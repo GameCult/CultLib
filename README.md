@@ -1,12 +1,13 @@
 # CultLib
 
-CultLib is a set of reusable C# libraries for game backends, game-adjacent services, and Unity-integrated tooling.
+CultLib is a set of reusable C# libraries for game backends, game-adjacent services, and Unity-integrated tooling, including a declarative runtime UI composition framework for Unity.
 
 The libraries cover three main areas:
 
 - logging primitives and implementations
 - a typed in-memory cache with pluggable persistence
 - LiteNetLib-based networking with encrypted credential exchange and signed session tokens
+- declarative Unity UI composition and reflective runtime inspector tooling
 
 ## Repository Scope
 
@@ -21,7 +22,7 @@ The solution includes:
 - `GameCult.Networking`: encrypted login/register/verify flows and message dispatch over LiteNetLib
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
-- `GameCult.Unity`: Unity-side project and integrations used with the runtime libraries
+- `GameCult.Unity`: CultUI, a Unity runtime UI composition framework with reflective inspector generation, prefab-backed field resolvers, reusable controls, and a demo project packaged for UPM-style consumption
 
 ## Repository Layout
 
