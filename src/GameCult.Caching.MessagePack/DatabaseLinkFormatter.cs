@@ -4,8 +4,13 @@ using MessagePack.Formatters;
 
 namespace GameCult.Caching.MessagePack
 {
-    public sealed class DatabaseLinkFormatter<T> : IMessagePackFormatter<DatabaseLink<T>> where T : DatabaseEntry
+    /// <summary>
+    /// Serializes <see cref="DatabaseLink{T}"/> values as their linked identifier only.
+    /// </summary>
+    /// <typeparam name="T">The target entry type.</typeparam>
+    public sealed class DatabaseLinkFormatter<T> : IMessagePackFormatter<DatabaseLink<T>?> where T : DatabaseEntry
     {
+        /// <inheritdoc />
         public void Serialize(ref MessagePackWriter writer, DatabaseLink<T>? value, MessagePackSerializerOptions options)
         {
             if (value == null) { writer.WriteNil(); return; }
@@ -14,6 +19,7 @@ namespace GameCult.Caching.MessagePack
             fmt.Serialize(ref writer, value.LinkID, options);
         }
 
+        /// <inheritdoc />
         public DatabaseLink<T>? Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
         {
             if (reader.TryReadNil()) return null;

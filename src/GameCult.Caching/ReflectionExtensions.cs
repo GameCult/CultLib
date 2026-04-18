@@ -2,16 +2,21 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
 
 namespace GameCult.Caching
 {
+    /// <summary>
+    /// Provides cached reflection helpers used by the cache infrastructure.
+    /// </summary>
     public static class ReflectionExtensions
     {
         private static Dictionary<Type, Type[]> ParentTypes = new Dictionary<Type, Type[]>();
 
+        /// <summary>
+        /// Gets all base types for the supplied type, caching the result.
+        /// </summary>
+        /// <param name="type">The type whose parent types should be returned.</param>
+        /// <returns>An array of base types ordered from immediate parent upward.</returns>
         public static Type[] GetParentTypes(this Type type)
         {
             if (ParentTypes.ContainsKey(type))
@@ -37,6 +42,12 @@ namespace GameCult.Caching
         }
 
         private static Dictionary<Type, Type[]> ChildClasses = new Dictionary<Type, Type[]>();
+
+        /// <summary>
+        /// Gets all loaded types assignable to the supplied type, caching the result.
+        /// </summary>
+        /// <param name="type">The base type or interface to search from.</param>
+        /// <returns>An array of matching loaded types.</returns>
         public static Type[] GetAllChildClasses(this Type type)
         {
             if (ChildClasses.ContainsKey(type))
@@ -44,6 +55,5 @@ namespace GameCult.Caching
             return ChildClasses[type] = AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(ass => ass.GetTypes()).Where(type.IsAssignableFrom).ToArray();
         }
-
     }
 }

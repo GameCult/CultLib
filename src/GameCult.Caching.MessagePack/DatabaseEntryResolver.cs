@@ -12,12 +12,20 @@ namespace GameCult.Caching.MessagePack
     /// </summary>
     public sealed class DatabaseEntryResolver : IFormatterResolver
     {
+        /// <summary>
+        /// Shared singleton instance of the resolver.
+        /// </summary>
         public static readonly DatabaseEntryResolver Instance = new DatabaseEntryResolver();
 
         private readonly ConcurrentDictionary<Type, object> _formatterCache = new();
 
         private DatabaseEntryResolver() { }
 
+        /// <summary>
+        /// Resolves a formatter for a cache entry type or a <see cref="DatabaseLink{T}"/>.
+        /// </summary>
+        /// <typeparam name="T">The requested serialized type.</typeparam>
+        /// <returns>The formatter if one is available; otherwise, <c>null</c>.</returns>
         public IMessagePackFormatter<T>? GetFormatter<T>()
         {
             // 1. Check generated resolver mapping

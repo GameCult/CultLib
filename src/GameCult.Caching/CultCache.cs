@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using ConcurrentCollections;
 using GameCult.Logging;
@@ -69,11 +70,13 @@ namespace GameCult.Caching
         private readonly ConcurrentDictionary<Type, DatabaseEntry?> _globals = new();
         private readonly ConcurrentDictionary<Type, ConcurrentHashSet<DatabaseEntry>> _types = new();
         private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, Guid>> _nameToIdMap = new();
+        private readonly ConcurrentDictionary<long, Task> _pendingStoreOperations = new();
         // Generic indexes: Map (Type, FieldName) -> (Value -> ID). Allows registering indexes for any field
         private readonly ConcurrentDictionary<(Type Type, string FieldName), ConcurrentDictionary<string, Guid>> _indexes = new();
         // Cache getters per type (list of (field, getter) for that type only). Avoids scanning all indexes.
         private readonly ConcurrentDictionary<Type, List<(string FieldName, Func<DatabaseEntry, string> Getter)>> _typeToGetters = new();
         private ILogger _logger = new NullLogger();
+        private long _storeOperationId;
         
         /// <summary>
         /// Gets or sets the <see cref="ILogger"/> instance used for logging within the cache.
@@ -161,7 +164,7 @@ namespace GameCult.Caching
                 foreach (var existingStore in _backingStores) store.SubscribeTo(existingStore);
                 _backingStores.Add(store);
             }
-            store.EntryAdded.Subscribe(async entry =>
+            store.EntryAdded.Subscribe(entry => TrackStoreOperation(async () =>
             {
                 try // Try-catch logs without swallowing. Added to EntryDeleted for consistency (even though sync)
                 {
@@ -172,8 +175,8 @@ namespace GameCult.Caching
                 {
                     Logger.LogError($"EntryAdded processing failed for {entry?.ID}: {ex.Message}");
                 }
-            });
-            store.EntryUpdated.Subscribe(async entry =>
+            }));
+            store.EntryUpdated.Subscribe(entry => TrackStoreOperation(async () =>
             {
                 try
                 {
@@ -184,8 +187,8 @@ namespace GameCult.Caching
                 {
                     Logger.LogError($"EntryUpdated processing failed for {entry?.ID}: {ex.Message}");
                 }
-            });
-            store.EntryDeleted.Subscribe(entry =>
+            }));
+            store.EntryDeleted.Subscribe(entry => TrackStoreOperation(() =>
             {
                 try
                 {
@@ -196,7 +199,9 @@ namespace GameCult.Caching
                 {
                     Logger.LogError($"EntryDeleted processing failed for {entry?.ID}: {ex.Message}");
                 }
-            });
+
+                return Task.CompletedTask;
+            }));
             store.Logger = Logger;
         }
         
@@ -212,6 +217,7 @@ namespace GameCult.Caching
                 .Concat(_storeTypes.Keys.Select(store => Task.Run(store.PullAll)))
                 .ToArray();
             await Task.WhenAll(tasks);
+            await WaitForPendingStoreOperationsAsync();
         }
 
         /// <summary>
@@ -230,6 +236,24 @@ namespace GameCult.Caching
             if (entry == null) return;
 
             var type = entry.GetType();
+
+            try
+            {
+                if (_typeStores.TryGetValue(type, out var store))
+                {
+                    if (store != source)
+                        await Task.Run(() => store.Push(entry));
+                }
+                else if (_backingStores.Any() && _backingStores.First() != source)
+                {
+                    await Task.Run(() => _backingStores.First().Push(entry));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to persist entry {entry.ID}: {ex.Message}");
+                throw;
+            }
 
             // Pre-fetch existing to detect updates (for map/index cleanup)
             if (!_entries.TryGetValue(entry.ID, out var existing)) existing = null;
@@ -300,19 +324,6 @@ namespace GameCult.Caching
                 }
             }
 
-            // Async file write
-            try
-            {
-                if (_typeStores.TryGetValue(type, out var store))
-                    await Task.Run(() => store.Push(entry));
-                else if (_backingStores.Any() && _backingStores.First() != source)
-                    await Task.Run(() => _backingStores.First().Push(entry));
-            }
-            catch (Exception ex)
-            {
-                // Log error but don't revert cache update to ensure consistency
-                Logger.LogError($"Failed to persist entry {entry.ID}: {ex.Message}");
-            }
         }
 
         /// <summary>
@@ -555,6 +566,32 @@ namespace GameCult.Caching
             foreach (var store in _storeTypes.Keys)
                 if (store is IDisposable d) d.Dispose();
         }
+
+        private void TrackStoreOperation(Func<Task> operationFactory)
+        {
+            var operationId = Interlocked.Increment(ref _storeOperationId);
+            var operationTask = Task.Run(operationFactory);
+            _pendingStoreOperations[operationId] = operationTask;
+
+            _ = operationTask.ContinueWith(
+                (_, state) => _pendingStoreOperations.TryRemove((long)state!, out _),
+                operationId,
+                TaskScheduler.Default);
+        }
+
+        private async Task WaitForPendingStoreOperationsAsync()
+        {
+            while (true)
+            {
+                var pendingOperations = _pendingStoreOperations.Values.ToArray();
+                if (pendingOperations.Length == 0)
+                {
+                    return;
+                }
+
+                await Task.WhenAll(pendingOperations);
+            }
+        }
     }
 
     /// <summary>
@@ -654,7 +691,7 @@ namespace GameCult.Caching
         }
 
         /// <inheritdoc/>
-        public void Dispose()
+        public virtual void Dispose()
         {
             EntryAdded?.Dispose();
             EntryDeleted?.Dispose();
@@ -697,6 +734,7 @@ namespace GameCult.Caching
         protected readonly ConcurrentDictionary<string, Guid> _filePathToIdMap = new();
         private FileSystemWatcher? watcher;
         private Subject<string>? _changedSubject;
+        private IDisposable? _changedSubscription;
 
         /// <summary>
         /// Serializes a <see cref="DatabaseEntry"/> into a byte array for file storage.
@@ -797,7 +835,14 @@ namespace GameCult.Caching
             Entries[entry.ID] = entry;
             var directory = EntryTypeDirectories[type];
             var filePath = Path.Combine(directory.FullName, GetFileName(entry));
-            File.WriteAllBytes(filePath, Serialize(entry));
+            if (TryGetExistingPath(entry.ID, out var existingPath) &&
+                !string.Equals(existingPath, filePath, StringComparison.OrdinalIgnoreCase))
+            {
+                TryDeleteFile(existingPath);
+                _filePathToIdMap.TryRemove(existingPath, out _);
+            }
+
+            WriteAllBytesAtomic(filePath, Serialize(entry));
             _filePathToIdMap[filePath] = entry.ID;
         }
 
@@ -812,14 +857,12 @@ namespace GameCult.Caching
         {
             if (Entries.ContainsKey(entry.ID))
             {
-                var type = entry.GetType();
                 Entries.TryRemove(entry.ID, out _);
-                var directory = EntryTypeDirectories[type];
-                var filePath = Path.Combine(directory.FullName, GetFileName(entry));
+                var filePath = TryGetExistingPath(entry.ID, out var existingPath)
+                    ? existingPath
+                    : Path.Combine(EntryTypeDirectories[entry.GetType()].FullName, GetFileName(entry));
                 _filePathToIdMap.TryRemove(filePath, out _);
-                var file = new FileInfo(filePath);
-                if (file.Exists)
-                    file.Delete();
+                TryDeleteFile(filePath);
             }
         }
 
@@ -847,7 +890,7 @@ namespace GameCult.Caching
         public void ObserveChanges()
         {
             if (watcher != null) // Guard against re-creation
-                Dispose();
+                StopObservingChanges();
 
             watcher = new FileSystemWatcher(RootDirectory.FullName, $"*.{Extension}")
             {
@@ -858,7 +901,7 @@ namespace GameCult.Caching
 
             // Use R3 to throttle events if file writes are bursty
             _changedSubject = new Subject<string>();  // For paths
-            _changedSubject.Debounce(TimeSpan.FromMilliseconds(100)).Subscribe(HandleFileChange);
+            _changedSubscription = _changedSubject.Debounce(TimeSpan.FromMilliseconds(100)).Subscribe(HandleFileChange);
 
             watcher.Changed += (sender, args) =>
             {
@@ -953,17 +996,77 @@ namespace GameCult.Caching
         // Stub creator (minimal; only for rare fallback—extend if Deletion events need more data)
         private DatabaseEntry CreateStubEntry(Guid id, Type type)
         {
-            var entry = (DatabaseEntry)Activator.CreateInstance(type);
+            var entry = type == typeof(DatabaseEntry)
+                ? new DeletedDatabaseEntry()
+                : (DatabaseEntry)Activator.CreateInstance(type)!;
             typeof(DatabaseEntry).GetField("ID")?.SetValue(entry, id);  // Set ID via reflection
             return entry;
         }
 
         /// <inheritdoc/>
-        public new void Dispose()
+        public override void Dispose()
         {
+            StopObservingChanges();
             base.Dispose();
-            watcher?.Dispose();
+        }
+
+        private bool TryGetExistingPath(Guid id, out string path)
+        {
+            foreach (var pair in _filePathToIdMap)
+            {
+                if (pair.Value == id)
+                {
+                    path = pair.Key;
+                    return true;
+                }
+            }
+
+            path = string.Empty;
+            return false;
+        }
+
+        private static void WriteAllBytesAtomic(string filePath, byte[] data)
+        {
+            var directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var tempFilePath = Path.Combine(directory ?? string.Empty, $"{Path.GetFileName(filePath)}.{Guid.NewGuid():N}.tmp");
+            File.WriteAllBytes(tempFilePath, data);
+
+            if (File.Exists(filePath))
+            {
+                File.Replace(tempFilePath, filePath, null);
+            }
+            else
+            {
+                File.Move(tempFilePath, filePath);
+            }
+        }
+
+        private static void TryDeleteFile(string filePath)
+        {
+            var file = new FileInfo(filePath);
+            if (file.Exists)
+            {
+                file.Delete();
+            }
+        }
+
+        private void StopObservingChanges()
+        {
+            _changedSubscription?.Dispose();
+            _changedSubscription = null;
             _changedSubject?.Dispose();
+            _changedSubject = null;
+            watcher?.Dispose();
+            watcher = null;
+        }
+
+        private sealed class DeletedDatabaseEntry : DatabaseEntry
+        {
         }
     }
 
@@ -1063,7 +1166,22 @@ namespace GameCult.Caching
         public override void PushAll(bool soft = false)
         {
             var entriesArray = Entries.Values.ToArray();
-            File.WriteAllBytes(FileInfo.FullName, Serialize(entriesArray));
+            var directory = FileInfo.DirectoryName;
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var tempFilePath = Path.Combine(directory ?? string.Empty, $"{Path.GetFileName(FileInfo.FullName)}.{Guid.NewGuid():N}.tmp");
+            File.WriteAllBytes(tempFilePath, Serialize(entriesArray));
+            if (FileInfo.Exists)
+            {
+                File.Replace(tempFilePath, FileInfo.FullName, null);
+            }
+            else
+            {
+                File.Move(tempFilePath, FileInfo.FullName);
+            }
         }
     }
 }

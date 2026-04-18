@@ -17,8 +17,8 @@ namespace GameCult.Unity.UI.Components
         public int Priority => 100;
 
         public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
-            (type == typeof(float) && attr is InspectableRangedFloatAttribute) ||
-            (type == typeof(int) && attr is InspectableRangedIntAttribute);
+            (type == typeof(float) && attr is InspectableRangedFloatAttribute { ReadOnly: false }) ||
+            (type == typeof(int) && attr is InspectableRangedIntAttribute { ReadOnly: false });
 
         public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
         {
@@ -93,7 +93,6 @@ namespace GameCult.Unity.UI.Components
             
             return this;
         }
-
         public SliderField Configure(IUIContext context, Func<int> read, Action<int> write, int min, int max, DisplayOptions? displayOptions = null)
         {
             if(displayOptions is not { PlaceInContext: true })
@@ -155,5 +154,6 @@ namespace GameCult.Unity.UI.Components
             DisplayOptions? displayOptions = null,
             string? prefabName = null) =>
             context.Resolver.Resolve<SliderField>(prefabName)?.Configure(context, read, write, min, max, displayOptions);
+
     }
 }

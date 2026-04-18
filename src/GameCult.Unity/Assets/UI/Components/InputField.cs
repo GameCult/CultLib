@@ -154,7 +154,7 @@ namespace GameCult.Unity.UI.Components
             context.Refresh += () =>
             {
                 var val = read();
-                if (float.TryParse(inputField.text, out var existing) && Mathf.Abs(existing-val) < .001)
+                if (!float.TryParse(inputField.text, out var existing) || Mathf.Abs(existing - val) > .001f)
                     inputField.text = val.ToString("0.###");
             };
             

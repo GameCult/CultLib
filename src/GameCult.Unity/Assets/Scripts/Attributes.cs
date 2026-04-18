@@ -6,16 +6,6 @@ public class InspectableAttribute : Attribute { }
 [AttributeUsage(AttributeTargets.Field)]
 public abstract class PreferredInspectorAttribute : InspectableAttribute { }
 
-public class InspectableEnumValuesAttribute : PreferredInspectorAttribute
-{
-    public Type EnumType;
-
-    public InspectableEnumValuesAttribute(Type enumType)
-    {
-        EnumType = enumType;
-    }
-}
-
 public class InspectableRangedFloatAttribute : PreferredInspectorAttribute
 {
     public readonly float Min, Max;

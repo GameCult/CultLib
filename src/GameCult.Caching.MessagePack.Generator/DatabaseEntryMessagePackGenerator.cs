@@ -8,9 +8,16 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace GameCult.Caching.MessagePack.Generator
 {
+    /// <summary>
+    /// Generates MessagePack formatters and resolver mappings for concrete <c>DatabaseEntry</c> types.
+    /// </summary>
     [Generator]
     public class DatabaseEntryMessagePackGenerator : IIncrementalGenerator
     {
+        /// <summary>
+        /// Configures the incremental generator pipeline.
+        /// </summary>
+        /// <param name="ctx">The generator initialization context.</param>
         public void Initialize(IncrementalGeneratorInitializationContext ctx)
         {
             // Select DatabaseEntry subclass declarations

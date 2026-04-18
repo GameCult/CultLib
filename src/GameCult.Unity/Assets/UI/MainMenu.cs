@@ -138,6 +138,7 @@ namespace GameCult.Unity.UI
             _nextMenu.panel.AddEnumInspector("Enum", () => testEnum, e => testEnum = e);
             var testFlags = AnimalTraits.HasFur;
             _nextMenu.panel.AddFlagsEnumInspector("Flags", () => testFlags, f => testFlags = f);
+            _nextMenu.panel.AddProgressInspector("Progress", () => Mathf.PingPong(Time.time * 0.2f, 1f));
             _nextMenu.panel.AddTextButton("Back",
                 () =>
                 {

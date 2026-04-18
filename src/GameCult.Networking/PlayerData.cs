@@ -14,19 +14,19 @@ namespace GameCult.Networking
         /// Email address of the player.
         /// </summary>
         [Key(1)]
-        public string Email;
+        public string Email = string.Empty;
 
         /// <summary>
         /// Password hash of the player.
         /// </summary>
         [Key(2)]
-        public string PasswordHash;
+        public string PasswordHash = string.Empty;
 
         /// <summary>
         /// Username of the player.
         /// </summary>
         [Key(3)]
-        public string Username;
+        public string Username = string.Empty;
 
         /// <inheritdoc/>
         [IgnoreMember]
