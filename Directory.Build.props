@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup>
+    <!-- Build defaults -->
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <RepoRootPath>$(MSBuildThisFileDirectory)</RepoRootPath>
+    <BaseIntermediateOutputPath>$(RepoRootPath)obj\$([MSBuild]::MakeRelative($(RepoRootPath), $(MSBuildProjectDirectory)))\</BaseIntermediateOutputPath>
+    <BaseOutputPath Condition=" '$(BaseOutputPath)' == '' ">$(RepoRootPath)bin\$(MSBuildProjectName)\</BaseOutputPath>
+    <PackageOutputPath>$(RepoRootPath)bin\Packages\$(Configuration)\</PackageOutputPath>
+
+    <!-- NuGet metadata (applies to all packages) -->
+    <Authors>metacratic</Authors>
+    <PackageProjectUrl>https://github.com/GameCult/CultLib</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/GameCult/CultLib</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Copyright>© Meta Vens and contributors</Copyright>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+	<Version>1.0.3</Version>
+
+    <!-- Symbols/debugging -->
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+</Project>

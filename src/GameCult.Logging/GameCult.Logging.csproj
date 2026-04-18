@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Simple pluggable logging interface for CultLib</Description>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,2917 @@
+﻿
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Attributes.cs
+
+using System;
+
+namespace GameCult.Unity.UI
+{
+    [AttributeUsage(AttributeTargets.All, Inherited = false)]
+    public class InspectableAttribute : Attribute { }
+
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
+    public abstract class PreferredInspectorAttribute : InspectableAttribute { }
+    
+    public class InspectableReadOnlyLabelAttribute : PreferredInspectorAttribute { }
+
+    public class InspectableRangedFloatAttribute : PreferredInspectorAttribute
+    {
+        public readonly float Min, Max;
+
+        public InspectableRangedFloatAttribute(float min, float max)
+        {
+            Min = min;
+            Max = max;
+        }
+    }
+
+    public class InspectableRangedIntAttribute : PreferredInspectorAttribute
+    {
+        public readonly int Min, Max;
+
+        public InspectableRangedIntAttribute(int min, int max)
+        {
+            Min = min;
+            Max = max;
+        }
+    }
+
+    public class InspectableIncrementIntAttribute : PreferredInspectorAttribute
+    {
+        public readonly int Min, Max;
+
+        public InspectableIncrementIntAttribute(int min, int max)
+        {
+            Min = min;
+            Max = max;
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\ColorConversion.cs
+
+using Unity.Mathematics;
+using UnityEngine;
+using static Unity.Mathematics.math;
+
+namespace GameCult.Unity.UI
+{
+    // Color conversion functions from https://www.chilliant.com/rgb2hsv.html
+    public static class ColorConversion
+    {
+        private static float Epsilon = 1e-10f;
+
+        public static float3 HUEtoRGB(in float h)
+        {
+            float R = abs(h * 6 - 3) - 1;
+            float G = 2 - abs(h * 6 - 2);
+            float B = 2 - abs(h * 6 - 4);
+            return saturate(float3(R,G,B));
+        }
+
+        public static float3 RGBtoHCV(in float3 rgb)
+        {
+            // Based on work by Sam Hocevar and Emil Persson
+            float4 P = (rgb.y < rgb.z) ? float4(rgb.zy, -1.0f, 2.0f/3.0f) : float4(rgb.yz, 0.0f, -1.0f/3.0f);
+            float4 Q = (rgb.x < P.x) ? float4(P.xyw, rgb.x) : float4(rgb.x, P.yzx);
+            float C = Q.x - min(Q.w, Q.y);
+            float H = abs((Q.w - Q.y) / (6 * C + Epsilon) + Q.z);
+            return float3(H, C, Q.x);
+        }
+
+        public static float3 HSVtoRGB(in float3 hsv)
+        {
+            float3 rgb = HUEtoRGB(hsv.x);
+            return ((rgb - 1) * hsv.y + 1) * hsv.z;
+        }
+
+        public static float3 HSLtoRGB(in float3 hsl)
+        {
+            float3 RGB = HUEtoRGB(hsl.x);
+            float C = (1 - abs(2 * hsl.z - 1)) * hsl.y;
+            return (RGB - 0.5f) * C + hsl.z;
+        }
+
+        // The weights of RGB contributions to luminance.
+        // Should sum to unity.
+        private static float3 HCYwts = float3(0.299f, 0.587f, 0.114f);
+ 
+        public static float3 HCYtoRGB(float3 hcy)
+        {
+            float3 RGB = HUEtoRGB(hcy.x);
+            float Z = dot(RGB, HCYwts);
+            if (hcy.z < Z)
+            {
+                hcy.y *= hcy.z / Z;
+            }
+            else if (Z < 1)
+            {
+                hcy.y *= (1 - hcy.z) / (1 - Z);
+            }
+            return (RGB - Z) * hcy.y + hcy.z;
+        }
+
+        public static float3 RGBtoHSV(in float3 rgb)
+        {
+            float3 HCV = RGBtoHCV(rgb);
+            float S = HCV.y / (HCV.z + Epsilon);
+            return float3(HCV.x, S, HCV.z);
+        }
+
+        public static float3 RGBtoHSL(in float3 rgb)
+        {
+            float3 HCV = RGBtoHCV(rgb);
+            float L = HCV.z - HCV.y * 0.5f;
+            float S = HCV.y / (1 - abs(L * 2 - 1) + Epsilon);
+            return float3(HCV.x, S, L);
+        }
+
+        public static float3 RGBtoHCY(in float3 rgb)
+        {
+            // Corrected by David Schaeffer
+            float3 HCV = RGBtoHCV(rgb);
+            float Y = dot(rgb, HCYwts);
+            float Z = dot(HUEtoRGB(HCV.x), HCYwts);
+            if (Y < Z)
+            {
+                HCV.y *= Z / (Epsilon + Y);
+            }
+            else
+            {
+                HCV.y *= (1 - Z) / (Epsilon + 1 - Y);
+            }
+            return float3(HCV.x, HCV.y, Y);
+        }
+
+        public static Color ToColor(this float3 color) => new Color(color.x, color.y, color.z);
+        public static float3 ToFloat3(this Color color) => new float3(color.r, color.g, color.b);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\DisplayOptions.cs
+
+using TMPro;
+
+namespace GameCult.Unity.UI
+{
+    public class DisplayOptions
+    {
+        public TextAlignmentOptions? TextAlignment { get; }
+        public VerticalAlignmentOptions? VerticalAlignment { get; }
+        public float? LayoutPriority { get; }
+        public float? LayoutHeight { get; }
+        public float? TextSize { get; }
+        public bool Interactable { get; }
+        public bool PlaceInContext { get; }
+        
+        public DisplayOptions(bool placeInContext = true, 
+            bool interactable = true, 
+            float? layoutHeight = null, 
+            float? textSize = null,
+            float? layoutPriority = null,
+            VerticalAlignmentOptions? verticalAlignment = null,
+            TextAlignmentOptions? textAlignment = null)
+        {
+            PlaceInContext = placeInContext;
+            LayoutHeight = layoutHeight;
+            Interactable = interactable;
+            TextSize = textSize;
+            LayoutPriority = layoutPriority;
+            VerticalAlignment = verticalAlignment;
+            TextAlignment = textAlignment;
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Generator.cs
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using GameCult.Unity.UI.Components;
+using UnityEngine;
+using ZLinq;
+
+namespace GameCult.Unity.UI
+{
+    public class Generator : ResolverComponent, IUIContext
+    {
+        [SerializeField] private float inspectorLabelPriority = 3;
+        [SerializeField] private float inspectorFieldPriority = 2;
+        [SerializeField] private ReflectiveResolver? resolver;
+        [SerializeField] private RectTransform? contentRoot;
+        protected event Action<GameObject>? OnPropertyAdded;
+        protected event Action? RefreshPropertyValues;
+        
+        protected List<GameObject> Elements { get; } = new();
+        public IUIResolver Resolver => resolver ?? throw new NullReferenceException("Generator doesn't have an assigned resolver.");
+        public Action? Refresh
+        {
+            get => RefreshPropertyValues;
+            set => RefreshPropertyValues = value;
+        }
+
+        public RectTransform ContentRoot => contentRoot ?? (RectTransform)transform;
+        public Canvas Canvas => GetComponentInParent<Canvas>();
+        public RectTransform CanvasRoot => (RectTransform)Canvas.transform;
+        
+        public void Inspect(object obj, bool inspectableOnly = false, bool recursive = true)
+        {
+            var members = obj.GetType().GetMembers(BindingFlags.Public | BindingFlags.Instance);
+            foreach (var member in members)
+            {
+                var inspectable = member.GetCustomAttribute<InspectableAttribute>();
+                if (inspectable == null && inspectableOnly) continue;
+                var preferred = inspectable as PreferredInspectorAttribute;
+                switch (member)
+                {
+                    case FieldInfo field:
+                    {
+                        var type = field.FieldType;
+                        var handler = Resolver.ResolveField(type, preferred);
+                        // If there's a handler for this field and attribute type, use that
+                        if (handler != null)
+                        {
+                            var group = Resolver.Resolve<HorizontalGroup>()?.Configure(this);
+                            if (group == null) continue;
+                            Resolver.Resolve<Label>()?.Configure(group, member.Name);
+                            handler.ConfigureForMember(group, obj, field);
+                        }
+                        else
+                        {
+                            // No field handler found;
+                            // If recursion is enabled and the field is a class marked inspectable or if we don't care,
+                            // Generate a foldout and then inspect recursively inside the foldout
+                            if (recursive && field.FieldType.IsClass &&
+                                (!inspectableOnly || field.FieldType.GetCustomAttribute<InspectableAttribute>() != null))
+                            {
+                                var foldout = Resolver.Resolve<GeneratorFoldout>();
+                                if (foldout != null)
+                                {
+                                    foldout.Title = member.Name;
+                                    foldout.Inspect(field.GetValue(obj), inspectableOnly, recursive);
+                                }
+                            }
+                            // If all else fails, just display the ToString
+                            else this.AddLabelInspector(member.Name, () => field.GetValue(obj)?.ToString() ?? "Null");
+                        }
+                        continue;
+                    }
+                    case PropertyInfo property:
+                    {
+                        var type = property.PropertyType;
+                        var isReadOnly = !property.CanWrite;
+                        PreferredInspectorAttribute? usedAttr = preferred;
+                        if (isReadOnly && preferred == null && IsDisplayablePrimitive(type))
+                        {
+                            usedAttr = new InspectableReadOnlyLabelAttribute();
+                        }
+
+                        var handler = Resolver.ResolveField(type, usedAttr);
+                        if (handler != null)
+                        {
+                            var group = Resolver.Resolve<HorizontalGroup>()?.Configure(this);
+                            if (group == null) continue;
+                            Resolver.Resolve<Label>()?.Configure(group, member.Name);
+                            handler.ConfigureForMember(group, obj, property);
+                        }
+                        else
+                        {
+                            if (recursive && property.PropertyType.IsClass &&
+                                (!inspectableOnly || property.PropertyType.GetCustomAttribute<InspectableAttribute>() != null))
+                            {
+                                var foldout = Resolver.Resolve<GeneratorFoldout>();
+                                if (foldout != null)
+                                {
+                                    foldout.Title = member.Name;
+                                    foldout.Inspect(property.GetValue(obj), inspectableOnly, recursive);
+                                }
+                            }
+                            else this.AddLabelInspector(member.Name, () => property.GetValue(obj)?.ToString() ?? "Null");
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        private static bool IsDisplayablePrimitive(Type type)
+        {
+            return type.IsPrimitive || type == typeof(string) || type == typeof(decimal);
+        }
+        
+        public virtual void Update()
+        {
+            RefreshValues();
+        }
+        
+        protected void RefreshValues()
+        {
+            RefreshPropertyValues?.Invoke();
+        }
+        
+        public void Register(GameObject go)
+        {
+            Elements.Add(go);
+            OnPropertyAdded?.Invoke(go);
+        }
+
+        public void Clear()
+        {
+            foreach(var element in Elements)
+                Destroy(element);
+            Elements.Clear();
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\GeneratorPanel.cs
+
+using TMPro;
+using UnityEngine;
+
+namespace GameCult.Unity.UI
+{
+    public class GeneratorPanel : Generator
+    {
+        [SerializeField] private TextMeshProUGUI? title;
+        
+        public string Title
+        {
+            set
+            {
+                if (title is not null) title.text = value;
+            }
+        }
+
+        public void TitleSubtitle(string title, string subtitle) => Title = $"{title}\n<smallcaps><size=50%>{subtitle}";
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Interfaces.cs
+
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using GameCult.Unity.UI.Components;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI
+{
+    public interface IFieldHandler
+    {
+        int Priority { get; }
+        bool CanHandle(Type type, PreferredInspectorAttribute? attr);
+        void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null);
+    }
+
+    public interface IUIResolver
+    {
+        // For general field generation (reflection, attributes, etc.)
+        IFieldHandler? ResolveField(Type type, PreferredInspectorAttribute? attr);
+
+        // For declarative, known-type composition
+        T? Resolve<T>(string? prefabName = null) where T : ResolverComponent;
+    }
+
+    public interface IUIContext
+    {
+        IUIResolver Resolver { get; }
+        RectTransform ContentRoot { get; }
+        Canvas Canvas { get; }
+        RectTransform CanvasRoot { get; }
+        void Register(GameObject go);
+        Action? Refresh { get; set; }
+        // DisplayOptions InspectorLabelDisplayOptions { get; }
+        // DisplayOptions InspectorFieldDisplayOptions { get; }
+    }
+    
+    public interface ILayoutElement
+    {
+        public LayoutElement? LayoutElement { get; }
+    }
+
+    public interface ITextElement
+    {
+        public TextMeshProUGUI? Text { get; }
+    }
+
+    public interface IMultipleTextElement
+    {
+        public IEnumerable<TextMeshProUGUI> Text { get; }
+    }
+
+    public static class DisplayOptionsExtensions
+    {
+        public static void ApplyLayoutOptions(this ILayoutElement layoutElement, DisplayOptions? displayOptions)
+        {
+            if(displayOptions == null || layoutElement.LayoutElement == null) return;
+            
+            if(displayOptions.LayoutPriority != null) layoutElement.LayoutElement.flexibleWidth = displayOptions.LayoutPriority.Value;
+            if(displayOptions.LayoutHeight != null) layoutElement.LayoutElement.minHeight = displayOptions.LayoutHeight.Value;
+        }
+        
+        public static void ApplyTextOptions(this ITextElement textElement, DisplayOptions? displayOptions)
+        {
+            if(displayOptions == null || textElement.Text is null) return;
+            
+            if(displayOptions.TextAlignment != null) textElement.Text.alignment = displayOptions.TextAlignment.Value;
+            if(displayOptions.VerticalAlignment != null) textElement.Text.verticalAlignment = displayOptions.VerticalAlignment.Value;
+            if(displayOptions.TextSize != null) textElement.Text.fontSize = displayOptions.TextSize.Value;
+        }
+        
+        public static void ApplyTextOptions(this IMultipleTextElement textElement, DisplayOptions? displayOptions)
+        {
+            if(displayOptions == null) return;
+            
+            foreach(var text in textElement.Text)
+            {
+                if (displayOptions.TextAlignment != null) text.alignment = displayOptions.TextAlignment.Value;
+                if (displayOptions.VerticalAlignment != null) text.verticalAlignment = displayOptions.VerticalAlignment.Value;
+                if (displayOptions.TextSize != null) text.fontSize = displayOptions.TextSize.Value;
+            }
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\MainMenu.cs
+
+using System;
+using GameCult.Unity.UI.Components;
+using UnityEngine;
+using static Unity.Mathematics.math;
+
+namespace GameCult.Unity.UI
+{
+    public class MainMenu : MonoBehaviour
+    {
+        [SerializeField] private Prototype? panelPrototype;
+        [SerializeField] private float fadeTime = .5f;
+        [SerializeField] private float fadeDistance = 512;
+        [SerializeField] private float fadeAlphaExponent = 2;
+        [SerializeField] private float fadePositionExponent = 2;
+
+        private (GeneratorPanel panel, CanvasGroup group) _currentMenu, _nextMenu;
+        private bool _fadeFromRight;
+        private float _fadeLerp;
+        private bool _fading;
+        private Vector3 _panelPosition;
+        //private Task<DatabaseCache> _databaseLoad;
+    
+        void Start()
+        {
+            // Start loading the database in the background 'cause it takes a few seconds
+            //_databaseLoad = Task.Run(() => ActionGameManager.Database);
+            
+            if(panelPrototype == null)
+            {
+                gameObject.SetActive(false);
+                return;
+            }
+        
+            _panelPosition = panelPrototype.transform.position;
+        
+            var panel1 = panelPrototype.Instantiate<GeneratorPanel>();
+            _currentMenu = (panel1, panel1.GetComponent<CanvasGroup>());
+        
+            var panel2 = panelPrototype.Instantiate<GeneratorPanel>();
+            _nextMenu = (panel2, panel2.GetComponent<CanvasGroup>());
+
+            _currentMenu.panel.gameObject.SetActive(false);
+            //_saveDirectory = ActionGameManager.GameDataDirectory.CreateSubdirectory("Saves");
+        
+            ShowMain();
+            Fade(true);
+        }
+
+        private void Update()
+        {
+            if (_fading)
+            {
+                _fadeLerp += Time.deltaTime / fadeTime;
+
+                _currentMenu.panel.transform.position = 
+                    _panelPosition + (_fadeFromRight ? Vector3.left : Vector3.right) * (fadeDistance * pow(_fadeLerp, fadePositionExponent));
+                _nextMenu.panel.transform.position = 
+                    _panelPosition + (_fadeFromRight ? Vector3.right : Vector3.left) * (fadeDistance * pow(1-_fadeLerp, fadePositionExponent));
+                _currentMenu.group.alpha = pow(1 - _fadeLerp, fadeAlphaExponent);
+                _nextMenu.group.alpha = pow(_fadeLerp, fadeAlphaExponent);
+            
+                if (_fadeLerp > 1)
+                {
+                    _fading = false;
+                    _currentMenu.panel.gameObject.SetActive(false);
+                    (_currentMenu, _nextMenu) = (_nextMenu, _currentMenu);
+                }
+            }
+        }
+        
+        private void Fade(bool fromRight)
+        {
+            _nextMenu.panel.gameObject.SetActive(true);
+            _nextMenu.group.alpha = 0;
+            _fading = true;
+            _fadeLerp = 0;
+            _fadeFromRight = fromRight;
+        }
+
+        private void ShowMain()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("CultUI", "Runtime UI Composition");
+            _nextMenu.panel.AddTextButton("Demos",
+                () =>
+                {
+                    ShowDemos();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Settings",
+                () =>
+                {
+                    ShowSettings();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Quit", Application.Quit);
+        }
+
+        private void ShowDemos()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("CultUI", "Demos");
+            _nextMenu.panel.AddTextButton("Procedural Inspector",
+                () =>
+                {
+                    ShowProceduralInspectorDemo();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowMain();
+                    Fade(false);
+                });
+        }
+
+        private void ShowProceduralInspectorDemo()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("CultUI", "Code Inspector");
+            _nextMenu.panel.AddLabel("For the common task of inspector-style menus with a label and a field, " +
+                                     "CultUI offers convenient extensions " +
+                                     "which compose a label and a field handler within a horizontal scope. " +
+                                     "This can be great for options menus or in-game properties panels.");
+            _nextMenu.panel.AddLabelInspector("Read-only String", () => $"{Time.time:F1}");
+            var testString = "Test String";
+            _nextMenu.panel.AddStringInspector("String", () => testString, s => testString = s);
+            var testFloat = 10f;
+            _nextMenu.panel.AddFloatInspector("Float", () => testFloat, f => testFloat = f);
+            var testRangedFloat = 10f;
+            _nextMenu.panel.AddRangedFloatInspector("Ranged Float", () => testRangedFloat, f => testRangedFloat = f, 0, 100);
+            var testBool = true;
+            _nextMenu.panel.AddBoolInspector("Bool", () => testBool, b => testBool = b);
+            var testIncrement = 3;
+            _nextMenu.panel.AddIncrementIntInspector("Increment Int", () => testIncrement, i => testIncrement = i, 0, 5);
+            _nextMenu.panel.AddButtonInspector("Button", "Click me!", () => Debug.Log("Button Clicked!"));
+            var testEnum = Animals.Dog;
+            _nextMenu.panel.AddEnumInspector("Enum", () => testEnum, e => testEnum = e);
+            var testFlags = AnimalTraits.HasFur;
+            _nextMenu.panel.AddFlagsEnumInspector("Flags", () => testFlags, f => testFlags = f);
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowDemos();
+                    Fade(false);
+                });
+        }
+        
+        [Flags]
+        enum AnimalTraits
+        {
+            None = 0,
+            HasFur = 1,
+            CanFly = 2,
+            CanSwim = 4,
+            IsVenomous = 8,
+            Nocturnal = 16
+        }
+
+        private enum Animals
+        {
+            Dog,
+            Cat,
+            Bird
+        }
+
+        private void ShowSettings()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.Title = "Settings";
+            _nextMenu.panel.AddTextButton("Gameplay",
+                () =>
+                {
+                    ShowGameplaySettings();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Graphics",
+                () =>
+                {
+                    ShowGraphicsSettings();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Input",
+                () =>
+                {
+                    ShowInputSettings();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Audio",
+                () =>
+                {
+                    ShowAudioSettings();
+                    Fade(true);
+                });
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowMain();
+                    Fade(false);
+                });
+        }
+    
+        private void ShowGameplaySettings()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("Gameplay", "Settings");
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowSettings();
+                    Fade(false);
+                });
+        }
+
+        private void ShowGraphicsSettings()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("Graphics", "Settings");
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowSettings();
+                    Fade(false);
+                });
+        }
+
+        private void ShowInputSettings()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("Input", "Settings");
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowSettings();
+                    Fade(false);
+                });
+        }
+
+        private void ShowAudioSettings()
+        {
+            _nextMenu.panel.Clear();
+            _nextMenu.panel.TitleSubtitle("Audio", "Settings");
+            _nextMenu.panel.AddTextButton("Back",
+                () =>
+                {
+                    ShowSettings();
+                    Fade(false);
+                });
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Prototype.cs
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace GameCult.Unity.UI
+{
+    /// <summary>
+    /// Convenience helper that lets you create "prototype" GameObjects in-scene which act like prefabs:<br/>
+    ///   - The prototype (root) exists in the scene and deactivates itself on start.<br/>
+    ///   - You can Instantiate&lt;T&gt;() to get an active copy in the same parent/transform space.<br/>
+    ///   - When finished, call ReturnToPool() on the instance to return it to the prototype's pool
+    ///     so it can be reused instead of being destroyed and recreated.
+    /// </summary>
+    public class Prototype : MonoBehaviour
+    {
+        /// <summary>
+        /// Fired when an instance is returned into the prototype's pool (after it is deactivated).
+        /// </summary>
+        public event Action? OnReturnToPool;
+
+        // True when this component is the prototype/root (i.e. not a pooled instance).
+        public bool IsPrototype => _rootPrototype is null;
+
+        // Always returns the prototype/root for this object. If this object is the prototype, it returns itself.
+        public Prototype RootPrototype => _rootPrototype ?? this;
+
+        private void Start()
+        {
+            // Prototype objects remain inactive in the scene by default.
+            if (IsPrototype)
+                gameObject.SetActive(false);
+        }
+
+        private void OnDestroy()
+        {
+            // When the prototype is destroyed, clean up pooled instances too.
+            if (_instancePool != null)
+            {
+                foreach (var instance in _instancePool)
+                    Destroy(instance.gameObject);
+            }
+        }
+
+        /// <summary>
+        /// Instantiate a copy of this Prototype and return the requested component T from the instance.
+        /// If there is an available instance in the pool, reuse it.
+        /// </summary>
+        public T Instantiate<T>() where T : Component
+        {
+            Prototype instance;
+
+            // Re-use from pool if possible (pool belongs to the prototype/root).
+            var poolOwner = RootPrototype;
+            if (poolOwner._instancePool != null && poolOwner._instancePool.Count > 0)
+            {
+                var lastIndex = poolOwner._instancePool.Count - 1;
+                instance = poolOwner._instancePool[lastIndex];
+                poolOwner._instancePool.RemoveAt(lastIndex);
+                instance.transform.SetAsLastSibling();
+            }
+            else
+            {
+                // Create a fresh instance from this object (clone entire GameObject).
+                // Place it under the same parent as the prototype.
+                instance = UnityEngine.Object.Instantiate(this, transform.parent, false);
+
+                // For UI RectTransforms, copy anchors/pivot/sizeDelta so layout matches.
+                if (transform is RectTransform protoRT &&
+                    instance.transform is RectTransform instRT)
+                {
+                    instRT.anchorMin = protoRT.anchorMin;
+                    instRT.anchorMax = protoRT.anchorMax;
+                    instRT.pivot = protoRT.pivot;
+                    instRT.sizeDelta = protoRT.sizeDelta;
+                }
+
+                // Match local transform values exactly.
+                instance.transform.localPosition = transform.localPosition;
+                instance.transform.localRotation = transform.localRotation;
+                instance.transform.localScale = transform.localScale;
+
+                // Mark this new copy as an instance of this prototype.
+                instance._rootPrototype = this;
+            }
+
+            instance.gameObject.SetActive(true);
+            return instance.GetComponent<T>();
+        }
+
+        /// <summary>
+        /// Return this instance to its prototype's pool for reuse.
+        /// Can only be called on an instance (not on the prototype/root itself).
+        /// </summary>
+        public void ReturnToPool()
+        {
+            if (IsPrototype)
+            {
+                Debug.LogError($"Cannot ReturnToPool: '{name}' appears to be the prototype root (it has no root prototype). " +
+                               "Only instantiated instances can be returned to a pool.");
+                Destroy(gameObject);
+                return;
+            }
+
+            // Move instance back under the prototype's parent and add to pool.
+            transform.SetParent(RootPrototype.transform.parent);
+            RootPrototype.AddToPool(this);
+
+            // Clear any handlers to avoid leaking references while pooled.
+            OnReturnToPool = null;
+        }
+
+        /// <summary>
+        /// Get the requested component on the prototype (if this is the prototype) or on the root prototype.
+        /// </summary>
+        public T GetOriginal<T>()
+        {
+            return RootPrototype.GetComponent<T>();
+        }
+
+        /// <summary>
+        /// Adds an instance back into this prototype's pool.
+        /// This method is internal to the prototype; it should only be called on the prototype/root.
+        /// </summary>
+        private void AddToPool(Prototype instance)
+        {
+            if (!IsPrototype)
+            {
+                Debug.LogError($"Attempting to add '{instance.name}' to the pool of '{name}', but '{name}' is not the prototype root.");
+                // still attempt to add to the real root if available
+                if (_rootPrototype is not null)
+                {
+                    _rootPrototype.AddToPool(instance);
+                    return;
+                }
+            }
+
+            instance.gameObject.SetActive(false);
+
+            _instancePool ??= new List<Prototype>();
+            _instancePool.Add(instance);
+
+            // Notify any subscribers that this instance has returned to the pool.
+            instance.OnReturnToPool?.Invoke();
+        }
+
+        // Reference to the prototype/root. Non-null on instances; null on the prototype itself.
+        private Prototype? _rootPrototype;
+
+        // Pool of instances owned by the prototype/root.
+        private List<Prototype>? _instancePool;
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\ReflectiveResolver.cs
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using GameCult.Unity.UI.Components;
+using UnityEngine;
+using Object = UnityEngine.Object;
+
+namespace GameCult.Unity.UI
+{
+    [CreateAssetMenu(menuName="Inspector/Reflective Resolver")]
+    public class ReflectiveResolver : ScriptableObject, IUIResolver
+    {
+        [SerializeField] private List<LayoutComponent> fieldPrefabs = new();
+        [SerializeField] private List<ResolverComponent> componentPrefabs = new();
+
+        private List<IFieldHandler> _handlers = new();
+
+        private void Awake()
+        {
+            foreach (var prefab in fieldPrefabs)
+            {
+                if (prefab is not IFieldHandler)
+                {
+                    Debug.LogWarning($"Prefab {prefab.gameObject.name} in Field Prefabs is not IFieldHandler");
+                }
+                _handlers.Add((IFieldHandler)prefab);
+            }
+            _handlers = _handlers.OrderByDescending(h => h.Priority).ToList();
+        }
+
+        public IFieldHandler? ResolveField(Type type, PreferredInspectorAttribute? attribute)
+        {
+            var match = _handlers.FirstOrDefault(h => h.CanHandle(type, attribute));
+            if (match != null) return (IFieldHandler)Instantiate((LayoutComponent)match);
+            Debug.LogWarning($"{name} unable to resolve {type}" +
+                             (attribute != null ? $" with attribute {attribute.GetType().Name}" : ""));
+            return null;
+        }
+
+        public T? Resolve<T>(string? prefabName = null) where T : ResolverComponent
+        {
+            foreach (var component in componentPrefabs)
+            {
+                if (component is T t && (prefabName==null || t.gameObject.name.StartsWith(prefabName))) return Instantiate(t);
+            }
+            foreach (var field in fieldPrefabs)
+            {
+                if (field is T t && (prefabName==null || t.gameObject.name.StartsWith(prefabName))) return Instantiate(t);
+            }
+            
+            Debug.LogWarning($"{name} unable to resolve {typeof(T).Name}" + (prefabName != null ? $" with name {prefabName}" : ""));
+
+            return null;
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\StringExtensions.cs
+
+using System.Text.RegularExpressions;
+
+namespace GameCult.Unity.UI
+{
+    public static class StringExtensions
+    {
+        public static string SplitCamelCase( this string str )
+        {
+            return Regex.Replace( 
+                Regex.Replace( 
+                    str, 
+                    @"(\P{Ll})(\P{Ll}\p{Ll})", 
+                    "$1 $2" 
+                ), 
+                @"(\p{Ll})(\P{Ll})", 
+                "$1 $2" 
+            );
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\BoolField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class BoolField : LayoutComponent, IFieldHandler
+    {
+        [SerializeField] private Toggle? toggle;
+
+        public int Priority => 10;
+
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            type == typeof(bool) && attr == null;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? options = null)
+        {
+            Func<bool> read;
+            Action<bool> write;
+            switch (member)
+            {
+                case FieldInfo field:
+                    read = () => (bool)field.GetValue(target);
+                    write = b => field.SetValue(target, b);
+                    break;
+                case PropertyInfo property:
+                    read = () => (bool)property.GetValue(target);
+                    write = b => property.SetValue(target, b);
+                    break;
+                default:
+                    return;
+            }
+            Configure(context, read, write, options);
+        }
+
+        public BoolField Configure(IUIContext context, Func<bool> read, Action<bool> write, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (toggle is null) return this;
+            toggle.isOn = read();
+            toggle.onValueChanged.AddListener(b => write(b));
+            
+            toggle.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+
+            context.Refresh += () => toggle.isOn = read();
+            return this;
+        }
+    }
+
+    public static class BoolFieldGeneratorExtension
+    {
+        public static void AddBoolInspector(this IUIContext context,
+            string label,
+            Func<bool> read,
+            Action<bool> write,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context, 
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<BoolField>(prefabName)?.Configure(context, read, write));
+        
+        public static void AddBoolField(this IUIContext context,
+            Func<bool> read,
+            Action<bool> write,
+            string? prefabName = null,
+            DisplayOptions? displayOptions = null) =>
+            context.Resolver.Resolve<BoolField>(prefabName)?.Configure(context, read, write, displayOptions);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ButtonField.cs
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ButtonField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class ButtonField : LayoutComponent, IFieldHandler, ITextElement
+    {
+        [SerializeField] private TextMeshProUGUI? buttonLabel;
+        [SerializeField] private Button? button;
+
+        public int Priority => 10;
+
+        public TextMeshProUGUI? Text => buttonLabel;
+
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            type == typeof(Action);
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            Action action;
+            switch (member)
+            {
+                case FieldInfo field:
+                    action = (Action)field.GetValue(target);
+                    break;
+                case PropertyInfo property:
+                    action = (Action)property.GetValue(target);
+                    break;
+                default:
+                    return;
+            }
+            Configure(context, member.Name, action, displayOptions);
+        }
+
+        public ButtonField Configure(IUIContext context, string labelText, Action onClick, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (buttonLabel is null || button is null) return this;
+            buttonLabel.text = labelText;
+            button.onClick.AddListener(() => onClick());
+            
+            button.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+
+        public Component Component => this;
+    }
+
+    public static class ButtonFieldGeneratorExtension
+    {
+        public static void AddButtonInspector(this IUIContext context,
+            string label,
+            string buttonLabel,
+            Action onClick,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context, 
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<ButtonField>(prefabName)?.Configure(context, buttonLabel, onClick));
+
+        public static void AddButton(this IUIContext context,
+            string label,
+            Action onClick,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<ButtonField>(prefabName)?.Configure(context, label, onClick, displayOptions);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ClickCatcher.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using R3;
+using UnityEngine.EventSystems;
+
+namespace GameCult.Unity.UI.Components
+{
+	public class ClickCatcher : ResolverComponent, IPointerEnterHandler, IPointerExitHandler, IPointerDownHandler, IPointerClickHandler
+	{
+		public float dragDistance = 25f;
+		
+		public bool PointerIsInside { get; private set; }
+	
+		public Subject<PointerEventData> OnEnter = new Subject<PointerEventData>();
+		public Subject<PointerEventData> OnExit = new Subject<PointerEventData>();
+		public Subject<PointerEventData> OnClick = new Subject<PointerEventData>();
+		public Subject<PointerEventData> OnDown = new Subject<PointerEventData>();
+	
+		public void OnPointerEnter(PointerEventData eventData)
+		{
+			//Debug.Log("Pointer Entered");
+			OnEnter.OnNext(eventData);
+			PointerIsInside = true;
+		}
+
+		public void OnPointerExit(PointerEventData eventData)
+		{
+			//Debug.Log("Pointer Exited");
+			OnExit.OnNext(eventData);
+			PointerIsInside = false;
+		}
+
+		public void OnPointerDown(PointerEventData eventData)
+		{
+			OnDown.OnNext(eventData);
+		}
+
+		public void OnPointerClick(PointerEventData eventData)
+		{
+			if((eventData.pressPosition - eventData.position).sqrMagnitude < dragDistance)
+				OnClick.OnNext(eventData);
+		}
+
+		private void OnDestroy()
+		{
+			OnEnter.Dispose();
+			OnExit.Dispose();
+			OnClick.Dispose();
+			OnDown.Dispose();
+		}
+	}
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ColorModal.cs
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using TMPro;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.UI;
+using static GameCult.Unity.UI.ColorConversion;
+using static Unity.Mathematics.math;
+#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
+
+namespace GameCult.Unity.UI.Components
+{
+    public class ColorModal : Modal
+    {
+        private static readonly int Mode = Shader.PropertyToID("_Mode");
+        private static readonly int H = Shader.PropertyToID("_H");
+        private static readonly int S = Shader.PropertyToID("_S");
+        private static readonly int V = Shader.PropertyToID("_V");
+        private static readonly int Value = Shader.PropertyToID("_Value");
+        [SerializeField] private ConstrainedSlider2D colorCircle;
+        [SerializeField] private Slider hueSlider;
+        [SerializeField] private Slider satSlider;
+        [SerializeField] private Slider valSlider;
+        [SerializeField] private EnumField modeEnum;
+        [SerializeField] private TMP_InputField hexStringField;
+        [SerializeField] private Image circleImage;
+        [SerializeField] private Image previewImage;
+        [SerializeField] private List<Image> sliderBackgrounds = new();
+        [SerializeField] private List<Image> sliderHandles = new();
+        [SerializeField] private List<Image> sliderHandleOutlines = new();
+        [SerializeField] private List<Material> circleMaterials = new();
+        [SerializeField] private List<Material> hueSliderMaterials = new();
+        [SerializeField] private List<Material> satSliderMaterials = new();
+        [SerializeField] private List<Material> valSliderMaterials = new();
+
+        private Color _color = Color.red;
+        private float3 _hsv;
+        private ColorMode _mode = ColorMode.HSV;
+        
+        private float3 HSV
+        {
+            get => _hsv;
+            set
+            {
+                _hsv = value;
+                circleImage.material.SetFloat(Value, _hsv.z);
+                foreach (var image in sliderBackgrounds)
+                {
+                    image.material.SetFloat(H, _hsv.x);
+                    image.material.SetFloat(S, _hsv.y);
+                    image.material.SetFloat(V, _hsv.z);
+                }
+
+                colorCircle.Value = PolarToRect(_hsv.xy);
+                hueSlider.value = _hsv.x;
+                satSlider.value = _hsv.y;
+                valSlider.value = _hsv.z;
+                RefreshColor();
+            }
+        }
+
+        private Color Color
+        {
+            get => _color;
+            set
+            {
+                _color = value;
+                foreach (var handle in sliderHandles)
+                {
+                    handle.color = value;
+                }
+                previewImage.color = value;
+                RefreshHex();
+            }
+        }
+
+        private float2 RectToPolar(float2 rect)
+        {
+            var offset = rect * 2 - float2(1,1);
+            return float2(atan2(offset.y, -offset.x) / PI2 + .5f, length(offset));
+        }
+
+        private float2 PolarToRect(float2 polar)
+        {
+            float angle = (polar.x - 0.5f) * PI2;
+            float r = polar.y;
+            var offset = float2(-r * cos(angle), r * sin(angle));
+            return (offset + float2(1,1)) / 2;
+        }
+
+        private void RefreshColor()
+        {
+            Color = _mode switch
+            {
+                ColorMode.HSV => HSVtoRGB(HSV).ToColor().gamma,
+                ColorMode.HSL => HSLtoRGB(HSV).ToColor().gamma,
+                ColorMode.HCY => HCYtoRGB(HSV).ToColor().gamma,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+        }
+
+        private void RefreshHSV()
+        {
+            HSV = _mode switch
+            {
+                ColorMode.HSV => RGBtoHSV(_color.linear.ToFloat3()),
+                ColorMode.HSL => RGBtoHSL(_color.linear.ToFloat3()),
+                ColorMode.HCY => RGBtoHCY(_color.linear.ToFloat3()),
+                _ => throw new ArgumentOutOfRangeException()
+            };
+        }
+        
+        private void RefreshHex() => hexStringField.text = '#' + ColorUtility.ToHtmlStringRGB(Color);
+
+        private void SetColorMode(ColorMode mode)
+        {
+            circleImage.material = circleMaterials[(int)mode];
+            sliderBackgrounds[0].material = hueSliderMaterials[(int)mode];
+            sliderBackgrounds[1].material = satSliderMaterials[(int)mode];
+            sliderBackgrounds[2].material = valSliderMaterials[(int)mode];
+        }
+        
+        // BUG: This should work, but neither setting the mode integer or shader keywords actually affects the material
+        // private void SetColorMode(Material mat, ColorMode mode)
+        // {
+        //     mat.SetInteger("_Mode", (int)mode);
+        //     var enumType = typeof(ColorMode);
+        //     var names = Enum.GetNames(enumType);
+        //     var values = Enum.GetValues(enumType);
+        //     for (var i = 0; i < names.Length; i++)
+        //     {
+        //         if((ColorMode)values.GetValue(i) == mode)
+        //         {
+        //             mat.EnableKeyword("_Mode_" + names[i]);
+        //             Debug.Log($"Enabling keyword {"_Mode_" + names[i]} on {mat.name}");
+        //         }
+        //         else
+        //         {
+        //             mat.DisableKeyword("_Mode_" + names[i]);
+        //             Debug.Log($"Disabling keyword {"_Mode_" + names[i]} on {mat.name}");
+        //         }
+        //     }
+        // }
+        
+        private void OnEnable()
+        {
+            colorCircle.ConstrainFunction = v =>
+            {
+                var offset = v * 2 - Vector2.one;
+                if (offset.sqrMagnitude > 1) offset = offset.normalized;
+                return (offset + Vector2.one) / 2;
+            };
+            colorCircle.OnValueChanged.AddListener(v => HSV = float3(RectToPolar(v),_hsv.z));
+            hueSlider.onValueChanged.AddListener(h => HSV = float3(h, _hsv.yz));
+            satSlider.onValueChanged.AddListener(s => HSV = float3(_hsv.x, s, _hsv.z));
+            valSlider.onValueChanged.AddListener(v => HSV = float3(_hsv.xy, v));
+            
+            var enumType = typeof(ColorMode);
+            var names = Enum.GetNames(enumType);
+            var values = Enum.GetValues(enumType);
+            modeEnum.Configure(this,
+                () => Array.IndexOf(values, _mode),
+                i =>
+                {
+                    _mode = (ColorMode)values.GetValue(i);
+                    SetColorMode(_mode);
+                    RefreshHSV();
+                }, names, new DisplayOptions(placeInContext:false));
+            RefreshHSV();
+            
+            hexStringField.onEndEdit.AddListener(s =>
+            {
+                if(ColorUtility.TryParseHtmlString(s, out Color color))
+                {
+                    Color = color;
+                    RefreshHSV();
+                }
+                else
+                    RefreshHex();
+            });
+            RefreshHex();
+        }
+
+        enum ColorMode
+        {
+            HSV,
+            HSL,
+            HCY
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ConstrainedSlider2D.cs
+
+using System;
+using UnityEditor;
+using UnityEngine;
+using UnityEngine.Events;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    /// <summary>
+    /// A UI element similar to Slider but allowing free 2D movement of the handle within a rect,
+    /// constrained by an external validation function.
+    /// </summary>
+    /// <remarks>
+    /// The handle RectTransform is driven by the ConstrainedHandle. The position is normalized (0-1) in both axes.
+    /// An external Func<Vector2, Vector2> can be provided via constrainFunction to validate/constrain positions (e.g., to a circle for HSV picker).
+    /// When a change to the handle value occurs, a callback is sent to any registered listeners of UI.ConstrainedHandle.onValueChanged.
+    /// </remarks>
+    [AddComponentMenu("UI/Constrained Slider 2D")]
+    [ExecuteAlways]
+    [RequireComponent(typeof(RectTransform))]
+    public class ConstrainedSlider2D : Selectable, IDragHandler, IInitializePotentialDragHandler, ICanvasElement
+    {
+        [Serializable]
+        public class ConstrainedSlider2DEvent : UnityEvent<Vector2> { }
+
+        [SerializeField]
+        private RectTransform? handleRect;
+
+        public RectTransform? HandleRect
+        {
+            get => handleRect;
+            set
+            {
+                if (handleRect == value) return;
+                handleRect = value;
+                UpdateCachedReferences();
+                UpdateVisuals();
+            }
+        }
+
+        [Space]
+
+        [SerializeField]
+        private ConstrainedSlider2DEvent onValueChanged = new ConstrainedSlider2DEvent();
+
+        public ConstrainedSlider2DEvent OnValueChanged
+        {
+            get => onValueChanged;
+            set => onValueChanged = value;
+        }
+
+        /// <summary>
+        /// External function to constrain the normalized position (Vector2 in [0,1] range).
+        /// Defaults to identity (no constraint).
+        /// </summary>
+        public System.Func<Vector2, Vector2> ConstrainFunction { get; set; } = pos => pos;
+
+        // Private fields
+        private RectTransform? _handleContainerRect;
+        private Vector2 _offset = Vector2.zero;
+
+        // field is never assigned warning
+#pragma warning disable 649
+        private DrivenRectTransformTracker _tracker;
+#pragma warning restore 649
+
+        // This "delayed" mechanism is required for case 1037681.
+        private bool _delayedUpdateVisuals;
+
+        [SerializeField]
+        protected Vector2 value = new(0.5f, 0.5f);
+
+        /// <summary>
+        /// Normalized value (0-1 in both axes) representing handle position fraction within the container.
+        /// </summary>
+        public virtual Vector2 Value
+        {
+            get => value;
+            set => Set(value);
+        }
+
+        public virtual void SetValueWithoutNotify(Vector2 input)
+        {
+            Set(input, false);
+        }
+
+        protected ConstrainedSlider2D() { }
+
+#if UNITY_EDITOR
+        protected override void OnValidate()
+        {
+            base.OnValidate();
+
+            // OnValidate is called before OnEnable. We need to make sure not to touch any other objects before OnEnable is run.
+            if (IsActive())
+            {
+                UpdateCachedReferences();
+                // Update rects in next update since other things might affect them even if value didn't change.
+                _delayedUpdateVisuals = true;
+            }
+
+            if (!PrefabUtility.IsPartOfPrefabAsset(this) && !Application.isPlaying)
+                CanvasUpdateRegistry.RegisterCanvasElementForLayoutRebuild(this);
+        }
+#endif
+
+        public virtual void Rebuild(CanvasUpdate executing)
+        {
+#if UNITY_EDITOR
+            if (executing == CanvasUpdate.Prelayout)
+                OnValueChanged.Invoke(Value);
+#endif
+        }
+
+        /// <summary>
+        /// See ICanvasElement.LayoutComplete
+        /// </summary>
+        public virtual void LayoutComplete() { }
+
+        /// <summary>
+        /// See ICanvasElement.GraphicUpdateComplete
+        /// </summary>
+        public virtual void GraphicUpdateComplete() { }
+
+        protected override void OnEnable()
+        {
+            base.OnEnable();
+            UpdateCachedReferences();
+            Set(value, false);
+            // Update rects since they need to be initialized correctly.
+            UpdateVisuals();
+#if UNITY_EDITOR
+            Undo.undoRedoEvent -= OnUndoRedoEvent;
+            Undo.undoRedoEvent += OnUndoRedoEvent;
+#endif
+        }
+
+        protected override void OnDisable()
+        {
+#if UNITY_EDITOR
+            Undo.undoRedoEvent -= OnUndoRedoEvent;
+#endif
+            _tracker.Clear();
+            base.OnDisable();
+        }
+
+        /// <summary>
+        /// Update the rect based on the delayed update visuals.
+        /// Got around issue of calling SendMessage from OnValidate.
+        /// </summary>
+        protected virtual void Update()
+        {
+            if (_delayedUpdateVisuals)
+            {
+                _delayedUpdateVisuals = false;
+                Set(value, false);
+                UpdateVisuals();
+            }
+        }
+
+        protected override void OnDidApplyAnimationProperties()
+        {
+            Vector2 animatedValue = ComputeValueFromVisuals();
+            if (animatedValue != value)
+            {
+                value = animatedValue;
+                OnValueChanged.Invoke(value);
+            }
+            base.OnDidApplyAnimationProperties();
+        }
+
+        private Vector2 ComputeValueFromVisuals()
+        {
+            if (_handleContainerRect is null || handleRect is null) return value;
+            Vector2 size = _handleContainerRect.rect.size;
+            if (size == Vector2.zero) return value;
+            Vector2 delta = handleRect.anchoredPosition;
+            return new Vector2(
+                delta.x / size.x + 0.5f,
+                delta.y / size.y + 0.5f
+            );
+        }
+
+        void UpdateCachedReferences()
+        {
+            if (handleRect && handleRect != (RectTransform)transform)
+            {
+                _handleContainerRect = handleRect.parent as RectTransform;
+            }
+            else
+            {
+                handleRect = null;
+                _handleContainerRect = null;
+            }
+        }
+
+        protected virtual void Set(Vector2 input, bool sendCallback = true)
+        {
+            // Apply constraint and clamp
+            Vector2 newValue = ConstrainFunction(input);
+            newValue.x = Mathf.Clamp01(newValue.x);
+            newValue.y = Mathf.Clamp01(newValue.y);
+
+            if (value == newValue)
+                return;
+
+            value = newValue;
+            UpdateVisuals();
+            if (sendCallback)
+            {
+                UISystemProfilerApi.AddMarker("ConstrainedHandle.value", this);
+                onValueChanged.Invoke(newValue);
+            }
+        }
+
+        protected override void OnRectTransformDimensionsChange()
+        {
+            base.OnRectTransformDimensionsChange();
+
+            // This can be invoked before OnEnable is called. So we shouldn't be accessing other objects before OnEnable is called.
+            if (!IsActive())
+                return;
+
+            UpdateVisuals();
+        }
+
+#if UNITY_EDITOR
+        void OnUndoRedoEvent(in UndoRedoInfo undo)
+        {
+            UpdateVisuals();
+        }
+#endif
+
+        // Force-update the handle. Useful if you've changed the properties and want it to update visually.
+        private void UpdateVisuals()
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                UpdateCachedReferences();
+#endif
+
+            _tracker.Clear();
+
+            if (_handleContainerRect != null && handleRect != null)
+            {
+                _tracker.Add(this, handleRect, DrivenTransformProperties.AnchoredPosition);
+                Vector2 size = _handleContainerRect.rect.size;
+                if (size != Vector2.zero)
+                {
+                    Vector2 delta = (value - new Vector2(0.5f, 0.5f)) * size;
+                    handleRect.anchoredPosition = delta;
+                }
+            }
+        }
+
+        // Update the handle's position based on the mouse.
+        void UpdateDrag(PointerEventData eventData, Camera cam)
+        {
+            RectTransform? containerRect = _handleContainerRect;
+            if (containerRect == null) return;
+
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(containerRect, eventData.position, cam, out var localCursor))
+                return;
+
+            Vector2 candidateAnchored = localCursor - _offset;
+            Vector2 size = containerRect.rect.size;
+            if (size == Vector2.zero) return;
+
+            Vector2 candidateNorm = new Vector2(
+                candidateAnchored.x / size.x + 0.5f,
+                candidateAnchored.y / size.y + 0.5f
+            );
+
+            // Apply constraint here as well for drag consistency
+            Vector2 constrainedNorm = ConstrainFunction(candidateNorm);
+            constrainedNorm.x = Mathf.Clamp01(constrainedNorm.x);
+            constrainedNorm.y = Mathf.Clamp01(constrainedNorm.y);
+
+            Value = constrainedNorm;
+        }
+
+        private bool MayDrag(PointerEventData eventData)
+        {
+            return IsActive() && IsInteractable() && eventData.button == PointerEventData.InputButton.Left;
+        }
+
+        public override void OnPointerDown(PointerEventData eventData)
+        {
+            if (!MayDrag(eventData))
+                return;
+
+            base.OnPointerDown(eventData);
+
+            _offset = Vector2.zero;
+            Camera cam = eventData.pressEventCamera;
+            if (handleRect != null && RectTransformUtility.RectangleContainsScreenPoint(handleRect, eventData.pointerPressRaycast.screenPosition, cam))
+            {
+                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(handleRect, eventData.pointerPressRaycast.screenPosition, cam, out var localMousePos))
+                    _offset = localMousePos;
+            }
+            else
+            {
+                // Outside the handle - jump to this point instead
+                UpdateDrag(eventData, cam);
+            }
+        }
+
+        public virtual void OnDrag(PointerEventData eventData)
+        {
+            if (!MayDrag(eventData))
+                return;
+            UpdateDrag(eventData, eventData.pressEventCamera);
+        }
+
+        public override void OnMove(AxisEventData eventData)
+        {
+            if (!IsActive() || !IsInteractable())
+            {
+                base.OnMove(eventData);
+                return;
+            }
+
+            Set(value + eventData.moveVector * .05f);
+        }
+
+        public virtual void OnInitializePotentialDrag(PointerEventData eventData)
+        {
+            eventData.useDragThreshold = false;
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\EnumField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class EnumField : LayoutComponent, IFieldHandler, ITextElement
+    {
+        [SerializeField] private Button? dropdown;
+        [SerializeField] private TextMeshProUGUI? dropdownLabel;
+
+        public TextMeshProUGUI? Text => dropdownLabel;
+        
+        public int Priority => 10;
+        
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            type.IsEnum && type.GetCustomAttribute<FlagsAttribute>() == null;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            var fieldType = member is FieldInfo fi ? fi.FieldType : ((PropertyInfo)member).PropertyType;
+            var names = Enum.GetNames(fieldType);
+            var values = Enum.GetValues(fieldType);
+            
+            Configure(context, () =>
+            {
+                if(member is FieldInfo field) return Array.IndexOf(values, field.GetValue(target));
+                if(member is PropertyInfo property) return Array.IndexOf(values, property.GetValue(target));
+                return 0;
+            },i =>
+            {
+                if(member is FieldInfo field) field.SetValue(target, values.GetValue(i));
+                if(member is PropertyInfo property) property.SetValue(target, values.GetValue(i));
+            }, names, displayOptions);
+        }
+
+        public EnumField Configure(IUIContext context, Func<int> read, Action<int> write, string[] options, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            
+            if (dropdownLabel is null || dropdown is null) return this;
+            
+            dropdown.onClick.AddListener(() =>
+            {
+                var modal = context.ShowModal();
+                if (modal == null) return;
+                for (var i = 0; i < options.Length; i++)
+                {
+                    var i1 = i;
+                    modal.Resolver.Resolve<ButtonField>("Enum")?.Configure(modal, options[i], () =>
+                    {
+                        write(i1);
+                        Destroy(modal.gameObject);
+                    });
+                }
+                modal.AlignVertical((RectTransform)dropdown.transform);
+            });
+
+            dropdown.interactable = displayOptions?.Interactable ?? true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+            
+            context.Refresh += () => dropdownLabel.text = options[read()];
+            return this;
+        }
+    }
+
+    public static class EnumFieldGeneratorExtension
+    {
+        public static void AddEnumInspector(this IUIContext context,
+            string label,
+            Func<int> read,
+            Action<int> write,
+            string[] options,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context, 
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<EnumField>(prefabName)?.Configure(context, read, write, options));
+
+        public static void AddEnumInspector<TEnum>(this IUIContext context,
+            string label,
+            Func<TEnum> read,
+            Action<TEnum> write,
+            string? prefabName = null) where TEnum : Enum
+        {
+            var enumType = typeof(TEnum);
+            var names = Enum.GetNames(enumType);
+            var values = Enum.GetValues(enumType);
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<EnumField>(prefabName)?.Configure(context,
+                    () => Array.IndexOf(values, read()),
+                    i => write((TEnum)values.GetValue(i)), names));
+        }
+        
+        public static void AddEnumField(this IUIContext context,
+            Func<int> read,
+            Action<int> write,
+            string[] options,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<EnumField>(prefabName)?.Configure(context, read, write, options);
+
+        public static void AddEnumField<TEnum>(this IUIContext context,
+            Func<TEnum> read,
+            Action<TEnum> write,
+            string? prefabName = null) where TEnum : Enum
+        {
+            var enumType = typeof(TEnum);
+            var names = Enum.GetNames(enumType);
+            var values = Enum.GetValues(enumType);
+            context.Resolver.Resolve<EnumField>(prefabName)?.Configure(context, 
+                () => Array.IndexOf(values, read()),
+                i => write((TEnum)values.GetValue(i)), names);
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\GeneratorFoldout.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class GeneratorFoldout : Generator, IFieldHandler, ILayoutElement, ITextElement
+    {
+        [SerializeField] private TextMeshProUGUI? label;
+        [SerializeField] private Image? foldoutIcon;
+        [SerializeField] private Button? button;
+        [SerializeField] private VerticalLayoutGroup? layoutGroup;
+        [SerializeField] private LayoutElement? layoutElement;
+        [SerializeField] private float foldoutRotationDamping = 10f;
+        [SerializeField] private int foldedPadding = -8;
+        [SerializeField] private int expandedPadding = 8;
+        public event Action<bool>? OnExpand;
+
+        private bool _expanded;
+        private float _targetFoldoutRotation;
+        private float _foldoutRotation;
+
+        public TextMeshProUGUI? Text => label;
+
+        public LayoutElement? LayoutElement => layoutElement;
+
+        public string Title
+        {
+            set
+            {
+                if (label != null) label.text = value;
+            }
+        }
+
+        public bool Expanded => _expanded;
+
+        public new void Awake()
+        {
+            button?.onClick.AddListener(ToggleExpand);
+            OnPropertyAdded += go => go.SetActive(_expanded);
+        }
+
+        public override void Update()
+        {
+            RefreshValues();
+            _foldoutRotation =
+                Mathf.Lerp(_foldoutRotation, _targetFoldoutRotation, foldoutRotationDamping * Time.deltaTime);
+            if (foldoutIcon is not null) foldoutIcon.transform.localRotation = Quaternion.Euler(0, 0, _foldoutRotation);
+        }
+
+        public void ToggleExpand() => SetExpanded(!_expanded, false);
+
+        public void SetExpanded(bool expanded, bool force)
+        {
+            _expanded = expanded;
+            if (layoutGroup != null)
+            {
+                var padding = layoutGroup.padding;
+                padding = new RectOffset(padding.left, padding.right, padding.top, _expanded ? expandedPadding : foldedPadding);
+                layoutGroup.padding = padding;
+            }
+
+            foreach (var property in Elements) property.SetActive(_expanded);
+            _targetFoldoutRotation = _expanded ? -90 : 0;
+            if (force)
+            {
+                _foldoutRotation = _targetFoldoutRotation;
+                if (foldoutIcon != null) foldoutIcon.transform.localRotation = Quaternion.Euler(0, 0, _foldoutRotation);
+            }
+            OnExpand?.Invoke(_expanded);
+        }
+
+        public int Priority => 10;
+        
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) => 
+            type.IsEnum && type.GetCustomAttribute<FlagsAttribute>() != null;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (label is null || button is null) return;
+            var type = member is FieldInfo fi ? fi.FieldType : ((PropertyInfo)member).PropertyType;
+            label.text = type.Name.SplitCamelCase();
+            var names = Enum.GetNames(type);
+            var values = Enum.GetValues(type);
+
+            // Get current bitfield as ulong for flexibility
+            Func<ulong> read = () => Convert.ToUInt64(member is FieldInfo f ? f.GetValue(target)
+                : ((PropertyInfo)member).GetValue(target));
+
+            // Build one checkbox per flag
+            foreach (var val in values)
+            {
+                ulong bit = Convert.ToUInt64(val);
+                string flagName = Enum.GetName(type, val) ?? "Default";
+
+                if (bit == 0)
+                {
+                    // Handle "None" specially
+                    this.AddBoolInspector(flagName,
+                        () => Convert.ToUInt64(read()) == 0,
+                        b =>
+                        {
+                            if (b)
+                            {
+                                // Setting "None" clears all bits
+                                var newEnum = Enum.ToObject(type, 0);
+                                if (member is FieldInfo f2) f2.SetValue(target, newEnum);
+                                else if (member is PropertyInfo p2) p2.SetValue(target, newEnum);
+                            }
+                            // Unsetting None is a no-op
+                        });
+                }
+                else
+                {
+                    this.AddBoolInspector(flagName,
+                        () => (read() & bit) != 0,
+                        b =>
+                        {
+                            ulong value = Convert.ToUInt64(read());
+                            if (b) value |= bit;
+                            else value &= ~bit;
+
+                            var newEnum = Enum.ToObject(type, value);
+                            if (member is FieldInfo f2) f2.SetValue(target, newEnum);
+                            else if (member is PropertyInfo p2) p2.SetValue(target, newEnum);
+                        });
+                }
+            }
+            
+            button.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+        }
+        
+        public GeneratorFoldout Configure<TEnum>(IUIContext context, Func<TEnum> read, Action<TEnum> write, DisplayOptions? displayOptions = null) where TEnum : Enum
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (label is null || button is null) return this;
+            label.text = typeof(TEnum).Name.SplitCamelCase();
+
+            foreach (TEnum val in Enum.GetValues(typeof(TEnum)))
+            {
+                ulong bit = Convert.ToUInt64(val);
+                string flagName = Enum.GetName(typeof(TEnum), val) ?? "Default";
+
+                if (bit == 0)
+                {
+                    this.AddBoolInspector(flagName,
+                        () => Convert.ToUInt64(read()) == 0,
+                        b =>
+                        {
+                            if (b)
+                            {
+                                write((TEnum)Enum.ToObject(typeof(TEnum), 0UL));
+                            }
+                        });
+                }
+                else
+                {
+                    this.AddBoolInspector(flagName,
+                        () => (Convert.ToUInt64(read()) & bit) != 0,
+                        b =>
+                        {
+                            ulong value = Convert.ToUInt64(read());
+                            if (b) value |= bit;
+                            else value &= ~bit;
+                            write((TEnum)Enum.ToObject(typeof(TEnum), value));
+                        });
+                }
+            }
+            
+            button.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+
+        public GeneratorFoldout Configure(IUIContext context, string labelText, DisplayOptions? displayOptions = null, params LayoutComponent[] children)
+        {
+            transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            
+            if (label is null || button is null) return this;
+            label.text = labelText;
+            button.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+            
+            foreach (var component in children)
+            {
+                if (component != null) AddComponent(component);
+            }
+            
+            return this;
+        }
+
+        public void AddComponent(LayoutComponent component)
+        {
+            component.transform.SetParent(ContentRoot, false);
+        }
+    }
+    public static class EnumGeneratorExtensions
+    {
+        public static void AddFlagsEnumInspector<TEnum>(
+            this IUIContext context, string label,
+            Func<TEnum> read, Action<TEnum> write)
+            where TEnum : Enum =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context, 
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+            context.Resolver.Resolve<GeneratorFoldout>()?.Configure(context, read, write));
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\HorizontalGroup.cs
+
+using System;
+using UnityEngine;
+using UnityEngine.UI;
+#pragma warning disable CS8602 // Dereference of a possibly null reference.
+
+namespace GameCult.Unity.UI.Components
+{
+    public class HorizontalGroup : ResolverComponent, IUIContext
+    {
+        [SerializeField] private HorizontalLayoutGroup? layoutGroup;
+        private IUIContext? _parentContext;
+        
+        public IUIResolver Resolver => _parentContext.Resolver;
+        public RectTransform ContentRoot => (RectTransform)transform;
+        public Canvas Canvas => _parentContext.Canvas;
+        public RectTransform CanvasRoot => _parentContext.CanvasRoot;
+        public void Register(GameObject go) => _parentContext.Register(go);
+
+        public Action? Refresh
+        {
+            get => _parentContext.Refresh;
+            set => _parentContext.Refresh = value;
+        }
+
+        // public DisplayOptions InspectorLabelDisplayOptions => _parentContext.InspectorLabelDisplayOptions;
+        // public DisplayOptions InspectorFieldDisplayOptions => _parentContext.InspectorFieldDisplayOptions;
+
+        public HorizontalGroup Configure(IUIContext context, params ILayoutElement?[] children)
+        {
+            _parentContext = context;
+            transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            
+            foreach (var component in children)
+            {
+                if (component != null) AddComponent(component);
+            }
+
+            return this;
+        }
+
+        public void AddComponent(ILayoutElement component)
+        {
+            component.LayoutElement?.transform.SetParent(ContentRoot, false);
+        }
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\IncrementField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class IncrementField : LayoutComponent, IFieldHandler, ITextElement
+    {
+        [SerializeField] private TextMeshProUGUI? value;
+        [SerializeField] private Button? increment;
+        [SerializeField] private Button? decrement;
+
+        public int Priority => 100;
+
+        public TextMeshProUGUI? Text => value;
+
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            type == typeof(int) && attr is InspectableIncrementIntAttribute;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            Func<int> read;
+            Action<int> write;
+            switch (member)
+            {
+                case FieldInfo field:
+                    read = () => (int)field.GetValue(target);
+                    write = i => field.SetValue(target, i);
+                    break;
+                case PropertyInfo property:
+                    read = () => (int)property.GetValue(target);
+                    write = i => property.SetValue(target, i);
+                    break;
+                default:
+                    return;
+            }
+            var range = member.GetCustomAttribute<InspectableIncrementIntAttribute>();
+            Configure(context, read, write, range.Min, range.Max, displayOptions);
+        }
+
+        public IncrementField Configure(IUIContext context,
+            Func<int> read,
+            Action<int> write,
+            int min,
+            int max,
+            DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            
+            if (value is null || increment is null || decrement is null) return this;
+            
+            value.text = read().ToString();
+            increment.onClick.AddListener(() => write(Mathf.Min(read() + 1, max)));
+            decrement.onClick.AddListener(() => write(Mathf.Max(read() - 1, min)));
+
+            context.Refresh += () =>
+            {
+                var val = read();
+                value.text = val.ToString();
+                increment.interactable = val < max;
+                decrement.interactable = val > min;
+            };
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+            
+            return this;
+        }
+    }
+
+    public static class IncrementFieldGeneratorExtension
+    {
+        public static void AddIncrementIntInspector(this IUIContext context,
+            string label,
+            Func<int> read,
+            Action<int> write,
+            int min,
+            int max,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<IncrementField>(prefabName)?.Configure(context, read, write, min, max));
+        
+        public static void AddIncrementIntField(this IUIContext context,
+            string label,
+            Func<int> read,
+            Action<int> write,
+            int min,
+            int max,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<IncrementField>(prefabName)?.Configure(context, read, write, min, max);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\InputField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class InputField : LayoutComponent, IFieldHandler, IMultipleTextElement
+    {
+        [SerializeField] private TMP_InputField? inputField;
+        [SerializeField] private TextMeshProUGUI[]? textMeshes;
+
+        public int Priority => 10;
+
+        public IEnumerable<TextMeshProUGUI> Text => textMeshes ?? Enumerable.Empty<TextMeshProUGUI>();
+
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            (type == typeof(string) || type == typeof(int) || type == typeof(float)) && attr == null;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            var type = member switch
+            {
+                FieldInfo field => field.FieldType,
+                PropertyInfo property => property.PropertyType,
+                _ => null
+            };
+
+            if (type == null) return;
+
+            if (type == typeof(string))
+            {
+                Func<string> read;
+                Action<string> write;
+                switch (member)
+                {
+                    case FieldInfo field:
+                        read = () => (string)field.GetValue(target);
+                        write = s => field.SetValue(target, s);
+                        break;
+                    case PropertyInfo property:
+                        read = () => (string)property.GetValue(target);
+                        write = s => property.SetValue(target, s);
+                        break;
+                    default:
+                        return;
+                }
+                Configure(context, read, write);
+            }
+            else if (type == typeof(int))
+            {
+                Func<int> read;
+                Action<int> write;
+                switch (member)
+                {
+                    case FieldInfo field:
+                        read = () => (int)field.GetValue(target);
+                        write = i => field.SetValue(target, i);
+                        break;
+                    case PropertyInfo property:
+                        read = () => (int)property.GetValue(target);
+                        write = i => property.SetValue(target, i);
+                        break;
+                    default:
+                        return;
+                }
+                Configure(context, read, write);
+            }
+            else if (type == typeof(float))
+            {
+                Func<float> read;
+                Action<float> write;
+                switch (member)
+                {
+                    case FieldInfo field:
+                        read = () => (float)field.GetValue(target);
+                        write = f => field.SetValue(target, f);
+                        break;
+                    case PropertyInfo property:
+                        read = () => (float)property.GetValue(target);
+                        write = f => property.SetValue(target, f);
+                        break;
+                    default:
+                        return;
+                }
+                Configure(context, read, write);
+            }
+        }
+
+        public InputField Configure(IUIContext context, Func<string> read, Action<string> write, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (inputField is null) return this;
+            inputField.contentType = TMP_InputField.ContentType.Standard;
+            inputField.text = read() ?? string.Empty;
+            inputField.onValueChanged.AddListener(v => write(v));
+
+            context.Refresh += () =>
+            {
+                var val = read() ?? string.Empty;
+                if (inputField.text != val) inputField.text = val;
+            };
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+            
+            return this;
+        }
+
+        public InputField Configure(IUIContext context, Func<int> read, Action<int> write, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (inputField is null) return this;
+            inputField.contentType = TMP_InputField.ContentType.IntegerNumber;
+            inputField.text = read().ToString();
+            inputField.onValueChanged.AddListener(v =>
+            {
+                if (int.TryParse(v, out var i)) write(i);
+            });
+
+            context.Refresh += () =>
+            {
+                var val = read();
+                if (int.TryParse(inputField.text, out var existing) && existing != val)
+                    inputField.text = val.ToString();
+            };
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+
+        public InputField Configure(IUIContext context, Func<float> read, Action<float> write, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (inputField is null) return this;
+            inputField.contentType = TMP_InputField.ContentType.DecimalNumber;
+            inputField.text = read().ToString("0.###");
+            inputField.onValueChanged.AddListener(v => write(float.Parse(v)));
+
+            context.Refresh += () =>
+            {
+                var val = read();
+                if (float.TryParse(inputField.text, out var existing) && Mathf.Abs(existing-val) < .001)
+                    inputField.text = val.ToString("0.###");
+            };
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+    }
+
+    public static class InputFieldGeneratorExtension
+    {
+        public static void AddStringInspector(this IUIContext context,
+            string label,
+            Func<string> read,
+            Action<string> write,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write));
+
+        public static void AddIntInspector(this IUIContext context,
+            string label,
+            Func<int> read,
+            Action<int> write,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write));
+
+        public static void AddFloatInspector(this IUIContext context,
+            string label,
+            Func<float> read,
+            Action<float> write,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write));
+        
+        public static void AddStringField(this IUIContext context,
+            Func<string> read,
+            Action<string> write,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write);
+
+        public static void AddIntField(this IUIContext context,
+            Func<int> read,
+            Action<int> write,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write);
+
+        public static void AddFloatField(this IUIContext context,
+            Func<float> read,
+            Action<float> write,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<InputField>(prefabName)?.Configure(context, read, write);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\Label.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Globalization;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class Label : LayoutComponent, IFieldHandler, ITextElement
+    {
+        [SerializeField] protected TextMeshProUGUI? label;
+        
+        public int Priority => 100;
+
+        public TextMeshProUGUI? Text => label;
+        
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            attr is InspectableReadOnlyLabelAttribute;
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            Type memberType;
+            Func<object> getValue;
+            switch (member)
+            {
+                case FieldInfo field:
+                    memberType = field.FieldType;
+                    getValue = () => field.GetValue(target);
+                    break;
+                case PropertyInfo property:
+                    memberType = property.PropertyType;
+                    getValue = () => property.GetValue(target);
+                    break;
+                default:
+                    return;
+            }
+
+            string FormattedRead()
+            {
+                var val = getValue();
+                if (val == null) return "Null";
+                return FormatValue(val, memberType);
+            }
+
+            Configure(context, FormattedRead, displayOptions);
+        }
+        
+        private string FormatValue(object val, Type type)
+        {
+            if (type == typeof(float))
+            {
+                return ((float)val).ToString("F3", CultureInfo.InvariantCulture);
+            }
+
+            if (type == typeof(double))
+            {
+                return ((double)val).ToString("F3", CultureInfo.InvariantCulture);
+            }
+
+            if (type == typeof(decimal))
+            {
+                return ((decimal)val).ToString("F3", CultureInfo.InvariantCulture);
+            }
+
+            return val.ToString();
+        }
+
+        public Label Configure(IUIContext context, Func<string> read, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (label is null) return this;
+            label.text = read();
+
+            context.Refresh += () => label.text = read();
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+            
+            return this;
+        }
+
+        public Label Configure(IUIContext context, string labelText, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (label is null) return this;
+            label.text = labelText;
+            
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+    }
+
+    public static class LabelFieldGeneratorExtension
+    {
+        public static void AddLabelInspector(this IUIContext context,
+            string label,
+            Func<string> read) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<Label>("Value")?.Configure(context, read));
+        
+        public static void AddLabel(this IUIContext context, Func<string> read, string? prefabName = null) =>
+            context.Resolver.Resolve<Label>(prefabName)?.Configure(context, read);
+        
+        public static void AddLabel(this IUIContext context, string label, string? prefabName = null) =>
+            context.Resolver.Resolve<Label>(prefabName)?.Configure(context, label);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\LayoutComponent.cs
+
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class LayoutComponent : ResolverComponent, ILayoutElement
+    {
+        [SerializeField] private LayoutElement? layoutElement;
+        
+        public float LayoutPriority
+        {
+            set
+            {
+                if (layoutElement != null) layoutElement.flexibleWidth = value;
+            }
+        }
+
+        public LayoutElement? LayoutElement => layoutElement;
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\Modal.cs
+
+using System;
+using System.Collections;
+using R3;
+using UnityEngine;
+using UnityEngine.UI;
+using Object = UnityEngine.Object;
+
+namespace GameCult.Unity.UI.Components
+{
+    /// <summary>
+    /// Generic modal UI element that can either center itself
+    /// or align to another RectTransform while staying within screen bounds.
+    /// </summary>
+    [RequireComponent(typeof(RectTransform))]
+    public class Modal : Generator
+    {
+        public event Action? BeforeDestroy;
+        [SerializeField] protected VerticalLayoutGroup? layoutGroup;
+
+        /// <summary>
+        /// Positions the modal below the given element (or above if there's no space), matching its width
+        /// </summary>
+        public void AlignVertical(RectTransform alignToElement)
+        {
+            var rectTransform = (RectTransform)transform;
+
+            LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
+            var modalSize = rectTransform.rect.size;
+
+            var pivot = rectTransform.pivot;
+
+            pivot.x = 0;
+            var scaleFactor = Canvas.scaleFactor;
+            var corners = new Vector3[4];
+            alignToElement.GetWorldCorners(corners);
+            var pivotTop = corners[0].y > modalSize.y * scaleFactor;
+            pivot.y = pivotTop ? 1 : 0;
+            rectTransform.pivot = pivot;
+            var delta = alignToElement.sizeDelta;
+            if (layoutGroup != null)
+                delta.x = alignToElement.sizeDelta.x + (layoutGroup.padding.left + layoutGroup.padding.right);
+            rectTransform.sizeDelta = delta;
+            rectTransform.position = pivotTop ? corners[0] : corners[1];
+            if (layoutGroup != null)
+                rectTransform.anchoredPosition += Vector2.left * layoutGroup.padding.left;
+        }
+
+        /// <summary>
+        /// Positions the modal along the right or left edge,
+        /// pivoting down or up, respectively, according to available space
+        /// </summary>
+        public void AlignEdge(RectTransform alignToElement)
+        {
+            var rectTransform = (RectTransform)transform;
+
+            LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
+            var modalSize = rectTransform.rect.size;
+            var canvasRect = CanvasRoot.rect;
+
+            var pivot = rectTransform.pivot;
+
+            var scaleFactor = Canvas.scaleFactor;
+            var corners = new Vector3[4];
+            alignToElement.GetWorldCorners(corners);
+            // Is there enough space for the element to drop down from the upper edge?
+            var pivotTop = corners[2].y > modalSize.y * scaleFactor;
+            pivot.y = pivotTop ? 1 : 0;
+            // Is there enough space for the modal to sit on the right side?
+            var pivotRight = corners[2].x / scaleFactor + modalSize.x < canvasRect.x;
+            pivot.x = pivotRight ? 1 : 0;
+            rectTransform.pivot = pivot;
+            rectTransform.position = pivotTop ? corners[0] : corners[1];
+        }
+
+        public void Center()
+        {
+            var rect = (RectTransform)transform;
+            rect.pivot = new Vector2(.5f,.5f);
+            rect.anchoredPosition = Vector2.zero;
+        }
+
+        private void OnDestroy()
+        {
+            BeforeDestroy?.Invoke();
+        }
+    }
+    
+    public static class ModalGeneratorExtensions
+    {
+        /// <summary>
+        /// Spawns a modal. Automatically creates and wires a click catcher that closes both.
+        /// </summary>
+        public static Modal? ShowModal(
+            this IUIContext context)
+        {
+            // Instantiate click catcher behind modal
+            var catcher = context.Resolver.Resolve<ClickCatcher>();
+            if (catcher == null) return null;
+            catcher.transform.SetParent(context.CanvasRoot, false);
+            catcher.transform.SetAsLastSibling();
+
+            // Instantiate modal on top
+            var modal = context.Resolver.Resolve<Modal>();
+            if (modal == null) return null;
+            modal.transform.SetParent(context.CanvasRoot, false);
+            modal.transform.SetAsLastSibling();
+            
+            // If modal is ever destroyed, also destroy click catcher
+            modal.BeforeDestroy += () => Object.Destroy(catcher.gameObject);
+
+            // Hook up dismissal
+            catcher.OnClick.Subscribe(_ => Object.Destroy(modal.gameObject));
+
+            return modal;
+        }
+    }
+
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\ResolverComponent.cs
+
+using UnityEngine;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class ResolverComponent : MonoBehaviour
+    {
+    
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\SliderField.cs
+
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+using System;
+using System.Reflection;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class SliderField : LayoutComponent, IFieldHandler
+    {
+        [SerializeField] private Slider? slider;
+
+        public int Priority => 100;
+
+        public bool CanHandle(Type type, PreferredInspectorAttribute? attr) =>
+            (type == typeof(float) && attr is InspectableRangedFloatAttribute) ||
+            (type == typeof(int) && attr is InspectableRangedIntAttribute);
+
+        public void ConfigureForMember(IUIContext context, object target, MemberInfo member, DisplayOptions? displayOptions = null)
+        {
+            var type = member switch
+            {
+                FieldInfo field => field.FieldType,
+                PropertyInfo property => property.PropertyType,
+                _ => null
+            };
+
+            if (type == null) return;
+            
+            if (type == typeof(float))
+            {
+                Func<float> read;
+                Action<float> write;
+                switch (member)
+                {
+                    case FieldInfo field:
+                        read = () => (float)field.GetValue(target);
+                        write = f => field.SetValue(target, f);
+                        break;
+                    case PropertyInfo property:
+                        read = () => (float)property.GetValue(target);
+                        write = f => property.SetValue(target, f);
+                        break;
+                    default:
+                        return;
+                }
+
+                var range = member.GetCustomAttribute<InspectableRangedFloatAttribute>();
+                Configure(context, read, write, range.Min, range.Max, displayOptions);
+            }
+            else if (type == typeof(int))
+            {
+                Func<int> read;
+                Action<int> write;
+                switch (member)
+                {
+                    case FieldInfo field:
+                        read = () => (int)field.GetValue(target);
+                        write = i => field.SetValue(target, i);
+                        break;
+                    case PropertyInfo property:
+                        read = () => (int)property.GetValue(target);
+                        write = i => property.SetValue(target, i);
+                        break;
+                    default:
+                        return;
+                }
+
+                var range = member.GetCustomAttribute<InspectableRangedIntAttribute>();
+                Configure(context, read, write, range.Min, range.Max, displayOptions);
+            }
+        }
+
+        public SliderField Configure(IUIContext context, Func<float> read, Action<float> write, float min, float max, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (slider is null) return this;
+            slider.wholeNumbers = false;
+            slider.minValue = min;
+            slider.maxValue = max;
+            slider.value = read();
+            slider.onValueChanged.AddListener(f => write(f));
+
+            context.Refresh += () => slider.value = read();
+            
+            this.ApplyLayoutOptions(displayOptions);
+            
+            return this;
+        }
+
+        public SliderField Configure(IUIContext context, Func<int> read, Action<int> write, int min, int max, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if (slider is null) return this;
+            slider.wholeNumbers = true;
+            slider.minValue = min;
+            slider.maxValue = max;
+            slider.value = read();
+            slider.onValueChanged.AddListener(f => write(Mathf.RoundToInt(f)));
+
+            context.Refresh += () => slider.value = read();
+            
+            this.ApplyLayoutOptions(displayOptions);
+            
+            return this;
+        }
+    }
+
+    public static class RangedFloatFieldGeneratorExtension
+    {
+        public static void AddRangedFloatInspector(this IUIContext context,
+            string label,
+            Func<float> read,
+            Action<float> write,
+            float min,
+            float max,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<SliderField>(prefabName)?.Configure(context, read, write, min, max));
+
+        public static void AddRangedIntInspector(this IUIContext context,
+            string label,
+            Func<int> read,
+            Action<int> write,
+            int min,
+            int max,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<HorizontalGroup>()?.Configure(context,
+                context.Resolver.Resolve<Label>()?.Configure(context, label),
+                context.Resolver.Resolve<SliderField>(prefabName)?.Configure(context, read, write, min, max));
+        
+        public static void AddRangedFloatField(this IUIContext context,
+            Func<float> read,
+            Action<float> write,
+            float min,
+            float max,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<SliderField>(prefabName)?.Configure(context, read, write, min, max, displayOptions);
+        
+        public static void AddRangedIntField(this IUIContext context,
+            Func<int> read,
+            Action<int> write,
+            int min,
+            int max,
+            DisplayOptions? displayOptions = null,
+            string? prefabName = null) =>
+            context.Resolver.Resolve<SliderField>(prefabName)?.Configure(context, read, write, min, max, displayOptions);
+    }
+}
+
+// E:\Projects\CultLib\src\GameCult.Unity\Assets\UI\Components\TextButton.cs
+
+using System;
+using TMPro;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+using static Unity.Mathematics.math;
+
+namespace GameCult.Unity.UI.Components
+{
+    public class TextButton : LayoutComponent, IPointerEnterHandler, IPointerExitHandler, ITextElement
+    {
+        [SerializeField] private Button? button;
+        [SerializeField] private TextMeshProUGUI? label;
+        [SerializeField] private float animationDuration;
+        [SerializeField] private float hoverSpacing;
+
+        private float _lerp;
+        private bool _hovering;
+
+        public TextMeshProUGUI? Text => label;
+
+        private void Update()
+        {
+            _lerp = saturate(_lerp + Time.deltaTime / animationDuration * (button is { interactable: true } && _hovering ? 1 : -1));
+            if (label is not null) label.characterSpacing = hoverSpacing * _lerp;
+        }
+
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            _hovering = true;
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            _hovering = false;
+        }
+
+        public TextButton Configure(IUIContext context, string labelText, Action onClick, DisplayOptions? displayOptions = null)
+        {
+            if(displayOptions is not { PlaceInContext: true })
+                transform.SetParent(context.ContentRoot, false);
+            context.Register(gameObject);
+            if(button is null || label is null) return this;
+            
+            label.text = labelText;
+            button.onClick.AddListener(() => onClick());
+            
+            button.interactable = displayOptions?.Interactable??true;
+            this.ApplyLayoutOptions(displayOptions);
+            this.ApplyTextOptions(displayOptions);
+
+            return this;
+        }
+    }
+
+    public static class TextButtonGeneratorExtensions
+    {
+        public static void AddTextButton(this IUIContext context, string label, Action onClick, DisplayOptions? displayOptions = null) =>
+            context.Resolver.Resolve<TextButton>()?.Configure(context, label, onClick, displayOptions);
+    }
+}

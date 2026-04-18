@@ -1,0 +1,132 @@
+﻿
+
+// E:\Projects\CultLib\src\GameCult.Caching\GameCult.Caching.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CultCache: Concurrent polymorphic cache with modular backing stores for .NET</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
+    <PackageReference Include="R3" Version="1.3.0" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="ConcurrentHashSet " Version="1.3.0" />
+  </ItemGroup>
+</Project>
+
+// E:\Projects\CultLib\src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>File-based MessagePack backing store for CultCache</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+	<ProjectReference Include="..\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
+                  OutputItemType="Analyzer"
+                  ReferenceOutputAssembly="false" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+  </ItemGroup>
+</Project>
+
+// E:\Projects\CultLib\src\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- This tells MSBuild we are producing an analyzer -->
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <Nullable>enable</Nullable>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+
+    <!-- Optional: Pack this as a NuGet analyzer -->
+    <Description>Source generator that emits MessagePack formatters for DatabaseEntry subclasses.</Description>
+    <PackageTags>MessagePack;SourceGenerator;DatabaseEntry</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core Roslyn packages for incremental generators -->
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.3.4" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.10.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Mark this output as an analyzer -->
+    <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+</Project>
+
+// E:\Projects\CultLib\src\GameCult.Logging\GameCult.Logging.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Simple pluggable logging interface for CultLib</Description>
+  </PropertyGroup>
+</Project>
+
+// E:\Projects\CultLib\src\GameCult.Logging.Unity\GameCult.Logging.Unity.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Unity integration for GameCult.Logging</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
+    <PackageReference Include="R3" Version="1.3.0" />
+  </ItemGroup>
+</Project>
+
+// E:\Projects\CultLib\src\GameCult.Networking\GameCult.Networking.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CultNet: Secure, high-performance messaging for games/servers</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
+    <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="R3" Version="1.3.0" />
+    <PackageReference Include="LiteNetLib" Version="1.3.1" />
+    <PackageReference Include="Isopoh.Cryptography.Argon2" Version="2.0.0" />
+  </ItemGroup>
+</Project>
+
+// E:\Projects\CultLib\tests\GameCult.Networking.Tests\GameCult.Networking.Tests.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>GameCult.Networking.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GameCult.Networking\GameCult.Networking.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- NUnit framework -->
+    <PackageReference Include="coverlet.msbuild" Version="6.0.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="NUnit" Version="4.*" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="FluentAssertions" Version="6.*" />
+    <PackageReference Include="coverlet.collector" Version="6.*">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

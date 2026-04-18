@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+
+    <Description>Source generator that emits MessagePack formatters for DatabaseEntry subclasses</Description>
+    <PackageTags>MessagePack;SourceGenerator;DatabaseEntry;Analyzer</PackageTags>
+	
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);PackBuildOutputs</TargetsForTfmSpecificContentInPackage>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IncludeSymbols>false</IncludeSymbols>
+    <DevelopmentDependency>true</DevelopmentDependency>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference the generator project, but not for compile -->
+    <ProjectReference Include="..\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
+                      ExcludeAssets="compile" />
+  </ItemGroup>
+  
+  <Target Name="DebugResolvedProjectReferences" AfterTargets="ResolveProjectReferences">
+    <Message Importance="High" Text="ResolvedProjectReferencePaths = %(_ResolvedProjectReferencePaths.Identity)" />
+  </Target>
+  
+  <!-- This target must run after ResolveProjectReferences and ensure the generator was built -->
+  <Target Name="PackBuildOutputs" DependsOnTargets="ResolveProjectReferences;DebugSymbolsProjectOutputGroup">
+    <ItemGroup>
+      <!-- Put generator DLL into the analyzers folder -->
+      <TfmSpecificPackageFile Include="%(_ResolvedProjectReferencePaths.Identity)" PackagePath="analyzers/dotnet/cs/" />
+    </ItemGroup>
+  </Target>
+
+</Project>

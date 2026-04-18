@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CultNet: Secure, high-performance messaging for games/servers</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="R3" Version="1.3.0" />
+    <PackageReference Include="LiteNetLib" Version="1.3.1" />
+    <PackageReference Include="Isopoh.Cryptography.Argon2" Version="2.0.0" />
+  </ItemGroup>
+</Project>

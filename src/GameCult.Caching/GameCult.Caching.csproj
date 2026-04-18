@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CultCache: Concurrent polymorphic cache with modular backing stores for .NET</Description>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
+    <PackageReference Include="R3" Version="1.3.0" />
+    <PackageReference Include="ConcurrentHashSet " Version="1.3.0" />
+  </ItemGroup>
+</Project>

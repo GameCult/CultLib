@@ -1,0 +1,12 @@
+{
+    "name": "org.gamecult.ui",
+    "displayName": "CultUI",
+    "version": "1.0.0",
+    "unity": "2021.3",
+    "description": "Modular, data-driven procedural UI and runtime inspector framework for Unity",
+    "keywords": [
+        "UI"
+    ],
+    "license": "MIT",
+    "category": "Scripting"
+}

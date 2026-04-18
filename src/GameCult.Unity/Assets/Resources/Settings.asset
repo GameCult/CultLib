@@ -1,0 +1,477 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0d957fc3cdc9310499a3a494a317fe0a, type: 3}
+  m_Name: Settings
+  m_EditorClassIdentifier: 
+  DefaultOverworldSoundbank: Overworld_Generic
+  DefaultCombatSoundbank: Combat_Generic
+  DefaultBossSoundbank: Boss_Metal
+  AmbienceSoundBank: Ambience
+  StartingHullName: LonginusX
+  PickupLifetime: 30
+  LootDropProbability: 0.25
+  LootDropVelocity: 25
+  HeatstrokePhasingFloor: 0
+  HeatstrokePhasingFrequency: 5
+  WormholeDistanceRatio: 0.75
+  DefaultViewDistance: 4096
+  MinimapZoneGravityRange: 0.45
+  MinimapZoomLevels:
+  - 250
+  - 500
+  - 1000
+  - 2000
+  - 4000
+  DefaultMinimapZoom: 3
+  IconSize:
+    Exponent: 0.15
+    Multiplier: 10
+    Constant: 25
+  AsteroidMeshCount: 4
+  MinimapAsteroidSize: 3
+  MinimapIconSize: 0.125
+  PlanetRotationSpeed: 0.1
+  NameGeneratorSettings:
+    NameGeneratorMinLength: 5
+    NameGeneratorMaxLength: 10
+    NameGeneratorOrder: 3
+  TutorialGenerationSettings:
+    ProtagonistFaction: Miss
+    AntagonistFaction: Zhe
+    BufferFaction: Luc
+    NeutralFactions:
+    - Aero
+    - Finch
+    QuestFaction: Adras
+    LinkDensity: 0.5
+    ZoneCount: 64
+  TutorialBackgroundSettings:
+    NoiseAmplitude: 1
+    NoiseOffset: 0.3
+    NoiseGain: 0.7
+    NoiseLacunarity: 2
+    NoiseFrequency: 0.1
+    NoisePosition: 536.5106
+    CloudExponent: 10
+    CloudAmplitude: 0.01
+  SectorBackgroundSettings:
+    NoiseAmplitude: 1
+    NoiseOffset: 0.3
+    NoiseGain: 0.7
+    NoiseLacunarity: 2
+    NoiseFrequency: 1
+    NoisePosition: 91.29439
+    CloudExponent: 10
+    CloudAmplitude: 0.01
+  SectorGenerationSettings:
+    LinkDensity: 0.5
+    ZoneCount: 196
+    MegaCount: 12
+    BossCount: 3
+  BodySettingsCollections:
+  - MinimumMass: 0
+    BodySettings:
+    - {fileID: 11400000, guid: 67ee22ef2201846aab4c14548d654d93, type: 2}
+  - MinimumMass: 50
+    BodySettings:
+    - {fileID: 11400000, guid: 2a1cb691b0ffc49b4b8ca5edf4fb2044, type: 2}
+  - MinimumMass: 100
+    BodySettings:
+    - {fileID: 11400000, guid: 217a1c4af1183482495f6393e35a9d21, type: 2}
+  - MinimumMass: 250
+    BodySettings:
+    - {fileID: 11400000, guid: 27c76158025eb40b68d0f768f210e1ea, type: 2}
+    - {fileID: 11400000, guid: d26428a36e2e642ee93a7dd013b47255, type: 2}
+  - MinimumMass: 500
+    BodySettings:
+    - {fileID: 11400000, guid: d127c8c2ea8c946d29d60dbd0028681a, type: 2}
+  - MinimumMass: 800
+    BodySettings:
+    - {fileID: 11400000, guid: 695cb35c72b3b4d1692637c247a48580, type: 2}
+  PlanetSettings:
+    ZoneDepthExponent: 2
+    ZoneDepth: 64
+    ZoneBoundaryFog: 0
+    GravityDepth:
+      Exponent: 0.175
+      Multiplier: 30
+      Constant: 0
+    GravityRadius:
+      Exponent: 0.25
+      Multiplier: 500
+      Constant: 0
+    WaveDepth:
+      Exponent: 0.3
+      Multiplier: 0.5
+      Constant: 0
+    WaveRadius:
+      Exponent: 0.25
+      Multiplier: 500
+      Constant: 0
+    WaveFrequency:
+      Exponent: 0.45
+      Multiplier: 0.2
+      Constant: 0
+    WaveSpeed:
+      Exponent: 0
+      Multiplier: 0
+      Constant: 0.025
+    LightRadius:
+      Exponent: 0.25
+      Multiplier: 300
+      Constant: 0
+    BodyRadius:
+      Exponent: 0.25
+      Multiplier: 3
+      Constant: 0
+    AsteroidVerticalOffset: -10
+    AsteroidSize:
+      Exponent: 2
+      Minimum: 3
+      Maximum: 6
+    AsteroidHitpoints:
+      Exponent: 2
+      Minimum: 10
+      Maximum: 200
+    AsteroidRespawnTime:
+      Exponent: 1.5
+      Minimum: 10
+      Maximum: 100
+    GravityStrength: 2
+    MiningDifficulty: 500
+    SecureAreaRadiusMultiplier: 0.425
+    OrbitPeriod:
+      Exponent: 1
+      Multiplier: 1
+      Constant: 0
+  ZoneSettings:
+    PlanetSafetyRadius:
+      Exponent: 0.25
+      Multiplier: 2.5
+      Constant: 0
+    MassFloor: 1
+    SunMass: 5000
+    GasGiantMass: 1000
+    PlanetMass: 100
+    SatellitePasses: 5
+    SatelliteCreationMassFloor: 100
+    SatelliteCreationProbability: 0.25
+    BinaryCreationProbability: 0.1
+    RosetteProbability: 0.1
+    ZoneRadius:
+      Exponent: 1.5
+      Minimum: 1000
+      Maximum: 10000
+    ZoneMass:
+      Exponent: 1.5
+      Minimum: 10000
+      Maximum: 500000
+    SubZoneCount:
+      Exponent: 1.5
+      Minimum: 0
+      Maximum: 8
+    ZoneBoundaryRadius: 0.9
+    BeltProbability: 0.25
+    BeltMassCeiling: 500
+    AsteroidBeltWidth:
+      Exponent: 0.666
+      Multiplier: 5
+      Constant: 50
+    AsteroidCount:
+      Exponent: 0.5
+      Multiplier: 1
+      Constant: 11
+    AsteroidRotationSpeed:
+      Exponent: 2
+      Minimum: 0.1
+      Maximum: 0.5
+    ResourceDensityMinimum: 0.1
+    ResourceDensityMaximum: 1.5
+    SunColorSaturation: 0.85
+    SunSecondaryColorDistance: 0.33
+    SunLightSaturation: 0.5
+    SunFogTintSaturation: 0.55
+    GasGiantBandCount:
+      Exponent: 2
+      Minimum: 5
+      Maximum: 8
+    GasGiantBandColorSeparation: 0.25
+    GasGiantBandAltColorChance: 0.25
+    GasGiantBandSaturation:
+      Exponent: 0.5
+      Minimum: 0
+      Maximum: 0.8
+    GasGiantBandBrightness:
+      Exponent: 0.25
+      Minimum: 0.25
+      Maximum: 1
+    NameData: []
+  GameplaySettings:
+    DefaultEntitySettings:
+      ShutdownPerformance: 0.1
+    Tiers:
+    - Name: Common
+      Quality: 0.3
+      Color:
+        x: 0.75
+        y: 0.75
+        z: 0.75
+      Rarity: 1
+    - Name: Uncommon
+      Quality: 0.45
+      Color:
+        x: 0
+        y: 1
+        z: 0.5
+      Rarity: 0.5
+    - Name: Rare
+      Quality: 0.6
+      Color:
+        x: 0
+        y: 0.6
+        z: 1
+      Rarity: 0.15
+    - Name: Epic
+      Quality: 0.75
+      Color:
+        x: 0.75
+        y: 0
+        z: 1
+      Rarity: 0.05
+    - Name: Legendary
+      Quality: 0.9
+      Color:
+        x: 1
+        y: 0.4
+        z: 0
+      Rarity: 0.01
+    QualityPriceModifier:
+      Exponent: 3
+      Minimum: 0.25
+      Maximum: 8
+    DurabilityQualityExponent: 2
+    DurabilityQualityMin: 2
+    DurabilityQualityMax: 0.25
+    ThermalQualityExponent: 2
+    ThermalQualityMin: 2
+    ThermalQualityMax: 0.25
+    DefaultShutdownPerformance: 0.25
+    SevereHeatstrokeRiskThreshold: 0.25
+    WormholeDepth: 500
+    WormholeExitVelocity: 100
+    WormholeExitRadius: 50
+    WormholeAnimationDuration: 4
+    WormholeExitCurveStart: 0.8
+    ThermalWearExponent: 0.01
+    DeltaTempWearExponent: 0.01
+    QualityWearExponent: 2
+    WeaponGroupCount: 6
+    WarpDistance: 25
+    DockingDistance: 25
+    ProductionPersonalityLerp: 0.05
+    MessageDuration: 4
+    TargetPersistenceDuration: 3
+    StartingGearQuality:
+      Exponent: 1
+      Minimum: 0
+      Maximum: 1
+    HeatRadiationExponent: 3
+    HeatRadiationMultiplier: 0.00000001
+    HeatConductionMultiplier: 0.01
+    TemperatureEmissionCurve:
+      Exponent: 3
+      Multiplier: 0.000000001
+      Constant: 0
+    HeatstrokeTemperature: 330
+    HeatstrokeMultiplier: 0.000002
+    HeatstrokeExponent: 2
+    HeatstrokeRecoverySpeed: 0.2
+    HeatstrokeControlLimit: 0.75
+    HypothermiaTemperature: 273
+    HypothermiaMultiplier: 0.000002
+    HypothermiaExponent: 1.75
+    HypothermiaRecoverySpeed: 0.2
+    HypothermiaControlLimit: 0.75
+    LockIndicatorNoiseAmplitude: 256
+    LockIndicatorFrequency:
+      Exponent: 4
+      Minimum: 0.01
+      Maximum: 10
+    LockSpinSpeed:
+      Exponent: 2
+      Minimum: 5
+      Maximum: 720
+    TorqueFloor: 0.5
+    TorqueMultiplier: 0.1
+    AetherTorqueMultiplier: 0.1
+    AetherHeatMultiplier: 0.25
+    VisibilityDecay: 0.5
+    TargetInfoDecay: 0.5
+    TargetDetectionInfoThreshold: 0.1
+    TargetArmorInfoThreshold: 0.5
+    TargetGearInfoThreshold: 0.8
+    ConvergenceMinimumDistance: 50
+    AgentRangeExponent: 0.25
+    AgentForwardLerp: 0.5
+    AgentMaxForwardDistance: 50
+    AgentFiringMinDot: 0.99
+  HullHitColor: {r: 1, g: 1, b: 0.14999998, a: 1}
+  ArmorHitColor: {r: 1, g: 1, b: 1, a: 1}
+  HardpointHitColor: {r: 0.603, g: 0.66916656, b: 1, a: 1}
+  GearHitColor: {r: 1, g: 0.39999998, b: 0.39999998, a: 1}
+  ArmorGradient:
+    serializedVersion: 2
+    key0: {r: 0.2244, g: 0.66, b: 0.2244, a: 1}
+    key1: {r: 1, g: 1, b: 1, a: 1}
+    key2: {r: 0, g: 0, b: 0, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 65535
+    ctime2: 0
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 2
+    m_NumAlphaKeys: 2
+  DurabilityGradient:
+    serializedVersion: 2
+    key0: {r: 0.7264151, g: 0, b: 0, a: 1}
+    key1: {r: 1, g: 1, b: 0.19999999, a: 1}
+    key2: {r: 0.2244, g: 0.66, b: 0.2244, a: 0}
+    key3: {r: 0, g: 0, b: 0, a: 0}
+    key4: {r: 0, g: 0, b: 0, a: 0}
+    key5: {r: 0, g: 0, b: 0, a: 0}
+    key6: {r: 0, g: 0, b: 0, a: 0}
+    key7: {r: 0, g: 0, b: 0, a: 0}
+    ctime0: 0
+    ctime1: 29613
+    ctime2: 65535
+    ctime3: 0
+    ctime4: 0
+    ctime5: 0
+    ctime6: 0
+    ctime7: 0
+    atime0: 0
+    atime1: 65535
+    atime2: 0
+    atime3: 0
+    atime4: 0
+    atime5: 0
+    atime6: 0
+    atime7: 0
+    m_Mode: 0
+    m_ColorSpace: -1
+    m_NumColorKeys: 3
+    m_NumAlphaKeys: 2
+  DefaultEnvironment:
+    Nebula:
+      FillDensity: 0.000000001
+      FillDistance: 120
+      FillExponent: 5
+      FillOffset: 70
+      PatchDensity: 0.35
+      FloorOffset: -20
+      FloorBlend: 10
+      PatchBlend: 25
+      Luminance: 1
+      Extinction: 0.5
+      TintLodExponent: -0.45
+      SafetyDistance: 30
+    Flow:
+      GlobalScale: 512
+      GlobalAmplitude: 15
+      GlobalScrollSpeed: 0.025
+      Period: 8
+      SlopeAmplitude: 0
+      SwirlAmplitude: 0
+    Noise:
+      Scale: 414.2167
+      Amplitude: -36.17
+      Exponent: -0.25
+      Speed: 0.0025
+      SlopeExponent: 0.15
+    Lighting:
+      DynamicSkyBoost: 2
+      DynamicLodHigh: 7
+      DynamicLodLow: 2
+      DynamicIntensity: 0.5
+    Grid:
+      Enabled: 0
+      Offset: -7.88
+  ItemIcons:
+  - {fileID: 21300000, guid: 02171eb0c15bcf9449be2cebff5517c3, type: 3}
+  - {fileID: 21300000, guid: 0722b5b8355cdef498a13fbd6a3a1acc, type: 3}
+  - {fileID: 21300000, guid: 43098a4c7465e2e4d9dd0c48b25cfd4d, type: 3}
+  - {fileID: 21300000, guid: dd8fc0bb048e96a45ac1e98a9f89f5fe, type: 3}
+  - {fileID: 21300000, guid: dd8fc0bb048e96a45ac1e98a9f89f5fe, type: 3}
+  - {fileID: 21300000, guid: 7e0d105c81fc62c4995f8c732e11b1a8, type: 3}
+  - {fileID: 21300000, guid: c9a001ae343776a4fa311b8b3c37cdce, type: 3}
+  - {fileID: 21300000, guid: 71cca4a0fa4916444a6c798b69903e39, type: 3}
+  - {fileID: 21300000, guid: 1dcbc8f79d791eb47ad9bc49c9c01e9b, type: 3}
+  - {fileID: 21300000, guid: 5342a90faf9cd414490e424d5e19d77a, type: 3}
+  - {fileID: 21300000, guid: be2f4a4df88047e4cbee35d13ac0c078, type: 3}
+  - {fileID: 21300000, guid: 6afd6f75db2576e45850d709fa4006f8, type: 3}
+  - {fileID: 21300000, guid: b3acf34701ae8d7488852fc28408449b, type: 3}
+  - {fileID: 0}
+  WeaponTypeIcons:
+  - {fileID: 21300000, guid: a3100571eb7e8f24bbf54d248e247290, type: 3}
+  - {fileID: 21300000, guid: dc8c6f7a85945d242bd4cbd92df0a7d4, type: 3}
+  - {fileID: 21300000, guid: 035d99060b1bf0d46b48764c72f99dc0, type: 3}
+  - {fileID: 21300000, guid: 4f93da385ce3f6e4092391e9edc3b9a6, type: 3}
+  - {fileID: 21300000, guid: a037bd60873a5a744bd9328ba48e00f6, type: 3}
+  - {fileID: 21300000, guid: 05a60cc71bb0a1b4cab9c229775dcc91, type: 3}
+  - {fileID: 21300000, guid: 052f9ebd5b5bbdc4da0c8050d6e18a22, type: 3}
+  - {fileID: 21300000, guid: ee06ba7ceac0364448ad9ef016495a85, type: 3}
+  - {fileID: 21300000, guid: 947d6416152bba3438d155f3c1f2ad2c, type: 3}
+  - {fileID: 21300000, guid: 9ae7f8b405224394aa497f6900f86909, type: 3}
+  WeaponCaliberIcons:
+  - {fileID: 21300000, guid: 7ddef283c4d132b478960ddc65dad782, type: 3}
+  - {fileID: 21300000, guid: 11db2e83a5e79c644b707fca311680c9, type: 3}
+  - {fileID: 21300000, guid: 3ddaa0d0483541c48ba11e7fbf792eb3, type: 3}
+  - {fileID: 21300000, guid: 08f2ab1f9839d114ebe66cdd04f0b22b, type: 3}
+  WeaponRangeIcons:
+  - {fileID: 21300000, guid: 9099d9d8147be6647bef58bc86f6cce8, type: 3}
+  - {fileID: 21300000, guid: 3605fce693e46684db487553aaf9b74d, type: 3}
+  - {fileID: 21300000, guid: 8116eba48a70bee45a4e8b86ed4ade50, type: 3}
+  - {fileID: 21300000, guid: c67d4f4a1937edd45b177b6ca7f086b3, type: 3}
+  WeaponFireTypeIcons:
+  - {fileID: 0}
+  - {fileID: 21300000, guid: 97a86ff7062ae4841b54009537c4a359, type: 3}
+  - {fileID: 21300000, guid: 8381f89e37ef36b4e8689e3218c988fe, type: 3}
+  - {fileID: 21300000, guid: ea6db8f4b0a28b94eac13757d859ff50, type: 3}
+  - {fileID: 21300000, guid: e267ba096b10c724faa537bc12177ffa, type: 3}
+  - {fileID: 21300000, guid: b2db2634fbf23de40a54c98effe7875e, type: 3}
+  WeaponModifierIcons:
+  - {fileID: 0}
+  - {fileID: 21300000, guid: 262e9e24564ec684ca2e9d0d5cc7340c, type: 3}
+  - {fileID: 21300000, guid: 3d6feaf6c3f205e429b562da28bca3df, type: 3}
+  - {fileID: 21300000, guid: 401b9ed79a8cffc428a5e2f786fd9af5, type: 3}
+  - {fileID: 21300000, guid: 01ec5541ca0e6984d828f5480531c8ab, type: 3}
+  - {fileID: 21300000, guid: efe0b5cdaf240974abc687a0b158a239, type: 3}
+  - {fileID: 21300000, guid: 162b3e5032ea8db4dbbfc43df49d2ad8, type: 3}
+  - {fileID: 21300000, guid: b77180e315f7ee0478e0b0a3ceafd956, type: 3}
