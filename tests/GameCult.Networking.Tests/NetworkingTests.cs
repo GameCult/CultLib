@@ -108,6 +108,45 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void MessageSerialization_RoundTrips_SchemaCatalogMessages()
+        {
+            var client = new Client(DevelopmentClientSecurity);
+            var message = new SchemaCatalogResponseMessage
+            {
+                MessageId = "catalog-1",
+                Schemas =
+                [
+                    new SchemaDescriptorMessage
+                    {
+                        SchemaId = "https://example.test/contracts/example.schema.json",
+                        Kind = "shared_contract",
+                        SchemaVersion = "example.contract.v0",
+                        Title = "Example Contract",
+                        WireContracts = ["cultnet.schema.v0", "gamecult.networking.v0"],
+                        ContentHash = "deadbeef",
+                        SchemaJson = "{\"type\":\"object\"}"
+                    }
+                ]
+            };
+
+            var serializationType = client.GetType().Assembly
+                .GetType("GameCult.Networking.MessageSerialization", throwOnError: true)!;
+            var serialize = serializationType.GetMethod("Serialize", BindingFlags.Public | BindingFlags.Static)!
+                .MakeGenericMethod(typeof(Message));
+            var deserialize = serializationType.GetMethod("Deserialize", BindingFlags.Public | BindingFlags.Static)!
+                .MakeGenericMethod(typeof(Message));
+
+            var payload = (byte[])serialize.Invoke(null, [message])!;
+            var roundTrip = (SchemaCatalogResponseMessage)deserialize.Invoke(null, [payload])!;
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("catalog-1"));
+            Assert.That(roundTrip.Schemas, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Schemas[0].SchemaId, Is.EqualTo("https://example.test/contracts/example.schema.json"));
+            Assert.That(roundTrip.Schemas[0].WireContracts, Is.EqualTo(["cultnet.schema.v0", "gamecult.networking.v0"]));
+            Assert.That(roundTrip.Schemas[0].SchemaJson, Is.EqualTo("{\"type\":\"object\"}"));
+        }
+
+        [Test]
         public void MessageSerialization_Rejects_InvalidPayload()
         {
             var client = new Client(DevelopmentClientSecurity);

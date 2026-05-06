@@ -26,6 +26,8 @@ Keep the distinction clean:
 - auth/session semantics belong to the core library
 - application payload contracts should be explicit, versioned, and kept in sync
   across runtimes
+- runtimes should be able to ask each other which schemas they speak before
+  pretending a shared pipe implies shared understanding
 - if multiple apps share a message contract, they should be able to talk
   directly without bespoke translation sludge
 
@@ -41,6 +43,8 @@ Sample payloads:
 
 - `ChangeNameMessage`
 - `ChatMessage`
+- `SchemaCatalogRequestMessage`
+- `SchemaCatalogResponseMessage`
 
 Those now live under `Samples/` to make it obvious they are example application
 messages, not the entire meaning of the library.

@@ -15,6 +15,8 @@ namespace GameCult.Networking
      // Sample application payload tags preserved for cross-runtime compatibility.
      Union(5, typeof(ChangeNameMessage)),
      Union(6, typeof(ChatMessage)),
+     Union(7, typeof(SchemaCatalogRequestMessage)),
+     Union(8, typeof(SchemaCatalogResponseMessage)),
      MessagePackObject]
     public abstract class Message
     {
@@ -108,6 +110,97 @@ namespace GameCult.Networking
         /// Human-readable error text.
         /// </summary>
         [Key(0)] public string Error = string.Empty;
+    }
+
+    /// <summary>
+    /// Requests a catalog of schemas that the remote runtime can safely exchange.
+    /// </summary>
+    [MessagePackObject]
+    public class SchemaCatalogRequestMessage : Message
+    {
+        /// <summary>
+        /// Correlation identifier for the discovery request.
+        /// </summary>
+        [Key(0)] public string MessageId = string.Empty;
+
+        /// <summary>
+        /// Whether the remote runtime should include inline JSON schema bodies.
+        /// </summary>
+        [Key(1)] public bool IncludeSchemaJson;
+
+        /// <summary>
+        /// Optional schema-id filter.
+        /// </summary>
+        [Key(2)] public string[]? SchemaIds;
+
+        /// <summary>
+        /// Optional schema-kind filter.
+        /// </summary>
+        [Key(3)] public string[]? Kinds;
+    }
+
+    /// <summary>
+    /// Describes one schema that the runtime knows how to exchange safely.
+    /// </summary>
+    [MessagePackObject]
+    public class SchemaDescriptorMessage
+    {
+        /// <summary>
+        /// Stable canonical schema identifier.
+        /// </summary>
+        [Key(0)] public string SchemaId = string.Empty;
+
+        /// <summary>
+        /// Discovery kind such as wire_message, document_payload, or shared_contract.
+        /// </summary>
+        [Key(1)] public string Kind = string.Empty;
+
+        /// <summary>
+        /// Optional runtime message schema version.
+        /// </summary>
+        [Key(2)] public string? SchemaVersion;
+
+        /// <summary>
+        /// Optional CultCache/CultNet document type name.
+        /// </summary>
+        [Key(3)] public string? DocumentType;
+
+        /// <summary>
+        /// Human-facing schema title.
+        /// </summary>
+        [Key(4)] public string? Title;
+
+        /// <summary>
+        /// Wire contracts that can transport this schema safely.
+        /// </summary>
+        [Key(5)] public string[] WireContracts = Array.Empty<string>();
+
+        /// <summary>
+        /// SHA-256 hash of the canonical schema JSON.
+        /// </summary>
+        [Key(6)] public string ContentHash = string.Empty;
+
+        /// <summary>
+        /// Optional canonical JSON Schema body as a string.
+        /// </summary>
+        [Key(7)] public string? SchemaJson;
+    }
+
+    /// <summary>
+    /// Returns the remote runtime's schema catalog for safe exchange planning.
+    /// </summary>
+    [MessagePackObject]
+    public class SchemaCatalogResponseMessage : Message
+    {
+        /// <summary>
+        /// Correlation identifier matching the request.
+        /// </summary>
+        [Key(0)] public string MessageId = string.Empty;
+
+        /// <summary>
+        /// Discovered schemas available for safe exchange.
+        /// </summary>
+        [Key(1)] public SchemaDescriptorMessage[] Schemas = Array.Empty<SchemaDescriptorMessage>();
     }
 
 }
