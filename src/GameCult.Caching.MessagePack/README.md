@@ -10,6 +10,7 @@ The package focuses on:
 - single-file and multi-file store implementations
 - support for generated formatters for concrete cache-entry types
 - formatter support for `DatabaseLink<T>`
+- raw persisted-envelope helpers for exact payload relay
 
 ## Included Types
 
@@ -17,6 +18,8 @@ The package focuses on:
 - `MultiFileMessagePackBackingStore`
 - `DatabaseEntryResolver`
 - `DatabaseLinkFormatter<T>`
+- `CultCacheEnvelope`
+- `CultCacheEnvelopeSerialization`
 
 ## Why The Generator Matters
 
@@ -113,3 +116,26 @@ public class ItemData : DatabaseEntry, INamedEntry
 - For polymorphic `DatabaseEntry` serialization, use this package with the generator/analyzer package.
 - The backing stores build on the semantics of `CultCache`, including primary-store routing and type-specific store routing.
 - `MultiFileMessagePackBackingStore` inherits the rename-safe and atomic-write behavior of the hardened `MultiFileBackingStore` base class.
+
+## Raw Envelope Relay
+
+If a neighboring process already shares the same payload contract and just
+needs the exact persisted MessagePack bytes, use `CultCacheEnvelope` and
+`CultCacheEnvelopeSerialization`.
+
+That gives you:
+
+- the stable cache key
+- the explicit entry/document type
+- the exact payload bytes
+- the stored-at timestamp
+
+This is the seam the newer CultNet raw document/snapshot lane uses for
+bit-compatible neighbors. It keeps the transport from decoding bytes into a
+generic sludge object only to re-encode the same thing again five seconds
+later.
+
+One important constraint: concrete `DatabaseEntry` subclasses still need real
+MessagePack formatters. If a consumer assembly has not generated or registered
+formatters for a subtype, supply an explicit payload codec at the integration
+boundary instead of assuming the abstract resolver will become psychic.

@@ -18,5 +18,16 @@ namespace GameCult.Networking
         {
             peer.Send(MessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
         }
+
+        /// <summary>
+        /// Serializes and sends a modern CultNet schema-v0 message using reliable ordered delivery.
+        /// </summary>
+        /// <typeparam name="T">The concrete schema-v0 message type.</typeparam>
+        /// <param name="peer">The peer to send through.</param>
+        /// <param name="message">The schema-v0 message to serialize and send.</param>
+        public static void SendCultNet<T>(this NetPeer peer, T message) where T : ICultNetSchemaMessage
+        {
+            peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
+        }
     }
 }

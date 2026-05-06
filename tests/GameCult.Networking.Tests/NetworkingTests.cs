@@ -2,6 +2,9 @@
 using System;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
+using GameCult.Caching;
+using GameCult.Caching.MessagePack;
 using NUnit.Framework;
 
 namespace GameCult.Networking.Tests
@@ -161,6 +164,112 @@ namespace GameCult.Networking.Tests
                     .With.InnerException.InstanceOf<MessagePack.MessagePackSerializationException>());
         }
 
+        [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_RawSnapshotResponse()
+        {
+            var message = new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "snapshot-1",
+                Documents =
+                [
+                    new CultNetRawDocumentRecord
+                    {
+                        DocumentType = "ghostlight.agent-state",
+                        DocumentKey = "world/main",
+                        StoredAt = "2026-05-06T12:34:56.0000000+00:00",
+                        PayloadSchemaVersion = "ghostlight.agent_state.v0",
+                        PayloadEncoding = "messagepack",
+                        Payload = [0x91, 0xA3, 0x66, 0x6F, 0x6F],
+                        SourceRuntimeId = "voidbot",
+                        SourceAgentId = "void",
+                        SourceRole = "herald",
+                        Tags = ["swarm", "dream"]
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetSnapshotResponseRawMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("snapshot-1"));
+            Assert.That(roundTrip.Documents, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Documents[0].DocumentType, Is.EqualTo("ghostlight.agent-state"));
+            Assert.That(roundTrip.Documents[0].PayloadEncoding, Is.EqualTo("messagepack"));
+            Assert.That(roundTrip.Documents[0].Payload, Is.EqualTo(message.Documents[0].Payload));
+            Assert.That(roundTrip.Documents[0].Tags, Is.EqualTo(["swarm", "dream"]));
+        }
+
+        [Test]
+        public async Task CultNetDocumentRegistry_RawSnapshotReplication_PreservesPayloadBytes()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var registry = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForEntry<PlayerData>(
+                    "gamecult.player_data",
+                    payloadSchemaVersion: "gamecult.player_data.v0",
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+
+            var sourceEntry = new PlayerData
+            {
+                ID = Guid.NewGuid(),
+                Email = "cult@example.test",
+                PasswordHash = "not-a-real-hash",
+                Username = "CultGhost"
+            };
+
+            await sourceCache.AddAsync(sourceEntry);
+
+            var expectedPayload = SerializePlayerDataPayload(sourceEntry);
+            var request = registry.CreateSnapshotRequest(
+                "request-1",
+                documentTypes: ["gamecult.player_data"],
+                documentKeys: [sourceEntry.ID.ToString("D")]);
+            var response = registry.CreateRawSnapshotResponse(sourceCache, "snapshot-1", request);
+            var serializedResponse = CultNetSchemaMessageSerialization.Serialize(response);
+            var roundTrip = (CultNetSnapshotResponseRawMessage)CultNetSchemaMessageSerialization.Deserialize(serializedResponse);
+
+            Assert.That(roundTrip.Documents, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Documents[0].Payload, Is.EqualTo(expectedPayload));
+
+            await registry.ApplyRawSnapshotResponseAsync(targetCache, roundTrip);
+            var replicated = targetCache.Get<PlayerData>(sourceEntry.ID);
+
+            Assert.That(replicated, Is.Not.Null);
+            Assert.That(SerializePlayerDataPayload(replicated!), Is.EqualTo(expectedPayload));
+        }
+
+        [Test]
+        public void CultNetSchemaRegistry_BuiltInCatalog_AdvertisesRawLane_AndSharedGhostlightContract()
+        {
+            var response = CultNetSchemaRegistry.BuiltIn.CreateCatalogResponse(
+                new CultNetSchemaCatalogRequestMessage
+                {
+                    MessageId = "catalog-raw",
+                    IncludeSchemaJson = true
+                });
+
+            var rawPut = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.DocumentPutRaw);
+            var rawSnapshot = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.SnapshotResponseRaw);
+            var ghostlight = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == "ghostlight.agent_state.v0");
+
+            Assert.That(rawPut, Is.Not.Null);
+            Assert.That(rawPut!.WireContracts, Is.EqualTo([CultNetWireContracts.SchemaV0]));
+            Assert.That(rawPut.SchemaJson, Does.Contain("cultnet.document_put_raw.v0"));
+            Assert.That(rawPut.ContentHash, Has.Length.EqualTo(64));
+
+            Assert.That(rawSnapshot, Is.Not.Null);
+            Assert.That(rawSnapshot!.SchemaJson, Does.Contain("cultnet.snapshot_response_raw.v0"));
+
+            Assert.That(ghostlight, Is.Not.Null);
+            Assert.That(ghostlight!.DocumentType, Is.EqualTo("ghostlight.agent-state"));
+            Assert.That(ghostlight.Kind, Is.EqualTo("document_payload"));
+        }
+
         private sealed class EnvironmentVariableScope : IDisposable
         {
             private readonly (string Name, string? Value)[] _originalValues;
@@ -182,6 +291,38 @@ namespace GameCult.Networking.Tests
                     Environment.SetEnvironmentVariable(original.Name, original.Value);
                 }
             }
+        }
+
+        [MessagePack.MessagePackObject]
+        public sealed class PlayerDataPayload
+        {
+            [MessagePack.Key(0)] public Guid Id { get; set; }
+            [MessagePack.Key(1)] public string Email { get; set; } = string.Empty;
+            [MessagePack.Key(2)] public string PasswordHash { get; set; } = string.Empty;
+            [MessagePack.Key(3)] public string Username { get; set; } = string.Empty;
+        }
+
+        private static byte[] SerializePlayerDataPayload(PlayerData entry)
+        {
+            return MessagePack.MessagePackSerializer.Serialize(new PlayerDataPayload
+            {
+                Id = entry.ID,
+                Email = entry.Email,
+                PasswordHash = entry.PasswordHash,
+                Username = entry.Username
+            });
+        }
+
+        private static PlayerData DeserializePlayerDataPayload(byte[] payload)
+        {
+            var decoded = MessagePack.MessagePackSerializer.Deserialize<PlayerDataPayload>(payload);
+            return new PlayerData
+            {
+                ID = decoded.Id,
+                Email = decoded.Email,
+                PasswordHash = decoded.PasswordHash,
+                Username = decoded.Username
+            };
         }
     }
 }

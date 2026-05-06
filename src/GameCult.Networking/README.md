@@ -17,6 +17,8 @@ The library currently includes:
 - encrypted login, register, and verify flows
 - signed session-token generation and validation
 - `PlayerData` integration with `CultCache`
+- explicit schema discovery for shared contracts
+- a raw MessagePack document/snapshot lane for bit-compatible neighbors
 - sample application payloads under `Samples/`
 
 The library is focused on the built-in authentication and session flows in this repository.
@@ -30,6 +32,27 @@ Keep the distinction clean:
   pretending a shared pipe implies shared understanding
 - if multiple apps share a message contract, they should be able to talk
   directly without bespoke translation sludge
+
+## Wire Contracts
+
+`GameCult.Networking` now speaks two explicit wire contracts:
+
+- `gamecult.networking.v0`
+  - the legacy union-based auth/session/sample message surface
+- `cultnet.schema.v0`
+  - the newer schema-first contract family for discovery, raw document puts,
+    raw snapshot replication, and cross-runtime shared-state work
+
+There is no inbound autodetect priesthood here. Pick the contract on purpose,
+keep the schema stable, and let peers discover what they can exchange before
+they start lobbing bytes at each other.
+
+Modern schema-v0 helpers live in:
+
+- `CultNetSchemaMessageSerialization`
+- `CultNetSchemaRegistry`
+- `CultNetDocumentRegistry`
+- `NetPeerExtensions.SendCultNet(...)`
 
 ## Main Types
 
@@ -48,6 +71,20 @@ Sample payloads:
 
 Those now live under `Samples/` to make it obvious they are example application
 messages, not the entire meaning of the library.
+
+Schema-v0 message families include:
+
+- `CultNetHelloMessage`
+- `CultNetSchemaCatalogRequestMessage`
+- `CultNetSchemaCatalogResponseMessage`
+- `CultNetDocumentPutRawMessage`
+- `CultNetDocumentDeleteMessage`
+- `CultNetSnapshotRequestMessage`
+- `CultNetSnapshotResponseRawMessage`
+
+The raw document/snapshot lane is meant for neighbors that already share the
+same payload schema and MessagePack semantics. It carries exact payload bytes
+plus explicit type metadata; it does not guess what a blob "probably" means.
 
 ## Authentication Model
 
@@ -213,3 +250,10 @@ anything else, treat message tags and field keys like CultCache schema:
 - stable
 - shared
 - boring in exactly the useful way
+
+For the newer schema-v0 lane, the equivalent rule is:
+
+- keep canonical JSON Schema files in sync
+- keep payload codecs in sync
+- advertise supported contracts through schema discovery
+- do not rely on implicit runtime magic to decide what a peer meant
