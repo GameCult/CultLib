@@ -4,6 +4,9 @@
 
 It is intended for game or game-service scenarios where you want a compact transport layer with a small set of built-in authentication flows rather than a full HTTP stack.
 
+The networking/auth layer is the durable organ. Some payloads in this repo are
+just sample application messages riding that organ.
+
 ## Scope
 
 The library currently includes:
@@ -14,8 +17,17 @@ The library currently includes:
 - encrypted login, register, and verify flows
 - signed session-token generation and validation
 - `PlayerData` integration with `CultCache`
+- sample application payloads under `Samples/`
 
 The library is focused on the built-in authentication and session flows in this repository.
+
+Keep the distinction clean:
+
+- auth/session semantics belong to the core library
+- application payload contracts should be explicit, versioned, and kept in sync
+  across runtimes
+- if multiple apps share a message contract, they should be able to talk
+  directly without bespoke translation sludge
 
 ## Main Types
 
@@ -24,6 +36,14 @@ The library is focused on the built-in authentication and session flows in this 
 - `Server`: server dispatch, auth flow handling, rate limiting, and session refresh
 - `Secret`: encryption and signed-token helper methods
 - `PlayerData`: cache-backed player record type
+
+Sample payloads:
+
+- `ChangeNameMessage`
+- `ChatMessage`
+
+Those now live under `Samples/` to make it obvious they are example application
+messages, not the entire meaning of the library.
 
 ## Authentication Model
 
@@ -181,3 +201,11 @@ public class CustomPingMessage : Message
 ```
 
 If you extend the built-in message set, update the union and serialization model accordingly.
+
+If you want cross-runtime compatibility with TypeScript, Rust, Python, or
+anything else, treat message tags and field keys like CultCache schema:
+
+- explicit
+- stable
+- shared
+- boring in exactly the useful way

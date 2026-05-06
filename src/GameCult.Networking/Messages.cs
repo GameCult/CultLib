@@ -12,6 +12,7 @@ namespace GameCult.Networking
      Union(2, typeof(VerifyMessage)),
      Union(3, typeof(LoginSuccessMessage)),
      Union(4, typeof(ErrorMessage)),
+     // Sample application payload tags preserved for cross-runtime compatibility.
      Union(5, typeof(ChangeNameMessage)),
      Union(6, typeof(ChatMessage)),
      MessagePackObject]
@@ -109,27 +110,4 @@ namespace GameCult.Networking
         [Key(0)] public string Error = string.Empty;
     }
 
-    /// <summary>
-    /// Requests a username change for the authenticated user.
-    /// </summary>
-    [MessagePackObject]
-    public class ChangeNameMessage : Message
-    {
-        /// <summary>
-        /// Requested new username.
-        /// </summary>
-        [Key(0)] public string Name = string.Empty;
-    }
-
-    /// <summary>
-    /// Carries plain chat text.
-    /// </summary>
-    [MessagePackObject]
-    public class ChatMessage : Message
-    {
-        /// <summary>
-        /// Chat text content.
-        /// </summary>
-        [Key(0)] public string Text = string.Empty;
-    }
 }
