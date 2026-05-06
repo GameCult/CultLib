@@ -19,13 +19,23 @@ For each discovered concrete `DatabaseEntry` subtype, the generator emits:
 - a formatter type
 - a resolver mapping entry
 
-Member ordering is:
+Member slot assignment is:
 
-1. `ID` first
-2. members with `[Key(...)]`, ordered by key
-3. remaining non-ignored instance fields and properties
+1. `ID` in slot `0`
+2. members with `[Key(...)]` in their exact key slot
+3. remaining non-ignored instance fields and properties appended after the
+   highest occupied slot as legacy convenience
 
-That gives predictable binary layout while still supporting manual `[Key]` ordering.
+The generated formatter writes a MessagePack array sized to the highest occupied
+slot and writes nil for unused gaps. Deserialization tolerates shorter older
+arrays by leaving missing members at their constructor/field-initializer values,
+and skips unknown extra slots. That makes `[Key(n)]` a durable wire contract:
+deleted fields can leave their slot reserved and new fields can use new keys
+without a store migration.
+
+For schema-stable cache entries, annotate every persisted member. Unkeyed
+members are supported for older code, but they are not a good long-term wire
+contract because source member order is not a schema.
 
 ## Example
 

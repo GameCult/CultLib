@@ -119,18 +119,24 @@ namespace GameCult.Caching.MessagePack.Generator
             sb.AppendLine();
 
             var members = CollectMembers(type);
-            var ordered = OrderMembers(type, members);
+            var slots = AssignSlots(type, members);
+            var maxSlot = slots.Count == 0 ? -1 : slots.Max(m => m.slot);
 
             // Serialize
             sb.AppendLine($"        public void Serialize(ref MessagePackWriter writer, {typeFull}? value, MessagePackSerializerOptions options)");
             sb.AppendLine("        {");
             sb.AppendLine("            if (value == null) { writer.WriteNil(); return; }");
-            sb.AppendLine($"            writer.WriteArrayHeader({ordered.Count});");
-            for (int i = 0; i < ordered.Count; i++)
+            sb.AppendLine($"            writer.WriteArrayHeader({maxSlot + 1});");
+            for (int i = 0; i <= maxSlot; i++)
             {
-                var (name, tsym) = ordered[i];
-                var tname = tsym.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                var access = $"value.{name}";
+                var member = slots.FirstOrDefault(m => m.slot == i);
+                if (member.name == null)
+                {
+                    sb.AppendLine("            writer.WriteNil();");
+                    continue;
+                }
+                var tname = member.typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                var access = $"value.{member.name}";
                 sb.AppendLine(
                     tname == "global::System.Guid"
                         ? $"            options.Resolver.GetFormatterWithVerify<System.Guid>().Serialize(ref writer, {access}, options);"
@@ -144,21 +150,26 @@ namespace GameCult.Caching.MessagePack.Generator
             sb.AppendLine("        {");
             sb.AppendLine("            if (reader.TryReadNil()) return null;");
             sb.AppendLine($"            var count = reader.ReadArrayHeader();");
-            sb.AppendLine($"            if (count != {ordered.Count}) throw new MessagePackSerializationException($\"Invalid {type.Name} length {{count}}, expected {ordered.Count}\");");
-            for (int i = 0; i < ordered.Count; i++)
+            sb.AppendLine($"            var obj = new {typeFull}();");
+            sb.AppendLine("            for (var i = 0; i < count; i++)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                switch (i)");
+            sb.AppendLine("                {");
+            foreach (var (slot, name, tsym) in slots)
             {
-                var (_, tsym) = ordered[i];
                 var tname = tsym.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                sb.AppendLine($"                    case {slot}:");
                 sb.AppendLine(
                     tname == "global::System.Guid"
-                        ? $"            var v{i} = options.Resolver.GetFormatterWithVerify<System.Guid>().Deserialize(ref reader, options);"
-                        : $"            var v{i} = options.Resolver.GetFormatterWithVerify<{tname}>().Deserialize(ref reader, options);");
+                        ? $"                        obj.{name} = options.Resolver.GetFormatterWithVerify<System.Guid>().Deserialize(ref reader, options);"
+                        : $"                        obj.{name} = options.Resolver.GetFormatterWithVerify<{tname}>().Deserialize(ref reader, options);");
+                sb.AppendLine("                        break;");
             }
-            sb.AppendLine($"            var obj = new {typeFull}();");
-            for (int i = 0; i < ordered.Count; i++)
-            {
-                sb.AppendLine($"            obj.{ordered[i].name} = v{i};");
-            }
+            sb.AppendLine("                    default:");
+            sb.AppendLine("                        reader.Skip();");
+            sb.AppendLine("                        break;");
+            sb.AppendLine("                }");
+            sb.AppendLine("            }");
             sb.AppendLine("            return obj;");
             sb.AppendLine("        }");
 
@@ -190,29 +201,34 @@ namespace GameCult.Caching.MessagePack.Generator
             return members;
         }
 
-        private static List<(string name, ITypeSymbol typeSymbol)> OrderMembers(
+        private static List<(int slot, string name, ITypeSymbol typeSymbol)> AssignSlots(
             INamedTypeSymbol type,
             List<(string name, ITypeSymbol typeSymbol, int? key, bool ignore)> members)
         {
             members = members.Where(m => !m.ignore).ToList();
 
-            var ordered = new List<(string, ITypeSymbol)>();
+            var slots = new List<(int, string, ITypeSymbol)>();
 
             var id = FindIdMember(type);
             if (id != null)
             {
-                ordered.Add((id.Value.name, id.Value.typeSymbol));
+                slots.Add((0, id.Value.name, id.Value.typeSymbol));
                 members.RemoveAll(m => m.name == id.Value.name);
             }
 
-            var keyed = members.Where(m => m.key.HasValue).OrderBy(m => m.key.Value)
-                               .Select(m => (m.name, m.typeSymbol)).ToList();
-            var nonKeyed = members.Where(m => !m.key.HasValue)
-                                  .Select(m => (m.name, m.typeSymbol)).ToList();
+            foreach (var member in members.Where(m => m.key.HasValue).OrderBy(m => m.key!.Value))
+            {
+                slots.Add((member.key!.Value, member.name, member.typeSymbol));
+            }
 
-            ordered.AddRange(keyed);
-            ordered.AddRange(nonKeyed);
-            return ordered;
+            var nextSlot = slots.Count == 0 ? 0 : slots.Max(s => s.Item1) + 1;
+            foreach (var member in members.Where(m => !m.key.HasValue))
+            {
+                slots.Add((nextSlot, member.name, member.typeSymbol));
+                nextSlot++;
+            }
+
+            return slots.OrderBy(s => s.Item1).ToList();
         }
 
         private static int? GetKeyValue(ISymbol sym)
