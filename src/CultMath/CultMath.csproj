@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>CultMath</RootNamespace>
+    <AssemblyName>CultMath</AssemblyName>
+    <PackageId>CultMath</PackageId>
+    <Description>Clean-room C# math shaped for HLSL-style renderer code.</Description>
+    <Authors>GameCult</Authors>
+    <RepositoryUrl>https://github.com/GameCult/CultMath</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <NoWarn>$(NoWarn);CS8981</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
