@@ -17,6 +17,9 @@ namespace GameCult.Networking
     {
         private readonly Dictionary<string, RegisteredSchema> _entries = new Dictionary<string, RegisteredSchema>(StringComparer.Ordinal);
 
+        /// <summary>
+        /// Creates a schema registry with optional initial entries.
+        /// </summary>
         public CultNetSchemaRegistry(IEnumerable<CultNetSchemaRegistration>? entries = null)
         {
             if (entries == null)
@@ -30,6 +33,9 @@ namespace GameCult.Networking
             }
         }
 
+        /// <summary>
+        /// Adds or replaces one schema registration.
+        /// </summary>
         public CultNetSchemaRegistry Register(CultNetSchemaRegistration entry)
         {
             if (entry == null) throw new ArgumentNullException(nameof(entry));
@@ -47,6 +53,9 @@ namespace GameCult.Networking
             return this;
         }
 
+        /// <summary>
+        /// Gets one schema descriptor by schema identifier.
+        /// </summary>
         public CultNetSchemaDescriptor? Get(string schemaId, bool includeSchemaJson = false)
         {
             if (schemaId == null) throw new ArgumentNullException(nameof(schemaId));
@@ -55,6 +64,9 @@ namespace GameCult.Networking
                 : null;
         }
 
+        /// <summary>
+        /// Lists schema descriptors, optionally filtered by identifier or kind.
+        /// </summary>
         public CultNetSchemaDescriptor[] List(
             bool includeSchemaJson = false,
             IEnumerable<string>? schemaIds = null,
@@ -75,6 +87,9 @@ namespace GameCult.Networking
                 .ToArray();
         }
 
+        /// <summary>
+        /// Creates a schema catalog response for a request.
+        /// </summary>
         public CultNetSchemaCatalogResponseMessage CreateCatalogResponse(
             CultNetSchemaCatalogRequestMessage request)
         {
@@ -90,6 +105,9 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Creates a registry populated from embedded CultNet schema resources.
+        /// </summary>
         public static CultNetSchemaRegistry CreateBuiltIn()
         {
             return new CultNetSchemaRegistry(BuiltInSchemaManifest.Select(LoadEmbeddedRegistration));
@@ -98,6 +116,9 @@ namespace GameCult.Networking
         private static readonly Lazy<CultNetSchemaRegistry> BuiltInRegistry =
             new Lazy<CultNetSchemaRegistry>(CreateBuiltIn);
 
+        /// <summary>
+        /// Gets the lazily initialized built-in schema registry.
+        /// </summary>
         public static CultNetSchemaRegistry BuiltIn => BuiltInRegistry.Value;
 
         private static CultNetSchemaRegistration LoadEmbeddedRegistration(SchemaResourceSpec spec)
@@ -357,12 +378,33 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetSchemaRegistration
     {
+        /// <summary>
+        /// Gets or sets the schema identifier.
+        /// </summary>
         public string SchemaId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the schema kind.
+        /// </summary>
         public string Kind { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the wire contracts implemented by the schema.
+        /// </summary>
         public string[] WireContracts { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets the schema document.
+        /// </summary>
         public string SchemaJson { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the message or document schema version.
+        /// </summary>
         public string? SchemaVersion { get; set; }
+        /// <summary>
+        /// Gets or sets the document type associated with the schema.
+        /// </summary>
         public string? DocumentType { get; set; }
+        /// <summary>
+        /// Gets or sets the display title.
+        /// </summary>
         public string? Title { get; set; }
     }
 }

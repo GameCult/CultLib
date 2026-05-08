@@ -9,10 +9,16 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace GameCult.Caching.MessagePack.Generator
 {
-    [Generator]
-    public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
-    {
-        public void Initialize(IncrementalGeneratorInitializationContext context)
+/// <summary>
+/// Emits MessagePack payload serializers for CultCache document types.
+/// </summary>
+[Generator]
+public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
+{
+    /// <summary>
+    /// Registers the generator pipeline.
+    /// </summary>
+    public void Initialize(IncrementalGeneratorInitializationContext context)
         {
             var documentShapes = context.SyntaxProvider
                 .CreateSyntaxProvider(

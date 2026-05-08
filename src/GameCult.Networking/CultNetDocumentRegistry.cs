@@ -8,15 +8,36 @@ using GameCult.Caching.MessagePack;
 
 namespace GameCult.Networking
 {
+    /// <summary>
+    /// Optional metadata applied when creating CultNet document messages.
+    /// </summary>
     public sealed class CultNetDocumentMessageOptions
     {
+        /// <summary>
+        /// Gets or sets an explicit storage timestamp.
+        /// </summary>
         public string? StoredAt { get; set; }
+        /// <summary>
+        /// Gets or sets the runtime that produced the document.
+        /// </summary>
         public string? SourceRuntimeId { get; set; }
+        /// <summary>
+        /// Gets or sets the agent that produced the document.
+        /// </summary>
         public string? SourceAgentId { get; set; }
+        /// <summary>
+        /// Gets or sets the role that produced the document.
+        /// </summary>
         public string? SourceRole { get; set; }
+        /// <summary>
+        /// Gets or sets optional document tags.
+        /// </summary>
         public string[]? Tags { get; set; }
     }
 
+    /// <summary>
+    /// Binds a CultCache document type to CultNet payload serialization.
+    /// </summary>
     public sealed class CultNetDocumentBinding
     {
         internal CultNetDocumentBinding(
@@ -31,11 +52,26 @@ namespace GameCult.Networking
             PayloadDeserializer = payloadDeserializer;
         }
 
+        /// <summary>
+        /// Gets the bound document type.
+        /// </summary>
         public Type DocumentType { get; }
+        /// <summary>
+        /// Gets the bound schema identifier.
+        /// </summary>
         public string SchemaId { get; }
+        /// <summary>
+        /// Gets the payload serializer.
+        /// </summary>
         public Func<object, byte[]> PayloadSerializer { get; }
+        /// <summary>
+        /// Gets the payload deserializer.
+        /// </summary>
         public Func<byte[], object> PayloadDeserializer { get; }
 
+        /// <summary>
+        /// Creates a document binding for a typed CultCache document.
+        /// </summary>
         public static CultNetDocumentBinding ForDocument<T>(
             CultDocumentRegistry? registry = null,
             Func<T, byte[]>? payloadSerializer = null,
@@ -59,6 +95,9 @@ namespace GameCult.Networking
         }
     }
 
+    /// <summary>
+    /// Creates and applies CultNet messages that replicate CultCache documents.
+    /// </summary>
     public sealed class CultNetDocumentRegistry
     {
         private readonly CultDocumentRegistry _documents;
@@ -66,6 +105,9 @@ namespace GameCult.Networking
             new(StringComparer.Ordinal);
         private readonly Dictionary<Type, CultNetDocumentBinding> _bindingsByType = new();
 
+        /// <summary>
+        /// Creates a document registry with optional bindings.
+        /// </summary>
         public CultNetDocumentRegistry(
             CultDocumentRegistry? documents = null,
             IEnumerable<CultNetDocumentBinding>? bindings = null)
@@ -82,6 +124,9 @@ namespace GameCult.Networking
             }
         }
 
+        /// <summary>
+        /// Registers a document binding.
+        /// </summary>
         public CultNetDocumentRegistry Register(CultNetDocumentBinding binding)
         {
             _bindingsBySchemaId[binding.SchemaId] = binding;
@@ -89,16 +134,25 @@ namespace GameCult.Networking
             return this;
         }
 
+        /// <summary>
+        /// Gets a binding by schema identifier.
+        /// </summary>
         public CultNetDocumentBinding? GetBySchemaId(string schemaId)
         {
             return _bindingsBySchemaId.TryGetValue(schemaId, out var binding) ? binding : null;
         }
 
+        /// <summary>
+        /// Gets a binding by CLR document type.
+        /// </summary>
         public CultNetDocumentBinding? GetByDocumentType(Type documentType)
         {
             return _bindingsByType.TryGetValue(documentType, out var binding) ? binding : null;
         }
 
+        /// <summary>
+        /// Creates a document delete message.
+        /// </summary>
         public CultNetDocumentDeleteMessage CreateDocumentDeleteMessage(
             string messageId,
             string schemaId,
@@ -112,6 +166,9 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Creates a raw document put message for a typed document.
+        /// </summary>
         public CultNetDocumentPutRawMessage CreateRawDocumentPutMessage<T>(
             string messageId,
             CultRecordHandle<T> handle,
@@ -141,6 +198,9 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Creates a snapshot request message.
+        /// </summary>
         public CultNetSnapshotRequestMessage CreateSnapshotRequest(
             string messageId,
             IEnumerable<string>? schemaIds = null,
@@ -154,6 +214,9 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Creates a raw snapshot response from the cache.
+        /// </summary>
         public CultNetSnapshotResponseRawMessage CreateRawSnapshotResponse(
             CultCache cache,
             string messageId,
@@ -225,6 +288,9 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Applies a raw document put message to a cache.
+        /// </summary>
         public async Task<object> ApplyRawDocumentPutMessageAsync(
             CultCache cache,
             CultNetDocumentPutRawMessage message)
@@ -253,6 +319,9 @@ namespace GameCult.Networking
             return document;
         }
 
+        /// <summary>
+        /// Applies a raw document put message and returns the typed document.
+        /// </summary>
         public async Task<T> ApplyRawDocumentPutMessageAsync<T>(
             CultCache cache,
             CultNetDocumentPutRawMessage message)
@@ -261,6 +330,9 @@ namespace GameCult.Networking
             return (T)await ApplyRawDocumentPutMessageAsync(cache, message).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Applies all documents from a raw snapshot response.
+        /// </summary>
         public async Task<IReadOnlyList<object>> ApplyRawSnapshotResponseAsync(
             CultCache cache,
             CultNetSnapshotResponseRawMessage response)
@@ -280,6 +352,9 @@ namespace GameCult.Networking
             return applied;
         }
 
+        /// <summary>
+        /// Applies all typed documents from a raw snapshot response.
+        /// </summary>
         public async Task<IReadOnlyList<T>> ApplyRawSnapshotResponseAsync<T>(
             CultCache cache,
             CultNetSnapshotResponseRawMessage response)

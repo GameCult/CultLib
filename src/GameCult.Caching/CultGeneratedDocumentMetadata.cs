@@ -6,24 +6,45 @@ using System.Text;
 
 namespace GameCult.Caching
 {
+    /// <summary>
+    /// Registers a generated CultCache document metadata provider with an assembly.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
     public sealed class CultGeneratedDocumentMetadataProviderAttribute : Attribute
     {
+        /// <summary>
+        /// Creates an assembly metadata provider registration.
+        /// </summary>
         public CultGeneratedDocumentMetadataProviderAttribute(Type providerType)
         {
             ProviderType = providerType ?? throw new ArgumentNullException(nameof(providerType));
         }
 
+        /// <summary>
+        /// Gets the provider type that can create generated document definitions.
+        /// </summary>
         public Type ProviderType { get; }
     }
 
+    /// <summary>
+    /// Supplies generated CultCache document metadata for an assembly.
+    /// </summary>
     public interface ICultGeneratedDocumentMetadataProvider
     {
+        /// <summary>
+        /// Gets the generated document definitions exposed by the provider.
+        /// </summary>
         IEnumerable<CultGeneratedDocumentDefinition> GetDocumentDefinitions();
     }
 
+    /// <summary>
+    /// Describes one generated CultCache document contract.
+    /// </summary>
     public sealed class CultGeneratedDocumentDefinition
     {
+        /// <summary>
+        /// Creates a generated document contract definition.
+        /// </summary>
         public CultGeneratedDocumentDefinition(
             Type documentType,
             string schemaName,
@@ -52,20 +73,65 @@ namespace GameCult.Caching
             Members = members ?? Array.Empty<CultGeneratedDocumentMemberDefinition>();
         }
 
+        /// <summary>
+        /// Gets the CLR document type.
+        /// </summary>
         public Type DocumentType { get; }
+
+        /// <summary>
+        /// Gets the stable CultCache schema name.
+        /// </summary>
         public string SchemaName { get; }
+
+        /// <summary>
+        /// Gets the schema version string.
+        /// </summary>
         public string SchemaVersion { get; }
+
+        /// <summary>
+        /// Gets whether this document type stores one global record.
+        /// </summary>
         public bool IsGlobal { get; }
+
+        /// <summary>
+        /// Gets the member used as the document name, if any.
+        /// </summary>
         public string? NameMember { get; }
+
+        /// <summary>
+        /// Gets the generated name accessor, if any.
+        /// </summary>
         public Func<object, string?>? NameAccessor { get; }
+
+        /// <summary>
+        /// Gets the generated payload serializer, if one was emitted.
+        /// </summary>
         public Func<object, byte[]>? SerializePayload { get; }
+
+        /// <summary>
+        /// Gets the generated payload deserializer, if one was emitted.
+        /// </summary>
         public Func<byte[], object>? DeserializePayload { get; }
+
+        /// <summary>
+        /// Gets the generated index accessors.
+        /// </summary>
         public IReadOnlyList<CultGeneratedDocumentIndexAccessor> IndexAccessors { get; }
+
+        /// <summary>
+        /// Gets the generated persisted member definitions.
+        /// </summary>
         public IReadOnlyList<CultGeneratedDocumentMemberDefinition> Members { get; }
     }
 
+    /// <summary>
+    /// Describes a generated accessor for one CultCache index.
+    /// </summary>
     public sealed class CultGeneratedDocumentIndexAccessor
     {
+        /// <summary>
+        /// Creates a generated index accessor.
+        /// </summary>
         public CultGeneratedDocumentIndexAccessor(string alias, Func<object, string> accessor)
         {
             Alias = string.IsNullOrWhiteSpace(alias)
@@ -74,12 +140,25 @@ namespace GameCult.Caching
             Accessor = accessor ?? throw new ArgumentNullException(nameof(accessor));
         }
 
+        /// <summary>
+        /// Gets the index alias.
+        /// </summary>
         public string Alias { get; }
+
+        /// <summary>
+        /// Gets the function that extracts the index value.
+        /// </summary>
         public Func<object, string> Accessor { get; }
     }
 
+    /// <summary>
+    /// Describes one generated persisted document member.
+    /// </summary>
     public sealed class CultGeneratedDocumentMemberDefinition
     {
+        /// <summary>
+        /// Creates a generated persisted member definition.
+        /// </summary>
         public CultGeneratedDocumentMemberDefinition(
             string memberName,
             int slot,
@@ -104,13 +183,44 @@ namespace GameCult.Caching
             IndexAlias = indexAlias;
         }
 
+        /// <summary>
+        /// Gets the CLR member name.
+        /// </summary>
         public string MemberName { get; }
+
+        /// <summary>
+        /// Gets the persisted slot number.
+        /// </summary>
         public int Slot { get; }
+
+        /// <summary>
+        /// Gets the persisted type name.
+        /// </summary>
         public string TypeName { get; }
+
+        /// <summary>
+        /// Gets whether this member stores a document reference.
+        /// </summary>
         public bool IsReference { get; }
+
+        /// <summary>
+        /// Gets whether this member stores many references.
+        /// </summary>
         public bool IsMany { get; }
+
+        /// <summary>
+        /// Gets the target schema name for reference members.
+        /// </summary>
         public string? TargetSchemaName { get; }
+
+        /// <summary>
+        /// Gets whether this member is the document name.
+        /// </summary>
         public bool IsName { get; }
+
+        /// <summary>
+        /// Gets the index alias for indexed members.
+        /// </summary>
         public string? IndexAlias { get; }
     }
 
