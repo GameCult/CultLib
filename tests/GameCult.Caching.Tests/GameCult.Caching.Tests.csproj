@@ -12,7 +12,6 @@
     <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
-    <ProjectReference Include="..\..\src\GameCult.Caching.NewtonsoftJson\GameCult.Caching.NewtonsoftJson.csproj" />
   </ItemGroup>
 
   <ItemGroup>

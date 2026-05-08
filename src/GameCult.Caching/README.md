@@ -1,8 +1,9 @@
 # GameCult.Caching
 
-`GameCult.Caching` is an attribute-driven typed cache with pluggable stores.
-Domain models stay clean. The cache owns record keys, schema ids, timestamps,
-and persistence metadata instead of smearing that sludge across every class.
+`GameCult.Caching` is an attribute-driven typed cache with a canonical
+single-file MessagePack store. Domain models stay clean. The cache owns record
+keys, schema ids, timestamps, and persistence metadata instead of smearing
+that sludge across every class.
 
 ## Authoring Model
 
@@ -13,7 +14,6 @@ using GameCult.Caching;
 using MessagePack;
 
 [CultDocument("gamecult.item_data", "gamecult.item_data.v1")]
-[MessagePackObject]
 public sealed class ItemData
 {
     [Key(0)]
@@ -78,7 +78,6 @@ but it will not quietly build an entire haunted object graph behind your back.
 
 ```csharp
 [CultDocument("gamecult.quest_data", "gamecult.quest_data.v1")]
-[MessagePackObject]
 public sealed class QuestData
 {
     [Key(0)] public string Title = string.Empty;
@@ -103,24 +102,24 @@ Each persisted record carries:
 
 The domain payload stays free of storage metadata.
 
-## Backing Stores
+## Backing Store
 
-Base abstractions:
-
-- `CacheBackingStore`
-- `SingleFileBackingStore`
-- `MultiFileBackingStore`
-
-Included implementations in sibling packages:
+CultCache now has one sanctioned persistence format:
 
 - `SingleFileMessagePackBackingStore`
-- `MultiFileMessagePackBackingStore`
-- `SingleFileNewtonsoftJsonBackingStore`
-- `MultiFileNewtonsoftJsonBackingStore`
 
-`MultiFileBackingStore` derives filenames from the `CultName` member when one
-exists, so renames replace stale files instead of leaving little corpses
-behind.
+It persists the whole store as:
+
+1. store format version
+2. embedded schema catalog
+3. persisted records
+
+Each persisted record carries:
+
+- `key`
+- `schemaId`
+- `storedAt`
+- `payload`
 
 ## Typical Startup
 
@@ -129,7 +128,7 @@ using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 
 var cache = new CultCache();
-var store = new MultiFileMessagePackBackingStore("Data");
+var store = new SingleFileMessagePackBackingStore("Data.msgpack");
 
 cache.AddBackingStore(store);
 await cache.PullAllBackingStoresAsync();
