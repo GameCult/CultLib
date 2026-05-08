@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using GameCult.Caching;
 using MessagePack;
 using MessagePack.Formatters;
@@ -26,6 +27,10 @@ public sealed class CultDocumentResolver : IFormatterResolver
 
 public static class CultDocumentMessagePackSerialization
 {
+    private const int PersistedRecordFieldCount = 4;
+    private const int SchemaCatalogEntryFieldCount = 6;
+    private const int StoreSnapshotFieldCount = 3;
+
     public static readonly MessagePackSerializerOptions Options =
         MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(
@@ -67,6 +72,214 @@ public static class CultDocumentMessagePackSerialization
 
         return MessagePackSerializer.Deserialize(type, payload, Options);
     }
+
+    public static byte[] SerializePersistedRecord(CultPersistedRecord record)
+    {
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        WritePersistedRecord(ref writer, record);
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    public static CultPersistedRecord DeserializePersistedRecord(byte[] payload)
+    {
+        var reader = new MessagePackReader(payload);
+        return ReadPersistedRecord(ref reader);
+    }
+
+    public static byte[] SerializeSchemaCatalog(CultSchemaCatalogEntry[] catalog)
+    {
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        writer.WriteArrayHeader(catalog.Length);
+        foreach (var entry in catalog)
+        {
+            WriteSchemaCatalogEntry(ref writer, entry);
+        }
+
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    public static CultSchemaCatalogEntry[] DeserializeSchemaCatalog(byte[] payload)
+    {
+        var reader = new MessagePackReader(payload);
+        var count = reader.ReadArrayHeader();
+        var catalog = new CultSchemaCatalogEntry[count];
+        for (var index = 0; index < count; index++)
+        {
+            catalog[index] = ReadSchemaCatalogEntry(ref reader);
+        }
+
+        return catalog;
+    }
+
+    public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+    {
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        writer.WriteArrayHeader(StoreSnapshotFieldCount);
+        writer.Write(snapshot.FormatVersion);
+        writer.WriteArrayHeader(snapshot.SchemaCatalog.Length);
+        foreach (var entry in snapshot.SchemaCatalog)
+        {
+            WriteSchemaCatalogEntry(ref writer, entry);
+        }
+
+        writer.WriteArrayHeader(snapshot.Records.Length);
+        foreach (var record in snapshot.Records)
+        {
+            WritePersistedRecord(ref writer, record);
+        }
+
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
+    {
+        var reader = new MessagePackReader(payload);
+        var fieldCount = reader.ReadArrayHeader();
+        var snapshot = new CultPersistedStoreSnapshot();
+
+        if (fieldCount > 0)
+        {
+            snapshot.FormatVersion = reader.ReadString() ?? "cultcache.store.v1";
+        }
+
+        if (fieldCount > 1)
+        {
+            var catalogCount = reader.ReadArrayHeader();
+            snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
+            for (var index = 0; index < catalogCount; index++)
+            {
+                snapshot.SchemaCatalog[index] = ReadSchemaCatalogEntry(ref reader);
+            }
+        }
+
+        if (fieldCount > 2)
+        {
+            var recordCount = reader.ReadArrayHeader();
+            snapshot.Records = new CultPersistedRecord[recordCount];
+            for (var index = 0; index < recordCount; index++)
+            {
+                snapshot.Records[index] = ReadPersistedRecord(ref reader);
+            }
+        }
+
+        for (var index = StoreSnapshotFieldCount; index < fieldCount; index++)
+        {
+            reader.Skip();
+        }
+
+        return snapshot;
+    }
+
+    private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
+    {
+        writer.WriteArrayHeader(PersistedRecordFieldCount);
+        writer.Write(record.Key);
+        writer.Write(record.SchemaId);
+        writer.Write(record.StoredAt);
+        writer.Write(record.Payload);
+    }
+
+    private static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
+    {
+        var fieldCount = reader.ReadArrayHeader();
+        var record = new CultPersistedRecord();
+
+        if (fieldCount > 0)
+        {
+            record.Key = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 1)
+        {
+            record.SchemaId = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 2)
+        {
+            record.StoredAt = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 3)
+        {
+            record.Payload = reader.ReadBytes()?.ToArray() ?? Array.Empty<byte>();
+        }
+
+        for (var index = PersistedRecordFieldCount; index < fieldCount; index++)
+        {
+            reader.Skip();
+        }
+
+        return record;
+    }
+
+    private static void WriteSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
+    {
+        writer.WriteArrayHeader(SchemaCatalogEntryFieldCount);
+        writer.Write(entry.SchemaId);
+        writer.Write(entry.SchemaName);
+        writer.Write(entry.SchemaVersion);
+        writer.Write(entry.ContentHash);
+        writer.Write(entry.CanonicalSchemaJson);
+        writer.WriteArrayHeader(entry.CompatibleSchemaIds.Length);
+        foreach (var schemaId in entry.CompatibleSchemaIds)
+        {
+            writer.Write(schemaId);
+        }
+    }
+
+    private static CultSchemaCatalogEntry ReadSchemaCatalogEntry(ref MessagePackReader reader)
+    {
+        var fieldCount = reader.ReadArrayHeader();
+        var entry = new CultSchemaCatalogEntry();
+
+        if (fieldCount > 0)
+        {
+            entry.SchemaId = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 1)
+        {
+            entry.SchemaName = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 2)
+        {
+            entry.SchemaVersion = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 3)
+        {
+            entry.ContentHash = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 4)
+        {
+            entry.CanonicalSchemaJson = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 5)
+        {
+            var compatibleCount = reader.ReadArrayHeader();
+            entry.CompatibleSchemaIds = new string[compatibleCount];
+            for (var index = 0; index < compatibleCount; index++)
+            {
+                entry.CompatibleSchemaIds[index] = reader.ReadString() ?? string.Empty;
+            }
+        }
+
+        for (var index = SchemaCatalogEntryFieldCount; index < fieldCount; index++)
+        {
+            reader.Skip();
+        }
+
+        return entry;
+    }
 }
 
 public class SingleFileMessagePackBackingStore : SingleFileBackingStore
@@ -77,12 +290,12 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
     {
-        return CultDocumentMessagePackSerialization.Serialize(snapshot);
+        return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
     }
 
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
-        return CultDocumentMessagePackSerialization.Deserialize<CultPersistedStoreSnapshot>(data);
+        return CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
     }
 
     protected override byte[] SerializePayload(object document)
@@ -104,22 +317,22 @@ public class MultiFileMessagePackBackingStore : MultiFileBackingStore
 
     protected override byte[] SerializeRecord(CultPersistedRecord record)
     {
-        return CultDocumentMessagePackSerialization.Serialize(record);
+        return CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
     }
 
     protected override CultPersistedRecord DeserializeRecord(byte[] data)
     {
-        return CultDocumentMessagePackSerialization.Deserialize<CultPersistedRecord>(data);
+        return CultDocumentMessagePackSerialization.DeserializePersistedRecord(data);
     }
 
     protected override byte[] SerializeCatalog(CultSchemaCatalogEntry[] catalog)
     {
-        return CultDocumentMessagePackSerialization.Serialize(catalog);
+        return CultDocumentMessagePackSerialization.SerializeSchemaCatalog(catalog);
     }
 
     protected override CultSchemaCatalogEntry[] DeserializeCatalog(byte[] data)
     {
-        return CultDocumentMessagePackSerialization.Deserialize<CultSchemaCatalogEntry[]>(data);
+        return CultDocumentMessagePackSerialization.DeserializeSchemaCatalog(data);
     }
 
     protected override byte[] SerializePayload(object document)
