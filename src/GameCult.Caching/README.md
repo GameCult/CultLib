@@ -1,241 +1,130 @@
 # GameCult.Caching
 
-`GameCult.Caching` provides a typed in-memory cache for `DatabaseEntry` models and a persistence abstraction for backing stores.
+`GameCult.Caching` is an attribute-driven typed cache with pluggable stores.
+Domain models stay clean. The cache owns record keys, schema ids, timestamps,
+and persistence metadata instead of smearing that sludge across every class.
 
-## Scope
+## Authoring Model
 
-The library is designed for applications that need:
-
-- fast in-memory lookup by `Guid`
-- optional lookup by human-readable name
-- optional lookup by indexed fields or properties
-- persistence through one or more pluggable stores
-- a common model base type for runtime and storage code
-
-It is a domain cache with persistence adapters.
-
-## Main Concepts
-
-### `DatabaseEntry`
-
-All cacheable models inherit from `DatabaseEntry`.
+Cacheable models are plain classes annotated with cache intent.
 
 ```csharp
 using GameCult.Caching;
+using MessagePack;
 
-public class ItemData : DatabaseEntry, INamedEntry
+[CultDocument("gamecult.item_data", "gamecult.item_data.v1")]
+[MessagePackObject]
+public sealed class ItemData
 {
+    [Key(0)]
+    [CultName]
     public string Name = string.Empty;
-    public string Category = string.Empty;
-    public int Value;
 
-    public string EntryName
-    {
-        get => Name;
-        set => Name = value;
-    }
+    [Key(1)]
+    [CultIndex]
+    public string Category = string.Empty;
+
+    [Key(2)]
+    public int Value;
 }
 ```
 
-### `INamedEntry`
+Available cache attributes:
 
-If a type implements `INamedEntry`, `CultCache` maintains a name-to-id lookup for it. That enables:
+- `CultDocument(schemaName, schemaVersion)`
+- `CultName`
+- `CultIndex(alias?)`
+- `CultGlobal`
+- `CultReference(targetType?, many: false)`
 
-- `GetIdByName<T>(...)`
-- `GetByName<T>(...)`
+## Main Concepts
 
-### Registered Indexes
+### Record keys and handles
 
-Indexes are opt-in. Register an index once for a field or property, and the cache maintains a value-to-id lookup map for that member.
+`CultCache` gives each stored document a cache-owned `CultRecordKey`. You work
+with typed handles instead of forcing storage identity into the domain object.
 
 ```csharp
 var cache = new CultCache();
-cache.RegisterIndex<ItemData>("Category");
-```
-
-After registration:
-
-```csharp
-var consumable = cache.GetByIndex<ItemData>("Category", "Consumable");
-```
-
-### Global Entries
-
-If a `DatabaseEntry` type is marked with `GlobalSettingsAttribute`, the cache treats it as a singleton-style global entry and exposes it through `GetGlobal<T>()`.
-
-## Core Features
-
-- ID-based lookup
-- optional name-based lookup
-- optional field/property indexes
-- global singleton-style entries
-- pluggable backing stores
-- event propagation from backing stores into the cache
-- support for both single-file and multi-file persistence strategies
-
-## Basic Usage
-
-```csharp
-using GameCult.Caching;
-
-var cache = new CultCache();
-cache.RegisterIndex<ItemData>("Category");
-
-await cache.AddAsync(new ItemData
+var handle = await cache.AddAsync(new ItemData
 {
-    ID = Guid.NewGuid(),
     Name = "Potion",
     Category = "Consumable",
     Value = 50
 });
 
-var potion = cache.GetByName<ItemData>("Potion");
-var samePotion = cache.GetByIndex<ItemData>("Category", "Consumable");
+var potion = cache.Get<ItemData>(handle.Key);
 ```
 
-## Important Concept: Backing Store Routing
+### Name and index lookups
 
-`CultCache` can have:
-
-- generic backing stores
-- type/domain-specific backing stores
-
-### Domain-Specific Stores
-
-If you register a store with one or more domain types:
+Name and index lookups are driven from attributes, not manual registration.
 
 ```csharp
-cache.AddBackingStore(playerStore, typeof(PlayerData));
-cache.AddBackingStore(settingsStore, typeof(AppSettings));
+var byName = cache.GetByName<ItemData>("Potion");
+var byIndex = cache.GetByIndex<ItemData>("Category", "Consumable");
 ```
 
-then writes for those types are routed directly to those stores.
+### Explicit references
 
-### Generic Stores
-
-If you register stores without domains:
-
-```csharp
-cache.AddBackingStore(primaryStore);
-cache.AddBackingStore(mirrorStore);
-```
-
-the first generic store becomes the primary write target for entries that do not have a type-specific store.
-
-The later generic stores subscribe to earlier ones and mirror their changes.
-
-That means:
-
-- generic store registration order matters
-- the first generic store is effectively the source of truth for generic writes
-- later generic stores behave like downstream replicas
-
-### How Multiple Backing Stores Behave
-
-With this setup:
+References stay explicit in the domain. The cache will resolve them on demand,
+but it will not quietly build an entire haunted object graph behind your back.
 
 ```csharp
-cache.AddBackingStore(primaryStore);
-cache.AddBackingStore(reportingMirror);
-cache.AddBackingStore(playerStore, typeof(PlayerData));
-```
-
-the behavior is:
-
-- `PlayerData` writes go to `playerStore`
-- other entry types go to `primaryStore`
-- `reportingMirror` mirrors change events from `primaryStore`
-- `PullAllBackingStoresAsync()` pulls from all registered stores
-
-This is not a multi-master design. If you need symmetric writes to multiple stores, implement that outside `CultCache`.
-
-## Persistence Semantics
-
-`AddAsync` persists to the appropriate backing store before the cache treats the write as committed. If persistence fails, the call throws instead of updating only the in-memory state.
-
-Effects:
-
-- memory and disk are less likely to diverge silently
-- callers can react to persistence failures explicitly
-
-## Backing Store Base Types
-
-### `CacheBackingStore`
-
-Abstract base for persistence implementations. It exposes:
-
-- `PullAll()`
-- `Push(DatabaseEntry entry)`
-- `Delete(DatabaseEntry entry)`
-- `PushAll(bool soft = false)`
-
-### `SingleFileBackingStore`
-
-Stores the entire set of entries in one file.
-
-Use cases:
-
-- small datasets
-- settings-style data
-- atomic snapshot persistence
-
-### `MultiFileBackingStore`
-
-Stores one file per entry in type-specific directories.
-
-Use cases:
-
-- large sets of independent entries
-- change observation with `FileSystemWatcher`
-- workflows where per-entry files are useful
-
-## Rename Behavior In `MultiFileBackingStore`
-
-For `INamedEntry` types, the filename is derived from the entry name. The backing store removes the stale old file before committing the new one.
-
-## Example: Custom Backing Store
-
-```csharp
-using System.IO;
-using System.Text;
-using GameCult.Caching;
-
-public sealed class TextItemStore : MultiFileBackingStore
+[CultDocument("gamecult.quest_data", "gamecult.quest_data.v1")]
+[MessagePackObject]
+public sealed class QuestData
 {
-    public TextItemStore(string path) : base(path)
-    {
-    }
-
-    public override byte[] Serialize(DatabaseEntry entry)
-    {
-        var item = (ItemData)entry;
-        return Encoding.UTF8.GetBytes($"{item.ID}|{item.Name}|{item.Category}|{item.Value}");
-    }
-
-    public override DatabaseEntry Deserialize(byte[] data)
-    {
-        var parts = Encoding.UTF8.GetString(data).Split('|');
-        return new ItemData
-        {
-            ID = Guid.Parse(parts[0]),
-            Name = parts[1],
-            Category = parts[2],
-            Value = int.Parse(parts[3])
-        };
-    }
-
-    public override string Extension => "item";
+    [Key(0)] public string Title = string.Empty;
+    [Key(1)] [CultReference] public CultRecordRef<ItemData> Reward;
 }
 ```
 
-## Typical Startup Sequence
+## Persistence Shape
+
+CultCache persistence is store-shaped, not entry-shaped:
+
+1. store header
+2. embedded schema catalog
+3. records
+
+Each persisted record carries:
+
+- `key`
+- `schemaId`
+- `storedAt`
+- `payload`
+
+The domain payload stays free of storage metadata.
+
+## Backing Stores
+
+Base abstractions:
+
+- `CacheBackingStore`
+- `SingleFileBackingStore`
+- `MultiFileBackingStore`
+
+Included implementations in sibling packages:
+
+- `SingleFileMessagePackBackingStore`
+- `MultiFileMessagePackBackingStore`
+- `SingleFileNewtonsoftJsonBackingStore`
+- `MultiFileNewtonsoftJsonBackingStore`
+
+`MultiFileBackingStore` derives filenames from the `CultName` member when one
+exists, so renames replace stale files instead of leaving little corpses
+behind.
+
+## Typical Startup
 
 ```csharp
+using GameCult.Caching;
+using GameCult.Caching.MessagePack;
+
 var cache = new CultCache();
-cache.RegisterIndex<PlayerData>("Email");
+var store = new MultiFileMessagePackBackingStore("Data");
 
-var store = new TextItemStore("Data");
-cache.AddBackingStore(store, typeof(ItemData));
-
+cache.AddBackingStore(store);
 await cache.PullAllBackingStoresAsync();
 ```

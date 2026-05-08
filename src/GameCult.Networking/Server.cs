@@ -59,7 +59,6 @@ namespace GameCult.Networking
         {
             _database = cache;
             _security = security ?? ServerSecurityOptions.FromEnvironment();
-            _database.RegisterIndex<PlayerData>("Email");
             _cleanupSubscription = Observable.Timer(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60))
                 .Subscribe(_ => CleanupExpiredSessions());
         }
@@ -256,7 +255,7 @@ namespace GameCult.Networking
                     return;
                 }
 
-                if (_database.GetIdByName<PlayerData>(message.Name) != null)
+                if (_database.GetByName<PlayerData>(message.Name) != null)
                 {
                     message.Peer?.Send(new ErrorMessage { Error = "Username Taken" });
                     return;
@@ -310,13 +309,13 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (_database.GetIdByIndex<PlayerData>("Email", email) != null)
+            if (_database.GetByIndex<PlayerData>("Email", email) != null)
             {
                 peer.Send(new ErrorMessage { Error = "Email Taken" });
                 return;
             }
 
-            if (_database.GetIdByName<PlayerData>(name) != null)
+            if (_database.GetByName<PlayerData>(name) != null)
             {
                 peer.Send(new ErrorMessage { Error = "Username Taken" });
                 return;
@@ -330,15 +329,15 @@ namespace GameCult.Networking
 
             var newUserData = new PlayerData
             {
-                ID = Guid.NewGuid(),
+                PlayerId = Guid.NewGuid(),
                 Email = email,
                 PasswordHash = Argon2.Hash(password, memoryCost: 16384),
                 Username = name
             };
 
             await _database.AddAsync(newUserData);
-            AttachUser(user, newUserData.ID);
-            SendSessionToken(peer, newUserData.ID);
+            AttachUser(user, newUserData.PlayerId);
+            SendSessionToken(peer, newUserData.PlayerId);
         }
 
         private void HandleVerify(NetPeer peer, User user, VerifyMessage verify)
@@ -350,7 +349,7 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (_database.Get<PlayerData>(playerId) == null)
+            if (_database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D")) == null)
             {
                 peer.Send(new ErrorMessage { Error = "Session Not Found" });
                 return;
@@ -387,18 +386,18 @@ namespace GameCult.Networking
                 return;
             }
 
-            AttachUser(user, userData.ID);
-            SendSessionToken(peer, userData.ID);
+            AttachUser(user, userData.PlayerId);
+            SendSessionToken(peer, userData.PlayerId);
         }
 
         private bool IsVerified(User? user) =>
             user != null &&
             user.PlayerId != Guid.Empty &&
             user.SessionExpiresAt > DateTimeOffset.UtcNow &&
-            _database.Get<PlayerData>(user.PlayerId) != null;
+            _database.GetByIndex<PlayerData>("PlayerId", user.PlayerId.ToString("D")) != null;
 
         private PlayerData? SessionData(User user) =>
-            IsVerified(user) ? _database.Get<PlayerData>(user.PlayerId) : null;
+            IsVerified(user) ? _database.GetByIndex<PlayerData>("PlayerId", user.PlayerId.ToString("D")) : null;
 
         private bool CheckRateLimit(string ip)
         {

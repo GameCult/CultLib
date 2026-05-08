@@ -55,16 +55,14 @@ static async Task ServeAsync(ServeConfig config)
 {
     var schemaRegistration = LoadSchemaRegistration(config.SchemaPath);
     var documentRegistry = new CultNetDocumentRegistry()
-        .Register(CultNetDocumentBinding.ForEntry<CultNetInteropNote>(
-            InteropPeerShared.InteropDocumentType,
-            payloadSchemaVersion: InteropPeerShared.InteropSchemaVersion,
-            documentKeySelector: note => note.DocumentId,
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropNote>(
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
 
     var customSchemaRegistry = new CultNetSchemaRegistry().Register(schemaRegistration);
     var cache = new CultCache();
-    await cache.AddAsync(BuildInteropNote(config.RuntimeId, config.DisplayName));
+    var localNote = BuildInteropNote(config.RuntimeId, config.DisplayName);
+    await cache.AddAsync(localNote, new CultRecordHandle<CultNetInteropNote>(new CultRecordKey(localNote.DocumentId)));
 
     using var udpSocket = CreateDiscoverySocket(config.DiscoveryPort, config.DiscoveryGroup);
     using var tcpListener = new TcpListener(IPAddress.Parse(config.BindHost), config.TcpPort);
@@ -173,10 +171,7 @@ static async Task DialAsync(DialConfig config)
     var schemaRegistration = LoadSchemaRegistration(config.SchemaPath);
     var cache = new CultCache();
     var documentRegistry = new CultNetDocumentRegistry()
-        .Register(CultNetDocumentBinding.ForEntry<CultNetInteropNote>(
-            InteropPeerShared.InteropDocumentType,
-            payloadSchemaVersion: InteropPeerShared.InteropSchemaVersion,
-            documentKeySelector: note => note.DocumentId,
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropNote>(
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
 
@@ -209,8 +204,8 @@ static async Task DialAsync(DialConfig config)
     await SendMessageAsync(stream, new CultNetSnapshotRequestMessage
     {
         MessageId = $"{config.RuntimeId}-snapshot",
-        DocumentTypes = [InteropPeerShared.InteropDocumentType],
-        DocumentKeys = [$"note:{remoteHello.RuntimeId}"]
+        SchemaIds = [schemaRegistration.SchemaId],
+        RecordKeys = [$"note:{remoteHello.RuntimeId}"]
     });
     var snapshot = await ExpectMessageAsync<CultNetSnapshotResponseRawMessage>(stream, CultNetSchemaVersions.SnapshotResponseRaw);
     await documentRegistry.ApplyRawSnapshotResponseAsync(cache, snapshot);
@@ -504,7 +499,6 @@ static CultNetInteropNote BuildInteropNote(string runtimeId, string displayName)
     var documentId = $"note:{runtimeId}";
     return new CultNetInteropNote
     {
-        ID = CreateDeterministicGuid(documentId),
         SchemaVersion = InteropPeerShared.InteropSchemaVersion,
         DocumentId = documentId,
         AuthorRuntimeId = runtimeId,
@@ -532,7 +526,6 @@ static CultNetInteropNote DeserializeInteropNotePayload(byte[] payload)
     var decoded = MessagePackSerializer.Deserialize<CultNetInteropNotePayload>(payload, CultNetSchemaMessageSerialization.Options);
     return new CultNetInteropNote
     {
-        ID = CreateDeterministicGuid(decoded.DocumentId),
         SchemaVersion = decoded.SchemaVersion,
         DocumentId = decoded.DocumentId,
         AuthorRuntimeId = decoded.AuthorRuntimeId,
@@ -540,12 +533,6 @@ static CultNetInteropNote DeserializeInteropNotePayload(byte[] payload)
         Body = decoded.Body,
         Tags = decoded.Tags ?? Array.Empty<string>()
     };
-}
-
-static Guid CreateDeterministicGuid(string value)
-{
-    var bytes = System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value));
-    return new Guid(bytes);
 }
 
 static async Task WaitForeverAsync(CancellationToken cancellationToken)
@@ -678,14 +665,16 @@ static class InteropPeerShared
     };
 }
 
-public sealed class CultNetInteropNote : DatabaseEntry
+[CultDocument(InteropPeerShared.InteropDocumentType, InteropPeerShared.InteropSchemaVersion)]
+[MessagePackObject]
+public sealed class CultNetInteropNote
 {
-    public string SchemaVersion { get; set; } = InteropPeerShared.InteropSchemaVersion;
-    public string DocumentId { get; set; } = string.Empty;
-    public string AuthorRuntimeId { get; set; } = string.Empty;
-    public string Title { get; set; } = string.Empty;
-    public string Body { get; set; } = string.Empty;
-    public string[] Tags { get; set; } = Array.Empty<string>();
+    [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.InteropSchemaVersion;
+    [Key(1)] [CultName] public string DocumentId { get; set; } = string.Empty;
+    [Key(2)] public string AuthorRuntimeId { get; set; } = string.Empty;
+    [Key(3)] public string Title { get; set; } = string.Empty;
+    [Key(4)] public string Body { get; set; } = string.Empty;
+    [Key(5)] public string[] Tags { get; set; } = Array.Empty<string>();
 }
 
 [MessagePackObject]

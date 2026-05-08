@@ -84,7 +84,8 @@ Schema-v0 message families include:
 
 The raw document/snapshot lane is meant for neighbors that already share the
 same payload schema and MessagePack semantics. It carries exact payload bytes
-plus explicit type metadata; it does not guess what a blob "probably" means.
+plus `schemaId`/record-key metadata; it does not guess what a blob "probably"
+means.
 
 ## Authentication Model
 

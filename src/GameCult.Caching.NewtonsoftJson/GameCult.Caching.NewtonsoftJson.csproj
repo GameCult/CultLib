@@ -5,6 +5,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 </Project>

@@ -174,10 +174,9 @@ namespace GameCult.Networking.Tests
                 [
                     new CultNetRawDocumentRecord
                     {
-                        DocumentType = "ghostlight.agent-state",
-                        DocumentKey = "world/main",
+                        SchemaId = "sha256:ghostlight-agent-state",
+                        RecordKey = "world/main",
                         StoredAt = "2026-05-06T12:34:56.0000000+00:00",
-                        PayloadSchemaVersion = "ghostlight.agent_state.v0",
                         PayloadEncoding = "messagepack",
                         Payload = [0x91, 0xA3, 0x66, 0x6F, 0x6F],
                         SourceRuntimeId = "voidbot",
@@ -193,7 +192,7 @@ namespace GameCult.Networking.Tests
 
             Assert.That(roundTrip.MessageId, Is.EqualTo("snapshot-1"));
             Assert.That(roundTrip.Documents, Has.Length.EqualTo(1));
-            Assert.That(roundTrip.Documents[0].DocumentType, Is.EqualTo("ghostlight.agent-state"));
+            Assert.That(roundTrip.Documents[0].SchemaId, Is.EqualTo("sha256:ghostlight-agent-state"));
             Assert.That(roundTrip.Documents[0].PayloadEncoding, Is.EqualTo("messagepack"));
             Assert.That(roundTrip.Documents[0].Payload, Is.EqualTo(message.Documents[0].Payload));
             Assert.That(roundTrip.Documents[0].Tags, Is.EqualTo(["swarm", "dream"]));
@@ -205,27 +204,25 @@ namespace GameCult.Networking.Tests
             var sourceCache = new CultCache();
             var targetCache = new CultCache();
             var registry = new CultNetDocumentRegistry()
-                .Register(CultNetDocumentBinding.ForEntry<PlayerData>(
-                    "gamecult.player_data",
-                    payloadSchemaVersion: "gamecult.player_data.v0",
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
                     payloadSerializer: SerializePlayerDataPayload,
                     payloadDeserializer: DeserializePlayerDataPayload));
 
             var sourceEntry = new PlayerData
             {
-                ID = Guid.NewGuid(),
+                PlayerId = Guid.NewGuid(),
                 Email = "cult@example.test",
                 PasswordHash = "not-a-real-hash",
                 Username = "CultGhost"
             };
 
-            await sourceCache.AddAsync(sourceEntry);
+            var handle = await sourceCache.AddAsync(sourceEntry);
 
             var expectedPayload = SerializePlayerDataPayload(sourceEntry);
             var request = registry.CreateSnapshotRequest(
                 "request-1",
-                documentTypes: ["gamecult.player_data"],
-                documentKeys: [sourceEntry.ID.ToString("D")]);
+                schemaIds: [sourceCache.Registry.GetRequired<PlayerData>().SchemaId],
+                recordKeys: [handle.Key.Value]);
             var response = registry.CreateRawSnapshotResponse(sourceCache, "snapshot-1", request);
             var serializedResponse = CultNetSchemaMessageSerialization.Serialize(response);
             var roundTrip = (CultNetSnapshotResponseRawMessage)CultNetSchemaMessageSerialization.Deserialize(serializedResponse);
@@ -234,7 +231,7 @@ namespace GameCult.Networking.Tests
             Assert.That(roundTrip.Documents[0].Payload, Is.EqualTo(expectedPayload));
 
             await registry.ApplyRawSnapshotResponseAsync(targetCache, roundTrip);
-            var replicated = targetCache.Get<PlayerData>(sourceEntry.ID);
+            var replicated = targetCache.GetByIndex<PlayerData>("PlayerId", sourceEntry.PlayerId.ToString("D"));
 
             Assert.That(replicated, Is.Not.Null);
             Assert.That(SerializePlayerDataPayload(replicated!), Is.EqualTo(expectedPayload));
@@ -296,7 +293,7 @@ namespace GameCult.Networking.Tests
         [MessagePack.MessagePackObject]
         public sealed class PlayerDataPayload
         {
-            [MessagePack.Key(0)] public Guid Id { get; set; }
+            [MessagePack.Key(0)] public Guid PlayerId { get; set; }
             [MessagePack.Key(1)] public string Email { get; set; } = string.Empty;
             [MessagePack.Key(2)] public string PasswordHash { get; set; } = string.Empty;
             [MessagePack.Key(3)] public string Username { get; set; } = string.Empty;
@@ -306,7 +303,7 @@ namespace GameCult.Networking.Tests
         {
             return MessagePack.MessagePackSerializer.Serialize(new PlayerDataPayload
             {
-                Id = entry.ID,
+                PlayerId = entry.PlayerId,
                 Email = entry.Email,
                 PasswordHash = entry.PasswordHash,
                 Username = entry.Username
@@ -318,7 +315,7 @@ namespace GameCult.Networking.Tests
             var decoded = MessagePack.MessagePackSerializer.Deserialize<PlayerDataPayload>(payload);
             return new PlayerData
             {
-                ID = decoded.Id,
+                PlayerId = decoded.PlayerId,
                 Email = decoded.Email,
                 PasswordHash = decoded.PasswordHash,
                 Username = decoded.Username

@@ -1,39 +1,37 @@
 # GameCult.Caching.MessagePack
 
-`GameCult.Caching.MessagePack` provides MessagePack-backed persistence for `GameCult.Caching`.
-
-## Scope
-
-The package focuses on:
-
-- MessagePack storage for `DatabaseEntry` models
-- single-file and multi-file store implementations
-- support for generated formatters for concrete cache-entry types
-- formatter support for `DatabaseLink<T>`
-- raw persisted-envelope helpers for exact payload relay
+`GameCult.Caching.MessagePack` provides MessagePack persistence for the
+attribute-first `GameCult.Caching` stack.
 
 ## Included Types
 
 - `SingleFileMessagePackBackingStore`
 - `MultiFileMessagePackBackingStore`
-- `DatabaseEntryResolver`
-- `DatabaseLinkFormatter<T>`
-- `CultCacheEnvelope`
-- `CultCacheEnvelopeSerialization`
+- `CultDocumentMessagePackSerialization`
+- `CultDocumentResolver`
+- `CultRecordRefFormatter<T>`
 
-## Why The Generator Matters
+## What It Does
 
-`DatabaseEntry` is abstract. Concrete subclasses need MessagePack formatters to be serializable without hand-writing formatters for each model.
+- stores CultCache snapshots and records in MessagePack
+- serializes plain attributed document payloads
+- keeps explicit `CultRecordRef<T>` values compact on disk/wire
+- preserves the cache/store split where metadata lives outside the domain model
 
-That is the role of:
+## Example Model
 
-- `GameCult.Caching.MessagePack.Generator`
-- `GameCult.Caching.MessagePack.Analyzers`
+```csharp
+using GameCult.Caching;
+using MessagePack;
 
-In practice:
-
-- this package gives you the stores and resolver support
-- the generator package produces the actual concrete formatters
+[CultDocument("gamecult.item_data", "gamecult.item_data.v1")]
+[MessagePackObject]
+public sealed class ItemData
+{
+    [Key(0)] [CultName] public string Name = string.Empty;
+    [Key(1)] public int Value;
+}
+```
 
 ## Typical Usage
 
@@ -48,94 +46,11 @@ cache.AddBackingStore(store);
 await cache.PullAllBackingStoresAsync();
 ```
 
-## Single-File vs Multi-File
+## Notes
 
-### `SingleFileMessagePackBackingStore`
-
-Use this when you want one snapshot file containing all entries.
-
-Use cases:
-
-- compact settings data
-- simple local persistence
-- write-all-at-once workflows
-
-```csharp
-var store = new SingleFileMessagePackBackingStore("cache.msgpack");
-cache.AddBackingStore(store);
-```
-
-### `MultiFileMessagePackBackingStore`
-
-Use this when you want one file per entry.
-
-Use cases:
-
-- large datasets
-- debugging persisted entries individually
-- change observation through the multi-file base store
-
-```csharp
-var store = new MultiFileMessagePackBackingStore("Data");
-cache.AddBackingStore(store, typeof(PlayerData));
-```
-
-## `DatabaseLink<T>`
-
-`DatabaseLink<T>` is a lightweight reference type used by the cache layer. The MessagePack formatter serializes only the linked `Guid`, not the fully loaded target object.
-
-That means:
-
-- links stay compact on disk
-- linked objects are resolved through the active `CultCache`
-- deserialized links depend on `DatabaseLinkBase.Cache` pointing at the active cache
-
-## Example Model
-
-```csharp
-using GameCult.Caching;
-using MessagePack;
-
-[MessagePackObject]
-public class ItemData : DatabaseEntry, INamedEntry
-{
-    [Key(1)] public string Name = string.Empty;
-    [Key(2)] public int Value;
-
-    [IgnoreMember]
-    public string EntryName
-    {
-        get => Name;
-        set => Name = value;
-    }
-}
-```
-
-## Practical Notes
-
-- For polymorphic `DatabaseEntry` serialization, use this package with the generator/analyzer package.
-- The backing stores build on the semantics of `CultCache`, including primary-store routing and type-specific store routing.
-- `MultiFileMessagePackBackingStore` inherits the rename-safe and atomic-write behavior of the hardened `MultiFileBackingStore` base class.
-
-## Raw Envelope Relay
-
-If a neighboring process already shares the same payload contract and just
-needs the exact persisted MessagePack bytes, use `CultCacheEnvelope` and
-`CultCacheEnvelopeSerialization`.
-
-That gives you:
-
-- the stable cache key
-- the explicit entry/document type
-- the exact payload bytes
-- the stored-at timestamp
-
-This is the seam the newer CultNet raw document/snapshot lane uses for
-bit-compatible neighbors. It keeps the transport from decoding bytes into a
-generic sludge object only to re-encode the same thing again five seconds
-later.
-
-One important constraint: concrete `DatabaseEntry` subclasses still need real
-MessagePack formatters. If a consumer assembly has not generated or registered
-formatters for a subtype, supply an explicit payload codec at the integration
-boundary instead of assuming the abstract resolver will become psychic.
+- Payload bytes are MessagePack. Store metadata and schema catalogs are also
+  persisted through MessagePack in this package.
+- The generator package now targets attributed document types instead of
+  `DatabaseEntry` subclasses.
+- The raw CultNet document lane should treat these payload bytes as already
+  blessed, not decode and re-encode them for sport.

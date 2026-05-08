@@ -114,10 +114,9 @@ namespace GameCult.Networking
     [MessagePackObject]
     public class CultNetRawDocumentRecord
     {
-        [Key("documentType")] public string DocumentType { get; set; } = string.Empty;
-        [Key("documentKey")] public string DocumentKey { get; set; } = string.Empty;
+        [Key("schemaId")] public string SchemaId { get; set; } = string.Empty;
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
         [Key("storedAt")] public string StoredAt { get; set; } = string.Empty;
-        [Key("payloadSchemaVersion")] public string? PayloadSchemaVersion { get; set; }
         [Key("payloadEncoding")] public string PayloadEncoding { get; set; } = "messagepack";
         [Key("payload")] public byte[] Payload { get; set; } = Array.Empty<byte>();
         [Key("sourceRuntimeId")] public string? SourceRuntimeId { get; set; }
@@ -131,8 +130,8 @@ namespace GameCult.Networking
     {
         [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DocumentDelete;
         [Key("messageId")] public string MessageId { get; set; } = string.Empty;
-        [Key("documentType")] public string DocumentType { get; set; } = string.Empty;
-        [Key("documentKey")] public string DocumentKey { get; set; } = string.Empty;
+        [Key("schemaId")] public string SchemaId { get; set; } = string.Empty;
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
     }
 
     [MessagePackObject]
@@ -148,8 +147,8 @@ namespace GameCult.Networking
     {
         [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SnapshotRequest;
         [Key("messageId")] public string MessageId { get; set; } = string.Empty;
-        [Key("documentTypes")] public string[]? DocumentTypes { get; set; }
-        [Key("documentKeys")] public string[]? DocumentKeys { get; set; }
+        [Key("schemaIds")] public string[]? SchemaIds { get; set; }
+        [Key("recordKeys")] public string[]? RecordKeys { get; set; }
     }
 
     [MessagePackObject]
