@@ -6,20 +6,6 @@ using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
 
-public sealed class CultRecordRefFormatter<T> : IMessagePackFormatter<CultRecordRef<T>>
-{
-    public void Serialize(ref MessagePackWriter writer, CultRecordRef<T> value, MessagePackSerializerOptions options)
-    {
-        options.Resolver.GetFormatterWithVerify<string>().Serialize(ref writer, value.Key.Value, options);
-    }
-
-    public CultRecordRef<T> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
-    {
-        var key = options.Resolver.GetFormatterWithVerify<string>().Deserialize(ref reader, options) ?? string.Empty;
-        return new CultRecordRef<T>(new CultRecordKey(key));
-    }
-}
-
 public sealed class CultDocumentResolver : IFormatterResolver
 {
     public static readonly CultDocumentResolver Instance = new();
@@ -27,16 +13,10 @@ public sealed class CultDocumentResolver : IFormatterResolver
 
     public IMessagePackFormatter<T>? GetFormatter<T>()
     {
-        var generated = GeneratedCultDocumentResolvers.GetFormatter<T>();
-        if (generated != null)
-        {
-            return generated;
-        }
-
         var type = typeof(T);
         if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>))
         {
-            var formatterType = typeof(CultRecordRefFormatter<>).MakeGenericType(type.GetGenericArguments()[0]);
+            var formatterType = typeof(global::GameCult.Caching.CultRecordRefFormatter<>).MakeGenericType(type.GetGenericArguments()[0]);
             return (IMessagePackFormatter<T>)Activator.CreateInstance(formatterType)!;
         }
 
@@ -72,11 +52,6 @@ public static class CultDocumentMessagePackSerialization
     {
         return MessagePackSerializer.Deserialize(type, payload, Options);
     }
-}
-
-public static class GeneratedCultDocumentResolvers
-{
-    public static IMessagePackFormatter<T>? GetFormatter<T>() => null;
 }
 
 public class SingleFileMessagePackBackingStore : SingleFileBackingStore

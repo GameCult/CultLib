@@ -108,6 +108,8 @@ namespace GameCult.Caching
         public bool IsReference { get; set; }
         public bool IsMany { get; set; }
         public string? TargetSchemaName { get; set; }
+        public bool IsName { get; set; }
+        public string? IndexAlias { get; set; }
     }
 
     public sealed class CultStoredDocument
@@ -156,12 +158,17 @@ namespace GameCult.Caching
             _bySchemaId.Clear();
             _bySchemaName.Clear();
 
-            foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes())
+            var generatedTypes = new HashSet<Type>();
+            foreach (var definition in CultGeneratedDocumentMetadataLoader.LoadDefinitions())
             {
-                var descriptor = BuildDescriptor(type);
-                _byType[type] = descriptor;
-                _bySchemaId[descriptor.SchemaId] = descriptor;
-                _bySchemaName[descriptor.SchemaName] = descriptor;
+                var descriptor = BuildDescriptor(definition);
+                RegisterDescriptor(descriptor);
+                generatedTypes.Add(descriptor.DocumentType);
+            }
+
+            foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes().Where(type => !generatedTypes.Contains(type)))
+            {
+                RegisterDescriptor(BuildDescriptor(type));
             }
         }
 
@@ -169,6 +176,13 @@ namespace GameCult.Caching
         {
             if (_byType.TryGetValue(type, out var descriptor))
             {
+                return descriptor;
+            }
+
+            descriptor = TryBuildGeneratedDescriptor(type);
+            if (descriptor != null)
+            {
+                RegisterDescriptor(descriptor);
                 return descriptor;
             }
 
@@ -180,9 +194,7 @@ namespace GameCult.Caching
             }
 
             descriptor = BuildDescriptor(type);
-            _byType[type] = descriptor;
-            _bySchemaId[descriptor.SchemaId] = descriptor;
-            _bySchemaName[descriptor.SchemaName] = descriptor;
+            RegisterDescriptor(descriptor);
             return descriptor;
         }
 
@@ -223,6 +235,22 @@ namespace GameCult.Caching
                 $"No local CultCache schema matches persisted schema '{persisted.SchemaName}' ({schemaId}).");
         }
 
+        private void RegisterDescriptor(CultDocumentDescriptor descriptor)
+        {
+            _byType[descriptor.DocumentType] = descriptor;
+            _bySchemaId[descriptor.SchemaId] = descriptor;
+            _bySchemaName[descriptor.SchemaName] = descriptor;
+        }
+
+        private static CultDocumentDescriptor? TryBuildGeneratedDescriptor(Type type)
+        {
+            var definition = CultGeneratedDocumentMetadataLoader.LoadDefinitions(type.Assembly)
+                .FirstOrDefault(candidate => candidate.DocumentType == type);
+            return definition == null
+                ? null
+                : BuildDescriptor(definition);
+        }
+
         private static CultDocumentDescriptor BuildDescriptor(Type type)
         {
             var attribute = type.GetCustomAttribute<CultDocumentAttribute>()
@@ -236,10 +264,22 @@ namespace GameCult.Caching
                     member => member.IndexAlias!,
                     member => member.Getter,
                     StringComparer.Ordinal);
-
-            var schemaJson = BuildCanonicalSchemaJson(attribute, members);
+            var descriptorMembers = members
+                .Select(member => new CultDocumentMemberDescriptor
+                {
+                    MemberName = member.Member.Name,
+                    Slot = member.Slot,
+                    TypeName = CultSchemaTypeNames.FromType(member.MemberType),
+                    IsReference = member.IsReference,
+                    IsMany = member.IsMany,
+                    TargetSchemaName = member.TargetSchemaName,
+                    IsName = member.IsName,
+                    IndexAlias = member.IndexAlias
+                })
+                .ToArray();
+            var schemaJson = BuildCanonicalSchemaJson(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
             var contentHash = Sha256(schemaJson);
-            var semanticFingerprint = BuildSemanticFingerprint(attribute, members);
+            var semanticFingerprint = BuildSemanticFingerprint(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
             var schemaId = Sha256(semanticFingerprint);
 
             return new CultDocumentDescriptor(
@@ -253,33 +293,61 @@ namespace GameCult.Caching
                 nameMember?.Member.Name,
                 nameMember?.GetterNullable,
                 indexAccessors,
-                members.Select(member => new CultDocumentMemberDescriptor
+                descriptorMembers);
+        }
+
+        private static CultDocumentDescriptor BuildDescriptor(CultGeneratedDocumentDefinition definition)
+        {
+            var descriptorMembers = definition.Members
+                .OrderBy(member => member.Slot)
+                .Select(member => new CultDocumentMemberDescriptor
                 {
-                    MemberName = member.Member.Name,
+                    MemberName = member.MemberName,
                     Slot = member.Slot,
-                    TypeName = member.MemberType.FullName ?? member.MemberType.Name,
+                    TypeName = member.TypeName,
                     IsReference = member.IsReference,
                     IsMany = member.IsMany,
-                    TargetSchemaName = member.TargetSchemaName
-                }).ToArray());
+                    TargetSchemaName = member.TargetSchemaName,
+                    IsName = member.IsName,
+                    IndexAlias = member.IndexAlias
+                })
+                .ToArray();
+            var schemaJson = BuildCanonicalSchemaJson(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
+            var contentHash = Sha256(schemaJson);
+            var semanticFingerprint = BuildSemanticFingerprint(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
+            var schemaId = Sha256(semanticFingerprint);
+
+            return new CultDocumentDescriptor(
+                definition.DocumentType,
+                definition.SchemaName,
+                definition.SchemaVersion,
+                schemaId,
+                contentHash,
+                schemaJson,
+                definition.IsGlobal,
+                definition.NameMember,
+                definition.NameAccessor,
+                definition.IndexAccessors.ToDictionary(accessor => accessor.Alias, accessor => accessor.Accessor, StringComparer.Ordinal),
+                descriptorMembers);
         }
 
         private static string BuildSemanticFingerprint(
-            CultDocumentAttribute attribute,
-            IReadOnlyList<PersistedMember> members)
+            string schemaName,
+            string schemaVersion,
+            IReadOnlyList<CultDocumentMemberDescriptor> members)
         {
             var builder = new StringBuilder();
-            builder.Append(attribute.SchemaName)
+            builder.Append(schemaName)
                 .Append('|')
-                .Append(attribute.SchemaVersion);
+                .Append(schemaVersion);
             foreach (var member in members.OrderBy(member => member.Slot))
             {
                 builder.Append('|')
                     .Append(member.Slot)
                     .Append(':')
-                    .Append(member.Member.Name)
+                    .Append(member.MemberName)
                     .Append(':')
-                    .Append(member.MemberType.FullName ?? member.MemberType.Name)
+                    .Append(member.TypeName)
                     .Append(':')
                     .Append(member.IsReference ? "ref" : "value")
                     .Append(':')
@@ -292,34 +360,15 @@ namespace GameCult.Caching
         }
 
         private static string BuildCanonicalSchemaJson(
-            CultDocumentAttribute attribute,
-            IReadOnlyList<PersistedMember> members)
+            string schemaName,
+            string schemaVersion,
+            IReadOnlyList<CultDocumentMemberDescriptor> members)
         {
-            var payload = new
-            {
-                schemaName = attribute.SchemaName,
-                schemaVersion = attribute.SchemaVersion,
-                members = members
-                    .OrderBy(member => member.Slot)
-                    .Select(member => new
-                    {
-                        slot = member.Slot,
-                        name = member.Member.Name,
-                        type = member.MemberType.FullName ?? member.MemberType.Name,
-                        isReference = member.IsReference,
-                        many = member.IsMany,
-                        targetSchemaName = member.TargetSchemaName,
-                        indexAlias = member.IndexAlias,
-                        isName = member.IsName
-                    })
-                    .ToArray()
-            };
-
             var builder = new StringBuilder();
             builder.Append("{\"schemaName\":\"")
-                .Append(attribute.SchemaName)
+                .Append(CultSchemaTypeNames.EscapeForLiteral(schemaName))
                 .Append("\",\"schemaVersion\":\"")
-                .Append(attribute.SchemaVersion)
+                .Append(CultSchemaTypeNames.EscapeForLiteral(schemaVersion))
                 .Append("\",\"members\":[");
             for (var index = 0; index < members.Count; index++)
             {
@@ -332,9 +381,9 @@ namespace GameCult.Caching
                 builder.Append("{\"slot\":")
                     .Append(member.Slot)
                     .Append(",\"name\":\"")
-                    .Append(member.Member.Name)
+                    .Append(CultSchemaTypeNames.EscapeForLiteral(member.MemberName))
                     .Append("\",\"type\":\"")
-                    .Append(member.MemberType.FullName ?? member.MemberType.Name)
+                    .Append(CultSchemaTypeNames.EscapeForLiteral(member.TypeName))
                     .Append("\",\"isReference\":")
                     .Append(member.IsReference ? "true" : "false")
                     .Append(",\"many\":")
@@ -346,7 +395,7 @@ namespace GameCult.Caching
                 }
                 else
                 {
-                    builder.Append('"').Append(member.TargetSchemaName).Append('"');
+                    builder.Append('"').Append(CultSchemaTypeNames.EscapeForLiteral(member.TargetSchemaName)).Append('"');
                 }
 
                 builder.Append(",\"indexAlias\":");
@@ -356,7 +405,7 @@ namespace GameCult.Caching
                 }
                 else
                 {
-                    builder.Append('"').Append(member.IndexAlias).Append('"');
+                    builder.Append('"').Append(CultSchemaTypeNames.EscapeForLiteral(member.IndexAlias)).Append('"');
                 }
 
                 builder.Append(",\"isName\":")
@@ -485,7 +534,7 @@ namespace GameCult.Caching
                     Slot = explicitSlot ?? -1,
                     IsName = member.GetCustomAttribute<CultNameAttribute>() != null,
                     IndexAlias = ResolveIndexAlias(member),
-                    IsReference = referenceAttribute != null,
+                    IsReference = targetType != null || referenceAttribute != null,
                     IsMany = referenceAttribute?.Many ?? false,
                     TargetSchemaName = targetSchemaName,
                     Getter = document => getValue(document)?.ToString() ?? string.Empty,

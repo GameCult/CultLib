@@ -11,6 +11,11 @@ attribute-first `GameCult.Caching` stack.
 - `CultDocumentResolver`
 - `CultRecordRefFormatter<T>`
 
+When a project declares `[CultDocument]` models, wire in the
+`GameCult.Caching.MessagePack.Generator` analyzer there as well. It emits
+assembly-local metadata providers for the cache registry; MessagePack itself
+still handles payload serialization through the normal resolver path.
+
 ## What It Does
 
 - stores CultCache snapshots and records in MessagePack

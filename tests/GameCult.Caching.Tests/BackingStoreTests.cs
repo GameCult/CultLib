@@ -148,8 +148,44 @@ namespace GameCult.Caching.Tests
                 Throws.TypeOf<MessagePackSerializationException>());
         }
 
+        [Test]
+        public void GeneratedMetadataProvider_Emits_AttributedDocuments_And_References()
+        {
+            var providers = typeof(NamedTestEntry).Assembly
+                .GetCustomAttributes(typeof(CultGeneratedDocumentMetadataProviderAttribute), false)
+                .Cast<CultGeneratedDocumentMetadataProviderAttribute>()
+                .ToArray();
+
+            Assert.That(providers, Is.Not.Empty);
+
+            var definitions = providers
+                .SelectMany(provider =>
+                    ((ICultGeneratedDocumentMetadataProvider)Activator.CreateInstance(provider.ProviderType)!)
+                    .GetDocumentDefinitions())
+                .ToArray();
+
+            var named = definitions.Single(definition => definition.DocumentType == typeof(NamedTestEntry));
+            Assert.That(named.SchemaName, Is.EqualTo("tests.named_entry"));
+            Assert.That(named.NameMember, Is.EqualTo(nameof(NamedTestEntry.Name)));
+
+            var referenceHolder = definitions.Single(definition => definition.DocumentType == typeof(ReferenceHolderEntry));
+            var parentMember = referenceHolder.Members.Single(member => member.MemberName == nameof(ReferenceHolderEntry.Parent));
+            Assert.That(parentMember.IsReference, Is.True);
+            Assert.That(parentMember.TargetSchemaName, Is.EqualTo("tests.named_entry"));
+            Assert.That(parentMember.TypeName, Does.Contain("CultRecordRef"));
+        }
+
+        [Test]
+        public void Registry_CanonicalSchemaJson_Tracks_Reference_Metadata()
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<ReferenceHolderEntry>();
+
+            Assert.That(descriptor.CanonicalSchemaJson, Does.Contain("\"targetSchemaName\":\"tests.named_entry\""));
+            Assert.That(descriptor.CanonicalSchemaJson, Does.Contain("\"isReference\":true"));
+        }
+
         [CultDocument("tests.named_entry", "tests.named_entry.v1")]
-        [MessagePackObject]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntry
         {
             [Key(0)]
@@ -158,6 +194,17 @@ namespace GameCult.Caching.Tests
 
             [Key(1)]
             public string Value = string.Empty;
+        }
+
+        [CultDocument("tests.reference_holder", "tests.reference_holder.v1")]
+        internal sealed class ReferenceHolderEntry
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public CultRecordRef<NamedTestEntry> Parent = new(new CultRecordKey("parent"));
         }
     }
 }
