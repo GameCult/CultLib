@@ -50,6 +50,8 @@ namespace GameCult.Caching
             bool isGlobal,
             string? nameMember,
             Func<object, string?>? nameAccessor,
+            Func<object, byte[]>? generatedPayloadSerializer,
+            Func<byte[], object>? generatedPayloadDeserializer,
             IReadOnlyDictionary<string, Func<object, string>> indexAccessors,
             IReadOnlyList<CultDocumentMemberDescriptor> members)
         {
@@ -62,6 +64,8 @@ namespace GameCult.Caching
             IsGlobal = isGlobal;
             NameMember = nameMember;
             NameAccessor = nameAccessor;
+            GeneratedPayloadSerializer = generatedPayloadSerializer;
+            GeneratedPayloadDeserializer = generatedPayloadDeserializer;
             IndexAccessors = indexAccessors;
             Members = members;
         }
@@ -75,6 +79,8 @@ namespace GameCult.Caching
         public bool IsGlobal { get; }
         public string? NameMember { get; }
         internal Func<object, string?>? NameAccessor { get; }
+        public Func<object, byte[]>? GeneratedPayloadSerializer { get; }
+        public Func<byte[], object>? GeneratedPayloadDeserializer { get; }
         internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
         internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
 
@@ -292,6 +298,8 @@ namespace GameCult.Caching
                 type.GetCustomAttribute<CultGlobalAttribute>() != null,
                 nameMember?.Member.Name,
                 nameMember?.GetterNullable,
+                null,
+                null,
                 indexAccessors,
                 descriptorMembers);
         }
@@ -327,6 +335,8 @@ namespace GameCult.Caching
                 definition.IsGlobal,
                 definition.NameMember,
                 definition.NameAccessor,
+                definition.SerializePayload,
+                definition.DeserializePayload,
                 definition.IndexAccessors.ToDictionary(accessor => accessor.Alias, accessor => accessor.Accessor, StringComparer.Ordinal),
                 descriptorMembers);
         }

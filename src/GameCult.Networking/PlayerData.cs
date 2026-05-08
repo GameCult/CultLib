@@ -5,7 +5,6 @@ using MessagePack;
 namespace GameCult.Networking
 {
     [CultDocument("gamecult.player_data", "gamecult.player_data.v1")]
-    [MessagePackObject]
     public class PlayerData
     {
         [Key(0)]

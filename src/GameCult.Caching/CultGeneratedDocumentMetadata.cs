@@ -31,6 +31,8 @@ namespace GameCult.Caching
             bool isGlobal,
             string? nameMember,
             Func<object, string?>? nameAccessor,
+            Func<object, byte[]>? serializePayload,
+            Func<byte[], object>? deserializePayload,
             IReadOnlyList<CultGeneratedDocumentIndexAccessor> indexAccessors,
             IReadOnlyList<CultGeneratedDocumentMemberDefinition> members)
         {
@@ -44,6 +46,8 @@ namespace GameCult.Caching
             IsGlobal = isGlobal;
             NameMember = nameMember;
             NameAccessor = nameAccessor;
+            SerializePayload = serializePayload;
+            DeserializePayload = deserializePayload;
             IndexAccessors = indexAccessors ?? Array.Empty<CultGeneratedDocumentIndexAccessor>();
             Members = members ?? Array.Empty<CultGeneratedDocumentMemberDefinition>();
         }
@@ -54,6 +58,8 @@ namespace GameCult.Caching
         public bool IsGlobal { get; }
         public string? NameMember { get; }
         public Func<object, string?>? NameAccessor { get; }
+        public Func<object, byte[]>? SerializePayload { get; }
+        public Func<byte[], object>? DeserializePayload { get; }
         public IReadOnlyList<CultGeneratedDocumentIndexAccessor> IndexAccessors { get; }
         public IReadOnlyList<CultGeneratedDocumentMemberDefinition> Members { get; }
     }

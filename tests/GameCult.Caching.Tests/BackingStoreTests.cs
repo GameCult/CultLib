@@ -176,6 +176,26 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void GeneratedMetadataProvider_Emits_Payload_Codecs_For_Plain_CultDocuments()
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<NamedTestEntry>();
+            var original = new NamedTestEntry
+            {
+                Name = "Teeth",
+                Value = "slot-array"
+            };
+
+            Assert.That(descriptor.GeneratedPayloadSerializer, Is.Not.Null);
+            Assert.That(descriptor.GeneratedPayloadDeserializer, Is.Not.Null);
+
+            var payload = descriptor.GeneratedPayloadSerializer!(original);
+            var roundTrip = (NamedTestEntry)descriptor.GeneratedPayloadDeserializer!(payload);
+
+            Assert.That(roundTrip.Name, Is.EqualTo("Teeth"));
+            Assert.That(roundTrip.Value, Is.EqualTo("slot-array"));
+        }
+
+        [Test]
         public void Registry_CanonicalSchemaJson_Tracks_Reference_Metadata()
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<ReferenceHolderEntry>();
@@ -185,7 +205,6 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.named_entry", "tests.named_entry.v1")]
-        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntry
         {
             [Key(0)]

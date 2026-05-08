@@ -45,11 +45,26 @@ public static class CultDocumentMessagePackSerialization
 
     public static byte[] SerializeUntyped(object value, Type type)
     {
+        if (value != null)
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired(type);
+            if (descriptor.GeneratedPayloadSerializer != null)
+            {
+                return descriptor.GeneratedPayloadSerializer(value);
+            }
+        }
+
         return MessagePackSerializer.Serialize(type, value, Options);
     }
 
     public static object DeserializeUntyped(Type type, byte[] payload)
     {
+        var descriptor = CultDocumentRegistry.Shared.GetRequired(type);
+        if (descriptor.GeneratedPayloadDeserializer != null)
+        {
+            return descriptor.GeneratedPayloadDeserializer(payload);
+        }
+
         return MessagePackSerializer.Deserialize(type, payload, Options);
     }
 }

@@ -666,7 +666,6 @@ static class InteropPeerShared
 }
 
 [CultDocument(InteropPeerShared.InteropDocumentType, InteropPeerShared.InteropSchemaVersion)]
-[MessagePackObject]
 public sealed class CultNetInteropNote
 {
     [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.InteropSchemaVersion;
