@@ -39,6 +39,19 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void SessionToken_Validates_SessionVersion()
+        {
+            var userId = Guid.NewGuid();
+            var token = Secret.CreateSessionToken(userId, DateTimeOffset.UtcNow.AddMinutes(5), 42, DevelopmentServerSecurity);
+
+            Assert.That(
+                Secret.TryValidateSessionToken(token, DevelopmentServerSecurity, out var parsedUserId, out _, out var sessionVersion),
+                Is.True);
+            Assert.That(parsedUserId, Is.EqualTo(userId));
+            Assert.That(sessionVersion, Is.EqualTo(42));
+        }
+
+        [Test]
         public void SessionToken_RejectsExpiredTokens()
         {
             var token = Secret.CreateSessionToken(Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(-1), DevelopmentServerSecurity);
@@ -267,6 +280,60 @@ namespace GameCult.Networking.Tests
             Assert.That(ghostlight.Kind, Is.EqualTo("document_payload"));
         }
 
+        [Test]
+        public void Server_Separates_Connection_And_Auth_RateLimits()
+        {
+            var cache = new CultCache();
+            var server = new Server(cache, DevelopmentServerSecurity);
+            var serverType = typeof(Server);
+            var connectionMethod = serverType.GetMethod("CheckConnectionRateLimit", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
+            var authMethod = serverType.GetMethod("CheckAuthRateLimit", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
+
+            for (var index = 0; index < 5; index++)
+            {
+                Assert.That((bool)connectionMethod.Invoke(server, new object[] { "127.0.0.1" })!, Is.True);
+            }
+
+            Assert.That((bool)authMethod.Invoke(server, new object[] { "127.0.0.1" })!, Is.True);
+
+            for (var index = 0; index < 5; index++)
+            {
+                _ = authMethod.Invoke(server, new object[] { "127.0.0.2" });
+            }
+
+            Assert.That((bool)authMethod.Invoke(server, new object[] { "127.0.0.2" })!, Is.False);
+            Assert.That((bool)connectionMethod.Invoke(server, new object[] { "127.0.0.2" })!, Is.True);
+        }
+
+        [Test]
+        public void Client_Reconnect_Backoff_Is_Bounded_And_Grows()
+        {
+            var method = typeof(Client).GetMethod("GetReconnectDelayForAttempt", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+            var first = (TimeSpan)method.Invoke(null, new object[] { 1 })!;
+            var third = (TimeSpan)method.Invoke(null, new object[] { 3 })!;
+            var tenth = (TimeSpan)method.Invoke(null, new object[] { 10 })!;
+
+            Assert.That(first, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(1)));
+            Assert.That(first, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(1.25)));
+            Assert.That(third, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(4)));
+            Assert.That(third, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(4.25)));
+            Assert.That(tenth, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(30)));
+            Assert.That(tenth, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(30.25)));
+        }
+
+        [Test]
+        public void SensitivePayloadLogging_Is_Gated_By_Default()
+        {
+            var client = new Client(DevelopmentClientSecurity);
+            var productionServer = new Server(new CultCache(), new ServerSecurityOptions("prod-connection-key", "prod-session-signing-secret"));
+            var developmentServer = new Server(new CultCache(), DevelopmentServerSecurity);
+
+            Assert.That(client.LogSensitivePayloads, Is.False);
+            Assert.That(productionServer.LogSensitivePayloads, Is.False);
+            Assert.That(developmentServer.LogSensitivePayloads, Is.True);
+        }
+
         private sealed class EnvironmentVariableScope : IDisposable
         {
             private readonly (string Name, string? Value)[] _originalValues;
@@ -297,6 +364,7 @@ namespace GameCult.Networking.Tests
             [MessagePack.Key(1)] public string Email { get; set; } = string.Empty;
             [MessagePack.Key(2)] public string PasswordHash { get; set; } = string.Empty;
             [MessagePack.Key(3)] public string Username { get; set; } = string.Empty;
+            [MessagePack.Key(4)] public long SessionVersion { get; set; }
         }
 
         private static byte[] SerializePlayerDataPayload(PlayerData entry)
@@ -306,7 +374,8 @@ namespace GameCult.Networking.Tests
                 PlayerId = entry.PlayerId,
                 Email = entry.Email,
                 PasswordHash = entry.PasswordHash,
-                Username = entry.Username
+                Username = entry.Username,
+                SessionVersion = entry.SessionVersion
             });
         }
 
@@ -318,7 +387,8 @@ namespace GameCult.Networking.Tests
                 PlayerId = decoded.PlayerId,
                 Email = decoded.Email,
                 PasswordHash = decoded.PasswordHash,
-                Username = decoded.Username
+                Username = decoded.Username,
+                SessionVersion = decoded.SessionVersion
             };
         }
     }

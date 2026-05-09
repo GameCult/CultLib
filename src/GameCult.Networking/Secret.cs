@@ -193,14 +193,20 @@ namespace GameCult.Networking
         /// <param name="expiresAtUtc">The UTC expiration time for the token.</param>
         /// <returns>A tamper-evident session token.</returns>
         public static string CreateSessionToken(Guid userId, DateTimeOffset expiresAtUtc) =>
-            CreateSessionToken(userId, expiresAtUtc, GetDefaultOptions());
+            CreateSessionToken(userId, expiresAtUtc, sessionVersion: 0, GetDefaultOptions());
 
         /// <summary>
         /// Creates a signed session token for the supplied user.
         /// </summary>
-        public static string CreateSessionToken(Guid userId, DateTimeOffset expiresAtUtc, ServerSecurityOptions options)
+        public static string CreateSessionToken(Guid userId, DateTimeOffset expiresAtUtc, ServerSecurityOptions options) =>
+            CreateSessionToken(userId, expiresAtUtc, sessionVersion: 0, options);
+
+        /// <summary>
+        /// Creates a signed session token for the supplied user and session version.
+        /// </summary>
+        public static string CreateSessionToken(Guid userId, DateTimeOffset expiresAtUtc, long sessionVersion, ServerSecurityOptions options)
         {
-            var payload = $"{userId:N}|{expiresAtUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)}";
+            var payload = $"{userId:N}|{expiresAtUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)}|{sessionVersion.ToString(CultureInfo.InvariantCulture)}";
             var payloadBytes = Encoding.UTF8.GetBytes(payload);
             var signatureBytes = ComputeHmacSha256(options.GetSessionSigningKey(), payloadBytes);
             return $"{ToBase64Url(payloadBytes)}.{ToBase64Url(signatureBytes)}";
@@ -214,7 +220,17 @@ namespace GameCult.Networking
         /// <param name="expiresAtUtc">The extracted UTC expiration time.</param>
         /// <returns><c>true</c> when the token is valid and unexpired.</returns>
         public static bool TryValidateSessionToken(string? token, out Guid userId, out DateTimeOffset expiresAtUtc) =>
-            TryValidateSessionToken(token, GetDefaultOptions(), out userId, out expiresAtUtc);
+            TryValidateSessionToken(token, GetDefaultOptions(), out userId, out expiresAtUtc, out _);
+
+        /// <summary>
+        /// Validates and parses a signed session token.
+        /// </summary>
+        public static bool TryValidateSessionToken(
+            string? token,
+            out Guid userId,
+            out DateTimeOffset expiresAtUtc,
+            out long sessionVersion) =>
+            TryValidateSessionToken(token, GetDefaultOptions(), out userId, out expiresAtUtc, out sessionVersion);
 
         /// <summary>
         /// Validates and parses a signed session token.
@@ -225,8 +241,22 @@ namespace GameCult.Networking
             out Guid userId,
             out DateTimeOffset expiresAtUtc)
         {
+            return TryValidateSessionToken(token, options, out userId, out expiresAtUtc, out _);
+        }
+
+        /// <summary>
+        /// Validates and parses a signed session token.
+        /// </summary>
+        public static bool TryValidateSessionToken(
+            string? token,
+            ServerSecurityOptions options,
+            out Guid userId,
+            out DateTimeOffset expiresAtUtc,
+            out long sessionVersion)
+        {
             userId = Guid.Empty;
             expiresAtUtc = DateTimeOffset.MinValue;
+            sessionVersion = 0;
 
             if (string.IsNullOrWhiteSpace(token))
                 return false;
@@ -245,11 +275,20 @@ namespace GameCult.Networking
 
                 var payload = Encoding.UTF8.GetString(payloadBytes);
                 var payloadParts = payload.Split('|');
-                if (payloadParts.Length != 2 ||
+                if ((payloadParts.Length != 2 && payloadParts.Length != 3) ||
                     !Guid.TryParseExact(payloadParts[0], "N", out userId) ||
                     !long.TryParse(payloadParts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var expiryUnixSeconds))
                 {
                     userId = Guid.Empty;
+                    return false;
+                }
+
+                if (payloadParts.Length == 3 &&
+                    !long.TryParse(payloadParts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out sessionVersion))
+                {
+                    userId = Guid.Empty;
+                    expiresAtUtc = DateTimeOffset.MinValue;
+                    sessionVersion = 0;
                     return false;
                 }
 
@@ -260,6 +299,7 @@ namespace GameCult.Networking
             {
                 userId = Guid.Empty;
                 expiresAtUtc = DateTimeOffset.MinValue;
+                sessionVersion = 0;
                 return false;
             }
         }

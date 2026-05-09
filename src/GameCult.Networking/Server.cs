@@ -25,12 +25,15 @@ namespace GameCult.Networking
         private const int ServerPort = 3075;
         private const float SessionTimeoutSeconds = 1800; // 30 minutes
         private const float SessionRefreshThresholdSeconds = 300; // 5 minutes
+        private const int MaxConnectionAttemptsPerMinute = 30;
         private const int MaxLoginAttemptsPerMinute = 5;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
         private readonly ConcurrentDictionary<long, User> _users = new();
-        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _loginAttempts = new();
-        private readonly ConcurrentDictionary<string, object> _loginAttemptLocks = new();
+        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _connectionAttempts = new();
+        private readonly ConcurrentDictionary<string, object> _connectionAttemptLocks = new();
+        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _authAttempts = new();
+        private readonly ConcurrentDictionary<string, object> _authAttemptLocks = new();
         private readonly IDisposable _cleanupSubscription;
         private readonly CultCache _database;
         private readonly ServerSecurityOptions _security;
@@ -48,6 +51,11 @@ namespace GameCult.Networking
             set => _logger = value ?? new NullLogger();
         }
 
+        /// <summary>
+        /// Gets or sets whether raw payload bodies may be logged for diagnostics.
+        /// </summary>
+        public bool LogSensitivePayloads { get; set; }
+
         private float Time => (float)(_timer?.Elapsed.TotalSeconds ?? 0d);
 
         /// <summary>
@@ -59,6 +67,7 @@ namespace GameCult.Networking
         {
             _database = cache;
             _security = security ?? ServerSecurityOptions.FromEnvironment();
+            LogSensitivePayloads = _security.IsDevelopment;
             _cleanupSubscription = Observable.Timer(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60))
                 .Subscribe(_ => CleanupExpiredSessions());
         }
@@ -150,7 +159,7 @@ namespace GameCult.Networking
 
             listener.ConnectionRequestEvent += request =>
             {
-                if (CheckRateLimit(request.RemoteEndPoint.Address.ToString()))
+                if (CheckConnectionRateLimit(request.RemoteEndPoint.Address.ToString()))
                 {
                     request.AcceptIfKey(_security.ConnectionKey);
                 }
@@ -186,7 +195,14 @@ namespace GameCult.Networking
                 {
                     var bytes = reader.GetRemainingBytes();
                     var message = MessageSerialization.Deserialize<Message>(bytes);
-                    Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    if (LogSensitivePayloads)
+                    {
+                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    }
+                    else
+                    {
+                        Logger.LogDebug($"Received message {message?.GetType().Name ?? "unknown"}");
+                    }
                     if (message == null)
                     {
                         return;
@@ -203,7 +219,7 @@ namespace GameCult.Networking
                             return;
                         }
 
-                        if (message is LoginMessage or RegisterMessage && !CheckRateLimit(peer.Address.ToString()))
+                        if (message is LoginMessage or RegisterMessage && !CheckAuthRateLimit(peer.Address.ToString()))
                         {
                             peer.Send(new ErrorMessage { Error = "Too Many Attempts" });
                             return;
@@ -343,20 +359,27 @@ namespace GameCult.Networking
         private void HandleVerify(NetPeer peer, User user, VerifyMessage verify)
         {
             var token = Secret.DecryptString(verify.Session, verify.Nonce, _security);
-            if (!Secret.TryValidateSessionToken(token, _security, out var playerId, out _))
+            if (!Secret.TryValidateSessionToken(token, _security, out var playerId, out _, out var sessionVersion))
             {
                 peer.Send(new ErrorMessage { Error = "Session Invalid" });
                 return;
             }
 
-            if (_database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D")) == null)
+            var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
+            if (player == null)
             {
                 peer.Send(new ErrorMessage { Error = "Session Not Found" });
                 return;
             }
 
+            if (player.SessionVersion != sessionVersion)
+            {
+                peer.Send(new ErrorMessage { Error = "Session Superseded" });
+                return;
+            }
+
             AttachUser(user, playerId);
-            SendSessionToken(peer, playerId);
+            SendSessionToken(peer, player);
         }
 
         private void HandleLogin(NetPeer peer, User user, LoginMessage login)
@@ -387,7 +410,7 @@ namespace GameCult.Networking
             }
 
             AttachUser(user, userData.PlayerId);
-            SendSessionToken(peer, userData.PlayerId);
+            SendSessionToken(peer, userData);
         }
 
         private bool IsVerified(User? user) =>
@@ -399,23 +422,14 @@ namespace GameCult.Networking
         private PlayerData? SessionData(User user) =>
             IsVerified(user) ? _database.GetByIndex<PlayerData>("PlayerId", user.PlayerId.ToString("D")) : null;
 
-        private bool CheckRateLimit(string ip)
+        internal bool CheckConnectionRateLimit(string ip)
         {
-            var now = DateTimeOffset.UtcNow;
-            var windowStart = now.AddMinutes(-1);
-            var queue = _loginAttempts.GetOrAdd(ip, _ => new Queue<DateTimeOffset>());
-            var gate = _loginAttemptLocks.GetOrAdd(ip, _ => new object());
+            return CheckRateLimit(ip, MaxConnectionAttemptsPerMinute, _connectionAttempts, _connectionAttemptLocks);
+        }
 
-            lock (gate)
-            {
-                while (queue.Count > 0 && queue.Peek() < windowStart)
-                {
-                    queue.Dequeue();
-                }
-
-                queue.Enqueue(now);
-                return queue.Count <= MaxLoginAttemptsPerMinute;
-            }
+        internal bool CheckAuthRateLimit(string ip)
+        {
+            return CheckRateLimit(ip, MaxLoginAttemptsPerMinute, _authAttempts, _authAttemptLocks);
         }
 
         private void CleanupExpiredSessions()
@@ -440,13 +454,28 @@ namespace GameCult.Networking
 
         private void SendSessionToken(NetPeer peer, Guid playerId)
         {
+            var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
+            if (player == null)
+            {
+                peer.Send(new ErrorMessage { Error = "Session Not Found" });
+                return;
+            }
+
+            SendSessionToken(peer, player);
+        }
+
+        private void SendSessionToken(NetPeer peer, PlayerData player)
+        {
             var expiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(SessionTimeoutSeconds);
-            var token = Secret.CreateSessionToken(playerId, expiresAtUtc, _security);
+            player.SessionVersion++;
+            var token = Secret.CreateSessionToken(player.PlayerId, expiresAtUtc, player.SessionVersion, _security);
+            _database.AddAsync(player).GetAwaiter().GetResult();
 
             if (_users.TryGetValue(peer.Id, out var user))
             {
-                user.PlayerId = playerId;
+                user.PlayerId = player.PlayerId;
                 user.SessionExpiresAt = expiresAtUtc;
+                user.SessionVersion = player.SessionVersion;
                 user.SessionToken = token;
             }
 
@@ -466,6 +495,29 @@ namespace GameCult.Networking
             }
 
             SendSessionToken(peer, user.PlayerId);
+        }
+
+        private static bool CheckRateLimit(
+            string ip,
+            int maxAttemptsPerMinute,
+            ConcurrentDictionary<string, Queue<DateTimeOffset>> attemptBuckets,
+            ConcurrentDictionary<string, object> attemptLocks)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var windowStart = now.AddMinutes(-1);
+            var queue = attemptBuckets.GetOrAdd(ip, _ => new Queue<DateTimeOffset>());
+            var gate = attemptLocks.GetOrAdd(ip, _ => new object());
+
+            lock (gate)
+            {
+                while (queue.Count > 0 && queue.Peek() < windowStart)
+                {
+                    queue.Dequeue();
+                }
+
+                queue.Enqueue(now);
+                return queue.Count <= maxAttemptsPerMinute;
+            }
         }
     }
 
@@ -514,5 +566,10 @@ namespace GameCult.Networking
         /// The latest signed session token issued to the peer.
         /// </summary>
         public string SessionToken = string.Empty;
+
+        /// <summary>
+        /// The session version associated with the latest issued token.
+        /// </summary>
+        public long SessionVersion;
     }
 }

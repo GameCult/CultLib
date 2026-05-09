@@ -40,7 +40,8 @@ public sealed class CultDocumentResolver : IFormatterResolver
 public static class CultDocumentMessagePackSerialization
 {
     private const int PersistedRecordFieldCount = 4;
-    private const int SchemaCatalogEntryFieldCount = 6;
+    private const int SchemaCatalogEntryFieldCount = 7;
+    private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
     /// <summary>
@@ -277,6 +278,12 @@ public static class CultDocumentMessagePackSerialization
         {
             writer.Write(schemaId);
         }
+
+        writer.WriteArrayHeader(entry.Members.Length);
+        foreach (var member in entry.Members)
+        {
+            WriteSchemaCatalogMember(ref writer, member);
+        }
     }
 
     private static CultSchemaCatalogEntry ReadSchemaCatalogEntry(ref MessagePackReader reader)
@@ -319,12 +326,88 @@ public static class CultDocumentMessagePackSerialization
             }
         }
 
+        if (fieldCount > 6)
+        {
+            var memberCount = reader.ReadArrayHeader();
+            entry.Members = new CultSchemaMemberCatalogEntry[memberCount];
+            for (var index = 0; index < memberCount; index++)
+            {
+                entry.Members[index] = ReadSchemaCatalogMember(ref reader);
+            }
+        }
+
         for (var index = SchemaCatalogEntryFieldCount; index < fieldCount; index++)
         {
             reader.Skip();
         }
 
         return entry;
+    }
+
+    private static void WriteSchemaCatalogMember(ref MessagePackWriter writer, CultSchemaMemberCatalogEntry member)
+    {
+        writer.WriteArrayHeader(SchemaCatalogMemberFieldCount);
+        writer.Write(member.Slot);
+        writer.Write(member.MemberName);
+        writer.Write(member.TypeName);
+        writer.Write(member.IsReference);
+        writer.Write(member.IsMany);
+        writer.Write(member.TargetSchemaName);
+        writer.Write(member.IsName);
+        writer.Write(member.IndexAlias);
+    }
+
+    private static CultSchemaMemberCatalogEntry ReadSchemaCatalogMember(ref MessagePackReader reader)
+    {
+        var fieldCount = reader.ReadArrayHeader();
+        var member = new CultSchemaMemberCatalogEntry();
+
+        if (fieldCount > 0)
+        {
+            member.Slot = reader.ReadInt32();
+        }
+
+        if (fieldCount > 1)
+        {
+            member.MemberName = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 2)
+        {
+            member.TypeName = reader.ReadString() ?? string.Empty;
+        }
+
+        if (fieldCount > 3)
+        {
+            member.IsReference = reader.ReadBoolean();
+        }
+
+        if (fieldCount > 4)
+        {
+            member.IsMany = reader.ReadBoolean();
+        }
+
+        if (fieldCount > 5)
+        {
+            member.TargetSchemaName = reader.ReadString();
+        }
+
+        if (fieldCount > 6)
+        {
+            member.IsName = reader.ReadBoolean();
+        }
+
+        if (fieldCount > 7)
+        {
+            member.IndexAlias = reader.ReadString();
+        }
+
+        for (var index = SchemaCatalogMemberFieldCount; index < fieldCount; index++)
+        {
+            reader.Skip();
+        }
+
+        return member;
     }
 }
 

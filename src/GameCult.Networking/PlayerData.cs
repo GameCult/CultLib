@@ -7,7 +7,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Basic player account document used by the sample networking stack.
     /// </summary>
-    [CultDocument("gamecult.player_data", "gamecult.player_data.v1")]
+    [CultDocument("gamecult.player_data", "gamecult.player_data.v2")]
     public class PlayerData
     {
         /// <summary>
@@ -36,5 +36,11 @@ namespace GameCult.Networking
         [Key(3)]
         [CultName]
         public string Username = string.Empty;
+
+        /// <summary>
+        /// Monotonic session version used to supersede older issued tokens.
+        /// </summary>
+        [Key(4)]
+        public long SessionVersion;
     }
 }

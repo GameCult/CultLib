@@ -133,3 +133,39 @@ var store = new SingleFileMessagePackBackingStore("Data.msgpack");
 cache.AddBackingStore(store);
 await cache.PullAllBackingStoresAsync();
 ```
+
+## Persistence discipline
+
+Persistence stays manual by default. Mutations mark the cache and attached
+backing stores dirty; nothing silently flushes every object write just because
+that felt convenient in the moment.
+
+Useful surfaces:
+
+- `cache.IsDirty`
+- `store.IsDirty`
+- `cache.FlushAllBackingStores()`
+- `cache.FlushBackingStore(store)`
+- `cache.PrepareForReloadOrShutdown()`
+- `cache.FlushAttachedStoresOnDispose`
+- `store.FlushOnDispose`
+
+This is built for callers like Aquarium that want durable runtime state while
+still choosing *when* to pay the write cost.
+
+Single-file MessagePack remains a single-writer format. The atomic replace path
+protects against partial writes, not competing writers trampling each other.
+
+## Schema migration diagnostics
+
+CultCache does not quietly fall back from exact `schemaId` resolution to
+"close enough, probably." When a persisted schema drifts, the cache now emits a
+typed migration report describing:
+
+- exact vs compatible-drift resolution
+- ignored extra slots
+- defaulted missing slots
+- warning codes/messages
+
+Compatibility rules and canonical fixture receipts live in
+`Contracts/cultcache-schema-compatibility.md`.

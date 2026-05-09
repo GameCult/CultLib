@@ -23,6 +23,11 @@ The library currently includes:
 
 The library is focused on the built-in authentication and session flows in this repository.
 
+Current readiness target:
+
+- trusted local mesh / self-hosted swarm use: yes
+- hostile public internet edge: not yet
+
 Keep the distinction clean:
 
 - auth/session semantics belong to the core library
@@ -98,6 +103,9 @@ The built-in flow is:
 5. server validates the token and re-establishes the session
 
 The session token is signed and validated by the server.
+Each newly issued session token also carries a monotonic session version so
+older signed tokens can be superseded cleanly instead of haunting reconnect
+paths forever.
 
 ## Runtime Secrets
 
@@ -218,14 +226,19 @@ The client:
 
 - disposes its prior polling subscription before reconnecting
 - stops the prior `NetManager`
-- schedules reconnect with a short delay
+- schedules reconnect with bounded exponential backoff and jitter
 - automatically re-verifies using the stored signed session token
+- exposes reconnect state for UI/operator surfaces
 
 ## Important Constraints
 
 - `Server` currently centers on `PlayerData` as the built-in account model.
 - Message authorization is based on the built-in verify/login/register flow.
 - Transport is LiteNetLib, so this is not a drop-in substitute for HTTP or WebSocket stacks.
+
+Sensitive payload logging is gated. Raw message JSON should only appear when a
+caller explicitly opts into diagnostic logging instead of accidentally bleeding
+live auth/session payloads into ordinary logs.
 
 ## Message Example
 
@@ -258,3 +271,10 @@ For the newer schema-v0 lane, the equivalent rule is:
 - keep payload codecs in sync
 - advertise supported contracts through schema discovery
 - do not rely on implicit runtime magic to decide what a peer meant
+
+## Future hostile-network work
+
+The next hardening tranche is documented in
+`production-hardening-checklist.md`. That ledger names the missing transport,
+replay, abuse-handling, and adversarial-test organs directly instead of
+pretending local-mesh readiness and internet readiness are the same rite.

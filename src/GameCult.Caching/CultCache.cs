@@ -42,6 +42,57 @@ namespace GameCult.Caching
         /// Gets or sets schema identifiers compatible with this entry.
         /// </summary>
         public string[] CompatibleSchemaIds { get; set; } = Array.Empty<string>();
+
+        /// <summary>
+        /// Gets or sets the persisted member descriptors used for compatibility checks.
+        /// </summary>
+        public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
+    }
+
+    /// <summary>
+    /// Persisted catalog entry describing one schema member.
+    /// </summary>
+    public sealed class CultSchemaMemberCatalogEntry
+    {
+        /// <summary>
+        /// Gets or sets the persisted slot number.
+        /// </summary>
+        public int Slot { get; set; }
+
+        /// <summary>
+        /// Gets or sets the member name.
+        /// </summary>
+        public string MemberName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the persisted type name.
+        /// </summary>
+        public string TypeName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets whether the member is a reference.
+        /// </summary>
+        public bool IsReference { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the member stores many values.
+        /// </summary>
+        public bool IsMany { get; set; }
+
+        /// <summary>
+        /// Gets or sets the referenced schema name, when the member is a reference.
+        /// </summary>
+        public string? TargetSchemaName { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the member provides the name lookup.
+        /// </summary>
+        public bool IsName { get; set; }
+
+        /// <summary>
+        /// Gets or sets the index alias, when the member participates in lookups.
+        /// </summary>
+        public string? IndexAlias { get; set; }
     }
 
     /// <summary>
@@ -84,6 +135,97 @@ namespace GameCult.Caching
         /// Gets or sets the persisted records.
         /// </summary>
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
+    }
+
+    /// <summary>
+    /// Classifies how a persisted schema mapped onto the local document registry.
+    /// </summary>
+    public enum CultSchemaMigrationKind
+    {
+        /// <summary>
+        /// The persisted schema matched the local schema exactly.
+        /// </summary>
+        Exact,
+
+        /// <summary>
+        /// The persisted schema required a compatible soft-migration path.
+        /// </summary>
+        CompatibleDrift
+    }
+
+    /// <summary>
+    /// Describes one schema-resolution warning emitted during load.
+    /// </summary>
+    public sealed class CultSchemaMigrationWarning
+    {
+        /// <summary>
+        /// Gets or sets the stable warning code.
+        /// </summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the human-readable warning text.
+        /// </summary>
+        public string Message { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Reports how one persisted schema entry resolved against the local schema catalog.
+    /// </summary>
+    public sealed class CultSchemaMigrationReport
+    {
+        /// <summary>
+        /// Gets or sets the persisted schema identifier.
+        /// </summary>
+        public string PersistedSchemaId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the local schema identifier selected for reading.
+        /// </summary>
+        public string LocalSchemaId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the persisted schema name.
+        /// </summary>
+        public string PersistedSchemaName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the local schema name.
+        /// </summary>
+        public string LocalSchemaName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets how the persisted schema matched locally.
+        /// </summary>
+        public CultSchemaMigrationKind Kind { get; set; }
+
+        /// <summary>
+        /// Gets or sets the persisted member slots ignored by the local reader.
+        /// </summary>
+        public int[] IgnoredExtraSlots { get; set; } = Array.Empty<int>();
+
+        /// <summary>
+        /// Gets or sets the local member slots defaulted because the persisted record did not contain them.
+        /// </summary>
+        public int[] DefaultedMissingSlots { get; set; } = Array.Empty<int>();
+
+        /// <summary>
+        /// Gets or sets emitted migration warnings.
+        /// </summary>
+        public CultSchemaMigrationWarning[] Warnings { get; set; } = Array.Empty<CultSchemaMigrationWarning>();
+    }
+
+    internal sealed class CultSchemaResolutionResult
+    {
+        public CultSchemaResolutionResult(CultDocumentDescriptor descriptor, CultSchemaMigrationReport report)
+        {
+            Descriptor = descriptor;
+            Report = report;
+        }
+
+        public CultDocumentDescriptor Descriptor { get; }
+
+        public CultSchemaMigrationReport Report { get; }
     }
 
     /// <summary>
@@ -177,7 +319,21 @@ namespace GameCult.Caching
                 SchemaVersion = SchemaVersion,
                 ContentHash = ContentHash,
                 CanonicalSchemaJson = CanonicalSchemaJson,
-                CompatibleSchemaIds = [SchemaId]
+                CompatibleSchemaIds = [SchemaId],
+                Members = Members
+                    .OrderBy(member => member.Slot)
+                    .Select(member => new CultSchemaMemberCatalogEntry
+                    {
+                        Slot = member.Slot,
+                        MemberName = member.MemberName,
+                        TypeName = member.TypeName,
+                        IsReference = member.IsReference,
+                        IsMany = member.IsMany,
+                        TargetSchemaName = member.TargetSchemaName,
+                        IsName = member.IsName,
+                        IndexAlias = member.IndexAlias
+                    })
+                    .ToArray()
             };
         }
 
@@ -350,9 +506,31 @@ namespace GameCult.Caching
         /// </summary>
         public CultDocumentDescriptor ResolvePersistedSchema(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
+            return ResolvePersistedSchemaDetailed(schemaId, catalog).Descriptor;
+        }
+
+        /// <summary>
+        /// Resolves a persisted schema identifier and returns the selected descriptor with migration diagnostics.
+        /// </summary>
+        public CultSchemaMigrationReport ResolvePersistedSchemaReport(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
+            return ResolvePersistedSchemaDetailed(schemaId, catalog).Report;
+        }
+
+        internal CultSchemaResolutionResult ResolvePersistedSchemaDetailed(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
             if (_bySchemaId.TryGetValue(schemaId, out var exact))
             {
-                return exact;
+                return new CultSchemaResolutionResult(
+                    exact,
+                    new CultSchemaMigrationReport
+                    {
+                        PersistedSchemaId = schemaId,
+                        LocalSchemaId = exact.SchemaId,
+                        PersistedSchemaName = exact.SchemaName,
+                        LocalSchemaName = exact.SchemaName,
+                        Kind = CultSchemaMigrationKind.Exact
+                    });
             }
 
             var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal));
@@ -361,9 +539,17 @@ namespace GameCult.Caching
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
             }
 
+            foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
+            {
+                if (_bySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
+                {
+                    return BuildCompatibleResolutionResult(persisted, compatibleLocal);
+                }
+            }
+
             if (_bySchemaName.TryGetValue(persisted.SchemaName, out var local))
             {
-                return local;
+                return BuildCompatibleResolutionResult(persisted, local);
             }
 
             throw new InvalidOperationException(
@@ -556,6 +742,255 @@ namespace GameCult.Caching
             return builder.ToString();
         }
 
+        private static CultSchemaResolutionResult BuildCompatibleResolutionResult(
+            CultSchemaCatalogEntry persisted,
+            CultDocumentDescriptor local)
+        {
+            if (string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal))
+            {
+                return new CultSchemaResolutionResult(
+                    local,
+                    new CultSchemaMigrationReport
+                    {
+                        PersistedSchemaId = persisted.SchemaId,
+                        LocalSchemaId = local.SchemaId,
+                        PersistedSchemaName = persisted.SchemaName,
+                        LocalSchemaName = local.SchemaName,
+                        Kind = CultSchemaMigrationKind.Exact
+                    });
+            }
+
+            var persistedSchema = new CanonicalSchemaShape(
+                persisted.SchemaName,
+                persisted.SchemaVersion,
+                persisted.Members.Select(member => new CanonicalSchemaMember(
+                    member.Slot,
+                    member.MemberName,
+                    member.TypeName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.TargetSchemaName,
+                    member.IsName,
+                    member.IndexAlias)).ToArray());
+            var localSchema = new CanonicalSchemaShape(
+                local.SchemaName,
+                local.SchemaVersion,
+                local.Members.Select(member => new CanonicalSchemaMember(
+                    member.Slot,
+                    member.MemberName,
+                    member.TypeName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.TargetSchemaName,
+                    member.IsName,
+                    member.IndexAlias)).ToArray());
+            var comparison = CompareSchemaShapes(persistedSchema, localSchema);
+            if (!comparison.IsCompatible)
+            {
+                throw new InvalidOperationException(
+                    $"Persisted schema '{persisted.SchemaName}' ({persisted.SchemaId}) is incompatible with local schema '{local.SchemaName}' ({local.SchemaId}): {string.Join("; ", comparison.Errors)}");
+            }
+
+            var warnings = new List<CultSchemaMigrationWarning>();
+            if (!string.Equals(persisted.SchemaId, local.SchemaId, StringComparison.Ordinal))
+            {
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "compatible_schema_id_drift",
+                    Message = $"Persisted schema '{persisted.SchemaId}' resolved to local schema '{local.SchemaId}'."
+                });
+            }
+
+            if (!string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal))
+            {
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "content_hash_drift",
+                    Message = $"Persisted schema content hash '{persisted.ContentHash}' differs from local hash '{local.ContentHash}'."
+                });
+            }
+
+            warnings.AddRange(comparison.Warnings);
+
+            return new CultSchemaResolutionResult(
+                local,
+                new CultSchemaMigrationReport
+                {
+                    PersistedSchemaId = persisted.SchemaId,
+                    LocalSchemaId = local.SchemaId,
+                    PersistedSchemaName = persisted.SchemaName,
+                    LocalSchemaName = local.SchemaName,
+                    Kind = CultSchemaMigrationKind.CompatibleDrift,
+                    IgnoredExtraSlots = comparison.IgnoredExtraSlots.OrderBy(slot => slot).ToArray(),
+                    DefaultedMissingSlots = comparison.DefaultedMissingSlots.OrderBy(slot => slot).ToArray(),
+                    Warnings = warnings.ToArray()
+                });
+        }
+
+        private static SchemaShapeComparison CompareSchemaShapes(CanonicalSchemaShape persisted, CanonicalSchemaShape local)
+        {
+            var errors = new List<string>();
+            var warnings = new List<CultSchemaMigrationWarning>();
+            var ignoredExtraSlots = new List<int>();
+            var defaultedMissingSlots = new List<int>();
+
+            if (!string.Equals(persisted.SchemaName, local.SchemaName, StringComparison.Ordinal))
+            {
+                errors.Add($"schema name drift '{persisted.SchemaName}' -> '{local.SchemaName}'");
+            }
+
+            var persistedBySlot = persisted.Members.ToDictionary(member => member.Slot);
+            var localBySlot = local.Members.ToDictionary(member => member.Slot);
+
+            foreach (var localMember in local.Members.OrderBy(member => member.Slot))
+            {
+                if (!persistedBySlot.TryGetValue(localMember.Slot, out var persistedMember))
+                {
+                    defaultedMissingSlots.Add(localMember.Slot);
+                    warnings.Add(new CultSchemaMigrationWarning
+                    {
+                        Code = "defaulted_missing_slot",
+                        Message = $"Local slot {localMember.Slot} ('{localMember.Name}') is missing from the persisted schema and will use the local default value."
+                    });
+                    continue;
+                }
+
+                if (!string.Equals(localMember.TypeName, persistedMember.TypeName, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed type '{persistedMember.TypeName}' -> '{localMember.TypeName}'");
+                }
+
+                if (localMember.IsReference != persistedMember.IsReference)
+                {
+                    errors.Add($"slot {localMember.Slot} changed reference semantics");
+                }
+
+                if (localMember.IsMany != persistedMember.IsMany)
+                {
+                    errors.Add($"slot {localMember.Slot} changed cardinality");
+                }
+
+                if (!string.Equals(localMember.TargetSchemaName, persistedMember.TargetSchemaName, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed target schema '{persistedMember.TargetSchemaName ?? "<none>"}' -> '{localMember.TargetSchemaName ?? "<none>"}'");
+                }
+
+                if (localMember.IsName != persistedMember.IsName)
+                {
+                    errors.Add($"slot {localMember.Slot} changed name-lookup semantics");
+                }
+
+                if (!string.Equals(localMember.IndexAlias, persistedMember.IndexAlias, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed index alias '{persistedMember.IndexAlias ?? "<none>"}' -> '{localMember.IndexAlias ?? "<none>"}'");
+                }
+            }
+
+            foreach (var persistedMember in persisted.Members.OrderBy(member => member.Slot))
+            {
+                if (localBySlot.ContainsKey(persistedMember.Slot))
+                {
+                    continue;
+                }
+
+                ignoredExtraSlots.Add(persistedMember.Slot);
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "ignored_extra_slot",
+                    Message = $"Persisted slot {persistedMember.Slot} ('{persistedMember.Name}') is not present locally and will be ignored."
+                });
+            }
+
+            return new SchemaShapeComparison(
+                errors.Count == 0,
+                errors.ToArray(),
+                warnings.ToArray(),
+                ignoredExtraSlots.ToArray(),
+                defaultedMissingSlots.ToArray());
+        }
+
+        private sealed class CanonicalSchemaShape
+        {
+            public CanonicalSchemaShape(string schemaName, string schemaVersion, CanonicalSchemaMember[] members)
+            {
+                SchemaName = schemaName;
+                SchemaVersion = schemaVersion;
+                Members = members;
+            }
+
+            public string SchemaName { get; }
+
+            public string SchemaVersion { get; }
+
+            public CanonicalSchemaMember[] Members { get; }
+        }
+
+        private sealed class CanonicalSchemaMember
+        {
+            public CanonicalSchemaMember(
+                int slot,
+                string name,
+                string typeName,
+                bool isReference,
+                bool isMany,
+                string? targetSchemaName,
+                bool isName,
+                string? indexAlias)
+            {
+                Slot = slot;
+                Name = name;
+                TypeName = typeName;
+                IsReference = isReference;
+                IsMany = isMany;
+                TargetSchemaName = targetSchemaName;
+                IsName = isName;
+                IndexAlias = indexAlias;
+            }
+
+            public int Slot { get; }
+
+            public string Name { get; }
+
+            public string TypeName { get; }
+
+            public bool IsReference { get; }
+
+            public bool IsMany { get; }
+
+            public string? TargetSchemaName { get; }
+
+            public bool IsName { get; }
+
+            public string? IndexAlias { get; }
+        }
+
+        private sealed class SchemaShapeComparison
+        {
+            public SchemaShapeComparison(
+                bool isCompatible,
+                string[] errors,
+                CultSchemaMigrationWarning[] warnings,
+                int[] ignoredExtraSlots,
+                int[] defaultedMissingSlots)
+            {
+                IsCompatible = isCompatible;
+                Errors = errors;
+                Warnings = warnings;
+                IgnoredExtraSlots = ignoredExtraSlots;
+                DefaultedMissingSlots = defaultedMissingSlots;
+            }
+
+            public bool IsCompatible { get; }
+
+            public string[] Errors { get; }
+
+            public CultSchemaMigrationWarning[] Warnings { get; }
+
+            public int[] IgnoredExtraSlots { get; }
+
+            public int[] DefaultedMissingSlots { get; }
+        }
+
         private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
         {
             var members = new List<PersistedMember>();
@@ -725,6 +1160,7 @@ namespace GameCult.Caching
         private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
         private readonly ConditionalWeakTable<object, DocumentHandleBox> _documentHandles = new();
         private ILogger _logger = new NullLogger();
+        private bool _hasUnflushedMutations;
 
         /// <summary>
         /// Creates a cache using the supplied document registry or the shared registry.
@@ -745,9 +1181,29 @@ namespace GameCult.Caching
         }
 
         /// <summary>
+        /// Gets whether the cache currently holds unflushed mutations in any attached backing store or only in memory.
+        /// </summary>
+        public bool IsDirty => _hasUnflushedMutations || _backingStores.Any(store => store.IsDirty);
+
+        /// <summary>
+        /// Gets the UTC timestamp of the last successful flush across all attached backing stores.
+        /// </summary>
+        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; private set; }
+
+        /// <summary>
+        /// Gets or sets whether disposing the cache should flush attached dirty backing stores first.
+        /// </summary>
+        public bool FlushAttachedStoresOnDispose { get; set; }
+
+        /// <summary>
         /// Raised when a backing store adds, updates, or removes a document.
         /// </summary>
         public event Action<object?, object?>? OnUpdate;
+
+        /// <summary>
+        /// Gets attached backing stores in registration order.
+        /// </summary>
+        public IReadOnlyList<CacheBackingStore> BackingStores => _backingStores;
 
         /// <summary>
         /// Gets all document instances currently held by the cache.
@@ -770,6 +1226,12 @@ namespace GameCult.Caching
             store.EntryAdded.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
             store.EntryUpdated.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
             store.EntryDeleted.Subscribe(entry => RemoveStoredDocumentInternal(entry, store, raiseUpdate: true));
+
+            foreach (var entry in _entries.Values.OrderBy(entry => entry.Key.Value, StringComparer.Ordinal))
+            {
+                store.Push(entry);
+            }
+
             _backingStores.Add(store);
         }
 
@@ -783,7 +1245,52 @@ namespace GameCult.Caching
                 store.PullAll();
             }
 
+            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
             await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Flushes all attached backing stores.
+        /// </summary>
+        public void FlushAllBackingStores(bool soft = false)
+        {
+            foreach (var store in _backingStores)
+            {
+                FlushBackingStore(store, soft);
+            }
+
+            RecomputeDirtyState();
+            if (!IsDirty)
+            {
+                LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
+            }
+        }
+
+        /// <summary>
+        /// Flushes one attached backing store.
+        /// </summary>
+        public void FlushBackingStore(CacheBackingStore store, bool soft = false)
+        {
+            if (store == null) throw new ArgumentNullException(nameof(store));
+            if (!_backingStores.Contains(store))
+            {
+                throw new InvalidOperationException("Backing store is not attached to this cache.");
+            }
+
+            store.PushAll(soft);
+            RecomputeDirtyState();
+            if (!store.IsDirty)
+            {
+                LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
+            }
+        }
+
+        /// <summary>
+        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
+        /// </summary>
+        public void PrepareForReloadOrShutdown(bool soft = false)
+        {
+            FlushAllBackingStores(soft);
         }
 
         /// <summary>
@@ -902,6 +1409,11 @@ namespace GameCult.Caching
         /// </summary>
         public void Dispose()
         {
+            if (FlushAttachedStoresOnDispose && IsDirty)
+            {
+                FlushAllBackingStores();
+            }
+
             foreach (var store in _backingStores.OfType<IDisposable>())
             {
                 store.Dispose();
@@ -944,6 +1456,15 @@ namespace GameCult.Caching
                 }
             }
 
+            if (source == null)
+            {
+                _hasUnflushedMutations = true;
+            }
+            else
+            {
+                RecomputeDirtyState();
+            }
+
             if (raiseUpdate)
             {
                 OnUpdate?.Invoke(existing?.Document, stored.Document);
@@ -972,6 +1493,15 @@ namespace GameCult.Caching
                 {
                     store.Delete(existing);
                 }
+            }
+
+            if (source == null)
+            {
+                _hasUnflushedMutations = true;
+            }
+            else
+            {
+                RecomputeDirtyState();
             }
 
             if (raiseUpdate)
@@ -1088,6 +1618,13 @@ namespace GameCult.Caching
 
             public CultRecordKey Key { get; }
         }
+
+        private void RecomputeDirtyState()
+        {
+            _hasUnflushedMutations = _backingStores.Count == 0
+                ? _hasUnflushedMutations
+                : _backingStores.Any(store => store.IsDirty);
+        }
     }
 
     /// <summary>
@@ -1097,6 +1634,8 @@ namespace GameCult.Caching
     {
         private CultDocumentRegistry? _registry;
         private ILogger _logger = new NullLogger();
+        private bool _isDirty;
+        private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
 
         /// <summary>
         /// Gets the attached document registry.
@@ -1118,6 +1657,30 @@ namespace GameCult.Caching
             get => _logger;
             set => _logger = value ?? new NullLogger();
         }
+
+        /// <summary>
+        /// Gets whether the backing store holds staged mutations not yet durably flushed.
+        /// </summary>
+        public bool IsDirty
+        {
+            get => _isDirty;
+            protected set => _isDirty = value;
+        }
+
+        /// <summary>
+        /// Gets the UTC timestamp of the last successful durable flush.
+        /// </summary>
+        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; protected set; }
+
+        /// <summary>
+        /// Gets or sets whether disposing the backing store should flush staged mutations first.
+        /// </summary>
+        public bool FlushOnDispose { get; set; }
+
+        /// <summary>
+        /// Gets schema migration reports emitted during the most recent pull.
+        /// </summary>
+        public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
 
         /// <summary>
         /// Publishes documents added by the backing store.
@@ -1158,6 +1721,11 @@ namespace GameCult.Caching
         /// </summary>
         public virtual void Dispose()
         {
+            if (FlushOnDispose && IsDirty)
+            {
+                PushAll();
+            }
+
             EntryAdded.Dispose();
             EntryUpdated.Dispose();
             EntryDeleted.Dispose();
@@ -1185,13 +1753,30 @@ namespace GameCult.Caching
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
             Func<Type, byte[], object> deserializePayload)
         {
-            var descriptor = Registry.ResolvePersistedSchema(record.SchemaId, catalog);
-            var document = deserializePayload(descriptor.DocumentType, record.Payload);
+            var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
+            var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),
                 record.StoredAt,
-                descriptor,
+                resolution.Descriptor,
                 document);
+        }
+
+        /// <summary>
+        /// Records schema migration reports captured during a pull.
+        /// </summary>
+        protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
+        {
+            _lastSchemaMigrationReports = reports?.ToArray() ?? Array.Empty<CultSchemaMigrationReport>();
+        }
+
+        /// <summary>
+        /// Marks the backing store as durably flushed.
+        /// </summary>
+        protected void MarkFlushSucceeded()
+        {
+            IsDirty = false;
+            LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
         }
     }
 
@@ -1236,16 +1821,23 @@ namespace GameCult.Caching
         {
             if (!FileInfo.Exists)
             {
+                SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
+                IsDirty = false;
                 return;
             }
 
             var snapshot = DeserializeSnapshot(File.ReadAllBytes(FileInfo.FullName));
+            var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
             foreach (var record in snapshot.Records)
             {
+                reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, snapshot.SchemaCatalog));
                 var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload);
                 Entries[stored.Key.Value] = stored;
                 EntryAdded.OnNext(stored);
             }
+
+            SetLastSchemaMigrationReports(reports);
+            IsDirty = false;
         }
 
         /// <summary>
@@ -1254,6 +1846,7 @@ namespace GameCult.Caching
         public override void Push(CultStoredDocument entry)
         {
             Entries[entry.Key.Value] = entry;
+            IsDirty = true;
         }
 
         /// <summary>
@@ -1262,6 +1855,7 @@ namespace GameCult.Caching
         public override void Delete(CultStoredDocument entry)
         {
             Entries.TryRemove(entry.Key.Value, out _);
+            IsDirty = true;
         }
 
         /// <summary>
@@ -1285,6 +1879,7 @@ namespace GameCult.Caching
 
             Directory.CreateDirectory(FileInfo.DirectoryName!);
             WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+            MarkFlushSucceeded();
         }
 
         private static void WriteSnapshotAtomically(string path, byte[] payload)
