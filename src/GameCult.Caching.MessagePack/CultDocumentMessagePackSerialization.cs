@@ -97,7 +97,8 @@ public static class CultDocumentMessagePackSerialization
             return descriptor.GeneratedPayloadDeserializer(payload);
         }
 
-        return MessagePackSerializer.Deserialize(type, payload, Options);
+        return MessagePackSerializer.Deserialize(type, payload, Options)
+            ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 
     /// <summary>

@@ -580,14 +580,14 @@ namespace GameCult.Caching
                 members.Add(PersistedMember.FromMember(property, property.PropertyType, value => property.GetValue(value), GetKeyValue(property)));
             }
 
-            var explicitMembers = members.Where(member => member.ExplicitSlot.HasValue).OrderBy(member => member.ExplicitSlot.Value).ToArray();
+            var explicitMembers = members.Where(member => member.ExplicitSlot.HasValue).OrderBy(member => member.ExplicitSlot.GetValueOrDefault()).ToArray();
             var implicitMembers = members.Where(member => !member.ExplicitSlot.HasValue).OrderBy(member => member.MetadataToken).ToArray();
             var assigned = new List<PersistedMember>(members.Count);
-            var nextSlot = explicitMembers.Length == 0 ? 0 : explicitMembers.Max(member => member.ExplicitSlot.Value) + 1;
+            var nextSlot = explicitMembers.Length == 0 ? 0 : explicitMembers.Max(member => member.ExplicitSlot.GetValueOrDefault()) + 1;
 
             foreach (var member in explicitMembers)
             {
-                member.Slot = member.ExplicitSlot.Value;
+                member.Slot = member.ExplicitSlot.GetValueOrDefault();
                 assigned.Add(member);
             }
 
