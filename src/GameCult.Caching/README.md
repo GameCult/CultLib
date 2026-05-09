@@ -121,18 +121,27 @@ Each persisted record carries:
 - `storedAt`
 - `payload`
 
-## Typical Startup
+## Happy Path
 
 ```csharp
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 
-var cache = new CultCache();
-var store = new SingleFileMessagePackBackingStore("Data.msgpack");
+var cache = await CultCacheMessagePack.OpenAsync("Data.msgpack");
 
-cache.AddBackingStore(store);
-await cache.PullAllBackingStoresAsync();
+var handle = await cache.UpsertAsync(new ItemData
+{
+    Name = "Potion",
+    Category = "Consumable",
+    Value = 50
+});
+
+await cache.FlushAsync();
 ```
+
+If you want the explicit assembly rite, the lower-level `CultCache` +
+`SingleFileMessagePackBackingStore` path is still there. The helper is just the
+blessed front door.
 
 ## Persistence discipline
 
@@ -142,11 +151,15 @@ that felt convenient in the moment.
 
 Useful surfaces:
 
+- `CultCacheMessagePack.OpenAsync(path)`
 - `cache.IsDirty`
 - `store.IsDirty`
+- `cache.UpsertAsync(document)`
 - `cache.FlushAllBackingStores()`
+- `cache.FlushAsync()`
 - `cache.FlushBackingStore(store)`
 - `cache.PrepareForReloadOrShutdown()`
+- `cache.PrepareForReloadOrShutdownAsync()`
 - `cache.FlushAttachedStoresOnDispose`
 - `store.FlushOnDispose`
 

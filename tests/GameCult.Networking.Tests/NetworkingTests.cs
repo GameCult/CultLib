@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -332,6 +333,54 @@ namespace GameCult.Networking.Tests
             Assert.That(client.LogSensitivePayloads, Is.False);
             Assert.That(productionServer.LogSensitivePayloads, Is.False);
             Assert.That(developmentServer.LogSensitivePayloads, Is.True);
+        }
+
+        [Test]
+        public async Task CultNetLocal_CreateHostAsync_Wires_Durable_Cache_Without_Starting_Server()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultnet-host-{Guid.NewGuid():N}.msgpack");
+
+            try
+            {
+                var host = await CultNetLocal.CreateHostAsync(filePath, new CultNetHostOptions
+                {
+                    StartServer = false
+                });
+
+                Assert.That(host.Cache, Is.Not.Null);
+                Assert.That(host.Store, Is.Not.Null);
+                Assert.That(host.Server, Is.Not.Null);
+
+                await host.Cache.UpsertAsync(new PlayerData
+                {
+                    PlayerId = Guid.NewGuid(),
+                    Email = "host@example.test",
+                    PasswordHash = "hash",
+                    Username = "HostUser"
+                });
+                await host.FlushAsync();
+                host.Dispose();
+
+                var reopened = await CultCacheMessagePack.OpenAsync(filePath);
+                Assert.That(reopened.GetByName<PlayerData>("HostUser"), Is.Not.Null);
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+            }
+        }
+
+        [Test]
+        public void CultNetLocal_CreateClient_Uses_Development_Defaults()
+        {
+            var client = CultNetLocal.CreateClient();
+
+            Assert.That(client, Is.Not.Null);
+            Assert.That(client.LogSensitivePayloads, Is.False);
+            Assert.That(client.ReconnectState, Is.EqualTo(ClientReconnectState.Idle));
         }
 
         private sealed class EnvironmentVariableScope : IDisposable

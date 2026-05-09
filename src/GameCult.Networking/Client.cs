@@ -165,6 +165,14 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a listener for a specific message type.
+        /// </summary>
+        public void On<T>(Action<T> callback) where T : Message
+        {
+            AddMessageListener(callback);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -176,6 +184,14 @@ namespace GameCult.Networking
                 var newDelegate = Delegate.Remove(currentDelegate, callback) as Action<T>;
                 _messageDelegates[typeof(T)] = newDelegate ?? (_ => { });  // Null if empty
             }
+        }
+
+        /// <summary>
+        /// Removes a previously registered listener for a specific message type.
+        /// </summary>
+        public void Off<T>(Action<T> callback) where T : Message
+        {
+            RemoveMessageListener(callback);
         }
 
         /// <summary>

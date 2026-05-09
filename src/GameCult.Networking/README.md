@@ -183,6 +183,20 @@ Use `ServerSecurityOptions.Development()` only for local development and tests. 
 
 ## Basic Server Usage
 
+Quickest local-host path:
+
+```csharp
+using GameCult.Networking;
+
+var host = await CultNetLocal.StartHostAsync("Players.msgpack");
+host.Server.On<ChatMessage>(message =>
+{
+    host.Server.Logger.LogInfo($"Chat: {message.Text}");
+});
+```
+
+Lower-level explicit path:
+
 ```csharp
 using GameCult.Caching;
 using GameCult.Logging;
@@ -194,7 +208,7 @@ var server = new Server(cache)
     Logger = new ConsoleLogger()
 };
 
-server.AddMessageListener<ChatMessage>(message =>
+server.On<ChatMessage>(message =>
 {
     server.Logger.LogInfo($"Chat: {message.Text}");
 });
@@ -203,6 +217,18 @@ server.Start();
 ```
 
 ## Basic Client Usage
+
+Quickest local-client path:
+
+```csharp
+using GameCult.Networking;
+
+var client = CultNetLocal.ConnectLocal();
+client.On<ChatMessage>(message => Console.WriteLine(message.Text));
+client.Login("user@example.com", "correct horse battery staple");
+```
+
+Lower-level explicit path:
 
 ```csharp
 using GameCult.Logging;
@@ -214,7 +240,7 @@ var client = new Client(new ClientSecurityOptions("<matching-connection-key>"))
 };
 
 client.OnError += error => client.Logger.LogError($"Client error: {error}");
-client.AddMessageListener<ChatMessage>(message => client.Logger.LogInfo($"Chat: {message.Text}"));
+client.On<ChatMessage>(message => client.Logger.LogInfo($"Chat: {message.Text}"));
 
 client.Connect("localhost", 3075);
 client.Login("user@example.com", "correct horse battery staple");

@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.IO;
 using System.Linq;
@@ -82,6 +83,35 @@ namespace GameCult.Caching.Tests
                 Assert.That(store.IsDirty, Is.False);
                 Assert.That(cache.LastSuccessfulFlushAtUtc, Is.Not.Null);
                 Assert.That(store.LastSuccessfulFlushAtUtc, Is.Not.Null);
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+            }
+        }
+
+        [Test]
+        public async Task CultCacheMessagePack_OpenAsync_Creates_Usable_Durable_Cache()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+
+            try
+            {
+                var cache = await CultCacheMessagePack.OpenAsync(filePath);
+                var handle = await cache.UpsertAsync(new NamedTestEntry
+                {
+                    Name = "open",
+                    Value = "magic"
+                });
+                await cache.FlushAsync();
+                cache.Dispose();
+
+                var reopened = await CultCacheMessagePack.OpenAsync(filePath);
+                Assert.That(reopened.TryGet(handle.Key, out NamedTestEntry? loaded), Is.True);
+                Assert.That(loaded!.Value, Is.EqualTo("magic"));
             }
             finally
             {

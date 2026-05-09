@@ -1267,6 +1267,15 @@ namespace GameCult.Caching
         }
 
         /// <summary>
+        /// Flushes all attached backing stores.
+        /// </summary>
+        public Task FlushAsync(bool soft = false)
+        {
+            FlushAllBackingStores(soft);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
         /// Flushes one attached backing store.
         /// </summary>
         public void FlushBackingStore(CacheBackingStore store, bool soft = false)
@@ -1294,6 +1303,15 @@ namespace GameCult.Caching
         }
 
         /// <summary>
+        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
+        /// </summary>
+        public Task PrepareForReloadOrShutdownAsync(bool soft = false)
+        {
+            PrepareForReloadOrShutdown(soft);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
         /// Adds or replaces a typed document and returns its record handle.
         /// </summary>
         public async Task<CultRecordHandle<T>> AddAsync<T>(T document, CultRecordHandle<T>? handle = null)
@@ -1304,6 +1322,14 @@ namespace GameCult.Caching
                 source: null,
                 raiseUpdate: false);
             return new CultRecordHandle<T>(stored.Key);
+        }
+
+        /// <summary>
+        /// Adds or replaces a typed document and returns its record handle.
+        /// </summary>
+        public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
+        {
+            return AddAsync(document, handle);
         }
 
         /// <summary>
@@ -1333,6 +1359,15 @@ namespace GameCult.Caching
         public T? Get<T>(CultRecordKey key) where T : class
         {
             return Get(key) as T;
+        }
+
+        /// <summary>
+        /// Tries to get a typed document by record key.
+        /// </summary>
+        public bool TryGet<T>(CultRecordKey key, out T? document) where T : class
+        {
+            document = Get<T>(key);
+            return document != null;
         }
 
         /// <summary>
@@ -1372,6 +1407,15 @@ namespace GameCult.Caching
         }
 
         /// <summary>
+        /// Tries to get a typed document by its CultName value.
+        /// </summary>
+        public bool TryGetByName<T>(string name, out T? document) where T : class
+        {
+            document = GetByName<T>(name);
+            return document != null;
+        }
+
+        /// <summary>
         /// Gets a typed document by an indexed value.
         /// </summary>
         public T? GetByIndex<T>(string alias, string value) where T : class
@@ -1383,6 +1427,15 @@ namespace GameCult.Caching
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Tries to get a typed document by an indexed value.
+        /// </summary>
+        public bool TryGetByIndex<T>(string alias, string value, out T? document) where T : class
+        {
+            document = GetByIndex<T>(alias, value);
+            return document != null;
         }
 
         /// <summary>
@@ -1402,6 +1455,15 @@ namespace GameCult.Caching
             {
                 RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
             }
+        }
+
+        /// <summary>
+        /// Removes a document by typed handle.
+        /// </summary>
+        public Task DeleteAsync<T>(CultRecordHandle<T> handle)
+        {
+            Remove(handle);
+            return Task.CompletedTask;
         }
 
         /// <summary>
