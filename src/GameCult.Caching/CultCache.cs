@@ -1284,7 +1284,44 @@ namespace GameCult.Caching
             };
 
             Directory.CreateDirectory(FileInfo.DirectoryName!);
-            File.WriteAllBytes(FileInfo.FullName, SerializeSnapshot(snapshot));
+            WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+        }
+
+        private static void WriteSnapshotAtomically(string path, byte[] payload)
+        {
+            var directory = Path.GetDirectoryName(path)!;
+            var tempPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+
+            try
+            {
+                using (var stream = new FileStream(
+                           tempPath,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           bufferSize: 4096,
+                           FileOptions.WriteThrough))
+                {
+                    stream.Write(payload, 0, payload.Length);
+                    stream.Flush(true);
+                }
+
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
         }
     }
 }
