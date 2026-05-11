@@ -82,6 +82,69 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Mutation authority owner identifiers advertised through CultNet mutation contracts.
+    /// </summary>
+    public static class CultNetMutationAuthorities
+    {
+        /// <summary>
+        /// The document is inspectable but not writable through CultNet.
+        /// </summary>
+        public const string ReadOnly = "readOnly";
+        /// <summary>
+        /// The local human operator may submit the corresponding mutation intent.
+        /// </summary>
+        public const string LocalUser = "localUser";
+        /// <summary>
+        /// A coordinator-owned Epiphany control surface owns the mutation path.
+        /// </summary>
+        public const string Coordinator = "coordinator";
+        /// <summary>
+        /// The runtime itself may write this document directly.
+        /// </summary>
+        public const string Runtime = "runtime";
+        /// <summary>
+        /// The document should not be mutated through CultNet.
+        /// </summary>
+        public const string Denied = "denied";
+    }
+
+    /// <summary>
+    /// Declares how a document or surface may be inspected and mutated over CultNet.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDocumentMutationContract
+    {
+        /// <summary>
+        /// Gets or sets the stable document type governed by this contract.
+        /// </summary>
+        [Key("documentType")] public string DocumentType { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the payload schema version when the contract governs a versioned document payload.
+        /// </summary>
+        [Key("payloadSchemaVersion")] public string? PayloadSchemaVersion { get; set; }
+        /// <summary>
+        /// Gets or sets the CultNet operations this document accepts.
+        /// </summary>
+        [Key("operations")] public string[] Operations { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets which actor is allowed to drive those operations.
+        /// </summary>
+        [Key("authority")] public string Authority { get; set; } = CultNetMutationAuthorities.ReadOnly;
+        /// <summary>
+        /// Gets or sets the intent document types a client may submit to request mutation.
+        /// </summary>
+        [Key("intentDocumentTypes")] public string[]? IntentDocumentTypes { get; set; }
+        /// <summary>
+        /// Gets or sets the receipt document types emitted after a successful mutation path.
+        /// </summary>
+        [Key("receiptDocumentTypes")] public string[]? ReceiptDocumentTypes { get; set; }
+        /// <summary>
+        /// Gets or sets freeform notes that explain local mutation guardrails or posture.
+        /// </summary>
+        [Key("notes")] public string[]? Notes { get; set; }
+    }
+
+    /// <summary>
     /// Marker interface for the explicit modern CultNet schema-v0 message family.
     /// </summary>
     public interface ICultNetSchemaMessage
@@ -126,6 +189,10 @@ namespace GameCult.Networking
         /// Gets or sets the supported document types.
         /// </summary>
         [Key("supportedDocumentTypes")] public string[]? SupportedDocumentTypes { get; set; }
+        /// <summary>
+        /// Gets or sets the supported mutation contracts.
+        /// </summary>
+        [Key("supportedMutationContracts")] public CultNetDocumentMutationContract[]? SupportedMutationContracts { get; set; }
         /// <summary>
         /// Gets or sets the supported message versions.
         /// </summary>

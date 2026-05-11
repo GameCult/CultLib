@@ -261,6 +261,12 @@ namespace GameCult.Networking
             },
             new SchemaResourceSpec
             {
+                FileName = "cultnet.document-mutation-contract.schema.json",
+                Kind = "shared_contract",
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
                 FileName = "cultnet.login.schema.json",
                 Kind = "wire_message",
                 SchemaVersion = CultNetSchemaVersions.Login,
