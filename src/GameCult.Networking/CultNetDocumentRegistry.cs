@@ -74,6 +74,7 @@ namespace GameCult.Networking
         /// </summary>
         public static CultNetDocumentBinding ForDocument<T>(
             CultDocumentRegistry? registry = null,
+            string? schemaId = null,
             Func<T, byte[]>? payloadSerializer = null,
             Func<byte[], T>? payloadDeserializer = null)
             where T : class
@@ -81,7 +82,7 @@ namespace GameCult.Networking
             var descriptor = (registry ?? CultDocumentRegistry.Shared).GetRequired<T>();
             return new CultNetDocumentBinding(
                 typeof(T),
-                descriptor.SchemaId,
+                string.IsNullOrWhiteSpace(schemaId) ? descriptor.SchemaId : schemaId!,
                 document =>
                 {
                     var typed = (T)document;
@@ -185,7 +186,7 @@ namespace GameCult.Networking
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
                 Document = new CultNetRawDocumentRecord
                 {
-                    SchemaId = descriptor.SchemaId,
+                    SchemaId = binding.SchemaId,
                     RecordKey = handle.Key.Value,
                     StoredAt = storedAt,
                     PayloadEncoding = "messagepack",
@@ -235,9 +236,19 @@ namespace GameCult.Networking
             foreach (var document in cache.AllEntries)
             {
                 var descriptor = _documents.GetRequired(document.GetType());
+                var binding = GetByDocumentType(document.GetType()) ??
+                              new CultNetDocumentBinding(
+                                  document.GetType(),
+                                  descriptor.SchemaId,
+                                  value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
+                                  payload => CultDocumentMessagePackSerialization.DeserializeUntyped(document.GetType(), payload));
+
                 if (requestedSchemaIds != null && !requestedSchemaIds.Contains(descriptor.SchemaId))
                 {
-                    continue;
+                    if (!requestedSchemaIds.Contains(binding.SchemaId))
+                    {
+                        continue;
+                    }
                 }
 
                 var handleMethod = typeof(CultCache)
@@ -260,16 +271,9 @@ namespace GameCult.Networking
                     continue;
                 }
 
-                var binding = GetByDocumentType(document.GetType()) ??
-                              new CultNetDocumentBinding(
-                                  document.GetType(),
-                                  descriptor.SchemaId,
-                                  value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
-                                  payload => CultDocumentMessagePackSerialization.DeserializeUntyped(document.GetType(), payload));
-
                 documents.Add(new CultNetRawDocumentRecord
                 {
-                    SchemaId = descriptor.SchemaId,
+                    SchemaId = binding.SchemaId,
                     RecordKey = key,
                     StoredAt = storedAt,
                     PayloadEncoding = "messagepack",
@@ -301,13 +305,15 @@ namespace GameCult.Networking
             }
 
             ValidateRawDocumentRecord(message.Document);
-            var descriptor = _documents.GetRequiredBySchemaId(message.Document.SchemaId);
-            var binding = GetBySchemaId(message.Document.SchemaId) ??
-                          new CultNetDocumentBinding(
-                              descriptor.DocumentType,
-                              descriptor.SchemaId,
-                              value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
-                              payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload));
+            var binding = GetBySchemaId(message.Document.SchemaId);
+            var descriptor = binding != null
+                ? _documents.GetRequired(binding.DocumentType)
+                : _documents.GetRequiredBySchemaId(message.Document.SchemaId);
+            binding ??= new CultNetDocumentBinding(
+                descriptor.DocumentType,
+                descriptor.SchemaId,
+                value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
+                payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload));
             var document = binding.PayloadDeserializer(message.Document.Payload);
 
             var addMethod = typeof(CultCache).GetMethod(nameof(CultCache.AddAsync))!

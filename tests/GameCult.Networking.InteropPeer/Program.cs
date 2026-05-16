@@ -56,6 +56,7 @@ static async Task ServeAsync(ServeConfig config)
     var schemaRegistration = LoadSchemaRegistration(config.SchemaPath);
     var documentRegistry = new CultNetDocumentRegistry()
         .Register(CultNetDocumentBinding.ForDocument<CultNetInteropNote>(
+            schemaId: schemaRegistration.SchemaId,
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
 
@@ -172,6 +173,7 @@ static async Task DialAsync(DialConfig config)
     var cache = new CultCache();
     var documentRegistry = new CultNetDocumentRegistry()
         .Register(CultNetDocumentBinding.ForDocument<CultNetInteropNote>(
+            schemaId: schemaRegistration.SchemaId,
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
 
