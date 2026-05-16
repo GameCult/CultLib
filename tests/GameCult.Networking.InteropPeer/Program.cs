@@ -59,6 +59,7 @@ static async Task ServeAsync(ServeConfig config)
             schemaId: schemaRegistration.SchemaId,
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
+    RegisterCapabilityBindings(documentRegistry);
 
     var customSchemaRegistry = new CultNetSchemaRegistry().Register(schemaRegistration);
     var cache = new CultCache();
@@ -176,6 +177,7 @@ static async Task DialAsync(DialConfig config)
             schemaId: schemaRegistration.SchemaId,
             payloadSerializer: SerializeInteropNotePayload,
             payloadDeserializer: DeserializeInteropNotePayload));
+    RegisterCapabilityBindings(documentRegistry);
 
     using var client = new TcpClient();
     await client.ConnectAsync(config.TargetHost, config.TargetPort);
@@ -189,6 +191,7 @@ static async Task DialAsync(DialConfig config)
         Role = "peer",
         DisplayName = config.DisplayName,
         SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
+        SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
         SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
         SupportsSchemaCatalog = true
     });
@@ -220,6 +223,9 @@ static async Task DialAsync(DialConfig config)
         string.Equals(schema.SchemaId, schemaRegistration.SchemaId, StringComparison.Ordinal) &&
         string.Equals(schema.DocumentType, InteropPeerShared.InteropDocumentType, StringComparison.Ordinal));
 
+    var mutation = await MutateRemoteNoteAsync(stream, cache, documentRegistry, config.RuntimeId, note);
+    var fireReceipt = await FireRemoteWeaponAsync(stream, cache, documentRegistry, config.RuntimeId, remoteHello.RuntimeId);
+
     WriteJsonLine(new
     {
         mode = "dial",
@@ -246,8 +252,77 @@ static async Task DialAsync(DialConfig config)
             title = note.Title,
             body = note.Body,
             tags = note.Tags
-        }
+        },
+        mutatedNote = mutation,
+        fireReceipt
     });
+}
+
+static async Task<object> MutateRemoteNoteAsync(
+    NetworkStream stream,
+    CultCache cache,
+    CultNetDocumentRegistry documentRegistry,
+    string runtimeId,
+    CultNetInteropNote note)
+{
+    var intent = new CultNetInteropMutationIntent
+    {
+        IntentId = $"{runtimeId}-decorate",
+        TargetDocumentId = note.DocumentId,
+        AppendBody = $" Decorated by {runtimeId}.",
+        AppendTag = $"decorated:{runtimeId}"
+    };
+    await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+        $"{runtimeId}-decorate-put",
+        new CultRecordHandle<CultNetInteropMutationIntent>(new CultRecordKey(intent.IntentId)),
+        intent));
+    await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropMutationReceipt>(
+        cache,
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+    var mutated = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropNote>(
+        cache,
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+    return new
+    {
+        schemaVersion = mutated.SchemaVersion,
+        documentId = mutated.DocumentId,
+        authorRuntimeId = mutated.AuthorRuntimeId,
+        title = mutated.Title,
+        body = mutated.Body,
+        tags = mutated.Tags
+    };
+}
+
+static async Task<object> FireRemoteWeaponAsync(
+    NetworkStream stream,
+    CultCache cache,
+    CultNetDocumentRegistry documentRegistry,
+    string runtimeId,
+    string remoteRuntimeId)
+{
+    var command = new CultNetInteropFireCommand
+    {
+        CommandId = $"{runtimeId}-fire",
+        CharacterId = remoteRuntimeId,
+        WeaponId = "interop-rifle"
+    };
+    await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+        $"{runtimeId}-fire-put",
+        new CultRecordHandle<CultNetInteropFireCommand>(new CultRecordKey(command.CommandId)),
+        command));
+    var receipt = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropFireReceipt>(
+        cache,
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+    return new
+    {
+        schemaVersion = receipt.SchemaVersion,
+        commandId = receipt.CommandId,
+        accepted = receipt.Accepted,
+        characterId = receipt.CharacterId,
+        weaponId = receipt.WeaponId,
+        shotsFired = receipt.ShotsFired,
+        ammoRemaining = receipt.AmmoRemaining
+    };
 }
 
 static async Task RunDiscoveryServerAsync(Socket socket, ServeConfig config, CancellationToken cancellationToken)
@@ -356,6 +431,7 @@ static async Task RunTcpServerAsync(
                                 Role = "peer",
                                 DisplayName = config.DisplayName,
                                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
+                                SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
                                 SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
                                 SupportsSchemaCatalog = true
                             }, cancellationToken);
@@ -379,6 +455,9 @@ static async Task RunTcpServerAsync(
                                     }),
                                 cancellationToken);
                             break;
+                        case CultNetDocumentPutRawMessage rawPut:
+                            await HandleRawPutAsync(stream, config, cache, documentRegistry, rawPut, cancellationToken);
+                            break;
                     }
                 }
             }
@@ -387,6 +466,68 @@ static async Task RunTcpServerAsync(
                 WriteLog("tcpServeError", new { runtimeId = config.RuntimeId, error = error.Message });
             }
         }, cancellationToken);
+    }
+}
+
+static async Task HandleRawPutAsync(
+    NetworkStream stream,
+    ServeConfig config,
+    CultCache cache,
+    CultNetDocumentRegistry documentRegistry,
+    CultNetDocumentPutRawMessage rawPut,
+    CancellationToken cancellationToken)
+{
+    switch (rawPut.Document.SchemaId)
+    {
+        case InteropPeerShared.MutationIntentSchemaId:
+        {
+            var intent = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropMutationIntent>(cache, rawPut);
+            var note = cache.AllEntries
+                .OfType<CultNetInteropNote>()
+                .First(candidate => string.Equals(candidate.DocumentId, intent.TargetDocumentId, StringComparison.Ordinal));
+            note.Body += intent.AppendBody;
+            note.Tags = [..note.Tags, intent.AppendTag];
+            await cache.AddAsync(note, new CultRecordHandle<CultNetInteropNote>(new CultRecordKey(note.DocumentId)));
+            var receipt = new CultNetInteropMutationReceipt
+            {
+                IntentId = intent.IntentId,
+                Accepted = true,
+                DocumentId = note.DocumentId,
+                Body = note.Body,
+                Tags = note.Tags
+            };
+            var options = ResponseOptions(config, "mutation");
+            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+                $"{config.RuntimeId}-mutation-receipt",
+                new CultRecordHandle<CultNetInteropMutationReceipt>(new CultRecordKey(receipt.IntentId)),
+                receipt,
+                options), cancellationToken);
+            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+                $"{config.RuntimeId}-mutated-note",
+                new CultRecordHandle<CultNetInteropNote>(new CultRecordKey(note.DocumentId)),
+                note,
+                options), cancellationToken);
+            break;
+        }
+        case InteropPeerShared.FireCommandSchemaId:
+        {
+            var command = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropFireCommand>(cache, rawPut);
+            var receipt = new CultNetInteropFireReceipt
+            {
+                CommandId = command.CommandId,
+                Accepted = true,
+                CharacterId = command.CharacterId,
+                WeaponId = command.WeaponId,
+                ShotsFired = 1,
+                AmmoRemaining = 29
+            };
+            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+                $"{config.RuntimeId}-fire-receipt",
+                new CultRecordHandle<CultNetInteropFireReceipt>(new CultRecordKey(receipt.CommandId)),
+                receipt,
+                ResponseOptions(config, "side-effect")), cancellationToken);
+            break;
+        }
     }
 }
 
@@ -537,6 +678,38 @@ static CultNetInteropNote DeserializeInteropNotePayload(byte[] payload)
     };
 }
 
+static void RegisterCapabilityBindings(CultNetDocumentRegistry registry)
+{
+    registry
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropMutationIntent>(
+            schemaId: InteropPeerShared.MutationIntentSchemaId,
+            payloadSerializer: value => MessagePackSerializer.Serialize(value, CultNetSchemaMessageSerialization.Options),
+            payloadDeserializer: payload => MessagePackSerializer.Deserialize<CultNetInteropMutationIntent>(payload, CultNetSchemaMessageSerialization.Options)))
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropMutationReceipt>(
+            schemaId: InteropPeerShared.MutationReceiptSchemaId,
+            payloadSerializer: value => MessagePackSerializer.Serialize(value, CultNetSchemaMessageSerialization.Options),
+            payloadDeserializer: payload => MessagePackSerializer.Deserialize<CultNetInteropMutationReceipt>(payload, CultNetSchemaMessageSerialization.Options)))
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropFireCommand>(
+            schemaId: InteropPeerShared.FireCommandSchemaId,
+            payloadSerializer: value => MessagePackSerializer.Serialize(value, CultNetSchemaMessageSerialization.Options),
+            payloadDeserializer: payload => MessagePackSerializer.Deserialize<CultNetInteropFireCommand>(payload, CultNetSchemaMessageSerialization.Options)))
+        .Register(CultNetDocumentBinding.ForDocument<CultNetInteropFireReceipt>(
+            schemaId: InteropPeerShared.FireReceiptSchemaId,
+            payloadSerializer: value => MessagePackSerializer.Serialize(value, CultNetSchemaMessageSerialization.Options),
+            payloadDeserializer: payload => MessagePackSerializer.Deserialize<CultNetInteropFireReceipt>(payload, CultNetSchemaMessageSerialization.Options)));
+}
+
+static CultNetDocumentMessageOptions ResponseOptions(ServeConfig config, string tag)
+{
+    return new CultNetDocumentMessageOptions
+    {
+        SourceRuntimeId = config.RuntimeId,
+        SourceAgentId = config.AgentId,
+        SourceRole = "peer",
+        Tags = [tag, config.RuntimeId]
+    };
+}
+
 static async Task WaitForeverAsync(CancellationToken cancellationToken)
 {
     try
@@ -658,6 +831,18 @@ static class InteropPeerShared
 {
     public const string InteropDocumentType = "cultnet.interop-note";
     public const string InteropSchemaVersion = "cultnet.interop_note.v0";
+    public const string MutationIntentDocumentType = "cultnet.interop-note-mutation-intent";
+    public const string MutationIntentSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-intent.schema.json";
+    public const string MutationIntentSchemaVersion = "cultnet.interop_note_mutation_intent.v0";
+    public const string MutationReceiptDocumentType = "cultnet.interop-note-mutation-receipt";
+    public const string MutationReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-receipt.schema.json";
+    public const string MutationReceiptSchemaVersion = "cultnet.interop_note_mutation_receipt.v0";
+    public const string FireCommandDocumentType = "cultnet.interop-fire-weapon-command";
+    public const string FireCommandSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-command.schema.json";
+    public const string FireCommandSchemaVersion = "cultnet.interop_fire_weapon_command.v0";
+    public const string FireReceiptDocumentType = "cultnet.interop-fire-weapon-receipt";
+    public const string FireReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-receipt.schema.json";
+    public const string FireReceiptSchemaVersion = "cultnet.interop_fire_weapon_receipt.v0";
     public const string DiscoveryProbeSchemaVersion = "cultnet.discovery_probe.v0";
     public const string DiscoveryAnnounceSchemaVersion = "cultnet.discovery_announce.v0";
 
@@ -665,6 +850,20 @@ static class InteropPeerShared
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+
+    public static CultNetDocumentMutationContract InteractionContract()
+    {
+        return new CultNetDocumentMutationContract
+        {
+            DocumentType = InteropDocumentType,
+            PayloadSchemaVersion = InteropSchemaVersion,
+            Operations = ["snapshot", "documentPut", "intentSubmit", "receiptWatch"],
+            Authority = CultNetMutationAuthorities.Runtime,
+            IntentDocumentTypes = [MutationIntentDocumentType, FireCommandDocumentType],
+            ReceiptDocumentTypes = [MutationReceiptDocumentType, FireReceiptDocumentType],
+            Notes = []
+        };
+    }
 }
 
 [CultDocument(InteropPeerShared.InteropDocumentType, InteropPeerShared.InteropSchemaVersion)]
@@ -687,6 +886,52 @@ public sealed class CultNetInteropNotePayload
     [Key(3)] public string Title { get; set; } = string.Empty;
     [Key(4)] public string Body { get; set; } = string.Empty;
     [Key(5)] public string[] Tags { get; set; } = Array.Empty<string>();
+}
+
+[CultDocument(InteropPeerShared.MutationIntentDocumentType, InteropPeerShared.MutationIntentSchemaVersion)]
+[MessagePackObject]
+public sealed class CultNetInteropMutationIntent
+{
+    [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.MutationIntentSchemaVersion;
+    [Key(1)] [CultName] public string IntentId { get; set; } = string.Empty;
+    [Key(2)] public string TargetDocumentId { get; set; } = string.Empty;
+    [Key(3)] public string AppendBody { get; set; } = string.Empty;
+    [Key(4)] public string AppendTag { get; set; } = string.Empty;
+}
+
+[CultDocument(InteropPeerShared.MutationReceiptDocumentType, InteropPeerShared.MutationReceiptSchemaVersion)]
+[MessagePackObject]
+public sealed class CultNetInteropMutationReceipt
+{
+    [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.MutationReceiptSchemaVersion;
+    [Key(1)] [CultName] public string IntentId { get; set; } = string.Empty;
+    [Key(2)] public bool Accepted { get; set; }
+    [Key(3)] public string DocumentId { get; set; } = string.Empty;
+    [Key(4)] public string Body { get; set; } = string.Empty;
+    [Key(5)] public string[] Tags { get; set; } = Array.Empty<string>();
+}
+
+[CultDocument(InteropPeerShared.FireCommandDocumentType, InteropPeerShared.FireCommandSchemaVersion)]
+[MessagePackObject]
+public sealed class CultNetInteropFireCommand
+{
+    [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.FireCommandSchemaVersion;
+    [Key(1)] [CultName] public string CommandId { get; set; } = string.Empty;
+    [Key(2)] public string CharacterId { get; set; } = string.Empty;
+    [Key(3)] public string WeaponId { get; set; } = string.Empty;
+}
+
+[CultDocument(InteropPeerShared.FireReceiptDocumentType, InteropPeerShared.FireReceiptSchemaVersion)]
+[MessagePackObject]
+public sealed class CultNetInteropFireReceipt
+{
+    [Key(0)] public string SchemaVersion { get; set; } = InteropPeerShared.FireReceiptSchemaVersion;
+    [Key(1)] [CultName] public string CommandId { get; set; } = string.Empty;
+    [Key(2)] public bool Accepted { get; set; }
+    [Key(3)] public string CharacterId { get; set; } = string.Empty;
+    [Key(4)] public string WeaponId { get; set; } = string.Empty;
+    [Key(5)] public int ShotsFired { get; set; }
+    [Key(6)] public int AmmoRemaining { get; set; }
 }
 
 [MessagePackObject]
