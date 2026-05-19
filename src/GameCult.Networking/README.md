@@ -57,6 +57,8 @@ Modern schema-v0 helpers live in:
 - `CultNetSchemaMessageSerialization`
 - `CultNetSchemaRegistry`
 - `CultNetDocumentRegistry`
+- `CultNetDatabase`
+- `CultNetDatabaseServer`
 - `NetPeerExtensions.SendCultNet(...)`
 
 ## Main Types
@@ -126,6 +128,11 @@ CultNet becomes the distribution model:
 - snapshot catch-up
 - remote subscription fanout
 - reconnect resynchronization
+
+The current first slice exposes this as `CultNetDatabase` and wires hosted
+servers through `CultNetDatabaseServer`. It handles primary-shard writes, typed
+R3 watch streams, raw document puts/deletes, and raw snapshot responses. Remote
+subscription messages and shard catalog exchange are the next missing organs.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner

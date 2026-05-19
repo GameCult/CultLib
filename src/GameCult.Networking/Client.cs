@@ -52,6 +52,7 @@ namespace GameCult.Networking
         private int _reconnectAttemptCount;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
+        private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
 
         private string? _sessionToken;
         private string _lastHost = "localhost";
@@ -138,11 +139,42 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends a modern CultNet schema-v0 message when the client is connected and authorized.
+        /// </summary>
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(Client));
+            }
+
+            if (message == null) throw new ArgumentNullException(nameof(message));
+
+            if (Connected && _peer != null)
+            {
+                if (Verified || message is CultNetLoginMessage or CultNetRegisterMessage or CultNetVerifyMessage)
+                {
+                    Logger.LogDebug($"Sending CultNet schema message {message.SchemaVersion}");
+                    _peer.SendCultNet(message);
+                }
+                else
+                {
+                    Logger.LogError("Cannot send CultNet schema message, client is not verified!");
+                }
+            }
+            else
+            {
+                Logger.LogError("Cannot send CultNet schema message, client is not connected!");
+            }
+        }
+
+        /// <summary>
         /// Removes all registered message listeners.
         /// </summary>
         public void ClearMessageListeners()
         {
             _messageDelegates.Clear();
+            _cultNetMessageDelegates.Clear();
         }
 
         /// <summary>
@@ -173,6 +205,29 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            var type = typeof(T);
+            _cultNetMessageDelegates.AddOrUpdate(type,
+                _ => callback,
+                (t, current) =>
+                {
+                    var combined = Delegate.Combine(current, callback) as Action<T>;
+                    return combined ?? throw new InvalidOperationException($"Failed to combine delegates for {t.Name}");
+                });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -192,6 +247,26 @@ namespace GameCult.Networking
         public void Off<T>(Action<T> callback) where T : Message
         {
             RemoveMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void RemoveCultNetMessageListener<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (_cultNetMessageDelegates.TryGetValue(typeof(T), out var currentDelegate))
+            {
+                var newDelegate = Delegate.Remove(currentDelegate, callback) as Action<T>;
+                _cultNetMessageDelegates[typeof(T)] = newDelegate ?? (_ => { });
+            }
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void OffCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            RemoveCultNetMessageListener(callback);
         }
 
         /// <summary>
@@ -293,6 +368,23 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
+                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    {
+                        Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
+                        var cultNetType = cultNetMessage.GetType();
+                        if (_cultNetMessageDelegates.TryGetValue(cultNetType, out var cultNetDelegate) &&
+                            cultNetDelegate != null)
+                        {
+                            cultNetDelegate.DynamicInvoke(cultNetMessage);
+                        }
+                        else
+                        {
+                            Logger.LogWarning($"No listener for CultNet schema message {cultNetMessage.SchemaVersion}");
+                        }
+
+                        return;
+                    }
+
                     var message = MessageSerialization.Deserialize<Message>(bytes);
                     if (LogSensitivePayloads)
                     {
@@ -353,6 +445,20 @@ namespace GameCult.Networking
 
             listener.NetworkLatencyUpdateEvent +=
                 (peer, latency) => Ping = latency; //Logger($"Ping received: {latency} ms");
+        }
+
+        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
+        {
+            try
+            {
+                message = CultNetSchemaMessageSerialization.Deserialize(payload);
+                return true;
+            }
+            catch (MessagePackSerializationException)
+            {
+                message = null!;
+                return false;
+            }
         }
 
         /// <summary>

@@ -356,6 +356,40 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabaseServer_Creates_Filtered_SnapshotResponse()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "snapshot@example.test",
+                PasswordHash = "hash",
+                Username = "Snapshot"
+            };
+            var handle = await database.PutAsync(new CultRecordKey("player:snapshot"), player);
+
+            var response = databaseServer.CreateSnapshotResponse(registry.CreateSnapshotRequest(
+                "snapshot-request",
+                recordKeys: [handle.Key.Value]));
+
+            Assert.That(response.MessageId, Is.EqualTo("snapshot-request"));
+            Assert.That(response.Documents, Has.Length.EqualTo(1));
+            Assert.That(response.Documents[0].RecordKey, Is.EqualTo(handle.Key.Value));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
+        }
+
+        [Test]
         public void CultNetSchemaRegistry_BuiltInCatalog_AdvertisesRawLane_AndSharedGhostlightContract()
         {
             var response = CultNetSchemaRegistry.BuiltIn.CreateCatalogResponse(

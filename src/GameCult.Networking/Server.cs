@@ -29,6 +29,7 @@ namespace GameCult.Networking
         private const int MaxLoginAttemptsPerMinute = 5;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
+        private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
         private readonly ConcurrentDictionary<long, User> _users = new();
         private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _connectionAttempts = new();
         private readonly ConcurrentDictionary<string, object> _connectionAttemptLocks = new();
@@ -92,6 +93,7 @@ namespace GameCult.Networking
         public void ClearMessageListeners()
         {
             _messageDelegates.Clear();
+            _cultNetMessageDelegates.Clear();
         }
 
         /// <summary>
@@ -120,6 +122,49 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Func<T, NetPeer, Task> callback) where T : ICultNetSchemaMessage
+        {
+            var type = typeof(T);
+            _cultNetMessageDelegates.AddOrUpdate(type,
+                _ => callback,
+                (t, current) =>
+                {
+                    var combined = Delegate.Combine(current, callback) as Func<T, NetPeer, Task>;
+                    return combined ?? throw new InvalidOperationException($"Failed to combine delegates for {t.Name}");
+                });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Action<T, NetPeer> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener<T>((message, peer) =>
+            {
+                callback(message, peer);
+                return Task.CompletedTask;
+            });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Func<T, NetPeer, Task> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Action<T, NetPeer> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -139,6 +184,25 @@ namespace GameCult.Networking
         public void Off<T>(Action<T> callback) where T : Message
         {
             RemoveMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void RemoveCultNetMessageListener<T>(Delegate callback) where T : ICultNetSchemaMessage
+        {
+            if (_cultNetMessageDelegates.TryGetValue(typeof(T), out var currentDelegate))
+            {
+                var newDelegate = Delegate.Remove(currentDelegate, callback);
+                if (newDelegate == null)
+                {
+                    _cultNetMessageDelegates.TryRemove(typeof(T), out _);
+                }
+                else
+                {
+                    _cultNetMessageDelegates[typeof(T)] = newDelegate;
+                }
+            }
         }
 
         /// <summary>
@@ -210,6 +274,14 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
+                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
+                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    {
+                        Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
+                        await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
+                        return;
+                    }
+
                     var message = MessageSerialization.Deserialize<Message>(bytes);
                     if (LogSensitivePayloads)
                     {
@@ -225,8 +297,6 @@ namespace GameCult.Networking
                     }
 
                     message.Peer = peer;
-                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
-
                     if (message is LoginMessage or RegisterMessage or VerifyMessage)
                     {
                         if (IsVerified(user))
@@ -308,6 +378,53 @@ namespace GameCult.Networking
             });
 
             Logger.LogInfo($"Server started on port {ServerPort}.");
+        }
+
+        private async Task HandleCultNetSchemaMessageAsync(NetPeer peer, User user, ICultNetSchemaMessage message)
+        {
+            if (!IsVerified(user) && !CanProcessBeforeVerification(message))
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "User Not Verified" });
+                return;
+            }
+
+            if (_cultNetMessageDelegates.TryGetValue(message.GetType(), out var del) && del != null)
+            {
+                foreach (var listener in del.GetInvocationList())
+                {
+                    var result = listener.DynamicInvoke(message, peer);
+                    if (result is Task task)
+                    {
+                        await task.ConfigureAwait(false);
+                    }
+                }
+
+                user.SessionExpiresAt = DateTimeOffset.UtcNow.AddSeconds(SessionTimeoutSeconds);
+                RefreshSessionIfNeeded(peer, user);
+            }
+            else
+            {
+                Logger.LogWarning($"No listener for CultNet schema message {message.SchemaVersion}");
+            }
+        }
+
+        private static bool CanProcessBeforeVerification(ICultNetSchemaMessage message)
+        {
+            return message is CultNetHelloMessage or CultNetSchemaCatalogRequestMessage;
+        }
+
+        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
+        {
+            try
+            {
+                message = CultNetSchemaMessageSerialization.Deserialize(payload);
+                return true;
+            }
+            catch (MessagePackSerializationException)
+            {
+                message = null!;
+                return false;
+            }
         }
 
         /// <inheritdoc />

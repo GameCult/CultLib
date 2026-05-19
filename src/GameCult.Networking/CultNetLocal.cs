@@ -42,12 +42,18 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetHost : IDisposable
     {
-        internal CultNetHost(CultCache cache, SingleFileMessagePackBackingStore? store, Server server, CultNetDatabase database)
+        internal CultNetHost(
+            CultCache cache,
+            SingleFileMessagePackBackingStore? store,
+            Server server,
+            CultNetDatabase database,
+            CultNetDatabaseServer databaseServer)
         {
             Cache = cache;
             Store = store;
             Server = server;
             Database = database;
+            DatabaseServer = databaseServer;
         }
 
         /// <summary>
@@ -71,6 +77,11 @@ namespace GameCult.Networking
         public CultNetDatabase Database { get; }
 
         /// <summary>
+        /// Gets the schema-v0 server bridge for distributed database messages.
+        /// </summary>
+        public CultNetDatabaseServer DatabaseServer { get; }
+
+        /// <summary>
         /// Starts the server.
         /// </summary>
         public void Start()
@@ -91,6 +102,7 @@ namespace GameCult.Networking
         /// </summary>
         public void Dispose()
         {
+            DatabaseServer.Dispose();
             Server.Dispose();
             Database.Dispose();
             Cache.Dispose();
@@ -118,9 +130,10 @@ namespace GameCult.Networking
             var server = new Server(cache, options.Security ?? ServerSecurityOptions.Development());
             var databaseOptions = options.DatabaseOptions ?? new CultNetDatabaseOptions();
             var database = new CultNetDatabase(cache, databaseOptions);
+            var databaseServer = new CultNetDatabaseServer(server, database);
             options.ConfigureServer?.Invoke(server);
 
-            var host = new CultNetHost(cache, store, server, database);
+            var host = new CultNetHost(cache, store, server, database, databaseServer);
             if (options.StartServer)
             {
                 host.Start();
