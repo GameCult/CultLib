@@ -277,6 +277,49 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_ShardLogResponse()
+        {
+            var message = new CultNetShardLogResponseMessage
+            {
+                MessageId = "log-1",
+                ShardId = "players-eu",
+                ShardEpoch = 12,
+                Entries =
+                [
+                    new CultNetShardLogEntryMessage
+                    {
+                        Sequence = 42,
+                        CommittedAt = "2026-05-19T12:00:00.0000000Z",
+                        ChangeKind = "updated",
+                        Put = new CultNetDocumentPutRawMessage
+                        {
+                            MessageId = "put-42",
+                            ShardId = "players-eu",
+                            ShardEpoch = 12,
+                            Document = new CultNetRawDocumentRecord
+                            {
+                                SchemaId = "schema-player",
+                                RecordKey = "player:42",
+                                Payload = [0x91, 0x2A]
+                            }
+                        }
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetShardLogResponseMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("log-1"));
+            Assert.That(roundTrip.ShardId, Is.EqualTo("players-eu"));
+            Assert.That(roundTrip.ShardEpoch, Is.EqualTo(12));
+            Assert.That(roundTrip.Entries, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Entries[0].Sequence, Is.EqualTo(42));
+            Assert.That(roundTrip.Entries[0].Put, Is.Not.Null);
+            Assert.That(roundTrip.Entries[0].Put!.Document.RecordKey, Is.EqualTo("player:42"));
+        }
+
+        [Test]
         public async Task CultNetDocumentRegistry_RawSnapshotReplication_PreservesPayloadBytes()
         {
             var sourceCache = new CultCache();
@@ -702,6 +745,108 @@ namespace GameCult.Networking.Tests
             Assert.That(entries, Has.Count.EqualTo(1));
             Assert.That(entries[0].Sequence, Is.EqualTo(2));
             Assert.That(entries[0].Key.Value, Is.EqualTo("player:two"));
+        }
+
+        [Test]
+        public async Task CultNetDatabaseServer_Creates_ShardLogResponse_AfterSequence()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-wire-log",
+                        "runtime-a",
+                        epoch: 5,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var first = new PlayerData { PlayerId = Guid.NewGuid(), Email = "one@example.test", PasswordHash = "hash", Username = "One" };
+            var second = new PlayerData { PlayerId = Guid.NewGuid(), Email = "two@example.test", PasswordHash = "hash", Username = "Two" };
+
+            await database.PutAsync(new CultRecordKey("player:one"), first);
+            await database.PutAsync(new CultRecordKey("player:two"), second);
+
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                MessageId = "wire-log",
+                ShardId = "players-wire-log",
+                ShardEpoch = 5,
+                AfterSequence = 1
+            });
+
+            Assert.That(response.MessageId, Is.EqualTo("wire-log"));
+            Assert.That(response.ShardId, Is.EqualTo("players-wire-log"));
+            Assert.That(response.ShardEpoch, Is.EqualTo(5));
+            Assert.That(response.ResyncRequired, Is.False);
+            Assert.That(response.Entries, Has.Length.EqualTo(1));
+            Assert.That(response.Entries[0].Sequence, Is.EqualTo(2));
+            Assert.That(response.Entries[0].ChangeKind, Is.EqualTo("added"));
+            Assert.That(response.Entries[0].Put, Is.Not.Null);
+            Assert.That(response.Entries[0].Put!.ShardId, Is.EqualTo("players-wire-log"));
+            Assert.That(response.Entries[0].Put!.ShardEpoch, Is.EqualTo(5));
+            Assert.That(response.Entries[0].Put!.Document.Payload, Is.EqualTo(SerializePlayerDataPayload(second)));
+        }
+
+        [Test]
+        public async Task CultNetDatabaseServer_Creates_ShardLogDeleteEntry()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-wire-delete",
+                        "runtime-a",
+                        epoch: 6,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var key = new CultRecordKey("player:delete-log");
+
+            await database.PutAsync(
+                key,
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "delete@example.test", PasswordHash = "hash", Username = "Delete" });
+            await database.DeleteAsync<PlayerData>(key);
+
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-wire-delete",
+                AfterSequence = 1
+            });
+
+            Assert.That(response.Entries, Has.Length.EqualTo(1));
+            Assert.That(response.Entries[0].Sequence, Is.EqualTo(2));
+            Assert.That(response.Entries[0].ChangeKind, Is.EqualTo("removed"));
+            Assert.That(response.Entries[0].Put, Is.Null);
+            Assert.That(response.Entries[0].Delete, Is.Not.Null);
+            Assert.That(response.Entries[0].Delete!.SchemaId, Is.EqualTo(schemaId));
+            Assert.That(response.Entries[0].Delete!.RecordKey, Is.EqualTo(key.Value));
+            Assert.That(response.Entries[0].Delete!.ShardEpoch, Is.EqualTo(6));
         }
 
         [Test]

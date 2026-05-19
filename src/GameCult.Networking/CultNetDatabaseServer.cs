@@ -21,6 +21,7 @@ namespace GameCult.Networking
         private readonly Func<CultNetDocumentPutRawMessage, NetPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, NetPeer, Task> _deleteHandler;
         private readonly Func<CultNetShardCatalogRequestMessage, NetPeer, Task> _shardCatalogHandler;
+        private readonly Func<CultNetShardLogRequestMessage, NetPeer, Task> _shardLogHandler;
         private readonly Func<CultNetDatabaseSubscribeMessage, NetPeer, Task> _subscribeHandler;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, NetPeer, Task> _unsubscribeHandler;
         private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
@@ -41,6 +42,7 @@ namespace GameCult.Networking
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
             _shardCatalogHandler = HandleShardCatalogRequestAsync;
+            _shardLogHandler = HandleShardLogRequestAsync;
             _subscribeHandler = HandleSubscribeAsync;
             _unsubscribeHandler = HandleUnsubscribeAsync;
 
@@ -48,6 +50,7 @@ namespace GameCult.Networking
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
             _server.OnCultNet(_shardCatalogHandler);
+            _server.OnCultNet(_shardLogHandler);
             _server.OnCultNet(_subscribeHandler);
             _server.OnCultNet(_unsubscribeHandler);
         }
@@ -94,6 +97,55 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Creates a shard mutation-log response from the database log.
+        /// </summary>
+        public CultNetShardLogResponseMessage CreateShardLogResponse(CultNetShardLogRequestMessage request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.ShardId))
+            {
+                throw new ArgumentException("Shard log request requires a shardId.", nameof(request));
+            }
+
+            var shard = _database.Shards.FirstOrDefault(candidate =>
+                string.Equals(candidate.ShardId, request.ShardId, StringComparison.Ordinal));
+            if (shard == null)
+            {
+                return new CultNetShardLogResponseMessage
+                {
+                    MessageId = RequestMessageId(request.MessageId),
+                    ShardId = request.ShardId,
+                    ResyncRequired = true,
+                    Reason = "unknown_shard"
+                };
+            }
+
+            if (request.ShardEpoch.HasValue && request.ShardEpoch.Value != shard.Epoch)
+            {
+                return new CultNetShardLogResponseMessage
+                {
+                    MessageId = RequestMessageId(request.MessageId),
+                    ShardId = request.ShardId,
+                    ShardEpoch = shard.Epoch,
+                    ResyncRequired = true,
+                    Reason = "stale_epoch"
+                };
+            }
+
+            var entries = _database.GetMutationLog(request.ShardId, request.AfterSequence, request.Limit)
+                .Select(ToLogEntryMessage)
+                .ToArray();
+
+            return new CultNetShardLogResponseMessage
+            {
+                MessageId = RequestMessageId(request.MessageId),
+                ShardId = request.ShardId,
+                ShardEpoch = shard.Epoch,
+                Entries = entries
+            };
+        }
+
+        /// <summary>
         /// Detaches handlers from the server.
         /// </summary>
         public void Dispose()
@@ -108,6 +160,7 @@ namespace GameCult.Networking
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
             _server.RemoveCultNetMessageListener<CultNetShardCatalogRequestMessage>(_shardCatalogHandler);
+            _server.RemoveCultNetMessageListener<CultNetShardLogRequestMessage>(_shardLogHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribeHandler);
             foreach (var subscription in _subscriptions.Values)
@@ -127,6 +180,20 @@ namespace GameCult.Networking
         private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, NetPeer peer)
         {
             peer.SendCultNet(CreateShardCatalogResponse(request));
+            return Task.CompletedTask;
+        }
+
+        private Task HandleShardLogRequestAsync(CultNetShardLogRequestMessage request, NetPeer peer)
+        {
+            try
+            {
+                peer.SendCultNet(CreateShardLogResponse(request));
+            }
+            catch (Exception ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+            }
+
             return Task.CompletedTask;
         }
 
@@ -267,6 +334,41 @@ namespace GameCult.Networking
             };
         }
 
+        private CultNetShardLogEntryMessage ToLogEntryMessage(CultNetShardMutationLogEntry entry)
+        {
+            if (entry.Kind == CultNetDatabaseChangeKind.Removed || entry.Document == null)
+            {
+                return new CultNetShardLogEntryMessage
+                {
+                    Sequence = entry.Sequence,
+                    CommittedAt = entry.CommittedAt,
+                    ChangeKind = "removed",
+                    Delete = new CultNetDocumentDeleteMessage
+                    {
+                        MessageId = Guid.NewGuid().ToString("N"),
+                        SchemaId = entry.SchemaId,
+                        RecordKey = entry.Key.Value,
+                        ShardId = entry.ShardId,
+                        ShardEpoch = entry.ShardEpoch
+                    }
+                };
+            }
+
+            return new CultNetShardLogEntryMessage
+            {
+                Sequence = entry.Sequence,
+                CommittedAt = entry.CommittedAt,
+                ChangeKind = entry.Kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                Put = new CultNetDocumentPutRawMessage
+                {
+                    MessageId = Guid.NewGuid().ToString("N"),
+                    Document = CreateRawDocumentRecord(entry.Key, entry.Document),
+                    ShardId = entry.ShardId,
+                    ShardEpoch = entry.ShardEpoch
+                }
+            };
+        }
+
         private CultNetRawDocumentRecord CreateRawDocumentRecord(CultRecordKey key, object document)
         {
             var method = typeof(CultNetDocumentRegistry)
@@ -296,6 +398,13 @@ namespace GameCult.Networking
         private static string SubscriptionKey(NetPeer peer, string subscriptionId)
         {
             return $"{peer.Id}:{subscriptionId}";
+        }
+
+        private static string RequestMessageId(string messageId)
+        {
+            return string.IsNullOrWhiteSpace(messageId)
+                ? Guid.NewGuid().ToString("N")
+                : messageId;
         }
 
         private static CultNetErrorMessage CreateRoutingError(CultNetShardAuthorityException exception)

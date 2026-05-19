@@ -50,13 +50,15 @@ Implemented:
 - in-memory per-shard mutation logs with sequence numbers, epochs, mutation
   kind, schema id, key, and document references
 - mutation-log catch-up by last seen sequence
+- wire-level shard log request/response messages
+- raw put/delete representation for accepted mutation-log entries
 
 Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- wire-level replica log request/response messages
 - durable log persistence and compaction
+- replica-side log application loop
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -73,15 +75,15 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add wire-level replica log catch-up:
+Add durable log storage and replica application:
 
-- `cultnet.shard_log_request.v0`
-- `cultnet.shard_log_response.v0`
-- serialize accepted mutations as raw put/delete records
-- let replicas ask for entries after a known sequence
-- return an explicit resync-required error when the requested sequence has
-  already been compacted away
+- persist per-shard mutation logs instead of keeping them only in memory
+- define the compaction boundary that turns old log reads into snapshot reads
+- apply `cultnet.shard_log_response.v0` entries on replicas through
+  `CultNetDatabase`
+- track last applied sequence per shard
 
-The in-memory log shape now exists. The next useful layer is moving that log
-over the wire. Membership and leader election should wait until replication
-catch-up is boring.
+The log is now wire-readable. The next useful layer is making a replica consume
+that stream durably enough that restart/reconnect behavior can be explained
+without hand waving. Membership and leader election should wait until basic
+replica catch-up is boring.

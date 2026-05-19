@@ -99,6 +99,14 @@ namespace GameCult.Networking
         /// shard catalog response contract identifier.
         /// </summary>
         public const string ShardCatalogResponse = "cultnet.shard_catalog_response.v0";
+        /// <summary>
+        /// shard mutation log request contract identifier.
+        /// </summary>
+        public const string ShardLogRequest = "cultnet.shard_log_request.v0";
+        /// <summary>
+        /// shard mutation log response contract identifier.
+        /// </summary>
+        public const string ShardLogResponse = "cultnet.shard_log_response.v0";
     }
 
     /// <summary>
@@ -709,6 +717,102 @@ namespace GameCult.Networking
         /// Gets or sets shard descriptors.
         /// </summary>
         [Key("shards")] public CultNetShardDescriptorMessage[] Shards { get; set; } = Array.Empty<CultNetShardDescriptorMessage>();
+    }
+
+    /// <summary>
+    /// Requests accepted mutation log entries for a shard.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardLogRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ShardLogRequest;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard id.
+        /// </summary>
+        [Key("shardId")] public string ShardId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard epoch expected by the requester.
+        /// </summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+        /// <summary>
+        /// Gets or sets the last sequence already held by the requester.
+        /// </summary>
+        [Key("afterSequence")] public long AfterSequence { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum number of entries to return.
+        /// </summary>
+        [Key("limit")] public int? Limit { get; set; }
+    }
+
+    /// <summary>
+    /// Returns accepted mutation log entries for a shard.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardLogResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ShardLogResponse;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard id.
+        /// </summary>
+        [Key("shardId")] public string ShardId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard epoch.
+        /// </summary>
+        [Key("shardEpoch")] public long ShardEpoch { get; set; }
+        /// <summary>
+        /// Gets or sets mutation log entries.
+        /// </summary>
+        [Key("entries")] public CultNetShardLogEntryMessage[] Entries { get; set; } = Array.Empty<CultNetShardLogEntryMessage>();
+        /// <summary>
+        /// Gets or sets whether the requester must fall back to a shard snapshot.
+        /// </summary>
+        [Key("resyncRequired")] public bool ResyncRequired { get; set; }
+        /// <summary>
+        /// Gets or sets a machine-readable resync reason.
+        /// </summary>
+        [Key("reason")] public string? Reason { get; set; }
+    }
+
+    /// <summary>
+    /// Describes one accepted shard mutation for replica catch-up.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardLogEntryMessage
+    {
+        /// <summary>
+        /// Gets or sets the per-shard sequence.
+        /// </summary>
+        [Key("sequence")] public long Sequence { get; set; }
+        /// <summary>
+        /// Gets or sets the commit timestamp.
+        /// </summary>
+        [Key("committedAt")] public string CommittedAt { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the mutation kind.
+        /// </summary>
+        [Key("changeKind")] public string ChangeKind { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets a raw put message for added/updated entries.
+        /// </summary>
+        [Key("put")] public CultNetDocumentPutRawMessage? Put { get; set; }
+        /// <summary>
+        /// Gets or sets a raw delete message for removed entries.
+        /// </summary>
+        [Key("delete")] public CultNetDocumentDeleteMessage? Delete { get; set; }
     }
 
     /// <summary>
