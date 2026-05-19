@@ -285,6 +285,7 @@ namespace GameCult.Networking.Tests
                 MessageId = "log-1",
                 ShardId = "players-eu",
                 ShardEpoch = 12,
+                CompactedThrough = 40,
                 Entries =
                 [
                     new CultNetShardLogEntryMessage
@@ -314,6 +315,7 @@ namespace GameCult.Networking.Tests
             Assert.That(roundTrip.MessageId, Is.EqualTo("log-1"));
             Assert.That(roundTrip.ShardId, Is.EqualTo("players-eu"));
             Assert.That(roundTrip.ShardEpoch, Is.EqualTo(12));
+            Assert.That(roundTrip.CompactedThrough, Is.EqualTo(40));
             Assert.That(roundTrip.Entries, Has.Length.EqualTo(1));
             Assert.That(roundTrip.Entries[0].Sequence, Is.EqualTo(42));
             Assert.That(roundTrip.Entries[0].Put, Is.Not.Null);
@@ -1020,6 +1022,66 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Entries[0].Put!.Document.SchemaId, Is.EqualTo(schemaId));
             Assert.That(response.Entries[0].Put!.Document.RecordKey, Is.EqualTo("player:durable"));
             Assert.That(response.Entries[0].Put!.Document.Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
+        }
+
+        [Test]
+        public async Task CultNetDatabaseServer_RequiresResync_ForCompactedShardLogHistory()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "shard-logs", Guid.NewGuid().ToString("N"));
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var store = new CultNetFileShardMutationLogStore(rootPath);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                MutationLogStore = store,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-compacted-log",
+                        "runtime-a",
+                        epoch: 8,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            await database.PutAsync(
+                new CultRecordKey("player:first"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "first@example.test", PasswordHash = "hash", Username = "First" });
+            await database.PutAsync(
+                new CultRecordKey("player:second"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "second@example.test", PasswordHash = "hash", Username = "Second" });
+            store.CompactThrough("players-compacted-log", 1);
+
+            var staleResponse = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-compacted-log",
+                ShardEpoch = 8,
+                AfterSequence = 0
+            });
+            var currentResponse = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-compacted-log",
+                ShardEpoch = 8,
+                AfterSequence = 1
+            });
+
+            Assert.That(staleResponse.ResyncRequired, Is.True);
+            Assert.That(staleResponse.Reason, Is.EqualTo("compacted_history"));
+            Assert.That(staleResponse.CompactedThrough, Is.EqualTo(1));
+            Assert.That(staleResponse.Entries, Is.Empty);
+            Assert.That(currentResponse.ResyncRequired, Is.False);
+            Assert.That(currentResponse.Entries, Has.Length.EqualTo(1));
+            Assert.That(currentResponse.Entries[0].Sequence, Is.EqualTo(2));
         }
 
         [Test]

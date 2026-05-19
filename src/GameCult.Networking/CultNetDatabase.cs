@@ -481,6 +481,16 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Gets the highest retained-log sequence that has been compacted away for a shard.
+        /// </summary>
+        public long GetCompactedMutationLogSequence(string shardId)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            return _mutationLogStore?.GetCompactedThrough(shardId) ?? 0;
+        }
+
+        /// <summary>
         /// Gets the last replicated sequence applied for a shard.
         /// </summary>
         public long GetAppliedShardSequence(string shardId)

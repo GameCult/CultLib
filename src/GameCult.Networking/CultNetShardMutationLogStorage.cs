@@ -21,6 +21,16 @@ namespace GameCult.Networking
         /// Appends or replaces one accepted log entry for a shard.
         /// </summary>
         void Append(string shardId, CultNetShardLogEntryMessage entry);
+
+        /// <summary>
+        /// Gets the highest sequence that has been compacted out of the retained log.
+        /// </summary>
+        long GetCompactedThrough(string shardId);
+
+        /// <summary>
+        /// Removes retained entries at or before the supplied sequence.
+        /// </summary>
+        void CompactThrough(string shardId, long sequence);
     }
 
     /// <summary>
@@ -80,6 +90,43 @@ namespace GameCult.Networking
             }
         }
 
+        /// <inheritdoc />
+        public long GetCompactedThrough(string shardId)
+        {
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+
+            lock (_gate)
+            {
+                return ReadMetadata(shardId).CompactedThrough;
+            }
+        }
+
+        /// <inheritdoc />
+        public void CompactThrough(string shardId, long sequence)
+        {
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            if (sequence < 0) throw new ArgumentOutOfRangeException(nameof(sequence), "Sequence must be non-negative.");
+
+            lock (_gate)
+            {
+                var metadata = ReadMetadata(shardId);
+                if (sequence <= metadata.CompactedThrough)
+                {
+                    return;
+                }
+
+                var retained = ReadAll(shardId)
+                    .Where(entry => entry.Sequence > sequence)
+                    .OrderBy(entry => entry.Sequence)
+                    .ToArray();
+                File.WriteAllBytes(
+                    GetShardPath(shardId),
+                    MessagePackSerializer.Serialize(retained, CultNetSchemaMessageSerialization.Options));
+                metadata.CompactedThrough = sequence;
+                WriteMetadata(shardId, metadata);
+            }
+        }
+
         private CultNetShardLogEntryMessage[] ReadAll(string shardId)
         {
             var path = GetShardPath(shardId);
@@ -99,11 +146,42 @@ namespace GameCult.Networking
             return Path.Combine(_rootPath, HashShardId(shardId) + ".mpack");
         }
 
+        private string GetMetadataPath(string shardId)
+        {
+            return Path.Combine(_rootPath, HashShardId(shardId) + ".meta.mpack");
+        }
+
+        private CultNetShardMutationLogMetadata ReadMetadata(string shardId)
+        {
+            var path = GetMetadataPath(shardId);
+            if (!File.Exists(path))
+            {
+                return new CultNetShardMutationLogMetadata();
+            }
+
+            var payload = File.ReadAllBytes(path);
+            return MessagePackSerializer.Deserialize<CultNetShardMutationLogMetadata>(
+                payload,
+                CultNetSchemaMessageSerialization.Options) ?? new CultNetShardMutationLogMetadata();
+        }
+
+        private void WriteMetadata(string shardId, CultNetShardMutationLogMetadata metadata)
+        {
+            var payload = MessagePackSerializer.Serialize(metadata, CultNetSchemaMessageSerialization.Options);
+            File.WriteAllBytes(GetMetadataPath(shardId), payload);
+        }
+
         private static string HashShardId(string shardId)
         {
             using var sha = SHA256.Create();
             var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(shardId));
             return string.Concat(hash.Select(value => value.ToString("x2")));
+        }
+
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class CultNetShardMutationLogMetadata
+        {
+            [Key("compactedThrough")] public long CompactedThrough { get; set; }
         }
     }
 }

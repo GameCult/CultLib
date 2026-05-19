@@ -793,6 +793,10 @@ namespace GameCult.Networking
         /// Gets or sets a machine-readable resync reason.
         /// </summary>
         [Key("reason")] public string? Reason { get; set; }
+        /// <summary>
+        /// Gets or sets the highest sequence compacted out of the retained log.
+        /// </summary>
+        [Key("compactedThrough")] public long? CompactedThrough { get; set; }
     }
 
     /// <summary>

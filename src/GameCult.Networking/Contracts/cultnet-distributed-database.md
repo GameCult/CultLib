@@ -62,6 +62,8 @@ Implemented:
 - durable authoritative shard-log storage behind
   `ICultNetShardMutationLogStore`, including a per-shard MessagePack file
   implementation
+- shard-log compaction watermarks; requests for compacted history return
+  `ResyncRequired` with `reason = "compacted_history"`
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -76,8 +78,7 @@ Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- log compaction
-- snapshot fallback for compacted log history
+- automatic snapshot fallback after compacted log history
 - peer-to-peer fanout for observation gossip and candidate propagation
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
@@ -94,6 +95,9 @@ Not implemented yet:
   bypass shard policy.
 - The accepted shard log is stored in replica catch-up wire form. Object logs
   are for local inspection; wire logs are the durable replication authority.
+- Log retention is part of the replication contract. A replica asking before
+  the compaction watermark must resync from a snapshot before applying newer
+  log entries.
 - Realtime subscriptions publish domain changes, not storage envelopes.
 - Client-owned input documents may be predicted locally only inside explicit
   `CultNetClientAuthorityScope` declarations.
@@ -108,10 +112,10 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add compaction-aware snapshot fallback and discovery fanout:
+Add automatic snapshot fallback and discovery fanout:
 
-- define the compaction boundary that turns old log reads into snapshot reads
-- return `ResyncRequired` when a replica asks for compacted history
+- teach the replication puller to request and apply a shard snapshot after
+  `compacted_history`
 - expose operator-facing defaults for durable shard-log paths in CultMesh nodes
 - add Verse discovery over the schema-v0 mesh lane
 - after that, add simulation-frame rollback/resimulation helpers around
@@ -124,8 +128,9 @@ restart. Client-owned input documents can now be predicted locally and
 reconciled when the authoritative log arrives. Nodes can also aggregate witness
 observations into deterministic consensus candidates for simulation facts like
 "who shot first," and those reports now have schema-v0 wire contracts. The next
-useful layer is making authoritative mutation logs durable and compaction-aware.
+useful layer is making the replication puller recover from compacted history
+automatically.
 Membership and leader election should wait until basic replica catch-up is
 boring. Authoritative mutation logs can now survive process restart through
-`ICultNetShardMutationLogStore`; compaction and snapshot fallback are the next
-places where the machine needs an honest boundary.
+`ICultNetShardMutationLogStore`; compaction now has an honest resync boundary,
+and snapshot fallback is the next place where that boundary needs automation.

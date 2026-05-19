@@ -159,7 +159,10 @@ those cursors in one local MessagePack file so replicas can resume after a
 restart. Authoritative shard logs can be stored through
 `ICultNetShardMutationLogStore`; `CultNetFileShardMutationLogStore` keeps one
 MessagePack log file per shard and lets a restarted primary continue answering
-`cultnet.shard_log_request.v0` from durable wire entries.
+`cultnet.shard_log_request.v0` from durable wire entries. The same store owns
+log compaction: once entries are compacted through a sequence, older catch-up
+requests return `ResyncRequired` with `reason = "compacted_history"` instead of
+silently handing a replica a partial history.
 
 For client-side prediction, `CultNetClientAuthorityScope` declares which input
 documents a runtime may author optimistically. `PutPredictedAsync` updates the

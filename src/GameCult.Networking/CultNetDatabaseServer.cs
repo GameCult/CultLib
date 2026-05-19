@@ -132,6 +132,20 @@ namespace GameCult.Networking
                 };
             }
 
+            var compactedThrough = _database.GetCompactedMutationLogSequence(request.ShardId);
+            if (request.AfterSequence < compactedThrough)
+            {
+                return new CultNetShardLogResponseMessage
+                {
+                    MessageId = RequestMessageId(request.MessageId),
+                    ShardId = request.ShardId,
+                    ShardEpoch = shard.Epoch,
+                    ResyncRequired = true,
+                    Reason = "compacted_history",
+                    CompactedThrough = compactedThrough
+                };
+            }
+
             var entries = _database.GetMutationLogMessages(request.ShardId, request.AfterSequence, request.Limit)
                 .ToArray();
 

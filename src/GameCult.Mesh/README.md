@@ -85,7 +85,9 @@ mesh opinion layer that can feed an authoritative shard commit path.
 CultMesh can persist authoritative shard logs through
 `ICultNetShardMutationLogStore`. The included file store writes one MessagePack
 log per shard, so a restarted primary can still serve replica catch-up without
-depending on warm process memory.
+depending on warm process memory. When retained log history is compacted, stale
+replicas get an explicit resync requirement instead of a partial log pretending
+to be enough.
 
 ## Documentation
 
