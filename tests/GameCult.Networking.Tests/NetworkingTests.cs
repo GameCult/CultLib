@@ -862,6 +862,42 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultMeshVerseCatalog_Upserts_WireDiscoveryResponse()
+        {
+            using var catalog = CultMesh.CreateVerseCatalog();
+            var updates = new List<CultMeshVerseDescriptor>();
+            using var subscription = catalog.Watch().Subscribe(updates.Add);
+
+            catalog.Upsert(new CultMeshVerseCatalogResponseMessage
+            {
+                MessageId = "verses-apply",
+                Verses =
+                [
+                    new CultMeshVerseDescriptorMessage
+                    {
+                        VerseId = "aetheria-branch",
+                        DisplayName = "Aetheria Branch",
+                        AuthorityModel = nameof(CultMeshVerseAuthorityModel.SubscribedOverlay),
+                        Compatibility = new CultMeshVerseCompatibilityMessage
+                        {
+                            TransportVersion = "cultmesh.v0",
+                            RulesHash = "branch-rules",
+                            CompatibleVerseIds = ["aetheria-main"]
+                        },
+                        ParentVerseId = "aetheria-main"
+                    }
+                ]
+            });
+
+            var verse = catalog.Get("aetheria-branch");
+
+            Assert.That(verse, Is.Not.Null);
+            Assert.That(verse!.AuthorityModel, Is.EqualTo(CultMeshVerseAuthorityModel.SubscribedOverlay));
+            Assert.That(verse.ParentVerseId, Is.EqualTo("aetheria-main"));
+            Assert.That(updates, Has.Count.EqualTo(1));
+        }
+
+        [Test]
         public async Task CultMeshNode_CanEnable_DurableShardLogs_WithDefaultPath()
         {
             var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-node", Guid.NewGuid().ToString("N"));

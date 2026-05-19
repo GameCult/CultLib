@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using GameCult.Networking;
 using R3;
 
 namespace GameCult.Mesh
@@ -223,6 +224,19 @@ namespace GameCult.Mesh
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             _verses[verse.VerseId] = verse;
             _updates.OnNext(verse);
+        }
+
+        /// <summary>
+        /// Adds or replaces Verses from a wire catalog response.
+        /// </summary>
+        public void Upsert(CultMeshVerseCatalogResponseMessage response)
+        {
+            ThrowIfDisposed();
+            if (response == null) throw new ArgumentNullException(nameof(response));
+            foreach (var verse in response.Verses)
+            {
+                Upsert(verse.ToVerseDescriptor());
+            }
         }
 
         /// <summary>

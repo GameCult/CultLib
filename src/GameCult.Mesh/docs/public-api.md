@@ -45,6 +45,8 @@ It can publish discovery updates and find compatible transfer targets.
 `CultMesh.ServeVerseCatalog(node, catalog)` attaches schema-v0 Verse discovery
 responses to a node. The wire contracts are
 `cultmesh.verse_catalog_request.v0` and `cultmesh.verse_catalog_response.v0`.
+Consumers can apply a response directly with
+`CultMeshVerseCatalog.Upsert(CultMeshVerseCatalogResponseMessage)`.
 
 ### Shard Authority
 
