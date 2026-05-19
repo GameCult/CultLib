@@ -59,6 +59,9 @@ Implemented:
 - schema-v0 shard log fetcher for `cultnet://host:port` endpoints
 - restart-safe replica cursor store, including a local MessagePack file-backed
   implementation
+- durable authoritative shard-log storage behind
+  `ICultNetShardMutationLogStore`, including a per-shard MessagePack file
+  implementation
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -73,7 +76,7 @@ Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- durable log persistence and compaction
+- log compaction
 - snapshot fallback for compacted log history
 - peer-to-peer fanout for observation gossip and candidate propagation
 - rollback/resimulation helpers for simulation frames
@@ -89,6 +92,8 @@ Not implemented yet:
   applied.
 - Raw snapshot/put/delete messages must pass through `CultNetDatabase`, not
   bypass shard policy.
+- The accepted shard log is stored in replica catch-up wire form. Object logs
+  are for local inspection; wire logs are the durable replication authority.
 - Realtime subscriptions publish domain changes, not storage envelopes.
 - Client-owned input documents may be predicted locally only inside explicit
   `CultNetClientAuthorityScope` declarations.
@@ -103,11 +108,12 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add durable mutation-log storage and snapshot fallback:
+Add compaction-aware snapshot fallback and discovery fanout:
 
-- persist per-shard mutation logs instead of keeping them only in memory
 - define the compaction boundary that turns old log reads into snapshot reads
 - return `ResyncRequired` when a replica asks for compacted history
+- expose operator-facing defaults for durable shard-log paths in CultMesh nodes
+- add Verse discovery over the schema-v0 mesh lane
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
 - add peer-to-peer fanout for observation gossip and candidate propagation
@@ -120,4 +126,6 @@ observations into deterministic consensus candidates for simulation facts like
 "who shot first," and those reports now have schema-v0 wire contracts. The next
 useful layer is making authoritative mutation logs durable and compaction-aware.
 Membership and leader election should wait until basic replica catch-up is
-boring.
+boring. Authoritative mutation logs can now survive process restart through
+`ICultNetShardMutationLogStore`; compaction and snapshot fallback are the next
+places where the machine needs an honest boundary.

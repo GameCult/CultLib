@@ -56,7 +56,10 @@ authoritative log arrives, the database emits `Reconciled`.
 ### Replica Catch-Up
 
 Shard logs can be requested over schema-v0 and applied by replicas. Replica
-cursors can be stored with `ICultNetShardReplicaCursorStore`.
+cursors can be stored with `ICultNetShardReplicaCursorStore`. Authoritative
+shard logs can be persisted with `ICultNetShardMutationLogStore`; the file
+implementation stores one MessagePack log per shard so catch-up survives a
+primary restart.
 
 ### Simulation Witness Consensus
 

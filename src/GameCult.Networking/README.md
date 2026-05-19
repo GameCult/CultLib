@@ -156,7 +156,10 @@ primary endpoints, using `CultNetSchemaShardLogFetcher` for the schema-v0
 transport path. Replica cursors can be stored through
 `ICultNetShardReplicaCursorStore`; `CultNetFileShardReplicaCursorStore` keeps
 those cursors in one local MessagePack file so replicas can resume after a
-restart.
+restart. Authoritative shard logs can be stored through
+`ICultNetShardMutationLogStore`; `CultNetFileShardMutationLogStore` keeps one
+MessagePack log file per shard and lets a restarted primary continue answering
+`cultnet.shard_log_request.v0` from durable wire entries.
 
 For client-side prediction, `CultNetClientAuthorityScope` declares which input
 documents a runtime may author optimistically. `PutPredictedAsync` updates the

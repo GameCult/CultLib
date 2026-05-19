@@ -80,6 +80,13 @@ support weight, total observed weight, confidence, and quorum status.
 Those candidates are not committed world state by themselves. They are the fast
 mesh opinion layer that can feed an authoritative shard commit path.
 
+## Durable Catch-Up
+
+CultMesh can persist authoritative shard logs through
+`ICultNetShardMutationLogStore`. The included file store writes one MessagePack
+log per shard, so a restarted primary can still serve replica catch-up without
+depending on warm process memory.
+
 ## Documentation
 
 - [Public API](docs/public-api.md)

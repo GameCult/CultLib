@@ -962,6 +962,67 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabaseServer_Reads_DurableShardLog_AfterRestart()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "shard-logs", Guid.NewGuid().ToString("N"));
+            var schemaId = new CultCache().Registry.GetRequired<PlayerData>().SchemaId;
+            var shard = new CultNetShardDescriptor(
+                "players-durable-log",
+                "runtime-a",
+                epoch: 7,
+                isPrimary: true,
+                schemaIds: [schemaId],
+                keyPrefix: "player:");
+
+            var sourceCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "durable@example.test",
+                PasswordHash = "hash",
+                Username = "Durable"
+            };
+
+            await sourceDatabase.PutAsync(new CultRecordKey("player:durable"), player);
+            sourceDatabase.Dispose();
+
+            var restartedCache = new CultCache();
+            var restartedDatabase = new CultNetDatabase(restartedCache, new CultNetDatabaseOptions
+            {
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+            using var server = new Server(restartedCache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, restartedDatabase);
+
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                MessageId = "durable-log",
+                ShardId = "players-durable-log",
+                ShardEpoch = 7
+            });
+
+            Assert.That(response.ResyncRequired, Is.False);
+            Assert.That(response.Entries, Has.Length.EqualTo(1));
+            Assert.That(response.Entries[0].Sequence, Is.EqualTo(1));
+            Assert.That(response.Entries[0].Put, Is.Not.Null);
+            Assert.That(response.Entries[0].Put!.Document.SchemaId, Is.EqualTo(schemaId));
+            Assert.That(response.Entries[0].Put!.Document.RecordKey, Is.EqualTo("player:durable"));
+            Assert.That(response.Entries[0].Put!.Document.Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
+        }
+
+        [Test]
         public async Task CultNetDatabase_Applies_ShardLogResponse_ToReplica()
         {
             var sourceCache = new CultCache();

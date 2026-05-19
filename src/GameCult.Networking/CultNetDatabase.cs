@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using R3;
@@ -225,6 +226,10 @@ namespace GameCult.Networking
         /// Gets or sets the document registry used to create and apply raw CultNet document messages.
         /// </summary>
         public CultNetDocumentRegistry? DocumentRegistry { get; set; }
+        /// <summary>
+        /// Gets or sets the durable store for accepted shard mutation logs.
+        /// </summary>
+        public ICultNetShardMutationLogStore? MutationLogStore { get; set; }
     }
 
     /// <summary>
@@ -385,6 +390,7 @@ namespace GameCult.Networking
         private readonly string _runtimeId;
         private readonly List<CultNetShardDescriptor> _shards;
         private readonly List<CultNetClientAuthorityScope> _clientAuthorityScopes;
+        private readonly ICultNetShardMutationLogStore? _mutationLogStore;
         private readonly Dictionary<string, object> _predictedDocuments = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<CultNetShardMutationLogEntry>> _mutationLogs =
             new(StringComparer.Ordinal);
@@ -402,11 +408,13 @@ namespace GameCult.Networking
             options ??= new CultNetDatabaseOptions();
             _runtimeId = options.RuntimeId;
             _documents = options.DocumentRegistry ?? new CultNetDocumentRegistry(cache.Registry);
+            _mutationLogStore = options.MutationLogStore;
             _shards = (options.Shards == null || options.Shards.Count == 0
                     ? new[] { CultNetShardDescriptor.PrimaryAll(options.RuntimeId) }
                     : options.Shards)
                 .ToList();
             _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
+            InitializeLogSequencesFromStore();
             _cache.OnUpdate += PublishCacheUpdate;
         }
 
@@ -450,6 +458,26 @@ namespace GameCult.Networking
             }
 
             return query.ToArray();
+        }
+
+        /// <summary>
+        /// Gets replica catch-up log entries for a shard after the supplied sequence.
+        /// </summary>
+        public IReadOnlyList<CultNetShardLogEntryMessage> GetMutationLogMessages(
+            string shardId,
+            long afterSequence = 0,
+            int? limit = null)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            if (_mutationLogStore != null)
+            {
+                return _mutationLogStore.Read(shardId, afterSequence, limit);
+            }
+
+            return GetMutationLog(shardId, afterSequence, limit)
+                .Select(ToLogEntryMessage)
+                .ToArray();
         }
 
         /// <summary>
@@ -639,7 +667,12 @@ namespace GameCult.Networking
                 key,
                 descriptor.SchemaId,
                 document,
-                previous);
+                previous,
+                new CultNetShardLogEntryMessage
+                {
+                    ChangeKind = previous == null ? "added" : "updated",
+                    Put = message
+                });
             PublishUntyped(
                 descriptor.DocumentType,
                 kind,
@@ -680,7 +713,12 @@ namespace GameCult.Networking
                 key,
                 descriptor.SchemaId,
                 document: null,
-                previousDocument: previous);
+                previousDocument: previous,
+                wireEntry: new CultNetShardLogEntryMessage
+                {
+                    ChangeKind = "removed",
+                    Delete = message
+                });
             PublishUntyped(
                 descriptor.DocumentType,
                 CultNetDatabaseChangeKind.Removed,
@@ -877,22 +915,30 @@ namespace GameCult.Networking
             CultRecordKey key,
             string schemaId,
             object? document,
-            object? previousDocument)
+            object? previousDocument,
+            CultNetShardLogEntryMessage? wireEntry = null)
         {
             var sequence = NextMutationLogSequence(shard.ShardId);
-            RecordMutationLogEntry(new CultNetShardMutationLogEntry(
+            var committedAt = DateTimeOffset.UtcNow.ToString("O");
+            var entry = new CultNetShardMutationLogEntry(
                 shard.ShardId,
                 shard.Epoch,
                 sequence,
-                DateTimeOffset.UtcNow.ToString("O"),
+                committedAt,
                 kind,
                 schemaId,
                 key,
                 document,
-                previousDocument));
+                previousDocument);
+            var storedWireEntry = _mutationLogStore == null
+                ? null
+                : wireEntry ?? ToLogEntryMessage(entry);
+            RecordMutationLogEntry(entry, storedWireEntry);
         }
 
-        private void RecordMutationLogEntry(CultNetShardMutationLogEntry entry)
+        private void RecordMutationLogEntry(
+            CultNetShardMutationLogEntry entry,
+            CultNetShardLogEntryMessage? wireEntry = null)
         {
             if (!_mutationLogs.TryGetValue(entry.ShardId, out var entries))
             {
@@ -906,6 +952,11 @@ namespace GameCult.Networking
             {
                 _nextLogSequences[entry.ShardId] = entry.Sequence + 1;
             }
+
+            if (_mutationLogStore != null && wireEntry != null)
+            {
+                _mutationLogStore.Append(entry.ShardId, NormalizeWireLogEntry(entry, wireEntry));
+            }
         }
 
         private long NextMutationLogSequence(string shardId)
@@ -915,6 +966,26 @@ namespace GameCult.Networking
                 : 1;
             _nextLogSequences[shardId] = sequence + 1;
             return sequence;
+        }
+
+        private void InitializeLogSequencesFromStore()
+        {
+            if (_mutationLogStore == null)
+            {
+                return;
+            }
+
+            foreach (var shard in _shards)
+            {
+                var highest = _mutationLogStore.Read(shard.ShardId)
+                    .Select(entry => entry.Sequence)
+                    .DefaultIfEmpty(0)
+                    .Max();
+                if (highest > 0)
+                {
+                    _nextLogSequences[shard.ShardId] = highest + 1;
+                }
+            }
         }
 
         private async Task ApplyCommittedShardLogEntryAsync(
@@ -983,7 +1054,8 @@ namespace GameCult.Networking
                 descriptor.SchemaId,
                 key,
                 document,
-                previous));
+                previous),
+                entry);
             PublishUntyped(
                 descriptor.DocumentType,
                 kind,
@@ -1029,7 +1101,8 @@ namespace GameCult.Networking
                 descriptor.SchemaId,
                 key,
                 document: null,
-                previousDocument: previous));
+                previousDocument: previous),
+                entry);
             PublishUntyped(
                 descriptor.DocumentType,
                 CultNetDatabaseChangeKind.Removed,
@@ -1038,6 +1111,93 @@ namespace GameCult.Networking
                 shard,
                 document: null,
                 previousDocument: previous);
+        }
+
+        private CultNetShardLogEntryMessage ToLogEntryMessage(CultNetShardMutationLogEntry entry)
+        {
+            if (entry.Kind == CultNetDatabaseChangeKind.Removed || entry.Document == null)
+            {
+                return new CultNetShardLogEntryMessage
+                {
+                    Sequence = entry.Sequence,
+                    CommittedAt = entry.CommittedAt,
+                    ChangeKind = "removed",
+                    Delete = new CultNetDocumentDeleteMessage
+                    {
+                        MessageId = Guid.NewGuid().ToString("N"),
+                        SchemaId = entry.SchemaId,
+                        RecordKey = entry.Key.Value,
+                        ShardId = entry.ShardId,
+                        ShardEpoch = entry.ShardEpoch
+                    }
+                };
+            }
+
+            return new CultNetShardLogEntryMessage
+            {
+                Sequence = entry.Sequence,
+                CommittedAt = entry.CommittedAt,
+                ChangeKind = entry.Kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                Put = new CultNetDocumentPutRawMessage
+                {
+                    MessageId = Guid.NewGuid().ToString("N"),
+                    Document = CreateRawDocumentRecord(entry.Key, entry.Document),
+                    ShardId = entry.ShardId,
+                    ShardEpoch = entry.ShardEpoch
+                }
+            };
+        }
+
+        private CultNetShardLogEntryMessage NormalizeWireLogEntry(
+            CultNetShardMutationLogEntry entry,
+            CultNetShardLogEntryMessage wireEntry)
+        {
+            return new CultNetShardLogEntryMessage
+            {
+                Sequence = entry.Sequence,
+                CommittedAt = string.IsNullOrWhiteSpace(entry.CommittedAt) ? wireEntry.CommittedAt : entry.CommittedAt,
+                ChangeKind = entry.Kind == CultNetDatabaseChangeKind.Removed
+                    ? "removed"
+                    : entry.Kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                Put = wireEntry.Put == null
+                    ? null
+                    : new CultNetDocumentPutRawMessage
+                    {
+                        MessageId = string.IsNullOrWhiteSpace(wireEntry.Put.MessageId)
+                            ? Guid.NewGuid().ToString("N")
+                            : wireEntry.Put.MessageId,
+                        Document = wireEntry.Put.Document,
+                        ShardId = entry.ShardId,
+                        ShardEpoch = entry.ShardEpoch
+                    },
+                Delete = wireEntry.Delete == null
+                    ? null
+                    : new CultNetDocumentDeleteMessage
+                    {
+                        MessageId = string.IsNullOrWhiteSpace(wireEntry.Delete.MessageId)
+                            ? Guid.NewGuid().ToString("N")
+                            : wireEntry.Delete.MessageId,
+                        SchemaId = wireEntry.Delete.SchemaId,
+                        RecordKey = wireEntry.Delete.RecordKey,
+                        ShardId = entry.ShardId,
+                        ShardEpoch = entry.ShardEpoch
+                    }
+            };
+        }
+
+        private CultNetRawDocumentRecord CreateRawDocumentRecord(CultRecordKey key, object document)
+        {
+            var method = typeof(CultNetDocumentRegistry)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Single(candidate => candidate.Name == nameof(CultNetDocumentRegistry.CreateRawDocumentPutMessage) &&
+                                     candidate.IsGenericMethodDefinition);
+            var documentType = document.GetType();
+            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
+            var handle = Activator.CreateInstance(handleType, new object[] { key });
+            var message = method
+                .MakeGenericMethod(documentType)
+                .Invoke(_documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
+            return ((CultNetDocumentPutRawMessage)message!).Document;
         }
 
         private static CultNetDatabaseChangeKind ChangeKindFromWire(string changeKind)

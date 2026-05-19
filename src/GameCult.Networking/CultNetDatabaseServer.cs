@@ -132,8 +132,7 @@ namespace GameCult.Networking
                 };
             }
 
-            var entries = _database.GetMutationLog(request.ShardId, request.AfterSequence, request.Limit)
-                .Select(ToLogEntryMessage)
+            var entries = _database.GetMutationLogMessages(request.ShardId, request.AfterSequence, request.Limit)
                 .ToArray();
 
             return new CultNetShardLogResponseMessage
@@ -331,41 +330,6 @@ namespace GameCult.Networking
                 SubscriptionId = subscriptionId,
                 ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
                 Document = CreateRawDocumentRecord(key, document)
-            };
-        }
-
-        private CultNetShardLogEntryMessage ToLogEntryMessage(CultNetShardMutationLogEntry entry)
-        {
-            if (entry.Kind == CultNetDatabaseChangeKind.Removed || entry.Document == null)
-            {
-                return new CultNetShardLogEntryMessage
-                {
-                    Sequence = entry.Sequence,
-                    CommittedAt = entry.CommittedAt,
-                    ChangeKind = "removed",
-                    Delete = new CultNetDocumentDeleteMessage
-                    {
-                        MessageId = Guid.NewGuid().ToString("N"),
-                        SchemaId = entry.SchemaId,
-                        RecordKey = entry.Key.Value,
-                        ShardId = entry.ShardId,
-                        ShardEpoch = entry.ShardEpoch
-                    }
-                };
-            }
-
-            return new CultNetShardLogEntryMessage
-            {
-                Sequence = entry.Sequence,
-                CommittedAt = entry.CommittedAt,
-                ChangeKind = entry.Kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
-                Put = new CultNetDocumentPutRawMessage
-                {
-                    MessageId = Guid.NewGuid().ToString("N"),
-                    Document = CreateRawDocumentRecord(entry.Key, entry.Document),
-                    ShardId = entry.ShardId,
-                    ShardEpoch = entry.ShardEpoch
-                }
             };
         }
 
