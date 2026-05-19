@@ -131,8 +131,9 @@ CultNet becomes the distribution model:
 
 The current first slice exposes this as `CultNetDatabase` and wires hosted
 servers through `CultNetDatabaseServer`. It handles primary-shard writes, typed
-R3 watch streams, raw document puts/deletes, and raw snapshot responses. Remote
-subscription messages and shard catalog exchange are the next missing organs.
+R3 watch streams, raw document puts/deletes, raw snapshot responses, and
+schema/key-filtered live subscriptions. Shard catalog exchange is the next
+missing organ.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner

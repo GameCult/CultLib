@@ -79,6 +79,18 @@ namespace GameCult.Networking
         /// schema catalog response contract identifier.
         /// </summary>
         public const string SchemaCatalogResponse = "cultnet.schema_catalog_response.v0";
+        /// <summary>
+        /// database subscription request contract identifier.
+        /// </summary>
+        public const string DatabaseSubscribe = "cultnet.database_subscribe.v0";
+        /// <summary>
+        /// database subscription cancel contract identifier.
+        /// </summary>
+        public const string DatabaseUnsubscribe = "cultnet.database_unsubscribe.v0";
+        /// <summary>
+        /// database subscription change contract identifier.
+        /// </summary>
+        public const string DatabaseChangeRaw = "cultnet.database_change_raw.v0";
     }
 
     /// <summary>
@@ -473,6 +485,94 @@ namespace GameCult.Networking
         /// Gets or sets the documents.
         /// </summary>
         [Key("documents")] public CultNetRawDocumentRecord[] Documents { get; set; } = Array.Empty<CultNetRawDocumentRecord>();
+    }
+
+    /// <summary>
+    /// Requests a live database subscription.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDatabaseSubscribeMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DatabaseSubscribe;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the live subscription id.
+        /// </summary>
+        [Key("subscriptionId")] public string SubscriptionId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional schema ids to watch.
+        /// </summary>
+        [Key("schemaIds")] public string[]? SchemaIds { get; set; }
+        /// <summary>
+        /// Gets or sets optional record keys to watch.
+        /// </summary>
+        [Key("recordKeys")] public string[]? RecordKeys { get; set; }
+        /// <summary>
+        /// Gets or sets whether the server should send a matching snapshot before live changes.
+        /// </summary>
+        [Key("includeSnapshot")] public bool IncludeSnapshot { get; set; } = true;
+    }
+
+    /// <summary>
+    /// Cancels a live database subscription.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDatabaseUnsubscribeMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DatabaseUnsubscribe;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the live subscription id.
+        /// </summary>
+        [Key("subscriptionId")] public string SubscriptionId { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Streams one raw document change for a live database subscription.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDatabaseChangeRawMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DatabaseChangeRaw;
+        /// <summary>
+        /// Gets or sets the message id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the live subscription id.
+        /// </summary>
+        [Key("subscriptionId")] public string SubscriptionId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the change kind.
+        /// </summary>
+        [Key("changeKind")] public string ChangeKind { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the current document for added or updated changes.
+        /// </summary>
+        [Key("document")] public CultNetRawDocumentRecord? Document { get; set; }
+        /// <summary>
+        /// Gets or sets the deleted record key for removed changes.
+        /// </summary>
+        [Key("recordKey")] public string? RecordKey { get; set; }
+        /// <summary>
+        /// Gets or sets the deleted schema id for removed changes.
+        /// </summary>
+        [Key("schemaId")] public string? SchemaId { get; set; }
     }
 
     /// <summary>

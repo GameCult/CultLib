@@ -1,6 +1,11 @@
 using System;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
+using GameCult.Caching;
 using LiteNetLib;
+using R3;
 
 namespace GameCult.Networking
 {
@@ -14,6 +19,9 @@ namespace GameCult.Networking
         private readonly Func<CultNetSnapshotRequestMessage, NetPeer, Task> _snapshotHandler;
         private readonly Func<CultNetDocumentPutRawMessage, NetPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, NetPeer, Task> _deleteHandler;
+        private readonly Func<CultNetDatabaseSubscribeMessage, NetPeer, Task> _subscribeHandler;
+        private readonly Func<CultNetDatabaseUnsubscribeMessage, NetPeer, Task> _unsubscribeHandler;
+        private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
         private bool _disposed;
 
         /// <summary>
@@ -26,10 +34,14 @@ namespace GameCult.Networking
             _snapshotHandler = HandleSnapshotRequestAsync;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
+            _subscribeHandler = HandleSubscribeAsync;
+            _unsubscribeHandler = HandleUnsubscribeAsync;
 
             _server.OnCultNet(_snapshotHandler);
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
+            _server.OnCultNet(_subscribeHandler);
+            _server.OnCultNet(_unsubscribeHandler);
         }
 
         /// <summary>
@@ -79,6 +91,14 @@ namespace GameCult.Networking
             _server.RemoveCultNetMessageListener<CultNetSnapshotRequestMessage>(_snapshotHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
+            _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
+            _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribeHandler);
+            foreach (var subscription in _subscriptions.Values)
+            {
+                subscription.Dispose();
+            }
+
+            _subscriptions.Clear();
         }
 
         private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, NetPeer peer)
@@ -109,6 +129,136 @@ namespace GameCult.Networking
             {
                 peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
+        }
+
+        private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage message, NetPeer peer)
+        {
+            var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
+                ? message.MessageId
+                : message.SubscriptionId;
+            if (string.IsNullOrWhiteSpace(subscriptionId))
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                return Task.CompletedTask;
+            }
+
+            var key = SubscriptionKey(peer, subscriptionId);
+            _subscriptions.AddOrUpdate(
+                key,
+                _ => CreateSubscription(message, subscriptionId, peer),
+                (_, existing) =>
+                {
+                    existing.Dispose();
+                    return CreateSubscription(message, subscriptionId, peer);
+                });
+
+            if (message.IncludeSnapshot)
+            {
+                peer.SendCultNet(CreateSnapshotResponse(new CultNetSnapshotRequestMessage
+                {
+                    MessageId = message.MessageId,
+                    SchemaIds = message.SchemaIds,
+                    RecordKeys = message.RecordKeys
+                }));
+            }
+
+            return Task.CompletedTask;
+        }
+
+        private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage message, NetPeer peer)
+        {
+            var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
+                ? message.MessageId
+                : message.SubscriptionId;
+            if (!string.IsNullOrWhiteSpace(subscriptionId) &&
+                _subscriptions.TryRemove(SubscriptionKey(peer, subscriptionId), out var subscription))
+            {
+                subscription.Dispose();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        private IDisposable CreateSubscription(
+            CultNetDatabaseSubscribeMessage request,
+            string subscriptionId,
+            NetPeer peer)
+        {
+            return _database.WatchAllChanges().Subscribe(change =>
+            {
+                var outbound = CreateChangeMessage(change, subscriptionId, request);
+                if (outbound != null)
+                {
+                    peer.SendCultNet(outbound);
+                }
+            });
+        }
+
+        internal CultNetDatabaseChangeRawMessage? CreateChangeMessage(
+            object change,
+            string subscriptionId,
+            CultNetDatabaseSubscribeMessage request)
+        {
+            var changeType = change.GetType();
+            var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(string.Empty));
+            var schemaId = (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? string.Empty;
+            if (!Matches(request, schemaId, key))
+            {
+                return null;
+            }
+
+            var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
+            var document = changeType.GetProperty("Document")?.GetValue(change);
+            if (kind == CultNetDatabaseChangeKind.Removed || document == null)
+            {
+                return new CultNetDatabaseChangeRawMessage
+                {
+                    MessageId = Guid.NewGuid().ToString("N"),
+                    SubscriptionId = subscriptionId,
+                    ChangeKind = "removed",
+                    RecordKey = key.Value,
+                    SchemaId = schemaId
+                };
+            }
+
+            return new CultNetDatabaseChangeRawMessage
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                SubscriptionId = subscriptionId,
+                ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                Document = CreateRawDocumentRecord(key, document)
+            };
+        }
+
+        private CultNetRawDocumentRecord CreateRawDocumentRecord(CultRecordKey key, object document)
+        {
+            var method = typeof(CultNetDocumentRegistry)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Single(candidate => candidate.Name == nameof(CultNetDocumentRegistry.CreateRawDocumentPutMessage) &&
+                                     candidate.IsGenericMethodDefinition);
+            var documentType = document.GetType();
+            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
+            var handle = Activator.CreateInstance(handleType, new object[] { key });
+            var message = method
+                .MakeGenericMethod(documentType)
+                .Invoke(_database.Documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
+            return ((CultNetDocumentPutRawMessage)message!).Document;
+        }
+
+        private static bool Matches(CultNetDatabaseSubscribeMessage request, string schemaId, CultRecordKey key)
+        {
+            var schemaMatches = request.SchemaIds == null ||
+                                request.SchemaIds.Length == 0 ||
+                                request.SchemaIds.Contains(schemaId, StringComparer.Ordinal);
+            var keyMatches = request.RecordKeys == null ||
+                             request.RecordKeys.Length == 0 ||
+                             request.RecordKeys.Contains(key.Value, StringComparer.Ordinal);
+            return schemaMatches && keyMatches;
+        }
+
+        private static string SubscriptionKey(NetPeer peer, string subscriptionId)
+        {
+            return $"{peer.Id}:{subscriptionId}";
         }
     }
 }

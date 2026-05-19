@@ -37,10 +37,11 @@ Implemented:
 - `CultNetDatabaseServer`: schema-v0 bridge for snapshot, put, and delete
 - `Client` and `Server` schema-v0 dispatch hooks
 - `CultNetHost.Database` and `CultNetHost.DatabaseServer`
+- subscription request/cancel/change messages
+- server-side live change fanout for schema/key-filtered subscriptions
 
 Not implemented yet:
 
-- remote subscription request/stream messages
 - shard catalog exchange
 - membership/failure detection
 - leader election or automatic shard failover
@@ -61,14 +62,13 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add explicit subscription messages:
+Add shard catalog exchange:
 
-- subscribe by schema
-- subscribe by record key
-- subscribe by name/index
-- unsubscribe
-- stream domain changes as raw document put/delete records
+- advertise shard ids, schema filters, key ranges/prefixes, owner runtime ids,
+  and epochs
+- let clients ask any node where a write belongs
+- reject stale-epoch writes explicitly
+- prepare forwarding without making forwarding mandatory
 
-That gives clients the RethinkDB/Firebase feel without requiring consensus or
-membership work first. Shard catalogs and membership should follow once there
-is more than one authority to discover.
+That gives the subscription surface a real routing model before membership,
+leader election, or replicated logs enter the room and start charging rent.

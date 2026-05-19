@@ -215,6 +215,33 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_DatabaseChangeRaw()
+        {
+            var message = new CultNetDatabaseChangeRawMessage
+            {
+                MessageId = "change-1",
+                SubscriptionId = "sub-1",
+                ChangeKind = "updated",
+                Document = new CultNetRawDocumentRecord
+                {
+                    SchemaId = "schema-1",
+                    RecordKey = "record-1",
+                    StoredAt = "2026-05-19T12:00:00.0000000+00:00",
+                    PayloadEncoding = "messagepack",
+                    Payload = [0x91, 0x01]
+                }
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetDatabaseChangeRawMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.SubscriptionId, Is.EqualTo("sub-1"));
+            Assert.That(roundTrip.ChangeKind, Is.EqualTo("updated"));
+            Assert.That(roundTrip.Document, Is.Not.Null);
+            Assert.That(roundTrip.Document!.RecordKey, Is.EqualTo("record-1"));
+        }
+
+        [Test]
         public async Task CultNetDocumentRegistry_RawSnapshotReplication_PreservesPayloadBytes()
         {
             var sourceCache = new CultCache();
@@ -387,6 +414,60 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(handle.Key.Value));
             Assert.That(response.Documents[0].Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
+        }
+
+        [Test]
+        public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var key = new CultRecordKey("player:change");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "change@example.test",
+                PasswordHash = "hash",
+                Username = "Change"
+            };
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var change = new CultNetDatabaseChange<PlayerData>(
+                CultNetDatabaseChangeKind.Added,
+                key,
+                schemaId,
+                database.Shards[0],
+                player,
+                previousDocument: null);
+            var method = typeof(CultNetDatabaseServer).GetMethod(
+                "CreateChangeMessage",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            var message = (CultNetDatabaseChangeRawMessage?)method.Invoke(databaseServer, new object[]
+            {
+                change,
+                "sub-1",
+                new CultNetDatabaseSubscribeMessage
+                {
+                    SubscriptionId = "sub-1",
+                    SchemaIds = [schemaId],
+                    RecordKeys = [key.Value]
+                }
+            });
+
+            Assert.That(message, Is.Not.Null);
+            Assert.That(message!.SubscriptionId, Is.EqualTo("sub-1"));
+            Assert.That(message.ChangeKind, Is.EqualTo("added"));
+            Assert.That(message.Document, Is.Not.Null);
+            Assert.That(message.Document!.Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
         }
 
         [Test]

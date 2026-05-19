@@ -391,6 +391,15 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Watches all typed domain changes as boxed change objects.
+        /// </summary>
+        public Observable<object> WatchAllChanges()
+        {
+            ThrowIfDisposed();
+            return _changes;
+        }
+
+        /// <summary>
         /// Watches one record.
         /// </summary>
         public Observable<CultNetDatabaseChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
