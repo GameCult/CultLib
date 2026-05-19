@@ -64,6 +64,8 @@ Implemented:
 - simulation witness observations for mesh-side opinions about frame facts
 - deterministic consensus candidates derived from witness observations
 - schema-v0 simulation observation and consensus candidate messages
+- reactive simulation observation hub that receives witness gossip and emits
+  consensus candidates
 
 Not implemented yet:
 
@@ -71,7 +73,7 @@ Not implemented yet:
 - leader election or automatic shard failover
 - durable log persistence and compaction
 - snapshot fallback for compacted log history
-- observation hub/fanout that receives gossip and emits candidates reactively
+- network fanout for observation gossip and candidate propagation
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
@@ -106,8 +108,7 @@ Add durable mutation-log storage and snapshot fallback:
 - return `ResyncRequired` when a replica asks for compacted history
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
-- add an observation hub that receives schema-v0 observation messages and emits
-  consensus candidates reactively
+- add network fanout for observation gossip and candidate propagation
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using MessagePack;
+using R3;
 
 namespace GameCult.Networking
 {
@@ -288,6 +289,111 @@ namespace GameCult.Networking
                 observation.Frame,
                 observation.SubjectId,
                 observation.ClaimKind);
+        }
+    }
+
+    /// <summary>
+    /// Collects witness observations and publishes updated consensus candidates.
+    /// </summary>
+    public sealed class CultNetSimulationObservationHub : IDisposable
+    {
+        private readonly List<CultNetSimulationObservation> _observations = new();
+        private readonly CultNetSimulationConsensus _consensus;
+        private readonly Subject<CultNetSimulationObservation> _observationStream = new();
+        private readonly Subject<CultNetSimulationConsensusCandidate> _candidateStream = new();
+        private bool _disposed;
+
+        /// <summary>
+        /// Creates an observation hub.
+        /// </summary>
+        public CultNetSimulationObservationHub(CultNetSimulationConsensusOptions? options = null)
+        {
+            _consensus = new CultNetSimulationConsensus(options);
+        }
+
+        /// <summary>
+        /// Gets all observations currently held by the hub.
+        /// </summary>
+        public IReadOnlyList<CultNetSimulationObservation> Observations => _observations;
+
+        /// <summary>
+        /// Watches accepted witness observations.
+        /// </summary>
+        public Observable<CultNetSimulationObservation> WatchObservations()
+        {
+            ThrowIfDisposed();
+            return _observationStream;
+        }
+
+        /// <summary>
+        /// Watches consensus candidate updates.
+        /// </summary>
+        public Observable<CultNetSimulationConsensusCandidate> WatchCandidates()
+        {
+            ThrowIfDisposed();
+            return _candidateStream;
+        }
+
+        /// <summary>
+        /// Adds an observation and returns current candidates for the same observed subject.
+        /// </summary>
+        public IReadOnlyList<CultNetSimulationConsensusCandidate> Submit(CultNetSimulationObservation observation)
+        {
+            ThrowIfDisposed();
+            if (observation == null) throw new ArgumentNullException(nameof(observation));
+            _observations.Add(observation);
+            _observationStream.OnNext(observation);
+
+            var candidates = _consensus.BuildCandidates(_observations)
+                .Where(candidate => MatchesSubject(candidate, observation))
+                .ToArray();
+            foreach (var candidate in candidates)
+            {
+                _candidateStream.OnNext(candidate);
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Adds an observation message and returns current candidates for the same observed subject.
+        /// </summary>
+        public IReadOnlyList<CultNetSimulationConsensusCandidate> Submit(CultNetSimulationObservationMessage message)
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            return Submit(message.Observation);
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _observationStream.Dispose();
+            _candidateStream.Dispose();
+        }
+
+        private static bool MatchesSubject(
+            CultNetSimulationConsensusCandidate candidate,
+            CultNetSimulationObservation observation)
+        {
+            return string.Equals(candidate.ShardId, observation.ShardId, StringComparison.Ordinal) &&
+                   candidate.ShardEpoch == observation.ShardEpoch &&
+                   candidate.Frame == observation.Frame &&
+                   string.Equals(candidate.SubjectId, observation.SubjectId, StringComparison.Ordinal) &&
+                   string.Equals(candidate.ClaimKind, observation.ClaimKind, StringComparison.Ordinal);
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(CultNetSimulationObservationHub));
+            }
         }
     }
 }

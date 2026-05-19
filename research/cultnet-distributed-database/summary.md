@@ -175,6 +175,7 @@ Shard catalog exchange now exists:
 - predicted/reconciled change events for client-side prediction
 - simulation witness observations and deterministic consensus candidates
 - schema-v0 simulation observation and candidate messages
+- reactive observation hub for witness gossip and consensus candidates
 
 ## Next Cut
 
@@ -185,7 +186,7 @@ Build durable authoritative mutation logs:
 - return explicit resync-required responses when requested history is gone
 - then add simulation-frame rollback and resimulation helpers on top of
   predicted input streams
-- add an observation hub that receives gossip and emits consensus candidates
+- add network fanout for observation gossip and candidate propagation
 
 That is the next foundation needed before membership, Raft-style failover, or
 CRDT policy work can be honest.

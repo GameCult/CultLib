@@ -1386,6 +1386,52 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSimulationObservationHub_Emits_ReactiveCandidates()
+        {
+            var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+            using var hub = new CultNetSimulationObservationHub(new CultNetSimulationConsensusOptions
+            {
+                MinimumWitnesses = 2,
+                QuorumRatio = 1d
+            });
+            var observations = new List<CultNetSimulationObservation>();
+            var candidates = new List<CultNetSimulationConsensusCandidate>();
+            using var observationSubscription = hub.WatchObservations()
+                .Subscribe(observation => observations.Add(observation));
+            using var candidateSubscription = hub.WatchCandidates()
+                .Subscribe(candidate => candidates.Add(candidate));
+
+            hub.Submit(new CultNetSimulationObservation
+            {
+                WitnessRuntimeId = "watcher-1",
+                ShardId = "arena",
+                ShardEpoch = 1,
+                Frame = 100,
+                SubjectId = "bob",
+                ClaimKind = "hit",
+                ClaimHash = claimHash
+            });
+            var current = hub.Submit(new CultNetSimulationObservationMessage
+            {
+                Observation = new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-2",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = claimHash
+                }
+            });
+
+            Assert.That(observations, Has.Count.EqualTo(2));
+            Assert.That(current, Has.Count.EqualTo(1));
+            Assert.That(current[0].HasQuorum, Is.True);
+            Assert.That(candidates.Exists(candidate => candidate.HasQuorum), Is.True);
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();
