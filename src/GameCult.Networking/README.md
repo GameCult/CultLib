@@ -92,6 +92,53 @@ same payload schema and MessagePack semantics. It carries exact payload bytes
 plus `schemaId`/record-key metadata; it does not guess what a blob "probably"
 means.
 
+## Distributed CultCache
+
+CultNet should be able to start as a sharding layer over CultCache. In that
+mode, applications treat the cluster as one typed realtime database instead of
+manually juggling a local cache, a network client, and a synchronization loop.
+
+Target feel:
+
+```csharp
+var db = await CultNetDatabase.ConnectAsync("localhost", 3075);
+
+var player = await db.GetAsync<PlayerData>(playerKey);
+await db.PutAsync(playerKey, player);
+
+using var subscription = db
+    .WatchByIndex<PlayerData>("Region", "eu-west")
+    .Subscribe(change => Render(change.Document));
+```
+
+CultCache remains the document model:
+
+- schema identity and compatibility
+- record keys and handles
+- local indexes, globals, and typed lookups
+- persistence and local domain-change diffing
+
+CultNet becomes the distribution model:
+
+- peer membership
+- shard ownership
+- mutation routing
+- snapshot catch-up
+- remote subscription fanout
+- reconnect resynchronization
+
+The first coherent shard policy is primary ownership. Each shard has one
+authoritative writer at a time. Clients may connect to any node; a non-owner
+node forwards a write to the owner or rejects it honestly when forwarding is
+not available. Followers subscribe to committed shard mutations and apply them
+through the same CultCache reconciliation path as local file changes.
+
+This should feel like the local-first parts of Firebase or RethinkDB without
+copying their hidden machinery wholesale. The hard line is conflict honesty:
+split-brain writes, stale shard epochs, and schema-incompatible documents must
+surface as explicit failures instead of being laundered into cheerful-looking
+state.
+
 ## Authentication Model
 
 The built-in flow is:

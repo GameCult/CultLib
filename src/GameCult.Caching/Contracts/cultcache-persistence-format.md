@@ -412,6 +412,71 @@ should mean the same thing across persistence and wire discovery.
 Where CultNet needs additional wire-oriented metadata, extend around the shared
 core instead of redefining the core.
 
+## CultNet As A Sharding Layer
+
+CultNet should be able to initialize directly as a CultCache distribution layer.
+The goal is a single distributed realtime database surface: clients work with
+typed CultCache documents, while CultNet decides which node owns the relevant
+shard and how committed changes reach subscribers.
+
+This is closer to the application experience of RethinkDB or Firebase than a
+traditional request/response game protocol. CultNet should still keep its own
+shape: explicit schemas, MessagePack payloads, local-first operation where
+useful, and honest rejection when compatibility or authority is unclear.
+
+The ownership split is:
+
+- CultCache owns document identity, schema compatibility, local indexing,
+  persistence, and domain-level change diffing.
+- CultNet owns peer membership, shard routing, mutation transport,
+  authorization, remote subscription fanout, and resynchronization after
+  reconnect.
+- R3 owns C# stream composition for observed domain changes.
+
+A distributed CultCache cluster should expose:
+
+- shard descriptors: which schema/key ranges or named partitions a node owns
+- shard epochs: monotonic authority versions for ownership changes
+- mutation messages: raw document put/delete records with source generation
+  and shard epoch
+- snapshot messages: bounded catch-up from a known generation or empty local
+  state
+- subscription messages: schema/key/index/global queries that stream matching
+  domain changes
+- conflict reports: explicit outcomes when a mutation cannot be applied cleanly
+
+Client-facing APIs should preserve the database illusion:
+
+```csharp
+var db = await CultNetDatabase.ConnectAsync("localhost", 3075);
+
+var player = await db.GetAsync<PlayerData>(playerKey);
+await db.PutAsync(playerKey, player);
+
+using var subscription = db
+    .WatchByIndex<PlayerData>("Region", "eu-west")
+    .Subscribe(change => Render(change.Document));
+```
+
+The illusion has limits and those limits should be visible in the contract.
+CultNet is not allowed to pretend that arbitrary split-brain writes merged
+cleanly. Each shard needs one current write authority, or a declared conflict
+strategy that can be explained without ritual smoke. If neither exists, the
+write is rejected and surfaced as a domain-visible failure.
+
+The simplest coherent first implementation is primary-shard ownership:
+
+1. Each shard has one authoritative writer at a time.
+2. Followers subscribe to that shard's committed mutation stream.
+3. Clients may connect to any node; non-owner nodes forward writes to the shard
+   owner or reject when forwarding is unavailable.
+4. Reconnect performs schema discovery, shard epoch comparison, then snapshot
+   catch-up before live events resume.
+
+More advanced replicated or offline-first conflict policies can come later, but
+they must be explicit shard policies rather than accidental behavior leaking out
+of transport retries.
+
 ## Migration From Current C# Shape
 
 The current C# `DatabaseEntry` base type exposes `ID` directly. That is useful
