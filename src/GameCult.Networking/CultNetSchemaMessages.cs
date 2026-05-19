@@ -115,6 +115,14 @@ namespace GameCult.Networking
         /// simulation consensus candidate gossip contract identifier.
         /// </summary>
         public const string SimulationConsensusCandidate = "cultnet.simulation_consensus_candidate.v0";
+        /// <summary>
+        /// CultMesh Verse catalog request contract identifier.
+        /// </summary>
+        public const string VerseCatalogRequest = "cultmesh.verse_catalog_request.v0";
+        /// <summary>
+        /// CultMesh Verse catalog response contract identifier.
+        /// </summary>
+        public const string VerseCatalogResponse = "cultmesh.verse_catalog_response.v0";
     }
 
     /// <summary>
@@ -955,6 +963,118 @@ namespace GameCult.Networking
                 Confidence = candidate.Confidence
             };
         }
+    }
+
+    /// <summary>
+    /// Requests known CultMesh Verses from a peer.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshVerseCatalogRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.VerseCatalogRequest;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional Verse ids to request.
+        /// </summary>
+        [Key("verseIds")] public string[]? VerseIds { get; set; }
+        /// <summary>
+        /// Gets or sets an optional transport compatibility filter.
+        /// </summary>
+        [Key("transportVersion")] public string? TransportVersion { get; set; }
+    }
+
+    /// <summary>
+    /// Returns known CultMesh Verses.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshVerseCatalogResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.VerseCatalogResponse;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets discovered Verses.
+        /// </summary>
+        [Key("verses")] public CultMeshVerseDescriptorMessage[] Verses { get; set; } = Array.Empty<CultMeshVerseDescriptorMessage>();
+    }
+
+    /// <summary>
+    /// Wire representation of a CultMesh Verse.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshVerseDescriptorMessage
+    {
+        /// <summary>
+        /// Gets or sets the stable Verse id.
+        /// </summary>
+        [Key("verseId")] public string VerseId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the display name.
+        /// </summary>
+        [Key("displayName")] public string DisplayName { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the authority model name.
+        /// </summary>
+        [Key("authorityModel")] public string AuthorityModel { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets compatibility metadata.
+        /// </summary>
+        [Key("compatibility")] public CultMeshVerseCompatibilityMessage Compatibility { get; set; } = new CultMeshVerseCompatibilityMessage();
+        /// <summary>
+        /// Gets or sets endpoints that can answer discovery for this Verse.
+        /// </summary>
+        [Key("discoveryEndpoints")] public string[] DiscoveryEndpoints { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets known authoritative runtime ids.
+        /// </summary>
+        [Key("authorityRuntimeIds")] public string[] AuthorityRuntimeIds { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets the parent Verse id for overlays or branches.
+        /// </summary>
+        [Key("parentVerseId")] public string? ParentVerseId { get; set; }
+        /// <summary>
+        /// Gets or sets an optional public description.
+        /// </summary>
+        [Key("description")] public string? Description { get; set; }
+    }
+
+    /// <summary>
+    /// Wire representation of CultMesh Verse compatibility.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshVerseCompatibilityMessage
+    {
+        /// <summary>
+        /// Gets or sets the CultMesh transport compatibility version.
+        /// </summary>
+        [Key("transportVersion")] public string TransportVersion { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the stable rules hash.
+        /// </summary>
+        [Key("rulesHash")] public string RulesHash { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets Verse ids this Verse can transfer from or subscribe to.
+        /// </summary>
+        [Key("compatibleVerseIds")] public string[] CompatibleVerseIds { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets required plugin ids.
+        /// </summary>
+        [Key("requiredPluginIds")] public string[] RequiredPluginIds { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets optional plugin ids.
+        /// </summary>
+        [Key("optionalPluginIds")] public string[] OptionalPluginIds { get; set; } = Array.Empty<string>();
     }
 
     /// <summary>

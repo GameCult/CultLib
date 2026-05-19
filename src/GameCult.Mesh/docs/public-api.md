@@ -42,6 +42,10 @@ known authority runtimes, optional parent Verse id, and plugin requirements.
 `CultMeshVerseCatalog` is the local reactive catalog for discovered Verses.
 It can publish discovery updates and find compatible transfer targets.
 
+`CultMesh.ServeVerseCatalog(node, catalog)` attaches schema-v0 Verse discovery
+responses to a node. The wire contracts are
+`cultmesh.verse_catalog_request.v0` and `cultmesh.verse_catalog_response.v0`.
+
 ### Shard Authority
 
 Each shard has one primary writer for now. Non-primary writes are rejected or

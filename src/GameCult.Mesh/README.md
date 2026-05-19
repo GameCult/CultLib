@@ -62,7 +62,13 @@ var aetheria = new CultMeshVerseDescriptor(
 
 using var catalog = CultMesh.CreateVerseCatalog();
 catalog.Upsert(aetheria);
+
+using var discovery = CultMesh.ServeVerseCatalog(node, catalog);
 ```
+
+Peers can request Verse catalogs over schema-v0 with
+`cultmesh.verse_catalog_request.v0` and receive transport-filtered
+`cultmesh.verse_catalog_response.v0` descriptors.
 
 ## Client-Side Prediction
 

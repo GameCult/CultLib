@@ -329,6 +329,43 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_VerseCatalogResponse()
+        {
+            var message = new CultMeshVerseCatalogResponseMessage
+            {
+                MessageId = "verses-1",
+                Verses =
+                [
+                    new CultMeshVerseDescriptorMessage
+                    {
+                        VerseId = "aetheria-main",
+                        DisplayName = "Aetheria",
+                        AuthorityModel = "OperatorCluster",
+                        Compatibility = new CultMeshVerseCompatibilityMessage
+                        {
+                            TransportVersion = "cultmesh.v0",
+                            RulesHash = "rules",
+                            CompatibleVerseIds = ["aetheria-modded"],
+                            RequiredPluginIds = ["core"],
+                            OptionalPluginIds = ["skylands"]
+                        },
+                        DiscoveryEndpoints = ["cultmesh://aetheria.example.test:3075"],
+                        AuthorityRuntimeIds = ["runtime-a"],
+                        Description = "main branch"
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultMeshVerseCatalogResponseMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("verses-1"));
+            Assert.That(roundTrip.Verses, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Verses[0].VerseId, Is.EqualTo("aetheria-main"));
+            Assert.That(roundTrip.Verses[0].Compatibility.RequiredPluginIds, Is.EqualTo(["core"]));
+        }
+
+        [Test]
         public void CultNetSchemaMessageSerialization_RoundTrips_SimulationObservation()
         {
             var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
@@ -790,6 +827,38 @@ namespace GameCult.Networking.Tests
             Assert.That(targets[0].VerseId, Is.EqualTo("aetheria-skylands"));
             Assert.That(modded.CanTransferFrom(aetheria), Is.True);
             Assert.That(incompatible.CanTransferFrom(aetheria), Is.False);
+        }
+
+        [Test]
+        public void CultMeshVerseDiscoveryServer_Creates_FilteredCatalogResponse()
+        {
+            using var catalog = CultMesh.CreateVerseCatalog();
+            var rulesHash = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "vanilla");
+            catalog.Upsert(new CultMeshVerseDescriptor(
+                "aetheria-main",
+                "Aetheria",
+                CultMeshVerseAuthorityModel.OperatorCluster,
+                new CultMeshVerseCompatibility("cultmesh.v0", rulesHash),
+                discoveryEndpoints: ["cultmesh://aetheria.example.test:3075"],
+                authorityRuntimeIds: ["runtime-a"]));
+            catalog.Upsert(new CultMeshVerseDescriptor(
+                "old-branch",
+                "Old Branch",
+                CultMeshVerseAuthorityModel.PeerToPeer,
+                new CultMeshVerseCompatibility("cultmesh.legacy", rulesHash)));
+            using var server = new Server(new CultCache(), DevelopmentServerSecurity);
+            using var discovery = new CultMeshVerseDiscoveryServer(server, catalog);
+
+            var response = discovery.CreateResponse(new CultMeshVerseCatalogRequestMessage
+            {
+                MessageId = "discover-1",
+                TransportVersion = "cultmesh.v0"
+            });
+
+            Assert.That(response.MessageId, Is.EqualTo("discover-1"));
+            Assert.That(response.Verses, Has.Length.EqualTo(1));
+            Assert.That(response.Verses[0].VerseId, Is.EqualTo("aetheria-main"));
+            Assert.That(response.Verses[0].DiscoveryEndpoints, Is.EqualTo(["cultmesh://aetheria.example.test:3075"]));
         }
 
         [Test]

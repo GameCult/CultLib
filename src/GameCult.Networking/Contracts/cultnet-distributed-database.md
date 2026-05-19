@@ -69,6 +69,8 @@ Implemented:
   replacement and cursor advancement
 - CultMesh node option for file-backed authoritative shard logs with a default
   `.cultmesh/shard-logs` path beside the cache file
+- schema-v0 Verse catalog request/response messages
+- CultMesh Verse discovery server bridge over the local Verse catalog
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -121,7 +123,7 @@ Not implemented yet:
 
 Add discovery fanout and operational polish:
 
-- add Verse discovery over the schema-v0 mesh lane
+- add peer-to-peer Verse discovery fetchers and gossip fanout
 - add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams

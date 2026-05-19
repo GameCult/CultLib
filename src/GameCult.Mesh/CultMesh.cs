@@ -197,6 +197,17 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Attaches Verse discovery responses to a CultMesh node.
+        /// </summary>
+        public static CultMeshVerseDiscoveryServer ServeVerseCatalog(
+            CultMeshNode node,
+            CultMeshVerseCatalog catalog)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return new CultMeshVerseDiscoveryServer(node.Server, catalog);
+        }
+
+        /// <summary>
         /// Creates a CultNet client configured for CultMesh use.
         /// </summary>
         public static Client CreateClient(ClientSecurityOptions? security = null, Action<Client>? configureClient = null)
