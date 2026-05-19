@@ -91,6 +91,14 @@ namespace GameCult.Networking
         /// database subscription change contract identifier.
         /// </summary>
         public const string DatabaseChangeRaw = "cultnet.database_change_raw.v0";
+        /// <summary>
+        /// shard catalog request contract identifier.
+        /// </summary>
+        public const string ShardCatalogRequest = "cultnet.shard_catalog_request.v0";
+        /// <summary>
+        /// shard catalog response contract identifier.
+        /// </summary>
+        public const string ShardCatalogResponse = "cultnet.shard_catalog_response.v0";
     }
 
     /// <summary>
@@ -321,6 +329,26 @@ namespace GameCult.Networking
         /// Gets or sets the error.
         /// </summary>
         [Key("error")] public string Error { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional shard routing details for authority failures.
+        /// </summary>
+        [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
+    }
+
+    /// <summary>
+    /// Describes where a shard write should be routed.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardRoutingHint
+    {
+        /// <summary>
+        /// Gets or sets the shard descriptor.
+        /// </summary>
+        [Key("shard")] public CultNetShardDescriptorMessage? Shard { get; set; }
+        /// <summary>
+        /// Gets or sets a machine-readable routing reason.
+        /// </summary>
+        [Key("reason")] public string Reason { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -421,6 +449,14 @@ namespace GameCult.Networking
         /// Gets or sets the record key.
         /// </summary>
         [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard id the sender targeted.
+        /// </summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>
+        /// Gets or sets the shard epoch the sender targeted.
+        /// </summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
     }
 
     /// <summary>
@@ -441,6 +477,14 @@ namespace GameCult.Networking
         /// Gets or sets the document.
         /// </summary>
         [Key("document")] public CultNetRawDocumentRecord Document { get; set; } = new CultNetRawDocumentRecord();
+        /// <summary>
+        /// Gets or sets the shard id the sender targeted.
+        /// </summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>
+        /// Gets or sets the shard epoch the sender targeted.
+        /// </summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
     }
 
     /// <summary>
@@ -573,6 +617,98 @@ namespace GameCult.Networking
         /// Gets or sets the deleted schema id for removed changes.
         /// </summary>
         [Key("schemaId")] public string? SchemaId { get; set; }
+    }
+
+    /// <summary>
+    /// Describes one shard advertised by a CultNet database node.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardDescriptorMessage
+    {
+        /// <summary>
+        /// Gets or sets the shard id.
+        /// </summary>
+        [Key("shardId")] public string ShardId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the owner runtime id.
+        /// </summary>
+        [Key("ownerRuntimeId")] public string OwnerRuntimeId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard authority epoch.
+        /// </summary>
+        [Key("epoch")] public long Epoch { get; set; }
+        /// <summary>
+        /// Gets or sets whether the responding node is primary for this shard.
+        /// </summary>
+        [Key("isPrimary")] public bool IsPrimary { get; set; }
+        /// <summary>
+        /// Gets or sets schema ids governed by this shard. Empty means all schemas.
+        /// </summary>
+        [Key("schemaIds")] public string[] SchemaIds { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets the record-key prefix governed by this shard.
+        /// </summary>
+        [Key("keyPrefix")] public string? KeyPrefix { get; set; }
+        /// <summary>
+        /// Gets or sets endpoints that accept authoritative writes.
+        /// </summary>
+        [Key("primaryEndpoints")] public string[] PrimaryEndpoints { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets authoritative replica endpoints.
+        /// </summary>
+        [Key("replicaEndpoints")] public string[] ReplicaEndpoints { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets low-latency read replica endpoints.
+        /// </summary>
+        [Key("readReplicaEndpoints")] public string[] ReadReplicaEndpoints { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets an optional locality label.
+        /// </summary>
+        [Key("region")] public string? Region { get; set; }
+    }
+
+    /// <summary>
+    /// Requests shard ownership and routing metadata.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardCatalogRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ShardCatalogRequest;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional schema filters.
+        /// </summary>
+        [Key("schemaIds")] public string[]? SchemaIds { get; set; }
+        /// <summary>
+        /// Gets or sets optional record-key filters.
+        /// </summary>
+        [Key("recordKeys")] public string[]? RecordKeys { get; set; }
+    }
+
+    /// <summary>
+    /// Returns shard ownership and routing metadata.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetShardCatalogResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ShardCatalogResponse;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets shard descriptors.
+        /// </summary>
+        [Key("shards")] public CultNetShardDescriptorMessage[] Shards { get; set; } = Array.Empty<CultNetShardDescriptorMessage>();
     }
 
     /// <summary>

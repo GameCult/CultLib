@@ -242,6 +242,41 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_ShardCatalogResponse()
+        {
+            var message = new CultNetShardCatalogResponseMessage
+            {
+                MessageId = "shards-1",
+                Shards =
+                [
+                    new CultNetShardDescriptorMessage
+                    {
+                        ShardId = "players-eu",
+                        OwnerRuntimeId = "runtime-a",
+                        Epoch = 12,
+                        IsPrimary = true,
+                        SchemaIds = ["schema-player"],
+                        KeyPrefix = "player:",
+                        PrimaryEndpoints = ["cultnet://runtime-a:3075"],
+                        ReplicaEndpoints = ["cultnet://runtime-b:3075"],
+                        ReadReplicaEndpoints = ["cultnet://edge-1:3075"],
+                        Region = "eu-west"
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetShardCatalogResponseMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("shards-1"));
+            Assert.That(roundTrip.Shards, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Shards[0].ShardId, Is.EqualTo("players-eu"));
+            Assert.That(roundTrip.Shards[0].Epoch, Is.EqualTo(12));
+            Assert.That(roundTrip.Shards[0].PrimaryEndpoints, Is.EqualTo(["cultnet://runtime-a:3075"]));
+            Assert.That(roundTrip.Shards[0].Region, Is.EqualTo("eu-west"));
+        }
+
+        [Test]
         public async Task CultNetDocumentRegistry_RawSnapshotReplication_PreservesPayloadBytes()
         {
             var sourceCache = new CultCache();
@@ -343,6 +378,53 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Rejects_RawPut_With_StaleShardEpoch()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players",
+                        "runtime-a",
+                        epoch: 7,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:",
+                        primaryEndpoints: ["cultnet://runtime-a:3075"])
+                ]
+            });
+            var key = new CultRecordKey("player:stale");
+            var message = registry.CreateRawDocumentPutMessage(
+                "put-stale",
+                new CultRecordHandle<PlayerData>(key),
+                new PlayerData
+                {
+                    PlayerId = Guid.NewGuid(),
+                    Email = "stale@example.test",
+                    PasswordHash = "hash",
+                    Username = "Stale"
+                });
+            message.ShardId = "players";
+            message.ShardEpoch = 6;
+
+            Assert.That(
+                async () => await database.ApplyPutAsync(message),
+                Throws.TypeOf<CultNetShardAuthorityException>()
+                    .With.Property(nameof(CultNetShardAuthorityException.Shard))
+                    .Property(nameof(CultNetShardDescriptor.Epoch))
+                    .EqualTo(7));
+        }
+
+        [Test]
         public async Task CultNetDatabase_ApplyRawPut_Publishes_DomainChange()
         {
             var cache = new CultCache();
@@ -414,6 +496,53 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(handle.Key.Value));
             Assert.That(response.Documents[0].Payload, Is.EqualTo(SerializePlayerDataPayload(player)));
+        }
+
+        [Test]
+        public void CultNetDatabaseServer_Creates_Filtered_ShardCatalogResponse()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players",
+                        "runtime-a",
+                        epoch: 3,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:",
+                        primaryEndpoints: ["cultnet://runtime-a:3075"],
+                        replicaEndpoints: ["cultnet://runtime-b:3075"],
+                        readReplicaEndpoints: ["cultnet://edge-a:3075"],
+                        region: "eu-west"),
+                    new CultNetShardDescriptor(
+                        "world",
+                        "runtime-c",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: ["schema-world"],
+                        keyPrefix: "world:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var response = databaseServer.CreateShardCatalogResponse(new CultNetShardCatalogRequestMessage
+            {
+                MessageId = "catalog-players",
+                SchemaIds = [schemaId],
+                RecordKeys = ["player:one"]
+            });
+
+            Assert.That(response.MessageId, Is.EqualTo("catalog-players"));
+            Assert.That(response.Shards, Has.Length.EqualTo(1));
+            Assert.That(response.Shards[0].ShardId, Is.EqualTo("players"));
+            Assert.That(response.Shards[0].Epoch, Is.EqualTo(3));
+            Assert.That(response.Shards[0].PrimaryEndpoints, Is.EqualTo(["cultnet://runtime-a:3075"]));
+            Assert.That(response.Shards[0].ReadReplicaEndpoints, Is.EqualTo(["cultnet://edge-a:3075"]));
         }
 
         [Test]

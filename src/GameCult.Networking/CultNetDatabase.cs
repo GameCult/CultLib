@@ -48,7 +48,11 @@ namespace GameCult.Networking
             long epoch,
             bool isPrimary,
             IEnumerable<string>? schemaIds = null,
-            string? keyPrefix = null)
+            string? keyPrefix = null,
+            IEnumerable<string>? primaryEndpoints = null,
+            IEnumerable<string>? replicaEndpoints = null,
+            IEnumerable<string>? readReplicaEndpoints = null,
+            string? region = null)
         {
             ShardId = RequireNonEmpty(shardId, nameof(shardId));
             OwnerRuntimeId = RequireNonEmpty(ownerRuntimeId, nameof(ownerRuntimeId));
@@ -57,6 +61,10 @@ namespace GameCult.Networking
             SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray()
                 ?? Array.Empty<string>();
             KeyPrefix = keyPrefix;
+            PrimaryEndpoints = CleanEndpoints(primaryEndpoints);
+            ReplicaEndpoints = CleanEndpoints(replicaEndpoints);
+            ReadReplicaEndpoints = CleanEndpoints(readReplicaEndpoints);
+            Region = region;
         }
 
         /// <summary>
@@ -83,6 +91,22 @@ namespace GameCult.Networking
         /// Gets the optional record-key prefix governed by this shard.
         /// </summary>
         public string? KeyPrefix { get; }
+        /// <summary>
+        /// Gets endpoints that can accept authoritative writes for this shard.
+        /// </summary>
+        public IReadOnlyList<string> PrimaryEndpoints { get; }
+        /// <summary>
+        /// Gets endpoints that replicate authoritative shard mutations.
+        /// </summary>
+        public IReadOnlyList<string> ReplicaEndpoints { get; }
+        /// <summary>
+        /// Gets endpoints intended for low-latency read and subscription traffic.
+        /// </summary>
+        public IReadOnlyList<string> ReadReplicaEndpoints { get; }
+        /// <summary>
+        /// Gets an optional locality label for this shard owner.
+        /// </summary>
+        public string? Region { get; }
 
         /// <summary>
         /// Creates a primary shard that accepts every schema and key.
@@ -121,6 +145,12 @@ namespace GameCult.Networking
             }
 
             return value;
+        }
+
+        private static string[] CleanEndpoints(IEnumerable<string>? endpoints)
+        {
+            return endpoints?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray()
+                ?? Array.Empty<string>();
         }
     }
 
@@ -258,6 +288,35 @@ namespace GameCult.Networking
         public IReadOnlyList<CultNetShardDescriptor> Shards => _shards;
 
         /// <summary>
+        /// Creates a shard catalog response for optional schema/key filters.
+        /// </summary>
+        public CultNetShardCatalogResponseMessage CreateShardCatalogResponse(CultNetShardCatalogRequestMessage request)
+        {
+            ThrowIfDisposed();
+            if (request == null) throw new ArgumentNullException(nameof(request));
+
+            var schemaIds = request.SchemaIds == null || request.SchemaIds.Length == 0
+                ? null
+                : request.SchemaIds;
+            var recordKeys = request.RecordKeys == null || request.RecordKeys.Length == 0
+                ? null
+                : request.RecordKeys.Select(key => new CultRecordKey(key)).ToArray();
+
+            var descriptors = _shards
+                .Where(shard => MatchesCatalogFilter(shard, schemaIds, recordKeys))
+                .Select(ToMessage)
+                .ToArray();
+
+            return new CultNetShardCatalogResponseMessage
+            {
+                MessageId = string.IsNullOrWhiteSpace(request.MessageId)
+                    ? Guid.NewGuid().ToString("N")
+                    : request.MessageId,
+                Shards = descriptors
+            };
+        }
+
+        /// <summary>
         /// Gets a document by key.
         /// </summary>
         public Task<T?> GetAsync<T>(CultRecordKey key) where T : class
@@ -330,7 +389,7 @@ namespace GameCult.Networking
 
             var key = new CultRecordKey(message.Document.RecordKey);
             var shard = ResolveShard(message.Document.SchemaId, key);
-            EnsurePrimary(shard, message.Document.SchemaId, key);
+            EnsurePrimary(shard, message.Document.SchemaId, key, message.ShardEpoch);
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
@@ -355,7 +414,7 @@ namespace GameCult.Networking
 
             var key = new CultRecordKey(message.RecordKey);
             var shard = ResolveShard(message.SchemaId, key);
-            EnsurePrimary(shard, message.SchemaId, key);
+            EnsurePrimary(shard, message.SchemaId, key, message.ShardEpoch);
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.SchemaId);
             var previous = _cache.Get(key);
             if (previous == null)
@@ -537,8 +596,15 @@ namespace GameCult.Networking
             return _shards.FirstOrDefault(shard => shard.Matches(schemaId, key)) ?? _shards[0];
         }
 
-        private static void EnsurePrimary(CultNetShardDescriptor shard, string schemaId, CultRecordKey key)
+        private static void EnsurePrimary(CultNetShardDescriptor shard, string schemaId, CultRecordKey key, long? expectedEpoch = null)
         {
+            if (expectedEpoch.HasValue && expectedEpoch.Value != shard.Epoch)
+            {
+                throw new CultNetShardAuthorityException(
+                    shard,
+                    $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not requested epoch {expectedEpoch.Value}.");
+            }
+
             if (shard.IsPrimary)
             {
                 return;
@@ -547,6 +613,39 @@ namespace GameCult.Networking
             throw new CultNetShardAuthorityException(
                 shard,
                 $"Shard '{shard.ShardId}' owned by '{shard.OwnerRuntimeId}' does not accept local writes for schema '{schemaId}' key '{key.Value}'.");
+        }
+
+        private static bool MatchesCatalogFilter(
+            CultNetShardDescriptor shard,
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<CultRecordKey>? recordKeys)
+        {
+            var schemaMatches = schemaIds == null ||
+                                schemaIds.Count == 0 ||
+                                shard.SchemaIds.Count == 0 ||
+                                schemaIds.Any(schemaId => shard.SchemaIds.Contains(schemaId, StringComparer.Ordinal));
+            var keyMatches = recordKeys == null ||
+                             recordKeys.Count == 0 ||
+                             recordKeys.Any(key => string.IsNullOrEmpty(shard.KeyPrefix) ||
+                                                   key.Value.StartsWith(shard.KeyPrefix!, StringComparison.Ordinal));
+            return schemaMatches && keyMatches;
+        }
+
+        internal static CultNetShardDescriptorMessage ToMessage(CultNetShardDescriptor shard)
+        {
+            return new CultNetShardDescriptorMessage
+            {
+                ShardId = shard.ShardId,
+                OwnerRuntimeId = shard.OwnerRuntimeId,
+                Epoch = shard.Epoch,
+                IsPrimary = shard.IsPrimary,
+                SchemaIds = shard.SchemaIds.ToArray(),
+                KeyPrefix = shard.KeyPrefix,
+                PrimaryEndpoints = shard.PrimaryEndpoints.ToArray(),
+                ReplicaEndpoints = shard.ReplicaEndpoints.ToArray(),
+                ReadReplicaEndpoints = shard.ReadReplicaEndpoints.ToArray(),
+                Region = shard.Region
+            };
         }
 
         private void ThrowIfDisposed()

@@ -39,10 +39,14 @@ Implemented:
 - `CultNetHost.Database` and `CultNetHost.DatabaseServer`
 - subscription request/cancel/change messages
 - server-side live change fanout for schema/key-filtered subscriptions
+- shard catalog request/response messages
+- shard descriptors with owner runtime id, epoch, schema filters, key prefix,
+  primary endpoints, replica endpoints, read replica endpoints, and region
+- epoch-aware raw put/delete messages
+- routing hints on shard authority errors
 
 Not implemented yet:
 
-- shard catalog exchange
 - membership/failure detection
 - leader election or automatic shard failover
 - replicated log
@@ -62,13 +66,14 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add shard catalog exchange:
+Add write forwarding:
 
-- advertise shard ids, schema filters, key ranges/prefixes, owner runtime ids,
-  and epochs
-- let clients ask any node where a write belongs
-- reject stale-epoch writes explicitly
-- prepare forwarding without making forwarding mandatory
+- non-primary nodes can forward raw put/delete messages to the advertised
+  primary endpoint when policy allows it
+- forwarded writes must preserve the original shard id and epoch
+- stale-epoch writes still fail instead of being "helpfully" retried against
+  unknown authority
+- clients that opt out of forwarding receive routing hints and retry directly
 
-That gives the subscription surface a real routing model before membership,
-leader election, or replicated logs enter the room and start charging rent.
+Forwarding is the next useful layer now that shard catalogs exist. Membership,
+leader election, and replicated logs should wait until routing is boring.

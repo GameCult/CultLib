@@ -19,6 +19,7 @@ namespace GameCult.Networking
         private readonly Func<CultNetSnapshotRequestMessage, NetPeer, Task> _snapshotHandler;
         private readonly Func<CultNetDocumentPutRawMessage, NetPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, NetPeer, Task> _deleteHandler;
+        private readonly Func<CultNetShardCatalogRequestMessage, NetPeer, Task> _shardCatalogHandler;
         private readonly Func<CultNetDatabaseSubscribeMessage, NetPeer, Task> _subscribeHandler;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, NetPeer, Task> _unsubscribeHandler;
         private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
@@ -34,12 +35,14 @@ namespace GameCult.Networking
             _snapshotHandler = HandleSnapshotRequestAsync;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
+            _shardCatalogHandler = HandleShardCatalogRequestAsync;
             _subscribeHandler = HandleSubscribeAsync;
             _unsubscribeHandler = HandleUnsubscribeAsync;
 
             _server.OnCultNet(_snapshotHandler);
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
+            _server.OnCultNet(_shardCatalogHandler);
             _server.OnCultNet(_subscribeHandler);
             _server.OnCultNet(_unsubscribeHandler);
         }
@@ -78,6 +81,14 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Creates a shard catalog response from the database shard map.
+        /// </summary>
+        public CultNetShardCatalogResponseMessage CreateShardCatalogResponse(CultNetShardCatalogRequestMessage request)
+        {
+            return _database.CreateShardCatalogResponse(request);
+        }
+
+        /// <summary>
         /// Detaches handlers from the server.
         /// </summary>
         public void Dispose()
@@ -91,6 +102,7 @@ namespace GameCult.Networking
             _server.RemoveCultNetMessageListener<CultNetSnapshotRequestMessage>(_snapshotHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
+            _server.RemoveCultNetMessageListener<CultNetShardCatalogRequestMessage>(_shardCatalogHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribeHandler);
             foreach (var subscription in _subscriptions.Values)
@@ -107,11 +119,21 @@ namespace GameCult.Networking
             return Task.CompletedTask;
         }
 
+        private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, NetPeer peer)
+        {
+            peer.SendCultNet(CreateShardCatalogResponse(request));
+            return Task.CompletedTask;
+        }
+
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, NetPeer peer)
         {
             try
             {
                 await ApplyPutAsync(message).ConfigureAwait(false);
+            }
+            catch (CultNetShardAuthorityException ex)
+            {
+                peer.SendCultNet(CreateRoutingError(ex));
             }
             catch (Exception ex)
             {
@@ -124,6 +146,10 @@ namespace GameCult.Networking
             try
             {
                 await ApplyDeleteAsync(message).ConfigureAwait(false);
+            }
+            catch (CultNetShardAuthorityException ex)
+            {
+                peer.SendCultNet(CreateRoutingError(ex));
             }
             catch (Exception ex)
             {
@@ -259,6 +285,19 @@ namespace GameCult.Networking
         private static string SubscriptionKey(NetPeer peer, string subscriptionId)
         {
             return $"{peer.Id}:{subscriptionId}";
+        }
+
+        private static CultNetErrorMessage CreateRoutingError(CultNetShardAuthorityException exception)
+        {
+            return new CultNetErrorMessage
+            {
+                Error = exception.Message,
+                RoutingHint = new CultNetShardRoutingHint
+                {
+                    Reason = exception.Shard.IsPrimary ? "stale_epoch" : "not_primary",
+                    Shard = CultNetDatabase.ToMessage(exception.Shard)
+                }
+            };
         }
     }
 }

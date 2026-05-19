@@ -152,9 +152,9 @@ The coherent path is:
   details.
 - Conflict policy must be declared before conflicting writes are accepted.
 
-## Next Cut
+## Current Cut
 
-Build shard catalog exchange:
+Shard catalog exchange now exists:
 
 - `cultnet.shard_catalog_request.v0`
 - `cultnet.shard_catalog_response.v0`
@@ -162,5 +162,15 @@ Build shard catalog exchange:
 - stale epoch rejection on writes
 - routing error that tells clients where the primary lives when known
 
-That is the next foundation needed before forwarding, membership, Raft-style
-replication, or CRDT policy work can be honest.
+## Next Cut
+
+Build write forwarding:
+
+- non-primary nodes forward raw put/delete messages to primary endpoints when
+  policy allows
+- forwarded writes preserve shard id and epoch
+- stale epochs still fail
+- clients can opt into direct retry using routing hints
+
+That is the next foundation needed before membership, Raft-style replication,
+or CRDT policy work can be honest.

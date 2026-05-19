@@ -62,6 +62,8 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.DatabaseSubscribe => Deserialize<CultNetDatabaseSubscribeMessage>(payload),
                 CultNetSchemaVersions.DatabaseUnsubscribe => Deserialize<CultNetDatabaseUnsubscribeMessage>(payload),
                 CultNetSchemaVersions.DatabaseChangeRaw => Deserialize<CultNetDatabaseChangeRawMessage>(payload),
+                CultNetSchemaVersions.ShardCatalogRequest => Deserialize<CultNetShardCatalogRequestMessage>(payload),
+                CultNetSchemaVersions.ShardCatalogResponse => Deserialize<CultNetShardCatalogResponseMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogRequest => Deserialize<CultNetSchemaCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogResponse => Deserialize<CultNetSchemaCatalogResponseMessage>(payload),
                 _ => throw new MessagePackSerializationException(
