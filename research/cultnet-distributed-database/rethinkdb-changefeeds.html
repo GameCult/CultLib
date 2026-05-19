@@ -1,0 +1,845 @@
+<!doctype html>
+
+
+
+
+
+
+<html>
+    <head>
+        
+            <title>Changefeeds in RethinkDB - RethinkDB</title>
+        
+        <meta charset="utf-8">
+        <meta content="IE=edge,chrome=1" http-equiv="X-UA-Compatible">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta property="twitter:account_id" content="52351557" />
+
+        <link rel="alternate" type="application/rss+xml" title="RethinkDB: the open-source database for the realtime web" href="/feed.xml">
+        <link rel="stylesheet" media="screen" href="/assets/css/styles-02.css"/>
+        <link rel="stylesheet" media="screen" href="/assets/css/jekyll-github.css"/>
+        <link rel="icon" type="image/png" href="/favicon.png">
+
+        <!-- typekit -->
+        <script type="text/javascript" src="//use.typekit.net/lmb6cah.js"></script>
+        <script type="text/javascript">try{Typekit.load();}catch(e){}</script>
+        <!-- jquery -->
+        <script type="text/javascript" src="/assets/js/jquery-2.1.3.min.js"></script>
+        <!-- js-cookie -->
+        <script type="text/javascript" src="/assets/js/js.cookie.js"></script>
+        <!-- waypoints -->
+        <script type="text/javascript" src="/assets/js/waypoints/jquery.waypoints.min.js"></script>
+        <script type="text/javascript" src="/assets/js/waypoints/shortcuts/sticky.min.js"></script>
+
+        <script type="text/javascript" src="/assets/js/site.js"></script>
+        
+        
+            <!-- algolia -->
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.css" />
+        
+        <script>
+            (function(h,o,t,j,a,r){
+                h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};
+                h._hjSettings={hjid:1540062,hjsv:6};
+                a=o.getElementsByTagName('head')[0];
+                r=o.createElement('script');r.async=1;
+                r.src=t+h._hjSettings.hjid+j+h._hjSettings.hjsv;
+                a.appendChild(r);
+            })(window,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');
+        </script>
+    </head>
+    <body class="docs">
+        <div id="wrapper">
+            
+<!-- site nav -->
+<nav class="mobile-menu push-menu-right">
+    <ul>
+        <li class="menu-trigger"><a href="/">Close</a></li>
+        <li><a href="/faq">FAQ</a></li>
+        <li><a href="/docs">Docs</a></li>
+        <li><a href="/api">API</a></li>
+        <li><a href="/community">Community</a></li>
+        <li><a href="/blog">Blog</a></li>
+    </ul>
+    
+</nav>
+<nav class="site-nav">
+    <div class="site-container">
+        <a class="logo" href="/">RethinkDB</a>
+        <ul>
+            <li class="menu-trigger"><a href="/"><img class="menu-trigger-icon" src="/assets/images/icons/icon-menu-white.png"></a></li>
+            <li><a href="/faq">FAQ</a></li>
+            <li><a href="/docs">Docs</a></li>
+            <li><a href="/api">API</a></li>
+            <li><a href="/community">Community</a></li>
+            <li><a href="/blog">Blog</a></li>
+        </ul>
+    </div>
+</nav>
+
+            <section class="documentation">
+    <div class="site-container">
+        <section class="docs-sidebar-left">
+            
+<div class="search">
+    <input class="small" type="text" placeholder="Search documentation...">
+</div>
+
+            
+<nav class="docs-nav">
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Getting started</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/quickstart/">Thirty-second quickstart</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/install/">Install the server</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/install-drivers/">Install client drivers</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/start-a-server/">Start a RethinkDB server</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">The ReQL query language</a></h1>
+            <ul class="expanded">
+                
+                    
+                    <li class="">
+                        <a href="/docs/guide/">Ten-minute guide</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/introduction-to-reql/">Introduction to ReQL</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/secondary-indexes/">Using secondary indexes</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/nested-fields/">Accessing nested fields</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/table-joins/">Table joins in RethinkDB</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/map-reduce/">Map-reduce in RethinkDB</a>
+                    </li>
+                
+                    
+                    <li class="active ">
+                        <a href="/docs/changefeeds/">Changefeeds</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/async-connections/">Asynchronous connections</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/external-api-access/">Accessing HTTP APIs</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/error-types/">ReQL error types</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/api/">API command reference</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">The RethinkDB data model</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/data-types/">ReQL data types</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/dates-and-times/">Dates and times</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/storing-binary/">Binary objects</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/geo-support/">Geospatial queries</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/data-modeling/">Modeling relationships</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">ReQL in practice</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/optimization/">Optimizing query performance</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/reql-data-exploration/">Data exploration</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/sql-to-reql/">SQL to ReQL cheat sheet</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/cookbook/">Cookbook</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/examples/">Example projects</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Administration</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/administration-tools/">Administration tools</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/sharding-and-replication/">Scaling, sharding and replication</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/permissions-and-accounts/">Permissions and user accounts</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/failover/">Failover</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/backup/">Backing up your data</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/system-tables/">System tables</a>
+                    </li>
+                
+                    
+                    <li class="nested ">
+                        <a href="/docs/system-issues/">Current issues</a>
+                    </li>
+                
+                    
+                    <li class="nested ">
+                        <a href="/docs/system-stats/">Statistics</a>
+                    </li>
+                
+                    
+                    <li class="nested ">
+                        <a href="/docs/system-jobs/">Jobs</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/migration/">Version migration</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/importing/">Importing data</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/third-party-admin-tools/">Third-party admin tools</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Deployment</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/start-on-startup/">Start on system startup</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/security/">Securing your cluster</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/config-file/">Configuration file settings</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/cli-options/">Command line options</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/paas/">Deploying with PaaS</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/deployment-tools/">Third-party deployment tools</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Troubleshooting</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/crashes/">Crash recovery</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/troubleshooting/">Troubleshooting FAQ</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/memory-usage/">Memory requirements</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Integration</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/publish-subscribe/">Publish-subscribe</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/elasticsearch/">Integrating Elasticsearch</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/rabbitmq/">Integrating RabbitMQ</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/rails">RethinkDB and Rails</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/frameworks-and-libraries/">Third-party libraries</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/writing-drivers/">Writing drivers</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">RethinkDB architecture</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/architecture/">Architecture details</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/consistency/">Consistency guarantees</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/limitations/">Limitations in RethinkDB</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/stability/">Stability report</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/faq/">Frequently asked questions</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/2-1-5-performance-report/">Performance report</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+        
+
+        
+        
+        
+
+        <section>
+        <h1><a href="#">Security</a></h1>
+            <ul>
+                
+                    
+                    <li class="">
+                        <a href="/docs/vulnerabilities/">Vulnerabilities</a>
+                    </li>
+                
+                    
+                    <li class="">
+                        <a href="/docs/mobile-connections/">Connections from mobile devices</a>
+                    </li>
+                
+            </ul>
+        </section>
+    
+</nav>
+
+        </section>
+        <section class="docs-article">
+            
+            <h1 class='title'>Changefeeds in RethinkDB</h1>
+            
+                <section class="byline">
+                    
+
+
+
+
+
+
+
+
+<nav class="lang-selector">
+    <p class="caption">Language: </p>
+    <section class="languages">
+        <a class="lang javascript"
+            href="
+    /docs/changefeeds/javascript/
+">
+            <i class="javascript"></i>
+            <span >JavaScript</span>
+        </a><span class="divider">|</span><!--
+        --><a class="lang python"
+            href="
+    /docs/changefeeds/python/
+">
+            <i class="python"></i>
+            <span >Python</span>
+        </a><span class="divider">|</span><!--
+        --><a class="lang ruby "
+            href="
+    /docs/changefeeds/ruby/
+">
+            <i class="ruby"></i>
+            <span >Ruby</span>
+        </a><span class="divider">|</span><!--
+        --><a class="lang java  active"
+            href="
+    /docs/changefeeds/java/
+">
+            <i class="java"></i>
+            <span >Java</span>
+        </a>
+    </section>
+</nav>
+
+                </section>
+            
+            <div class="alg-content"><p><strong>Changefeeds</strong> lie at the heart of RethinkDB’s real-time functionality.</p>
+
+<div class="toc">
+  <h1 class="no_toc" id="in-this-article">In this article</h1>
+<ul id="markdown-toc">
+  <li><a href="#basic-usage" id="markdown-toc-basic-usage">Basic usage</a></li>
+  <li><a href="#point-single-document-changefeeds" id="markdown-toc-point-single-document-changefeeds">Point (single document) changefeeds</a></li>
+  <li><a href="#changefeeds-with-filtering-and-aggregation-queries" id="markdown-toc-changefeeds-with-filtering-and-aggregation-queries">Changefeeds with filtering and aggregation queries</a></li>
+  <li><a href="#including-state-changes" id="markdown-toc-including-state-changes">Including state changes</a></li>
+  <li><a href="#including-initial-values" id="markdown-toc-including-initial-values">Including initial values</a></li>
+  <li><a href="#including-result-types" id="markdown-toc-including-result-types">Including result types</a></li>
+  <li><a href="#handling-latency" id="markdown-toc-handling-latency">Handling latency</a></li>
+  <li><a href="#scaling-considerations" id="markdown-toc-scaling-considerations">Scaling considerations</a></li>
+  <li><a href="#read-more" id="markdown-toc-read-more">Read more</a></li>
+</ul>
+
+</div>
+
+<p>They allow clients to receive changes on a table, a single document, or even the results from a specific query as they happen. Nearly any ReQL query can be turned into a changefeed.</p>
+
+<p><img alt="Data Modeling Illustration" class="api_command_illustration" src="/assets/images/docs/api_illustrations/change-feeds.png" /></p>
+
+<h1 id="basic-usage">Basic usage</h1>
+
+<p>Subscribe to a feed by calling <a href="/api/java/changes">changes</a> on a table:</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">Cursor</span> <span class="n">changeCursor</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="na">table</span><span class="o">(</span><span class="s">"users"</span><span class="o">).</span><span class="na">changes</span><span class="o">().</span><span class="na">run</span><span class="o">(</span><span class="n">conn</span><span class="o">);</span>
+<span class="k">for</span> <span class="o">(</span><span class="n">Object</span> <span class="n">change</span> <span class="o">:</span> <span class="n">changeCursor</span><span class="o">)</span> <span class="o">{</span>
+    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">change</span><span class="o">);</span>
+<span class="o">}</span>
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">changes</code> command returns a cursor (like the <code class="language-plaintext highlighter-rouge">table</code> or <code class="language-plaintext highlighter-rouge">filter</code> commands do). You can iterate through its contents using ReQL. Unlike other cursors, the output of <code class="language-plaintext highlighter-rouge">changes</code> is infinite: the cursor will block until more elements are available. Every time you make a change to the table or document the <code class="language-plaintext highlighter-rouge">changes</code> feed is monitoring, a new object will be returned to the cursor. For example, if you insert a user <code class="language-plaintext highlighter-rouge">{"id": 1, "name": "Slava", "age": 31}</code> into the <code class="language-plaintext highlighter-rouge">users</code> table, RethinkDB will post this document to changefeeds subscribed to <code class="language-plaintext highlighter-rouge">users</code>:</p>
+
+<div class="language-json highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="p">{</span><span class="w">
+  </span><span class="s2">"old_val"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">
+  </span><span class="s2">"new_val"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">"id"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="s2">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Slava"</span><span class="p">,</span><span class="w"> </span><span class="s2">"age"</span><span class="p">:</span><span class="w"> </span><span class="mi">31</span><span class="w"> </span><span class="p">}</span><span class="w">
+</span><span class="p">}</span><span class="w">
+</span></code></pre></div></div>
+
+<p>Here <code class="language-plaintext highlighter-rouge">old_val</code> is the old version of the document, and <code class="language-plaintext highlighter-rouge">new_val</code> is a new version of the document. On an <code class="language-plaintext highlighter-rouge">insert</code>, <code class="language-plaintext highlighter-rouge">old_val</code> will be <code class="language-plaintext highlighter-rouge">null</code>; on a <code class="language-plaintext highlighter-rouge">delete</code>, <code class="language-plaintext highlighter-rouge">new_val</code> will be <code class="language-plaintext highlighter-rouge">null</code>. On an <code class="language-plaintext highlighter-rouge">update</code>, both  <code class="language-plaintext highlighter-rouge">old_val</code> and <code class="language-plaintext highlighter-rouge">new_val</code> are present.</p>
+
+<h1 id="point-single-document-changefeeds">Point (single document) changefeeds</h1>
+
+<p>A “point” changefeed returns changes to a single document within a table rather than the table as a whole.</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">r</span><span class="o">.</span><span class="na">table</span><span class="o">(</span><span class="s">"users"</span><span class="o">).</span><span class="na">get</span><span class="o">(</span><span class="mi">100</span><span class="o">).</span><span class="na">changes</span><span class="o">().</span><span class="na">run</span><span class="o">(</span><span class="n">conn</span><span class="o">);</span>
+</code></pre></div></div>
+
+<p>The output format of a point changefeed is identical to a table changefeed.</p>
+
+<h1 id="changefeeds-with-filtering-and-aggregation-queries">Changefeeds with filtering and aggregation queries</h1>
+
+<p>Like any ReQL command, <code class="language-plaintext highlighter-rouge">changes</code> integrates with the rest of the query language. You can call <code class="language-plaintext highlighter-rouge">changes</code> after most commands that transform or select data:</p>
+
+<ul>
+  <li><a href="/api/java/filter">filter</a></li>
+  <li><a href="/api/java/get_all">getAll</a></li>
+  <li><a href="/api/java/map">map</a></li>
+  <li><a href="/api/java/pluck">pluck</a></li>
+  <li><a href="/api/java/between">between</a></li>
+  <li><a href="/api/java/union">union</a></li>
+  <li><a href="/api/java/min">min</a></li>
+  <li><a href="/api/java/max">max</a></li>
+  <li><a href="/api/java/order_by">orderBy</a>.<a href="/api/java/limit">limit</a></li>
+</ul>
+
+<p>You can also chain <code class="language-plaintext highlighter-rouge">changes</code> before any command that operates on a sequence of documents, as long as that command doesn’t consume the entire sequence. (For instance, <code class="language-plaintext highlighter-rouge">count</code> and <code class="language-plaintext highlighter-rouge">orderBy</code> cannot come after the <code class="language-plaintext highlighter-rouge">changes</code> command.)</p>
+
+<p>Suppose you have a chat application with multiple clients posting messages to different chat rooms. You can create feeds that subscribe to messages posted to a specific room:</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">r</span><span class="o">.</span><span class="na">table</span><span class="o">(</span><span class="s">"messages"</span><span class="o">).</span><span class="na">filter</span><span class="o">(</span>
+    <span class="n">row</span> <span class="o">-&gt;</span> <span class="n">row</span><span class="o">.</span><span class="na">g</span><span class="o">(</span><span class="s">"room_id"</span><span class="o">).</span><span class="na">eq</span><span class="o">(</span><span class="n">ROOM_ID</span><span class="o">)</span>
+<span class="o">).</span><span class="na">changes</span><span class="o">().</span><span class="na">run</span><span class="o">(</span><span class="n">conn</span><span class="o">);</span>
+</code></pre></div></div>
+
+<p>You can also use more complicated expressions. Let’s say you have a table <code class="language-plaintext highlighter-rouge">scores</code> that contains the latest game score for every user of your game. You can create a feed of all games where a user beats their previous score, and get only the new value:</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">r</span><span class="o">.</span><span class="na">table</span><span class="o">(</span><span class="s">"scores"</span><span class="o">).</span><span class="na">changes</span><span class="o">().</span><span class="na">filter</span><span class="o">(</span>
+    <span class="n">change</span> <span class="o">-&gt;</span> <span class="n">change</span><span class="o">.</span><span class="na">g</span><span class="o">(</span><span class="s">"new_val"</span><span class="o">).</span><span class="na">g</span><span class="o">(</span><span class="s">"score"</span><span class="o">).</span><span class="na">gt</span><span class="o">(</span><span class="n">change</span><span class="o">.</span><span class="na">g</span><span class="o">(</span><span class="s">"old_val"</span><span class="o">).</span><span class="na">g</span><span class="o">(</span><span class="s">"score"</span><span class="o">))</span>
+<span class="o">).</span><span class="na">g</span><span class="o">(</span><span class="s">"new_val"</span><span class="o">).</span><span class="na">run</span><span class="o">(</span><span class="n">conn</span><span class="o">);</span>
+</code></pre></div></div>
+
+<p>There are some limitations and caveats on chaining with changefeeds.</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">min</code>, <code class="language-plaintext highlighter-rouge">max</code> and <code class="language-plaintext highlighter-rouge">orderBy</code> must be used with indexes.</li>
+  <li><code class="language-plaintext highlighter-rouge">orderBy</code> requires <code class="language-plaintext highlighter-rouge">limit</code>; neither command works by itself.</li>
+  <li><code class="language-plaintext highlighter-rouge">orderBy</code> must be used with a <a href="/docs/secondary-indexes/java">secondary index</a> or the primary index; it cannot be used with an unindexed field.</li>
+  <li>You cannot use changefeeds after <a href="/api/java/concat_map">concatMap</a> or other transformations whose results cannot be pushed to the shards.</li>
+  <li>You cannot apply a <code class="language-plaintext highlighter-rouge">filter</code> after <code class="language-plaintext highlighter-rouge">orderBy.limit</code> in a changefeed.</li>
+  <li>Transformations are applied before changes are calculated.</li>
+</ul>
+
+<h1 id="including-state-changes">Including state changes</h1>
+
+<p>The <code class="language-plaintext highlighter-rouge">include_states</code> optional argument to <code class="language-plaintext highlighter-rouge">changes</code> allows you to receive extra “status” documents in changefeed streams. These can allow your application to distinguish between initial values returned at the start of a stream and subsequent changes. Read the <a href="/api/java/changes">changes</a> API documentation for a full explanation and example.</p>
+
+<h1 id="including-initial-values">Including initial values</h1>
+
+<p>By specifying <code class="language-plaintext highlighter-rouge">true</code> to the <code class="language-plaintext highlighter-rouge">include_initial</code> optional argument, the changefeed stream will start with the current contents of the table or selection being monitored. The initial results will have <code class="language-plaintext highlighter-rouge">new_val</code> fields, but no <code class="language-plaintext highlighter-rouge">old_val</code> fields, so it’s easy to distinguish them from change events.</p>
+
+<p>If an initial result for a document has been sent and a change is made to that document that would move it to the unsent part of the result set (for instance, a changefeed monitors the top 100 posters, the first 50 have been sent, and poster 48 has become poster 52), an “uninitial” notification will be sent, with an <code class="language-plaintext highlighter-rouge">old_val</code> field but no <code class="language-plaintext highlighter-rouge">new_val</code> field. This is distinct from a delete change event, which would have a <code class="language-plaintext highlighter-rouge">new_val</code> of <code class="language-plaintext highlighter-rouge">null</code>. (In the top 100 posters example, that could indicate the poster has been deleted, or has dropped out of the top 100.)</p>
+
+<p>If you specify <code class="language-plaintext highlighter-rouge">true</code> for both <code class="language-plaintext highlighter-rouge">include_states</code> and <code class="language-plaintext highlighter-rouge">include_initial</code>, the changefeed stream will start with a <code class="language-plaintext highlighter-rouge">{"state": "initializing"}</code> status document, followed by initial values. A <code class="language-plaintext highlighter-rouge">{"state": "ready"}</code> status document will be sent when all the initial values have been sent.</p>
+
+<h1 id="including-result-types">Including result types</h1>
+
+<p>The <code class="language-plaintext highlighter-rouge">include_types</code> optional argument adds a third field, <code class="language-plaintext highlighter-rouge">type</code>, to each result sent. The string values for <code class="language-plaintext highlighter-rouge">type</code> are largely self-explanatory:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">add</code>: a new value added to the result set.</li>
+  <li><code class="language-plaintext highlighter-rouge">remove</code>: an old value removed from the result set.</li>
+  <li><code class="language-plaintext highlighter-rouge">change</code>: an existing value changed in the result set.</li>
+  <li><code class="language-plaintext highlighter-rouge">initial</code>: an initial value notification.</li>
+  <li><code class="language-plaintext highlighter-rouge">uninitial</code>: an uninitial value notification.</li>
+  <li><code class="language-plaintext highlighter-rouge">state</code>: a status document from <code class="language-plaintext highlighter-rouge">include_states</code>.</li>
+</ul>
+
+<p>Including the <code class="language-plaintext highlighter-rouge">type</code> field can simplify code that handles different cases for changefeed results.</p>
+
+<h1 id="handling-latency">Handling latency</h1>
+
+<p>Depending on how fast your application makes changes to monitored data and how fast it processes change notifications, it’s possible that more than one change will happen between calls to the <code class="language-plaintext highlighter-rouge">changes</code> command. You can control what happens in that case with the <code class="language-plaintext highlighter-rouge">squash</code> optional argument.</p>
+
+<p>By default, if more than one change occurs between invocations of <code class="language-plaintext highlighter-rouge">changes</code>, your application will receive a single change object whose <code class="language-plaintext highlighter-rouge">new_val</code> will incorporate <em>all</em> the changes to the data. Suppose three updates occurred to a monitored document between <code class="language-plaintext highlighter-rouge">change</code> reads:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Change</th>
+      <th>Data</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Initial state (<code class="language-plaintext highlighter-rouge">old_val</code>)</td>
+      <td>{ name: “Fred”, admin: true }</td>
+    </tr>
+    <tr>
+      <td>update({name: “George”})</td>
+      <td>{ name: “George”, admin: true }</td>
+    </tr>
+    <tr>
+      <td>update({admin: false})</td>
+      <td>{ name: “George”, admin: false }</td>
+    </tr>
+    <tr>
+      <td>update({name: “Jay”})</td>
+      <td>{ name: “Jay”, admin: false }</td>
+    </tr>
+    <tr>
+      <td><code class="language-plaintext highlighter-rouge">new_val</code></td>
+      <td>{ name: “Jay”, admin: false }</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Your application would by default receive the object as it existed in the database after the <em>most recent</em> change. The previous two updates would be “squashed” into the third.</p>
+
+<p>If you wanted to receive <em>all</em> the changes, including the interim states, you could do so by passing <code class="language-plaintext highlighter-rouge">squash: false</code>. The server will buffer up to 100,000 changes. (This number can be changed with the <code class="language-plaintext highlighter-rouge">changefeed_queue_size</code> optional argument.)</p>
+
+<p>A third option is to specify how many seconds to wait between squashes. Passing <code class="language-plaintext highlighter-rouge">squash: 5</code> to the <code class="language-plaintext highlighter-rouge">changes</code> command tells RethinkDB to squash changes together every five seconds. Depending on your application’s use case, this might reduce the load on the server. A number passed to <code class="language-plaintext highlighter-rouge">squash</code> may be a float. Note that the requested interval is not guaranteed, but is rather a best effort.</p>
+
+<p><strong>Note:</strong> Changefeeds ignore the <code class="language-plaintext highlighter-rouge">read_mode</code> flag to <code class="language-plaintext highlighter-rouge">run</code>, and always behave as if it is set to <code class="language-plaintext highlighter-rouge">single</code> (i.e., the values they return are in memory on the primary replica, but have not necessarily been written to disk yet). For more details read <a href="/docs/consistency">Consistency guarantees</a>.</p>
+
+<h1 id="scaling-considerations">Scaling considerations</h1>
+
+<p>Changefeeds perform well as they scale, although they create extra intracluster messages in proportion to the number of servers with open feed connections on each write. This can be mitigated by running a RethinkDB proxy server (the <code class="language-plaintext highlighter-rouge">rethinkdb proxy</code> startup option); read <a href="/docs/sharding-and-replication/#running-a-proxy-node">Running a proxy node</a> for details.</p>
+
+<p>Since changefeeds are unidirectional with no acknowledgement returned from clients, they cannot guarantee delivery. If you need real-time updating with delivery guarantees, consider using a model that distributes to the clients through a message broker such as <a href="https://www.rabbitmq.com/">RabbitMQ</a>.</p>
+
+<h1 id="read-more">Read more</h1>
+
+<ul>
+  <li>The <a href="/api/java/changes">changes</a> command API reference</li>
+  <li><a href="/docs/introduction-to-reql/">Introduction to ReQL</a></li>
+  <li><a href="/docs/data-types/">ReQL data types</a></li>
+</ul>
+</div>
+        </section>
+    </div>
+</section>
+
+
+            <!-- site footer -->
+            <footer class="site-footer">
+                <div class="site-container">
+                    <section class="get-started">
+                        <h1>Join 100,000 developers</h1>
+                        <p>Install in seconds on Linux or OS X.</p>
+                        <a class="button small install" href="/install">Install</a>
+                        <a class="button small outlined learn-more" href="/faq">Learn more</a>
+
+                        <hr>
+                        <section class="contact-info">
+                            <p class="irc">#rethinkdb on freenode</p>
+                        </section>
+                    </section>
+                    <ul class="footer-links">
+                        <li>
+                            <header>
+                                <span>Getting started</span>
+                            </header>
+                            <ul>
+                                <li><a href="/faq">FAQ</a></li>
+                                <li><a href="/install">Install</a></li>
+                                <li><a href="/docs/quickstart">Quickstart</a></li>
+                                <li><a href="/docs/guide">Tutorial</a></li>
+                            </ul>
+                        </li>
+                        <li>
+                            <header>
+                                <span>Documentation</span>
+                            </header>
+                            <ul>
+                                <li><a href="/api">API</a></li>
+                                <li><a href="/docs/introduction-to-reql/">Intro to ReQL</a></li>
+                                <li><a href="/docs/cookbook">Cookbook</a></li>
+                                <li><a href="/docs/architecture">Architecture</a></li>
+                            </ul>
+                        </li>
+                        <li>
+                            <header>
+                                <span>Community</span>
+                            </header>
+                            <ul>
+                                <li><a href="/community">Get Involved</a></li>
+                                <li><a href="https://github.com/rethinkdb/rethinkdb">GitHub</a></li>
+                                <li><a href="https://twitter.com/rethinkdb">Twitter</a></li>
+                                <li><a href="https://join.slack.com/t/rethinkdb/shared_invite/enQtNzAxOTUzNTk1NzMzLWY5ZTA0OTNmMWJiOWFmOGVhNTUxZjQzODQyZjIzNjgzZjdjZDFjNDg1NDY3MjFhYmNhOTY1MDVkNDgzMWZiZWM">Slack</a></li>
+                            </ul>
+                        </li>
+                        <li>
+                            <header>
+                                <span>RethinkDB</span>
+                            </header>
+                            <ul>
+                                <li><a href="/blog/">Blog</a></li>
+                            </ul>
+                        </li>
+                    </ul>
+                    <p class="github-footer"><i class="icon-github-footer"></i><a href="https://github.com/rethinkdb/rethinkdb">Star this project</a> on GitHub.</p>
+                </div>
+            </footer>
+        </div>
+        
+            <!-- algolia -->
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.css" />
+            <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.js"></script>
+            <script type="text/javascript"> docsearch({
+                apiKey: 'a33e586ddcc6f914b6c3eb48760d6235',
+                indexName: 'rethinkdb',
+                inputSelector: '#wrapper > section > div > section.docs-sidebar-left > div > input',
+                debug: false
+                });
+            </script>
+        
+        <script type="text/javascript">
+
+            var _gaq = _gaq || [];
+            _gaq.push(['_setAccount', 'UA-9922584-1']);
+            _gaq.push(['_trackPageview']);
+
+            (function() {
+            var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+            ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+            var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+            })();
+        </script>
+    </body>
+</html>

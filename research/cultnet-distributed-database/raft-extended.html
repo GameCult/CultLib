@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+<meta charset="utf-8" />
+<title>In Search of an Understandable Consensus Algorithm (Extended Version)</title>
+<meta name="generator" content="Org mode" />
+<meta name="author" content="Diego Ongaro and John Ousterhout, Stanford University" />
+<link rel="stylesheet" type="text/css" href="/themes/readtheorg/styles/readtheorg/css/htmlize.css"/>
+<link rel="stylesheet" type="text/css" href="/themes/readtheorg/styles/readtheorg/css/readtheorg.css"/>
+<script src="/themes/jquery/2.1.3/jquery.min.js"></script>
+<script src="/themes/bootstrap/3.3.4/js/bootstrap.min.js"></script>
+<script type="text/javascript" src="/themes/readtheorg/styles/lib/js/jquery.stickytableheaders.min.js"></script>
+<script type="text/javascript" src="/themes/readtheorg/styles/readtheorg/js/readtheorg.js"></script>
+</head>
+<body>
+<div id="org-div-home-and-up">
+ <a accesskey="h" href="../index.html"> UP </a>
+ |
+ <a accesskey="H" href="paperlist.html"> HOME </a>
+</div><div id="content">
+<h1 class="title">In Search of an Understandable Consensus Algorithm (Extended Version)</h1>
+<div id="table-of-contents">
+<h2>Table of Contents</h2>
+<div id="text-table-of-contents">
+<ul>
+<li><a href="#orgf960eb7">DECLARATION</a></li>
+<li><a href="#orgd05d3d0">Abstract</a></li>
+<li><a href="#orge9839bb">1. Introduction</a></li>
+<li><a href="#orgae8bb96">2. Replicated state machines</a></li>
+<li><a href="#org1fe8017">3. What's wrong with Paxos?</a></li>
+<li><a href="#orgfc9c6b4">4. Designing for understandability</a></li>
+<li><a href="#orge3d8f10">5. The Raft consensus algorithm</a>
+<ul>
+<li><a href="#org752f98e">5.1. Raft basics</a></li>
+<li><a href="#org291797f">5.2. Leader election</a></li>
+<li><a href="#org44bb0a6">5.3. Log replication</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</div>
+
+<div id="outline-container-orgf960eb7" class="outline-2">
+<h2 id="orgf960eb7">DECLARATION</h2>
+<div class="outline-text-2" id="text-orgf960eb7">
+<p>
+This page is the In Search of an Understandable Consensus Algorithm
+(Extended Version)  paper. Original Paper Link
+is: <a href="https://raft.github.io/raft.pdf">https://raft.github.io/raft.pdf</a>
+</p>
+
+<p>
+In Search of an Understandable Consensus Algorithm<br />
+(Extended Version)<br />
+Diego Ongaro and John Ousterhout<br />
+Stanford University
+</p>
+</div>
+</div>
+
+<div id="outline-container-orgd05d3d0" class="outline-2">
+<h2 id="orgd05d3d0">Abstract</h2>
+<div class="outline-text-2" id="text-orgd05d3d0">
+<p>
+Raft is a consensus algorithm for managing a replicated log. It produces a
+result equivalent to (multi-)Paxos, and it is as efficient as Paxos, but its
+structure is different from Paxos; this makes Raft more understandable than
+Paxos and also provides a better foundation for building practical systems.
+In order to enhance understandability, Raft separates the key elements of
+consensus, such as leader election, log replication, and safety, and it enforces
+a stronger degree of coherency to reduce the number of states that must be
+considered. Results from a user study demonstrate that Raft is easier for
+students to learn than Paxos. Raft also includes a new mechanism for changing
+the cluster membership, which uses overlapping majorities to guarantee safety.
+</p>
+</div>
+</div>
+
+<div id="outline-container-orge9839bb" class="outline-2">
+<h2 id="orge9839bb"><span class="section-number-2">1</span> Introduction</h2>
+<div class="outline-text-2" id="text-1">
+<p>
+Consensus algorithms allow a collection of machines to work as a coherent group
+that can survive the failures of some of its members. Because of this, they play
+a key role in building reliable large-scale software systems. Paxos [15, 16] has
+dominated the discussion of consensus algorithms over the last decade: most
+implementations of consensus are based on Paxos or influenced by it, and Paxos
+has become the primary vehicle used to teach students about consensus.
+</p>
+
+<p>
+Unfortunately, Paxos is quite difficult to understand, in spite of numerous
+attempts to make it more approachable. Furthermore, its architecture requires
+complex changes to support practical systems. As a result, both system builders
+and students struggle with Paxos.
+</p>
+
+<p>
+After struggling with Paxos ourselves, we set out to find a new consensus
+algorithm that could provide a better foundation for system building and
+education. Our approach was unusual in that our primary goal was
+understandability: could we define a consensus algorithm for practical systems
+and describe it in a way that is significantly easier to learn than Paxos?
+Furthermore, we wanted the algorithm to facilitate the development of intuitions
+that are essential for system builders. It was important not just for the
+algorithm to work, but for it to be obvious why it works.
+</p>
+
+<p>
+The result of this work is a consensus algorithm called Raft. In designing Raft
+we applied specific techniques to improve understandability,including
+decomposition (Raft separates leader election, log replication, and safety) and
+This tech report is an extended version of [32]; additional material is noted
+with a gray bar in the margin. Published May 20, 2014. state space reduction
+(relative to Paxos, Raft reduces the degree of nondeterminism and the ways
+servers can be inconsistent with each other). A user study with 43 students
+at two universities shows that Raft is significantly easier to understand than
+Paxos: after learning both algorithms, 33 of these students were able to answer
+questions about Raft better than questions about Paxos.
+</p>
+
+<p>
+Raft is similar in many ways to existing consensus algorithms (most notably, Oki
+and Liskov's Viewstamped Replication [29, 22]), but it has several novel
+features:
+</p>
+
+<p>
+1/. Strong leader: Raft uses a stronger form of leadership than other consensus
+algorithms. For example, log entries only flow from the leader to other servers.
+This simplifies the management of the replicated log and makes Raft easier to
+understand.
+</p>
+
+<p>
+2/. Leader election: Raft uses randomized timers to elect leaders. This adds
+only a small amount of mechanism to the heartbeats already required for any
+consensus algorithm, while resolving conflicts simply and rapidly.
+</p>
+
+<p>
+3/. Membership changes: Raft's mechanism for changing the set of servers in the
+cluster uses a new joint consensus approach where the majorities of two
+different configurations overlap during transitions. This allows the cluster to
+continue operating normally during configuration changes.
+</p>
+
+<p>
+We believe that Raft is superior to Paxos and other consensus algorithms, both
+for educational purposes and as a foundation for implementation. It is simpler
+and more understandable than other algorithms; it is described completely enough
+to meet the needs of a practical system; it has several open-source
+implementations and is used by several companies; its safety properties have
+been formally specified and proven; and its efficiency is comparable to other
+algorithms.
+</p>
+
+<p>
+The remainder of the paper introduces the replicated state machine problem
+(Section 2), discusses the strengths and weaknesses of Paxos (Section 3),
+describes our general approach to understandability (Section 4), presents the
+Raft consensus algorithm (Sections 5–8), evaluates Raft (Section 9), and
+discusses related work (Section 10).
+</p>
+</div>
+</div>
+
+<div id="outline-container-orgae8bb96" class="outline-2">
+<h2 id="orgae8bb96"><span class="section-number-2">2</span> Replicated state machines</h2>
+<div class="outline-text-2" id="text-2">
+<p>
+Consensus algorithms typically arise in the context of replicated state machines
+[37]. In this approach, state machines on a collection of servers compute
+identical copies of the same state and can continue operating even if some of
+the servers are down. Replicated state machines are used to solve a variety of
+fault tolerance problems in distributed systems. For example, large-scale
+systems that have a single cluster leader, such as GFS [8], HDFS [38], and
+RAMCloud [33], typically use a separate replicated state machine to manage
+leader election and store configuration information that must survive leader
+crashes. Examples of replicated state machines include Chubby [2] and
+ZooKeeper [11].
+</p>
+
+
+<div id="org1bdf0c5" class="figure">
+<p><img src="img/raft-figure1.jpg" alt="raft-figure1.jpg" />
+</p>
+<p><span class="figure-number">Figure 1: </span>Replicated state machine architecture. The consensus algorithm manages a replicated log containing state machine commands from clients. The state machines process identical sequences of commands from the logs, so they produce the same outputs.</p>
+</div>
+
+<p>
+Replicated state machines are typically implemented using a replicated log, as
+shown in Figure 1. Each server stores a log containing a series of commands,
+which its state machine executes in order. Each log contains the same commands
+in the same order, so each state machine processes the same sequence of
+commands. Since the state machines are deterministic, each computes the same
+state and the same sequence of outputs.
+</p>
+
+<p>
+Keeping the replicated log consistent is the job of the consensus algorithm.
+The consensus module on a server receives commands from clients and adds them to
+its log. It communicates with the consensus modules on other servers to ensure
+that every log eventually contains the same requests in the same order, even if
+some servers fail. Once commands are properly replicated, each server's state
+machine processes them in log order, and the outputs are returned to clients. As
+a result, the servers appear to form a single, highly reliable state machine.
+</p>
+
+<p>
+Consensus algorithms for practical systems typically have the following
+properties:
+</p>
+
+<p>
+• They ensure <i>safety</i> (never returning an incorrect result) under all
+non-Byzantine conditions, including network delays, partitions, and packet loss,
+duplication, and reordering.
+</p>
+
+<p>
+• They are fully functional (available) as long as any majority of the servers
+are operational and can communicate with each other and with clients. Thus, a
+typical cluster of five servers can tolerate the failure of any two servers.
+Servers are assumed to fail by stopping; they may later recover from state on
+stable storage and rejoin the cluster.
+</p>
+
+<p>
+• They do not depend on timing to ensure the consistency of the logs: faulty
+clocks and extreme message delays can, at worst, cause availability problems.
+</p>
+
+<p>
+• In the common case, a command can complete as soon as a majority of the
+cluster has responded to a single round of remote procedure calls; a minority of
+slow servers need not impact overall system performance.
+</p>
+</div>
+</div>
+
+<div id="outline-container-org1fe8017" class="outline-2">
+<h2 id="org1fe8017"><span class="section-number-2">3</span> What's wrong with Paxos?</h2>
+<div class="outline-text-2" id="text-3">
+<p>
+Over the last ten years, Leslie Lamport's Paxos protocol [15] has become almost
+synonymous with consensus: it is the protocol most commonly taught in courses,
+and most implementations of consensus use it as a starting point. Paxos first
+defines a protocol capable of reaching agreement on a single decision, such as
+a single replicated log entry. We refer to this subset as single-decree Paxos.
+Paxos then combines multiple instances of this protocol to facilitate a series
+of decisions such as a log (multi-Paxos). Paxos ensures both safety and
+liveness, and it supports changes in cluster membership. Its correctness has
+been proven, and it is efficient in the normal case.
+</p>
+
+<p>
+Unfortunately, Paxos has two significant drawbacks. The first drawback is that
+Paxos is exceptionally difficult to understand. The full explanation [15] is
+notoriously opaque; few people succeed in understanding it, and only with great
+effort. As a result, there have been several attempts to explain Paxos in
+simpler terms [16, 20, 21]. These explanations focus on the single-decree
+subset, yet they are still challenging. In an informal survey of attendees at
+NSDI 2012, we found few people who were comfortable with Paxos, even among
+seasoned researchers. We struggled with Paxos ourselves; we were not able to
+understand the complete protocol until after reading several simplified
+explanations and designing our own alternative protocol, a process that took
+almost a year.
+</p>
+
+<p>
+We hypothesize that Paxos' opaqueness derives from its choice of the
+single-decree subset as its foundation. Single-decree Paxos is dense and subtle:
+it is divided into two stages that do not have simple intuitive explanations and
+cannot be understood independently. Because of this, it is difficult to develop
+intuitions about why the single-decree protocol works. The composition rules for
+multi-Paxos add significant additional complexity and subtlety. We believe that
+the overall problem of reaching consensus on multiple decisions (i.e., a log
+instead of a single entry) can be decomposed in other ways that are more direct
+and obvious.
+</p>
+
+<p>
+The second problem with Paxos is that it does not provide a good foundation for
+building practical implementations. One reason is that there is no widely
+agreed-upon algorithm for multi-Paxos. Lamport's descriptions are mostly about
+single-decree Paxos; he sketched possible approaches to multi-Paxos, but many
+details are missing. There have been several attempts to flesh out and optimize
+Paxos, such as [26], [39], and [13], but these differ from each other and from
+Lamport's sketches. Systems such as Chubby [4] have implemented Paxos-like
+algorithms, but in most cases their details have not been published.
+</p>
+
+<p>
+Furthermore, the Paxos architecture is a poor one for building practical
+systems; this is another consequence of the single-decree decomposition. For
+example, there is little benefit to choosing a collection of log entries
+independently and then melding them into a sequential log; this just adds
+complexity. It is simpler and more efficient to design a system around a log,
+where new entries are appended sequentially in a constrained order. Another
+problem is that Paxos uses a symmetric peer-to-peer approach at its core (though
+it eventually suggests a weak form of leadership as a performance optimization).
+This makes sense in a simplified world where only one decision will be made, but
+few practical systems use this approach. If a series of decisions must be made,
+it is simpler and faster to first elect a leader, then have the leader
+coordinate the decisions.
+</p>
+
+<p>
+As a result, practical systems bear little resemblance to Paxos. Each
+implementation begins with Paxos, discovers the difficulties in implementing it,
+and then develops a significantly different architecture. This is timeconsuming
+and error-prone, and the difficulties of understanding Paxos exacerbate the
+problem. Paxos' formulation may be a good one for proving theorems about its
+correctness, but real implementations are so different from Paxos that the
+proofs have little value. The following comment from the Chubby implementers is
+typical:
+</p>
+
+<blockquote>
+<p>
+There are significant gaps between the description of the Paxos algorithm and
+the needs of a real-world system. . . . the final system will be based on an
+unproven protocol [4].
+</p>
+</blockquote>
+
+<p>
+Because of these problems, we concluded that Paxos does not provide a good
+foundation either for system building or for education. Given the importance of
+consensus in large-scale software systems, we decided to see if we could design
+an alternative consensus algorithm with better properties than Paxos. Raft is
+the result of that experiment.
+</p>
+</div>
+</div>
+
+<div id="outline-container-orgfc9c6b4" class="outline-2">
+<h2 id="orgfc9c6b4"><span class="section-number-2">4</span> Designing for understandability</h2>
+<div class="outline-text-2" id="text-4">
+<p>
+We had several goals in designing Raft: it must provide a complete and practical
+foundation for system building, so that it significantly reduces the amount of
+design work required of developers; it must be safe under all conditions and
+available under typical operating conditions; and it must be efficient for
+common operations. But our most important goal—and most difficult challenge
+was understandability. It must be possible for a large audience to understand
+the algorithm comfortably. In addition, it must be possible to develop
+intuitions about the algorithm, so that system builders can make the extensions
+that are inevitable in real-world implementations.
+</p>
+
+<p>
+There were numerous points in the design of Raft where we had to choose among
+alternative approaches. In these situations we evaluated the alternatives
+based on understandability: how hard is it to explain each alternative (for
+example, how complex is its state space, and does it have subtle implications?),
+and how easy will it be for a reader to completely understand the approach and
+its implications?
+</p>
+
+<p>
+We recognize that there is a high degree of subjectivity in such analysis;
+nonetheless, we used two techniques that are generally applicable. The first
+technique is the well-known approach of problem decomposition: wherever
+possible, we divided problems into separate pieces that could be solved,
+explained, and understood relatively independently. For example, in Raft we
+separated leader election, log replication, safety, and membership changes.
+</p>
+
+<p>
+Our second approach was to simplify the state space by reducing the number of
+states to consider, making the system more coherent and eliminating
+nondeterminism where possible. Specifically, logs are not allowed to have holes,
+and Raft limits the ways in which logs can become inconsistent with each other.
+Although in most cases we tried to eliminate nondeterminism, there are some
+situations where nondeterminism actually improves understandability.
+In particular, randomized approaches introduce nondeterminism, but they tend to
+reduce the state space by handling all possible choices in a similar fashion
+("choose any; it doesn't matter"). We used randomization to simplify the Raft
+leader election algorithm.
+</p>
+</div>
+</div>
+
+<div id="outline-container-orge3d8f10" class="outline-2">
+<h2 id="orge3d8f10"><span class="section-number-2">5</span> The Raft consensus algorithm</h2>
+<div class="outline-text-2" id="text-5">
+<p>
+Raft is an algorithm for managing a replicated log of the form described in
+Section 2. Figure 2 summarizes the algorithm in condensed form for reference,
+and Figure 3 lists key properties of the algorithm; the elements of these
+figures are discussed piecewise over the rest of this section.
+</p>
+
+<p>
+<img src="img/raft-figure2-1.jpg" alt="raft-figure2-1.jpg" />
+<img src="img/raft-figure2-2.jpg" alt="raft-figure2-2.jpg" />
+<img src="img/raft-figure2-3.jpg" alt="raft-figure2-3.jpg" />
+</p>
+
+<div id="orgf3f186a" class="figure">
+<p><img src="img/raft-figure2-4.jpg" alt="raft-figure2-4.jpg" />
+</p>
+<p><span class="figure-number">Figure 2: </span>A condensed summary of the Raft consensus algorithm (excluding membership changes and log compaction). The server behavior in the upper-left box is described as a set of rules that trigger independently and repeatedly. Section numbers such as §5.2 indicate where particular features are discussed.A formal specification [31] describes the algorithm more precisely.</p>
+</div>
+
+<p>
+Raft implements consensus by first electing a distinguished leader, then giving
+the leader complete responsibility for managing the replicated log. The leader
+accepts log entries from clients, replicates them on other servers, and tells
+servers when it is safe to apply log entries to their state machines. Having a
+leader simplifies the management of the replicated log. For example, the leader
+can decide where to place new entries in the log without consulting other
+servers, and data flows in a simple fashion from the leader to other servers.
+A leader can fail or become disconnected from the other servers, in which case
+a new leader is elected.
+</p>
+
+<p>
+Given the leader approach, Raft decomposes the consensus problem into three
+relatively independent subproblems, which are discussed in the subsections that
+follow:
+</p>
+
+<p>
+• Leader election: a new leader must be chosen when an existing leader fails
+(Section 5.2).
+</p>
+
+<p>
+• Log replication: the leader must accept log entries from clients and replicate
+them across the cluster, forcing the other logs to agree with its own (Section
+5.3).
+• Safety: the key safety property for Raft is the State Machine Safety Property
+in Figure 3: if any server has applied a particular log entry to its state
+machine, then no other server may apply a different command for the same log
+index. Section 5.4 describes how Raft ensures this property; the solution
+involves an additional restriction on the election mechanism described in
+Section 5.2.
+</p>
+
+<p>
+After presenting the consensus algorithm, this section discusses the issue of
+availability and the role of timing in the system.
+</p>
+
+
+<div id="org159660c" class="figure">
+<p><img src="img/raft-figure3.jpg" alt="raft-figure3.jpg" />
+</p>
+<p><span class="figure-number">Figure 3: </span>Raft guarantees that each of these properties is true at all times. The section numbers indicate where each property is discussed.</p>
+</div>
+</div>
+
+<div id="outline-container-org752f98e" class="outline-3">
+<h3 id="org752f98e"><span class="section-number-3">5.1</span> Raft basics</h3>
+<div class="outline-text-3" id="text-5-1">
+<p>
+A Raft cluster contains several servers; five is a typical number, which allows
+the system to tolerate two failures. At any given time each server is in one of
+three states: leader, follower, or candidate. In normal operation there is
+exactly one leader and all of the other servers are followers. Followers are
+passive: they issue no requests on their own but simply respond to requests from
+leaders and candidates. The leader handles all client requests (if a client
+contacts a follower, the follower redirects it to the leader). The third state,
+candidate, is used to elect a new leader as described in Section 5.2. Figure 4
+shows the states and their transitions; the transitions are discussed below.
+</p>
+
+<div id="org3f316c7" class="figure">
+<p><img src="img/raft-figure4.jpg" alt="raft-figure4.jpg" />
+</p>
+<p><span class="figure-number">Figure 4: </span>Server states. Followers only respond to requests from other servers. If a follower receives no communication, it becomes a candidate and initiates an election. A candidate that receives votes from a majority of the full cluster becomes the new leader. Leaders typically operate until they fail.</p>
+</div>
+
+<p>
+Raft divides time into terms of arbitrary length, as shown in Figure 5. Terms
+are numbered with consecutive integers. Each term begins with an election, in
+which one or more candidates attempt to become leader as described in Section
+5.2. If a candidate wins the election, then it serves as leader for the rest of
+the term. In some situations an election will result in a split vote. In this
+case the term will end with no leader; a new term (with a new election) will
+begin shortly. Raft ensures that there is at most one leader in a given term.
+</p>
+
+
+<div id="orgc7ff282" class="figure">
+<p><img src="img/raft-figure5.jpg" alt="raft-figure5.jpg" />
+</p>
+<p><span class="figure-number">Figure 5: </span>Time is divided into terms, and each term begins with an election. After a successful election, a single leader manages the cluster until the end of the term. Some elections fail, in which case the term ends without choosing a leader. The transitions between terms may be observed at different times on different servers.</p>
+</div>
+
+<p>
+Different servers may observe the transitions between terms at different times,
+and in some situations a server may not observe an election or even entire
+terms. Terms act as a logical clock [14] in Raft, and they allow servers to
+detect obsolete information such as stale leaders. Each server stores a current
+term number, which increases monotonically over time. Current terms are
+exchanged whenever servers communicate; if one server's current term is smaller
+than the other's, then it updates its current term to the larger value. If a
+candidate or leader discovers that its term is out of date, it immediately
+reverts to follower state. If a server receives a request with a stale term
+number, it rejects the request.
+</p>
+
+<p>
+Raft servers communicate using remote procedure calls (RPCs), and the basic
+consensus algorithm requires only two types of RPCs. RequestVote RPCs are
+initiated by candidates during elections (Section 5.2), and AppendEntries RPCs
+are initiated by leaders to replicate log entries and to provide a form of
+heartbeat (Section 5.3). Section 7 adds a third RPC for transferring snapshots
+between servers. Servers retry RPCs if they do not receive a response in a
+timely manner, and they issue RPCs in parallel for best performance.
+</p>
+</div>
+</div>
+
+<div id="outline-container-org291797f" class="outline-3">
+<h3 id="org291797f"><span class="section-number-3">5.2</span> Leader election</h3>
+<div class="outline-text-3" id="text-5-2">
+<p>
+Raft uses a heartbeat mechanism to trigger leader election. When servers start
+up, they begin as followers. A server remains in follower state as long as it
+receives valid RPCs from a leader or candidate. Leaders send periodic heartbeats
+(AppendEntries RPCs that carry no log entries) to all followers in order to
+maintain their authority. If a follower receives no communication over a period
+of time called the election timeout, then it assumes there is no viable leader
+and begins an election to choose a new leader.
+</p>
+
+<p>
+To begin an election, a follower increments its current term and transitions to
+candidate state. It then votes for itself and issues RequestVote RPCs in
+parallel to each of the other servers in the cluster. A candidate continues in
+this state until one of three things happens: (a) it wins the election, (b)
+another server establishes itself as leader, or (c) a period of time goes by
+with no winner. These outcomes are discussed separately in the paragraphs below.
+</p>
+
+<p>
+A candidate wins an election if it receives votes from a majority of the servers
+in the full cluster for the same term. Each server will vote for at most one
+candidate in a given term, on a first-come-first-served basis (note: Section 5.4
+adds an additional restriction on votes). The majority rule ensures that at most
+one candidate can win the election for a particular term (the Election Safety
+Property in Figure 3). Once a candidate wins an election, it becomes leader. It
+then sends heartbeat messages to all of the other servers to establish its
+authority and prevent new elections.
+</p>
+
+<p>
+While waiting for votes, a candidate may receive an AppendEntries RPC from
+another server claiming to be leader. If the leader's term (included in its RPC)
+is at least as large as the candidate's current term, then the candidate
+recognizes the leader as legitimate and returns to follower state. If the term
+in the RPC is smaller than the candidate's current term, then the candidate
+rejects the RPC and continues in candidate state.
+</p>
+
+<p>
+The third possible outcome is that a candidate neither wins nor loses the
+election: if many followers become candidates at the same time, votes could be
+split so that no candidate obtains a majority. When this happens, each candidate
+will time out and start a new election by incrementing its term and initiating
+another round of RequestVote RPCs. However, without extra measures split votes
+could repeat indefinitely.
+</p>
+
+<p>
+Raft uses randomized election timeouts to ensure that split votes are rare and
+that they are resolved quickly. To prevent split votes in the first place,
+election timeouts are chosen randomly from a fixed interval (e.g., 150–300ms).
+This spreads out the servers so that in most cases only a single server will
+time out; it wins the election and sends heartbeats before any other servers
+time out. The same mechanism is used to handle split votes. Each candidate
+restarts its randomized election timeout at the start of an election, and it
+waits for that timeout to elapse before starting the next election; this reduces
+the likelihood of another split vote in the new election. Section 9.3 shows
+that this approach elects a leader rapidly.
+</p>
+
+<p>
+Elections are an example of how understandability guided our choice between
+design alternatives. Initially we planned to use a ranking system: each
+candidate was assigned a unique rank, which was used to select between
+competing candidates. If a candidate discovered another candidate with higher
+rank, it would return to follower state so that the higher ranking candidate
+could more easily win the next election. We found that this approach created
+subtle issues around availability (a lower-ranked server might need to time out
+and become a candidate again if a higher-ranked server fails, but if it does so
+too soon, it can reset progress towards electing a leader). We made adjustments
+to the algorithm several times, but after each adjustment new corner cases
+appeared. Eventually we concluded that the randomized retry approach is more
+obvious and understandable.
+</p>
+</div>
+</div>
+
+<div id="outline-container-org44bb0a6" class="outline-3">
+<h3 id="org44bb0a6"><span class="section-number-3">5.3</span> Log replication</h3>
+<div class="outline-text-3" id="text-5-3">
+<p>
+Once a leader has been elected, it begins servicing client requests. Each client
+request contains a command to be executed by the replicated state machines. The
+leader appends the command to its log as a new entry, then issues AppendEntries
+RPCs in parallel to each of the other servers to replicate the entry. When the
+entry has been safely replicated (as described below), the leader applies the
+entry to its state machine and returns the result of that execution to the
+client. If followers crash or run slowly, or if network packets are lost, the
+leader retries AppendEntries RPCs indefinitely (even after it has responded to
+the client) until all followers eventually store all log entries.
+</p>
+
+
+<div id="org879421f" class="figure">
+<p><img src="img/raft-figure6.jpg" alt="raft-figure6.jpg" />
+</p>
+<p><span class="figure-number">Figure 6: </span>Logs are composed of entries, which are numbered sequentially. Each entry contains the term in which it was created (the number in each box) and a command for the state machine. An entry is considered committed if it is safe for that entry to be applied to state machines.</p>
+</div>
+
+<p>
+Logs are organized as shown in Figure 6. Each log entry stores a state machine
+command along with the term number when the entry was received by the leader.
+The term numbers in log entries are used to detect inconsistencies between logs
+and to ensure some of the properties in Figure 3. Each log entry also has an
+integer index identifying its position in the log.
+</p>
+
+<p>
+The leader decides when it is safe to applyy a log en-
+try to the state machines; such an entry is called commit-
+ted. Raft guarantees that committed entries are durable
+and will eventually be executed by all of the available
+state machines. A log entry is committed once the leader
+that created the entry has replicated it on a majority of
+the servers (e.g., entry 7 in Figure 6). This also commits
+all preceding entries in the leader's log, including entries
+created by previous leaders. Section 5.4 discusses some
+subtleties when applying this rule after leader changes,
+and it also shows that this definition of commitment is
+safe. The leader keeps track of the highest index it knows
+to be committed, and it includes that index in future
+AppendEntries RPCs (including heartbeats) so that the
+other servers eventually find out. Once a follower learns
+that a log entry is committed, it applies the entry to its
+local state machine (in log order).
+We designed the Raft log mechanism to maintain a high
+level of coherency between the logs on different servers.
+Not only does this simplify the system's behavior and
+make it more predictable, but it is an important component
+of ensuring safety. Raft maintains the following proper-
+ties, which together constitute the Log Matching Property
+in Figure 3:
+</p>
+</div>
+</div>
+</div>
+
+<script src="https://utteranc.es/client.js"
+        repo="yygcode/yygcode.github.io"
+        issue-term="pathname"
+        label=" Utterances"
+        theme="github-light"
+        crossorigin="anonymous"
+        async>
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://github.com/utterance">comments powered by utterances.</a></noscript>
+</div>
+<div id="postamble" class="status">
+<div class="copyright">
+2012-2020 Copyright&copy; <i> YANYG<br/>Powered by Emacs Orgmode</i>
+</div>
+</div>
+</body>
+</html>
