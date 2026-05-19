@@ -63,6 +63,7 @@ Implemented:
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
 - deterministic consensus candidates derived from witness observations
+- schema-v0 simulation observation and consensus candidate messages
 
 Not implemented yet:
 
@@ -70,7 +71,7 @@ Not implemented yet:
 - leader election or automatic shard failover
 - durable log persistence and compaction
 - snapshot fallback for compacted log history
-- transport messages/documents for witness observation gossip
+- observation hub/fanout that receives gossip and emits candidates reactively
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
@@ -105,14 +106,15 @@ Add durable mutation-log storage and snapshot fallback:
 - return `ResyncRequired` when a replica asks for compacted history
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
-- add schema-v0 observation gossip once the local consensus document shape is
-  stable
+- add an observation hub that receives schema-v0 observation messages and emits
+  consensus candidates reactively
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive
 restart. Client-owned input documents can now be predicted locally and
 reconciled when the authoritative log arrives. Nodes can also aggregate witness
 observations into deterministic consensus candidates for simulation facts like
-"who shot first." The next useful layer is making authoritative mutation logs
-durable and compaction-aware. Membership and leader election should wait until
-basic replica catch-up is boring.
+"who shot first," and those reports now have schema-v0 wire contracts. The next
+useful layer is making authoritative mutation logs durable and compaction-aware.
+Membership and leader election should wait until basic replica catch-up is
+boring.

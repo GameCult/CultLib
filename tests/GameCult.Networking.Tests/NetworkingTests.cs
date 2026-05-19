@@ -320,6 +320,65 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_SimulationObservation()
+        {
+            var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+            var message = new CultNetSimulationObservationMessage
+            {
+                MessageId = "observation-1",
+                Observation = new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-1",
+                    ShardId = "arena",
+                    ShardEpoch = 4,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = claimHash,
+                    ClaimSummary = "alice hit bob first",
+                    ObservedAt = "2026-05-19T12:00:00.0000000Z"
+                }
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetSimulationObservationMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("observation-1"));
+            Assert.That(roundTrip.Observation.WitnessRuntimeId, Is.EqualTo("watcher-1"));
+            Assert.That(roundTrip.Observation.Frame, Is.EqualTo(100));
+            Assert.That(roundTrip.Observation.ClaimHash, Is.EqualTo(claimHash));
+        }
+
+        [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_SimulationConsensusCandidate()
+        {
+            var candidate = new CultNetSimulationConsensusCandidate(
+                "arena",
+                4,
+                100,
+                "bob",
+                "hit",
+                "claim-hash",
+                "alice hit bob first",
+                witnessCount: 3,
+                supportWeight: 3d,
+                totalWeight: 4d,
+                hasQuorum: true);
+
+            var message = CultNetSimulationConsensusCandidateMessage.FromCandidate("candidate-1", candidate);
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetSimulationConsensusCandidateMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("candidate-1"));
+            Assert.That(roundTrip.ShardId, Is.EqualTo("arena"));
+            Assert.That(roundTrip.WitnessCount, Is.EqualTo(3));
+            Assert.That(roundTrip.SupportWeight, Is.EqualTo(3d));
+            Assert.That(roundTrip.TotalWeight, Is.EqualTo(4d));
+            Assert.That(roundTrip.Confidence, Is.EqualTo(0.75d));
+            Assert.That(roundTrip.HasQuorum, Is.True);
+        }
+
+        [Test]
         public async Task CultNetDocumentRegistry_RawSnapshotReplication_PreservesPayloadBytes()
         {
             var sourceCache = new CultCache();

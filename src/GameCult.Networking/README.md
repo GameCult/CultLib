@@ -159,7 +159,9 @@ a witness saw for one shard epoch, frame, subject, and claim kind.
 `CultNetSimulationConsensus` deterministically aggregates those observations
 into candidates with support weight, total observed weight, confidence, and
 quorum status. Those candidates are opinions ready for an authoritative commit
-path, not committed world state by themselves.
+path, not committed world state by themselves. The schema-v0 wire contracts are
+`cultnet.simulation_observation.v0` and
+`cultnet.simulation_consensus_candidate.v0`.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner

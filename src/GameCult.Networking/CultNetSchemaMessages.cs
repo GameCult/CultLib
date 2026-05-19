@@ -107,6 +107,14 @@ namespace GameCult.Networking
         /// shard mutation log response contract identifier.
         /// </summary>
         public const string ShardLogResponse = "cultnet.shard_log_response.v0";
+        /// <summary>
+        /// simulation observation gossip contract identifier.
+        /// </summary>
+        public const string SimulationObservation = "cultnet.simulation_observation.v0";
+        /// <summary>
+        /// simulation consensus candidate gossip contract identifier.
+        /// </summary>
+        public const string SimulationConsensusCandidate = "cultnet.simulation_consensus_candidate.v0";
     }
 
     /// <summary>
@@ -813,6 +821,116 @@ namespace GameCult.Networking
         /// Gets or sets a raw delete message for removed entries.
         /// </summary>
         [Key("delete")] public CultNetDocumentDeleteMessage? Delete { get; set; }
+    }
+
+    /// <summary>
+    /// Carries one witness observation about a simulation fact.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSimulationObservationMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SimulationObservation;
+        /// <summary>
+        /// Gets or sets the message id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the observation.
+        /// </summary>
+        [Key("observation")] public CultNetSimulationObservation Observation { get; set; } = new CultNetSimulationObservation();
+    }
+
+    /// <summary>
+    /// Carries one deterministic consensus candidate derived from witness observations.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSimulationConsensusCandidateMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SimulationConsensusCandidate;
+        /// <summary>
+        /// Gets or sets the message id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard id.
+        /// </summary>
+        [Key("shardId")] public string ShardId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard epoch.
+        /// </summary>
+        [Key("shardEpoch")] public long ShardEpoch { get; set; }
+        /// <summary>
+        /// Gets or sets the simulation frame.
+        /// </summary>
+        [Key("frame")] public long Frame { get; set; }
+        /// <summary>
+        /// Gets or sets the subject id.
+        /// </summary>
+        [Key("subjectId")] public string SubjectId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the claim kind.
+        /// </summary>
+        [Key("claimKind")] public string ClaimKind { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the selected claim hash.
+        /// </summary>
+        [Key("claimHash")] public string ClaimHash { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional claim detail.
+        /// </summary>
+        [Key("claimSummary")] public string? ClaimSummary { get; set; }
+        /// <summary>
+        /// Gets or sets distinct supporting witnesses.
+        /// </summary>
+        [Key("witnessCount")] public int WitnessCount { get; set; }
+        /// <summary>
+        /// Gets or sets supporting witness weight.
+        /// </summary>
+        [Key("supportWeight")] public double SupportWeight { get; set; }
+        /// <summary>
+        /// Gets or sets total observed witness weight.
+        /// </summary>
+        [Key("totalWeight")] public double TotalWeight { get; set; }
+        /// <summary>
+        /// Gets or sets whether the candidate crossed quorum.
+        /// </summary>
+        [Key("hasQuorum")] public bool HasQuorum { get; set; }
+        /// <summary>
+        /// Gets or sets support divided by total observed weight.
+        /// </summary>
+        [Key("confidence")] public double Confidence { get; set; }
+
+        /// <summary>
+        /// Creates a wire candidate message from a local candidate.
+        /// </summary>
+        public static CultNetSimulationConsensusCandidateMessage FromCandidate(
+            string messageId,
+            CultNetSimulationConsensusCandidate candidate)
+        {
+            if (candidate == null) throw new ArgumentNullException(nameof(candidate));
+            return new CultNetSimulationConsensusCandidateMessage
+            {
+                MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
+                ShardId = candidate.ShardId,
+                ShardEpoch = candidate.ShardEpoch,
+                Frame = candidate.Frame,
+                SubjectId = candidate.SubjectId,
+                ClaimKind = candidate.ClaimKind,
+                ClaimHash = candidate.ClaimHash,
+                ClaimSummary = candidate.ClaimSummary,
+                WitnessCount = candidate.WitnessCount,
+                SupportWeight = candidate.SupportWeight,
+                TotalWeight = candidate.TotalWeight,
+                HasQuorum = candidate.HasQuorum,
+                Confidence = candidate.Confidence
+            };
+        }
     }
 
     /// <summary>

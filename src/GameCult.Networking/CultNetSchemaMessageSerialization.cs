@@ -66,6 +66,8 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.ShardCatalogResponse => Deserialize<CultNetShardCatalogResponseMessage>(payload),
                 CultNetSchemaVersions.ShardLogRequest => Deserialize<CultNetShardLogRequestMessage>(payload),
                 CultNetSchemaVersions.ShardLogResponse => Deserialize<CultNetShardLogResponseMessage>(payload),
+                CultNetSchemaVersions.SimulationObservation => Deserialize<CultNetSimulationObservationMessage>(payload),
+                CultNetSchemaVersions.SimulationConsensusCandidate => Deserialize<CultNetSimulationConsensusCandidateMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogRequest => Deserialize<CultNetSchemaCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogResponse => Deserialize<CultNetSchemaCatalogResponseMessage>(payload),
                 _ => throw new MessagePackSerializationException(
