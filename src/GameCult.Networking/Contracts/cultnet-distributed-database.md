@@ -54,13 +54,16 @@ Implemented:
 - raw put/delete representation for accepted mutation-log entries
 - replica-side shard log application with epoch checks, gap rejection, and
   idempotent replay
+- shard log replicator that pulls non-primary shards from catalog-advertised
+  primary endpoints
+- schema-v0 shard log fetcher for `cultnet://host:port` endpoints
 
 Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
 - durable log persistence and compaction
-- background replica pull loops
+- durable replica cursor storage across restarts
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -77,14 +80,13 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add durable log storage and background replica pull loops:
+Add durable log storage and restart-safe replica cursors:
 
 - persist per-shard mutation logs instead of keeping them only in memory
 - define the compaction boundary that turns old log reads into snapshot reads
 - store last applied sequence per shard across restarts
-- let replicas periodically pull from primary endpoints in the shard catalog
 
-The log is now wire-readable and replicas can apply it explicitly. The next
-useful layer is making that state survive restart and giving replicas a pull
-loop. Membership and leader election should wait until basic replica catch-up is
-boring.
+The log is now wire-readable, replicas can apply it explicitly, and a pull loop
+can drive non-primary shards from primary endpoints. The next useful layer is
+making that state survive restart. Membership and leader election should wait
+until basic replica catch-up is boring.

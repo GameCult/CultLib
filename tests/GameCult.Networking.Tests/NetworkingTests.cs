@@ -973,6 +973,71 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetShardReplicator_Pulls_AndApplies_NextBatch()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var shard = new CultNetShardDescriptor(
+                "players-pull",
+                "runtime-a",
+                epoch: 2,
+                isPrimary: false,
+                schemaIds: [schemaId],
+                keyPrefix: "player:",
+                primaryEndpoints: ["cultnet://primary.example.test:3075"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("player:pull");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "pull@example.test",
+                PasswordHash = "hash",
+                Username = "Pull"
+            };
+            var put = registry.CreateRawDocumentPutMessage("put-pull", new CultRecordHandle<PlayerData>(key), player);
+            put.ShardId = "players-pull";
+            put.ShardEpoch = 2;
+            var fetcher = new CapturingShardLogFetcher(new CultNetShardLogResponseMessage
+            {
+                ShardId = "players-pull",
+                ShardEpoch = 2,
+                Entries =
+                [
+                    new CultNetShardLogEntryMessage
+                    {
+                        Sequence = 1,
+                        CommittedAt = "2026-05-19T12:00:00.0000000Z",
+                        ChangeKind = "added",
+                        Put = put
+                    }
+                ]
+            });
+            using var replicator = new CultNetShardReplicator(database, new CultNetShardReplicatorOptions
+            {
+                Fetcher = fetcher,
+                BatchSize = 7
+            });
+
+            var sequence = await replicator.PullOnceAsync("players-pull");
+
+            Assert.That(sequence, Is.EqualTo(1));
+            Assert.That(fetcher.FetchCount, Is.EqualTo(1));
+            Assert.That(fetcher.LastShard!.ShardId, Is.EqualTo("players-pull"));
+            Assert.That(fetcher.LastAfterSequence, Is.EqualTo(0));
+            Assert.That(fetcher.LastLimit, Is.EqualTo(7));
+            Assert.That(cache.Get<PlayerData>(key)!.Username, Is.EqualTo("Pull"));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();
@@ -1198,6 +1263,33 @@ namespace GameCult.Networking.Tests
             public Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message)
             {
                 return Task.CompletedTask;
+            }
+        }
+
+        private sealed class CapturingShardLogFetcher : ICultNetShardLogFetcher
+        {
+            private readonly CultNetShardLogResponseMessage _response;
+
+            public CapturingShardLogFetcher(CultNetShardLogResponseMessage response)
+            {
+                _response = response;
+            }
+
+            public int FetchCount { get; private set; }
+            public CultNetShardDescriptor? LastShard { get; private set; }
+            public long LastAfterSequence { get; private set; }
+            public int? LastLimit { get; private set; }
+
+            public Task<CultNetShardLogResponseMessage> FetchAsync(
+                CultNetShardDescriptor shard,
+                long afterSequence,
+                int? limit = null)
+            {
+                FetchCount++;
+                LastShard = shard;
+                LastAfterSequence = afterSequence;
+                LastLimit = limit;
+                return Task.FromResult(_response);
             }
         }
 

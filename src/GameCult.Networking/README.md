@@ -141,6 +141,9 @@ mutations in per-shard ordered logs and exposes those logs over
 catch-up. Replicas apply those committed entries through
 `CultNetDatabase.ApplyShardLogResponseAsync`, which checks shard epoch, rejects
 sequence gaps, and treats replayed entries as already applied.
+`CultNetShardReplicator` can then pull non-primary shard logs from advertised
+primary endpoints, using `CultNetSchemaShardLogFetcher` for the schema-v0
+transport path.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner
