@@ -94,6 +94,16 @@ same payload schema and MessagePack semantics. It carries exact payload bytes
 plus `schemaId`/record-key metadata; it does not guess what a blob "probably"
 means.
 
+## CultMesh Lives In GameCult.Mesh
+
+The distributed realtime database and simulation-consensus surface now has its
+own package home: `GameCult.Mesh`, branded publicly as CultMesh. This networking
+package still owns CultNet transport, authentication, and schema-v0 wire
+contracts. CultMesh owns the developer-facing mesh entrypoints and higher-level
+runtime documentation.
+
+See `src/GameCult.Mesh/README.md` for the public-facing CultMesh API.
+
 ## Distributed CultCache
 
 CultNet should be able to start as a sharding layer over CultCache. In that

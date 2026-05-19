@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CultMesh: distributed realtime mesh database and simulation consensus for GameCult projects</Description>
+    <PackageId>GameCult.Mesh</PackageId>
+    <PackageTags>game;distributed;realtime;mesh;database;simulation;consensus</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
+    <ProjectReference Include="..\GameCult.Networking\GameCult.Networking.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="docs\**\*.md" Pack="true" PackagePath="docs\" />
+  </ItemGroup>
+</Project>

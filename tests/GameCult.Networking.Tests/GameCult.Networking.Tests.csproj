@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Networking\GameCult.Networking.csproj" />
   </ItemGroup>
 

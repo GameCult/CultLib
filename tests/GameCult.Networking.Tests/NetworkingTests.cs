@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Mesh;
 using NUnit.Framework;
 using R3;
 
@@ -729,6 +730,58 @@ namespace GameCult.Networking.Tests
             Assert.That(
                 () => CultNetSchemaWriteForwarder.ParseEndpoint("http://primary.example.test:3075"),
                 Throws.TypeOf<FormatException>());
+        }
+
+        [Test]
+        public void CultMesh_CreateClient_Returns_CultNetClient()
+        {
+            using var client = CultMesh.CreateClient(DevelopmentClientSecurity);
+
+            Assert.That(client, Is.Not.Null);
+            Assert.That(client.Connected, Is.False);
+        }
+
+        [Test]
+        public void CultMeshVerseCatalog_Finds_CompatibleTransferTargets()
+        {
+            var vanillaRules = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "rules:v1", "vanilla");
+            var moddedRules = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "rules:v1", "skylands");
+            var aetheria = new CultMeshVerseDescriptor(
+                "aetheria-main",
+                "Aetheria",
+                CultMeshVerseAuthorityModel.OperatorCluster,
+                new CultMeshVerseCompatibility("cultmesh.v0", vanillaRules),
+                discoveryEndpoints: ["cultmesh://aetheria.example.test:3075"],
+                authorityRuntimeIds: ["gc-us-east", "gc-eu-west"]);
+            var modded = new CultMeshVerseDescriptor(
+                "aetheria-skylands",
+                "Aetheria: Skylands",
+                CultMeshVerseAuthorityModel.SubscribedOverlay,
+                new CultMeshVerseCompatibility(
+                    "cultmesh.v0",
+                    moddedRules,
+                    compatibleVerseIds: ["aetheria-main"],
+                    requiredPluginIds: ["skylands"]),
+                parentVerseId: "aetheria-main");
+            var incompatible = new CultMeshVerseDescriptor(
+                "other-game",
+                "Other Game",
+                CultMeshVerseAuthorityModel.PeerToPeer,
+                new CultMeshVerseCompatibility("cultmesh.v0", CultMeshVerseDescriptor.ComputeRulesHash("other")));
+            using var catalog = CultMesh.CreateVerseCatalog();
+            var updates = new List<CultMeshVerseDescriptor>();
+            using var subscription = catalog.Watch().Subscribe(update => updates.Add(update));
+
+            catalog.Upsert(aetheria);
+            catalog.Upsert(modded);
+            catalog.Upsert(incompatible);
+            var targets = catalog.FindTransferTargets(aetheria);
+
+            Assert.That(updates, Has.Count.EqualTo(3));
+            Assert.That(targets, Has.Count.EqualTo(1));
+            Assert.That(targets[0].VerseId, Is.EqualTo("aetheria-skylands"));
+            Assert.That(modded.CanTransferFrom(aetheria), Is.True);
+            Assert.That(incompatible.CanTransferFrom(aetheria), Is.False);
         }
 
         [Test]
