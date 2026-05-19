@@ -546,6 +546,64 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabaseServer_Forwards_NonPrimaryWrites_WhenConfigured()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-remote",
+                        "runtime-owner",
+                        epoch: 9,
+                        isPrimary: false,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:",
+                        primaryEndpoints: ["cultnet://runtime-owner:3075"])
+                ]
+            });
+            var forwarder = new CapturingShardWriteForwarder();
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(
+                server,
+                database,
+                new CultNetDatabaseServerOptions
+                {
+                    ForwardNonPrimaryWrites = true,
+                    WriteForwarder = forwarder
+                });
+            var key = new CultRecordKey("player:forward");
+            var message = registry.CreateRawDocumentPutMessage(
+                "put-forward",
+                new CultRecordHandle<PlayerData>(key),
+                new PlayerData
+                {
+                    PlayerId = Guid.NewGuid(),
+                    Email = "forward@example.test",
+                    PasswordHash = "hash",
+                    Username = "Forward"
+                });
+            var exception = Assert.ThrowsAsync<CultNetShardAuthorityException>(
+                async () => await database.ApplyPutAsync(message));
+
+            var forwarded = await databaseServer.TryForwardPutAsync(exception!, message);
+
+            Assert.That(forwarded, Is.True);
+            Assert.That(forwarder.PutCount, Is.EqualTo(1));
+            Assert.That(forwarder.LastPutShard!.ShardId, Is.EqualTo("players-remote"));
+            Assert.That(forwarder.LastPutMessage!.ShardId, Is.EqualTo("players-remote"));
+            Assert.That(forwarder.LastPutMessage.ShardEpoch, Is.EqualTo(9));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();
@@ -751,6 +809,26 @@ namespace GameCult.Networking.Tests
                 {
                     Environment.SetEnvironmentVariable(original.Name, original.Value);
                 }
+            }
+        }
+
+        private sealed class CapturingShardWriteForwarder : ICultNetShardWriteForwarder
+        {
+            public int PutCount { get; private set; }
+            public CultNetShardDescriptor? LastPutShard { get; private set; }
+            public CultNetDocumentPutRawMessage? LastPutMessage { get; private set; }
+
+            public Task ForwardPutAsync(CultNetShardDescriptor shard, CultNetDocumentPutRawMessage message)
+            {
+                PutCount++;
+                LastPutShard = shard;
+                LastPutMessage = message;
+                return Task.CompletedTask;
+            }
+
+            public Task ForwardDeleteAsync(CultNetShardDescriptor shard, CultNetDocumentDeleteMessage message)
+            {
+                return Task.CompletedTask;
             }
         }
 

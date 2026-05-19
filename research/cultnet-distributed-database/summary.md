@@ -161,16 +161,16 @@ Shard catalog exchange now exists:
 - per-shard id, owner runtime id, epoch, schema ids, key prefix/range
 - stale epoch rejection on writes
 - routing error that tells clients where the primary lives when known
+- injectable non-primary write forwarding policy
 
 ## Next Cut
 
-Build write forwarding:
+Build a concrete schema-v0 write forwarder:
 
-- non-primary nodes forward raw put/delete messages to primary endpoints when
-  policy allows
+- dial the selected primary endpoint from the shard catalog
 - forwarded writes preserve shard id and epoch
-- stale epochs still fail
-- clients can opt into direct retry using routing hints
+- stale epochs still fail before forwarding
+- failed forwarding returns endpoint-aware routing errors
 
 That is the next foundation needed before membership, Raft-style replication,
 or CRDT policy work can be honest.

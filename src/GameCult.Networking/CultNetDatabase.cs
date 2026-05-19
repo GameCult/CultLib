@@ -237,15 +237,20 @@ namespace GameCult.Networking
         /// <summary>
         /// Creates a shard authority exception.
         /// </summary>
-        public CultNetShardAuthorityException(CultNetShardDescriptor shard, string message) : base(message)
+        public CultNetShardAuthorityException(CultNetShardDescriptor shard, string message, string reason = "not_primary") : base(message)
         {
             Shard = shard;
+            Reason = reason;
         }
 
         /// <summary>
         /// Gets the shard that rejected the write.
         /// </summary>
         public CultNetShardDescriptor Shard { get; }
+        /// <summary>
+        /// Gets the machine-readable authority rejection reason.
+        /// </summary>
+        public string Reason { get; }
     }
 
     /// <summary>
@@ -317,6 +322,15 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Resolves the shard that governs the supplied schema and key.
+        /// </summary>
+        public CultNetShardDescriptor ResolveShard(string schemaId, CultRecordKey key)
+        {
+            ThrowIfDisposed();
+            return ResolveShardInternal(schemaId, key);
+        }
+
+        /// <summary>
         /// Gets a document by key.
         /// </summary>
         public Task<T?> GetAsync<T>(CultRecordKey key) where T : class
@@ -334,7 +348,7 @@ namespace GameCult.Networking
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShard(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor.SchemaId, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
             var previous = _cache.Get<T>(key);
@@ -356,7 +370,7 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShard(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor.SchemaId, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
             var previous = _cache.Get<T>(key);
@@ -388,7 +402,7 @@ namespace GameCult.Networking
             }
 
             var key = new CultRecordKey(message.Document.RecordKey);
-            var shard = ResolveShard(message.Document.SchemaId, key);
+            var shard = ResolveShardInternal(message.Document.SchemaId, key);
             EnsurePrimary(shard, message.Document.SchemaId, key, message.ShardEpoch);
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
             var previous = _cache.Get(key);
@@ -413,7 +427,7 @@ namespace GameCult.Networking
             if (message == null) throw new ArgumentNullException(nameof(message));
 
             var key = new CultRecordKey(message.RecordKey);
-            var shard = ResolveShard(message.SchemaId, key);
+            var shard = ResolveShardInternal(message.SchemaId, key);
             EnsurePrimary(shard, message.SchemaId, key, message.ShardEpoch);
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.SchemaId);
             var previous = _cache.Get(key);
@@ -526,7 +540,7 @@ namespace GameCult.Networking
             var key = current != null
                 ? GetTrackedKey(current, documentType)
                 : new CultRecordKey(string.Empty);
-            var shard = ResolveShard(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor.SchemaId, key);
             var changeType = typeof(CultNetDatabaseChange<>).MakeGenericType(documentType);
             var change = Activator.CreateInstance(
                 changeType,
@@ -591,7 +605,7 @@ namespace GameCult.Networking
             }
         }
 
-        private CultNetShardDescriptor ResolveShard(string schemaId, CultRecordKey key)
+        private CultNetShardDescriptor ResolveShardInternal(string schemaId, CultRecordKey key)
         {
             return _shards.FirstOrDefault(shard => shard.Matches(schemaId, key)) ?? _shards[0];
         }
@@ -602,7 +616,8 @@ namespace GameCult.Networking
             {
                 throw new CultNetShardAuthorityException(
                     shard,
-                    $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not requested epoch {expectedEpoch.Value}.");
+                    $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not requested epoch {expectedEpoch.Value}.",
+                    "stale_epoch");
             }
 
             if (shard.IsPrimary)
@@ -612,7 +627,8 @@ namespace GameCult.Networking
 
             throw new CultNetShardAuthorityException(
                 shard,
-                $"Shard '{shard.ShardId}' owned by '{shard.OwnerRuntimeId}' does not accept local writes for schema '{schemaId}' key '{key.Value}'.");
+                $"Shard '{shard.ShardId}' owned by '{shard.OwnerRuntimeId}' does not accept local writes for schema '{schemaId}' key '{key.Value}'.",
+                "not_primary");
         }
 
         private static bool MatchesCatalogFilter(

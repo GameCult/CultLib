@@ -44,12 +44,14 @@ Implemented:
   primary endpoints, replica endpoints, read replica endpoints, and region
 - epoch-aware raw put/delete messages
 - routing hints on shard authority errors
+- injectable non-primary write forwarding policy
 
 Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
 - replicated log
+- concrete endpoint dialer for forwarded writes
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -66,14 +68,13 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add write forwarding:
+Add a concrete endpoint dialer for write forwarding:
 
-- non-primary nodes can forward raw put/delete messages to the advertised
-  primary endpoint when policy allows it
-- forwarded writes must preserve the original shard id and epoch
-- stale-epoch writes still fail instead of being "helpfully" retried against
-  unknown authority
-- clients that opt out of forwarding receive routing hints and retry directly
+- implement `ICultNetShardWriteForwarder` over the schema-v0 client transport
+- choose the best primary endpoint from the shard descriptor
+- preserve shard id and epoch on forwarded messages
+- surface forwarding failures as routing errors with endpoint context
 
-Forwarding is the next useful layer now that shard catalogs exist. Membership,
-leader election, and replicated logs should wait until routing is boring.
+Forwarding now has the policy seam. The next useful layer is the actual network
+dialer. Membership, leader election, and replicated logs should wait until
+routing is boring.

@@ -16,6 +16,7 @@ namespace GameCult.Networking
     {
         private readonly Server _server;
         private readonly CultNetDatabase _database;
+        private readonly CultNetDatabaseServerOptions _options;
         private readonly Func<CultNetSnapshotRequestMessage, NetPeer, Task> _snapshotHandler;
         private readonly Func<CultNetDocumentPutRawMessage, NetPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, NetPeer, Task> _deleteHandler;
@@ -28,10 +29,14 @@ namespace GameCult.Networking
         /// <summary>
         /// Creates and attaches a database message bridge to a server.
         /// </summary>
-        public CultNetDatabaseServer(Server server, CultNetDatabase database)
+        public CultNetDatabaseServer(
+            Server server,
+            CultNetDatabase database,
+            CultNetDatabaseServerOptions? options = null)
         {
             _server = server ?? throw new ArgumentNullException(nameof(server));
             _database = database ?? throw new ArgumentNullException(nameof(database));
+            _options = options ?? new CultNetDatabaseServerOptions();
             _snapshotHandler = HandleSnapshotRequestAsync;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
@@ -133,7 +138,10 @@ namespace GameCult.Networking
             }
             catch (CultNetShardAuthorityException ex)
             {
-                peer.SendCultNet(CreateRoutingError(ex));
+                if (!await TryForwardPutAsync(ex, message).ConfigureAwait(false))
+                {
+                    peer.SendCultNet(CreateRoutingError(ex));
+                }
             }
             catch (Exception ex)
             {
@@ -149,7 +157,10 @@ namespace GameCult.Networking
             }
             catch (CultNetShardAuthorityException ex)
             {
-                peer.SendCultNet(CreateRoutingError(ex));
+                if (!await TryForwardDeleteAsync(ex, message).ConfigureAwait(false))
+                {
+                    peer.SendCultNet(CreateRoutingError(ex));
+                }
             }
             catch (Exception ex)
             {
@@ -294,10 +305,50 @@ namespace GameCult.Networking
                 Error = exception.Message,
                 RoutingHint = new CultNetShardRoutingHint
                 {
-                    Reason = exception.Shard.IsPrimary ? "stale_epoch" : "not_primary",
+                    Reason = exception.Reason,
                     Shard = CultNetDatabase.ToMessage(exception.Shard)
                 }
             };
+        }
+
+        /// <summary>
+        /// Attempts to forward a rejected raw put to the shard owner.
+        /// </summary>
+        public async Task<bool> TryForwardPutAsync(
+            CultNetShardAuthorityException exception,
+            CultNetDocumentPutRawMessage message)
+        {
+            if (!_options.ForwardNonPrimaryWrites ||
+                _options.WriteForwarder == null ||
+                exception.Reason != "not_primary")
+            {
+                return false;
+            }
+
+            message.ShardId ??= exception.Shard.ShardId;
+            message.ShardEpoch ??= exception.Shard.Epoch;
+            await _options.WriteForwarder.ForwardPutAsync(exception.Shard, message).ConfigureAwait(false);
+            return true;
+        }
+
+        /// <summary>
+        /// Attempts to forward a rejected raw delete to the shard owner.
+        /// </summary>
+        public async Task<bool> TryForwardDeleteAsync(
+            CultNetShardAuthorityException exception,
+            CultNetDocumentDeleteMessage message)
+        {
+            if (!_options.ForwardNonPrimaryWrites ||
+                _options.WriteForwarder == null ||
+                exception.Reason != "not_primary")
+            {
+                return false;
+            }
+
+            message.ShardId ??= exception.Shard.ShardId;
+            message.ShardEpoch ??= exception.Shard.Epoch;
+            await _options.WriteForwarder.ForwardDeleteAsync(exception.Shard, message).ConfigureAwait(false);
+            return true;
         }
     }
 }

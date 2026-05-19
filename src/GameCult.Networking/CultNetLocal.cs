@@ -32,6 +32,11 @@ namespace GameCult.Networking
         public CultNetDatabaseOptions? DatabaseOptions { get; set; }
 
         /// <summary>
+        /// Gets or sets the database server bridge options used for shard routing and forwarding.
+        /// </summary>
+        public CultNetDatabaseServerOptions? DatabaseServerOptions { get; set; }
+
+        /// <summary>
         /// Gets or sets an optional callback used to customize the server before start.
         /// </summary>
         public Action<Server>? ConfigureServer { get; set; }
@@ -130,7 +135,7 @@ namespace GameCult.Networking
             var server = new Server(cache, options.Security ?? ServerSecurityOptions.Development());
             var databaseOptions = options.DatabaseOptions ?? new CultNetDatabaseOptions();
             var database = new CultNetDatabase(cache, databaseOptions);
-            var databaseServer = new CultNetDatabaseServer(server, database);
+            var databaseServer = new CultNetDatabaseServer(server, database, options.DatabaseServerOptions);
             options.ConfigureServer?.Invoke(server);
 
             var host = new CultNetHost(cache, store, server, database, databaseServer);
