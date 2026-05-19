@@ -27,6 +27,11 @@ namespace GameCult.Networking
         public bool StartServer { get; set; } = true;
 
         /// <summary>
+        /// Gets or sets the database sharding options used for the hosted CultCache.
+        /// </summary>
+        public CultNetDatabaseOptions? DatabaseOptions { get; set; }
+
+        /// <summary>
         /// Gets or sets an optional callback used to customize the server before start.
         /// </summary>
         public Action<Server>? ConfigureServer { get; set; }
@@ -37,11 +42,12 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetHost : IDisposable
     {
-        internal CultNetHost(CultCache cache, SingleFileMessagePackBackingStore? store, Server server)
+        internal CultNetHost(CultCache cache, SingleFileMessagePackBackingStore? store, Server server, CultNetDatabase database)
         {
             Cache = cache;
             Store = store;
             Server = server;
+            Database = database;
         }
 
         /// <summary>
@@ -58,6 +64,11 @@ namespace GameCult.Networking
         /// Gets the underlying CultNet server.
         /// </summary>
         public Server Server { get; }
+
+        /// <summary>
+        /// Gets the distributed database facade over the hosted cache.
+        /// </summary>
+        public CultNetDatabase Database { get; }
 
         /// <summary>
         /// Starts the server.
@@ -81,6 +92,7 @@ namespace GameCult.Networking
         public void Dispose()
         {
             Server.Dispose();
+            Database.Dispose();
             Cache.Dispose();
         }
     }
@@ -104,9 +116,11 @@ namespace GameCult.Networking
             var cache = await CultCacheMessagePack.OpenAsync(cachePath, options.CacheOptions).ConfigureAwait(false);
             var store = cache.BackingStores.OfType<SingleFileMessagePackBackingStore>().FirstOrDefault();
             var server = new Server(cache, options.Security ?? ServerSecurityOptions.Development());
+            var databaseOptions = options.DatabaseOptions ?? new CultNetDatabaseOptions();
+            var database = new CultNetDatabase(cache, databaseOptions);
             options.ConfigureServer?.Invoke(server);
 
-            var host = new CultNetHost(cache, store, server);
+            var host = new CultNetHost(cache, store, server, database);
             if (options.StartServer)
             {
                 host.Start();

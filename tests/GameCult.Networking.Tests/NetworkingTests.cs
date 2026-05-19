@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -7,6 +8,7 @@ using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using NUnit.Framework;
+using R3;
 
 namespace GameCult.Networking.Tests
 {
@@ -249,6 +251,108 @@ namespace GameCult.Networking.Tests
 
             Assert.That(replicated, Is.Not.Null);
             Assert.That(SerializePlayerDataPayload(replicated!), Is.EqualTo(expectedPayload));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_PutGet_AndWatchByIndex_Uses_PrimaryShard()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            var key = new CultRecordKey("player:watch");
+            var playerId = Guid.NewGuid();
+            var changes = new List<CultNetDatabaseChange<PlayerData>>();
+            using var subscription = database
+                .WatchByIndex<PlayerData>("PlayerId", playerId.ToString("D"))
+                .Subscribe(change => changes.Add(change));
+
+            var player = new PlayerData
+            {
+                PlayerId = playerId,
+                Email = "watch@example.test",
+                PasswordHash = "hash",
+                Username = "Watcher"
+            };
+
+            await database.PutAsync(key, player);
+            var roundTrip = await database.GetAsync<PlayerData>(key);
+
+            Assert.That(roundTrip, Is.SameAs(player));
+            Assert.That(changes, Has.Count.EqualTo(1));
+            Assert.That(changes[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+            Assert.That(changes[0].Key, Is.EqualTo(key));
+            Assert.That(changes[0].Shard.IsPrimary, Is.True);
+        }
+
+        [Test]
+        public void CultNetDatabase_Rejects_LocalWrites_To_ReadOnlyShard()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    CultNetShardDescriptor.ReadOnly(
+                        "remote-players",
+                        "remote-runtime",
+                        schemaIds: [schemaId])
+                ]
+            });
+
+            Assert.That(
+                async () => await database.PutAsync(
+                    new CultRecordKey("player:remote"),
+                    new PlayerData
+                    {
+                        PlayerId = Guid.NewGuid(),
+                        Email = "remote@example.test",
+                        PasswordHash = "hash",
+                        Username = "Remote"
+                    }),
+                Throws.TypeOf<CultNetShardAuthorityException>()
+                    .With.Property(nameof(CultNetShardAuthorityException.Shard))
+                    .Property(nameof(CultNetShardDescriptor.ShardId))
+                    .EqualTo("remote-players"));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_ApplyRawPut_Publishes_DomainChange()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry
+            });
+            var key = new CultRecordKey("player:raw");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "raw@example.test",
+                PasswordHash = "hash",
+                Username = "Raw"
+            };
+            var changes = new List<CultNetDatabaseChange<PlayerData>>();
+            using var subscription = database.WatchRecord<PlayerData>(key)
+                .Subscribe(change => changes.Add(change));
+
+            var message = registry.CreateRawDocumentPutMessage(
+                "put-raw",
+                new CultRecordHandle<PlayerData>(key),
+                player);
+
+            var applied = await database.ApplyPutAsync(message);
+
+            Assert.That(applied, Is.TypeOf<PlayerData>());
+            Assert.That(cache.Get<PlayerData>(key), Is.Not.Null);
+            Assert.That(changes, Has.Count.EqualTo(1));
+            Assert.That(changes[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+            Assert.That(changes[0].Document, Is.Not.Null);
+            Assert.That(changes[0].Document!.Username, Is.EqualTo("Raw"));
         }
 
         [Test]
