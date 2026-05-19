@@ -163,6 +163,9 @@ path, not committed world state by themselves. The schema-v0 wire contracts are
 `cultnet.simulation_observation.v0` and
 `cultnet.simulation_consensus_candidate.v0`. `CultNetSimulationObservationHub`
 collects incoming observations and emits candidate updates reactively.
+`CultNetSimulationObservationServer` attaches that hub to a server so incoming
+observation messages update the hub and receive current candidate messages in
+reply.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner

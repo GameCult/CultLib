@@ -1432,6 +1432,56 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSimulationObservationServer_Creates_CandidateMessages()
+        {
+            var cache = new CultCache();
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var hub = new CultNetSimulationObservationHub(new CultNetSimulationConsensusOptions
+            {
+                MinimumWitnesses = 2,
+                QuorumRatio = 1d
+            });
+            using var observationServer = new CultNetSimulationObservationServer(server, hub);
+            var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+            var first = new CultNetSimulationObservationMessage
+            {
+                MessageId = "observe-1",
+                Observation = new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-1",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = claimHash
+                }
+            };
+            var second = new CultNetSimulationObservationMessage
+            {
+                MessageId = "observe-2",
+                Observation = new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-2",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = claimHash
+                }
+            };
+
+            observationServer.CreateCandidateMessages(first);
+            var candidates = observationServer.CreateCandidateMessages(second);
+
+            Assert.That(candidates, Has.Length.EqualTo(1));
+            Assert.That(candidates[0].MessageId, Is.EqualTo("observe-2"));
+            Assert.That(candidates[0].ClaimHash, Is.EqualTo(claimHash));
+            Assert.That(candidates[0].HasQuorum, Is.True);
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();
