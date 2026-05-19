@@ -850,6 +850,129 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Applies_ShardLogResponse_ToReplica()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var targetRegistry = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    targetCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = sourceCache.Registry.GetRequired<PlayerData>().SchemaId;
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-replica",
+                        "runtime-a",
+                        epoch: 10,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            var targetDatabase = new CultNetDatabase(targetCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = targetRegistry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-replica",
+                        "runtime-a",
+                        epoch: 10,
+                        isPrimary: false,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            using var server = new Server(sourceCache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, sourceDatabase);
+            var key = new CultRecordKey("player:replica");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "replica@example.test",
+                PasswordHash = "hash",
+                Username = "Replica"
+            };
+
+            await sourceDatabase.PutAsync(key, player);
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-replica",
+                ShardEpoch = 10
+            });
+
+            var sequence = await targetDatabase.ApplyShardLogResponseAsync(response);
+            var replicated = targetCache.Get<PlayerData>(key);
+            var replayedSequence = await targetDatabase.ApplyShardLogResponseAsync(response);
+
+            Assert.That(sequence, Is.EqualTo(1));
+            Assert.That(replayedSequence, Is.EqualTo(1));
+            Assert.That(targetDatabase.GetAppliedShardSequence("players-replica"), Is.EqualTo(1));
+            Assert.That(replicated, Is.Not.Null);
+            Assert.That(replicated!.Username, Is.EqualTo("Replica"));
+            Assert.That(targetDatabase.GetMutationLog("players-replica"), Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public void CultNetDatabase_Rejects_ShardLogGap()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-gap",
+                        "runtime-a",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+
+            Assert.That(
+                async () => await database.ApplyShardLogResponseAsync(new CultNetShardLogResponseMessage
+                {
+                    ShardId = "players-gap",
+                    ShardEpoch = 1,
+                    Entries =
+                    [
+                        new CultNetShardLogEntryMessage
+                        {
+                            Sequence = 2,
+                            ChangeKind = "removed",
+                            Delete = new CultNetDocumentDeleteMessage
+                            {
+                                SchemaId = schemaId,
+                                RecordKey = "player:gap",
+                                ShardId = "players-gap",
+                                ShardEpoch = 1
+                            }
+                        }
+                    ]
+                }),
+                Throws.TypeOf<InvalidOperationException>().With.Message.Contains("log has a gap"));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

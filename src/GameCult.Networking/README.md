@@ -138,7 +138,9 @@ write rejection. Non-primary write forwarding is available behind an injectable
 schema-v0 `cultnet://host:port` endpoint dialer. It also records accepted
 mutations in per-shard ordered logs and exposes those logs over
 `cultnet.shard_log_request.v0` / `cultnet.shard_log_response.v0` for replica
-catch-up.
+catch-up. Replicas apply those committed entries through
+`CultNetDatabase.ApplyShardLogResponseAsync`, which checks shard epoch, rejects
+sequence gaps, and treats replayed entries as already applied.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner

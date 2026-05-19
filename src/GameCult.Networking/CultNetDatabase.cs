@@ -332,6 +332,7 @@ namespace GameCult.Networking
         private readonly Dictionary<string, List<CultNetShardMutationLogEntry>> _mutationLogs =
             new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> _appliedShardSequences = new(StringComparer.Ordinal);
         private readonly Subject<object> _changes = new();
         private bool _disposed;
 
@@ -385,6 +386,18 @@ namespace GameCult.Networking
             }
 
             return query.ToArray();
+        }
+
+        /// <summary>
+        /// Gets the last replicated sequence applied for a shard.
+        /// </summary>
+        public long GetAppliedShardSequence(string shardId)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            return _appliedShardSequences.TryGetValue(shardId, out var sequence)
+                ? sequence
+                : 0;
         }
 
         /// <summary>
@@ -576,6 +589,57 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Applies committed shard-log entries from an authoritative peer.
+        /// </summary>
+        public async Task<long> ApplyShardLogResponseAsync(CultNetShardLogResponseMessage response)
+        {
+            ThrowIfDisposed();
+            if (response == null) throw new ArgumentNullException(nameof(response));
+            if (response.ResyncRequired)
+            {
+                throw new InvalidOperationException(
+                    $"Shard '{response.ShardId}' requires snapshot resync before log application: {response.Reason ?? "unspecified"}.");
+            }
+
+            var shard = _shards.FirstOrDefault(candidate =>
+                string.Equals(candidate.ShardId, response.ShardId, StringComparison.Ordinal));
+            if (shard == null)
+            {
+                throw new InvalidOperationException($"Shard '{response.ShardId}' is not known by this database.");
+            }
+
+            if (response.ShardEpoch != shard.Epoch)
+            {
+                throw new CultNetShardAuthorityException(
+                    shard,
+                    $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not response epoch {response.ShardEpoch}.",
+                    "stale_epoch");
+            }
+
+            var lastApplied = GetAppliedShardSequence(response.ShardId);
+            var orderedEntries = response.Entries.OrderBy(entry => entry.Sequence).ToArray();
+            foreach (var entry in orderedEntries)
+            {
+                if (entry.Sequence <= lastApplied)
+                {
+                    continue;
+                }
+
+                if (entry.Sequence != lastApplied + 1)
+                {
+                    throw new InvalidOperationException(
+                        $"Shard '{response.ShardId}' log has a gap. Expected sequence {lastApplied + 1}, received {entry.Sequence}.");
+                }
+
+                await ApplyCommittedShardLogEntryAsync(shard, entry).ConfigureAwait(false);
+                lastApplied = entry.Sequence;
+                _appliedShardSequences[response.ShardId] = lastApplied;
+            }
+
+            return lastApplied;
+        }
+
+        /// <summary>
         /// Watches all changes assignable to the requested document type.
         /// </summary>
         public Observable<CultNetDatabaseChange<T>> Watch<T>() where T : class
@@ -711,12 +775,8 @@ namespace GameCult.Networking
             object? document,
             object? previousDocument)
         {
-            var sequence = _nextLogSequences.TryGetValue(shard.ShardId, out var next)
-                ? next
-                : 1;
-            _nextLogSequences[shard.ShardId] = sequence + 1;
-
-            var entry = new CultNetShardMutationLogEntry(
+            var sequence = NextMutationLogSequence(shard.ShardId);
+            RecordMutationLogEntry(new CultNetShardMutationLogEntry(
                 shard.ShardId,
                 shard.Epoch,
                 sequence,
@@ -725,15 +785,160 @@ namespace GameCult.Networking
                 schemaId,
                 key,
                 document,
-                previousDocument);
+                previousDocument));
+        }
 
-            if (!_mutationLogs.TryGetValue(shard.ShardId, out var entries))
+        private void RecordMutationLogEntry(CultNetShardMutationLogEntry entry)
+        {
+            if (!_mutationLogs.TryGetValue(entry.ShardId, out var entries))
             {
                 entries = new List<CultNetShardMutationLogEntry>();
-                _mutationLogs[shard.ShardId] = entries;
+                _mutationLogs[entry.ShardId] = entries;
             }
 
             entries.Add(entry);
+            if (!_nextLogSequences.TryGetValue(entry.ShardId, out var next) ||
+                next <= entry.Sequence)
+            {
+                _nextLogSequences[entry.ShardId] = entry.Sequence + 1;
+            }
+        }
+
+        private long NextMutationLogSequence(string shardId)
+        {
+            var sequence = _nextLogSequences.TryGetValue(shardId, out var next)
+                ? next
+                : 1;
+            _nextLogSequences[shardId] = sequence + 1;
+            return sequence;
+        }
+
+        private async Task ApplyCommittedShardLogEntryAsync(
+            CultNetShardDescriptor shard,
+            CultNetShardLogEntryMessage entry)
+        {
+            if (entry.Put != null)
+            {
+                await ApplyCommittedPutAsync(shard, entry).ConfigureAwait(false);
+                return;
+            }
+
+            if (entry.Delete != null)
+            {
+                ApplyCommittedDelete(shard, entry);
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"Shard '{shard.ShardId}' log entry {entry.Sequence} has no put or delete payload.");
+        }
+
+        private async Task ApplyCommittedPutAsync(
+            CultNetShardDescriptor shard,
+            CultNetShardLogEntryMessage entry)
+        {
+            var message = entry.Put!;
+            if (message.Document == null)
+            {
+                throw new InvalidOperationException(
+                    $"Shard '{shard.ShardId}' log entry {entry.Sequence} put is missing its document payload.");
+            }
+
+            if (!string.Equals(message.ShardId, shard.ShardId, StringComparison.Ordinal) ||
+                message.ShardEpoch != shard.Epoch)
+            {
+                throw new CultNetShardAuthorityException(
+                    shard,
+                    $"Shard '{shard.ShardId}' log entry {entry.Sequence} targets a different shard or epoch.",
+                    "stale_epoch");
+            }
+
+            var key = new CultRecordKey(message.Document.RecordKey);
+            var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
+            var previous = _cache.Get(key);
+            var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
+            var kind = ChangeKindFromWire(entry.ChangeKind);
+            if (kind == CultNetDatabaseChangeKind.Removed)
+            {
+                throw new InvalidOperationException(
+                    $"Shard '{shard.ShardId}' log entry {entry.Sequence} has a removed kind with a put payload.");
+            }
+
+            RecordMutationLogEntry(new CultNetShardMutationLogEntry(
+                shard.ShardId,
+                shard.Epoch,
+                entry.Sequence,
+                entry.CommittedAt,
+                kind,
+                descriptor.SchemaId,
+                key,
+                document,
+                previous));
+            PublishUntyped(
+                descriptor.DocumentType,
+                kind,
+                key,
+                descriptor.SchemaId,
+                shard,
+                document,
+                previous);
+        }
+
+        private void ApplyCommittedDelete(
+            CultNetShardDescriptor shard,
+            CultNetShardLogEntryMessage entry)
+        {
+            var message = entry.Delete!;
+            if (!string.Equals(message.ShardId, shard.ShardId, StringComparison.Ordinal) ||
+                message.ShardEpoch != shard.Epoch)
+            {
+                throw new CultNetShardAuthorityException(
+                    shard,
+                    $"Shard '{shard.ShardId}' log entry {entry.Sequence} targets a different shard or epoch.",
+                    "stale_epoch");
+            }
+
+            var key = new CultRecordKey(message.RecordKey);
+            var descriptor = _cache.Registry.GetRequiredBySchemaId(message.SchemaId);
+            var previous = _cache.Get(key);
+            if (previous != null)
+            {
+                var removeMethod = typeof(CultCache).GetMethod(nameof(CultCache.Remove))!
+                    .MakeGenericMethod(descriptor.DocumentType);
+                var handleType = typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType);
+                var handle = Activator.CreateInstance(handleType, new object[] { key });
+                removeMethod.Invoke(_cache, new[] { handle });
+            }
+
+            RecordMutationLogEntry(new CultNetShardMutationLogEntry(
+                shard.ShardId,
+                shard.Epoch,
+                entry.Sequence,
+                entry.CommittedAt,
+                CultNetDatabaseChangeKind.Removed,
+                descriptor.SchemaId,
+                key,
+                document: null,
+                previousDocument: previous));
+            PublishUntyped(
+                descriptor.DocumentType,
+                CultNetDatabaseChangeKind.Removed,
+                key,
+                descriptor.SchemaId,
+                shard,
+                document: null,
+                previousDocument: previous);
+        }
+
+        private static CultNetDatabaseChangeKind ChangeKindFromWire(string changeKind)
+        {
+            return changeKind switch
+            {
+                "added" => CultNetDatabaseChangeKind.Added,
+                "updated" => CultNetDatabaseChangeKind.Updated,
+                "removed" => CultNetDatabaseChangeKind.Removed,
+                _ => throw new InvalidOperationException($"Unsupported shard log change kind '{changeKind}'.")
+            };
         }
 
         private void PublishUntyped(
