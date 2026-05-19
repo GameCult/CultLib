@@ -21,6 +21,11 @@ Namespace: `GameCult.Mesh`
 - `Database`: the distributed realtime database facade
 - `DatabaseServer`: the schema-v0 database bridge
 
+`CultMeshNodeOptions.EnableDurableShardLogs` attaches a file-backed
+authoritative shard-log store when `DatabaseOptions.MutationLogStore` is not
+already supplied. `ShardLogPath` can override the location; otherwise CultMesh
+uses a `.cultmesh/shard-logs` directory beside the cache file.
+
 The package home and primary entrypoint are `GameCult.Mesh` / `CultMesh`.
 Some lower-level database and wire-contract types still retain `CultNet` names
 because they are shared with the transport package. Treat those as plumbing,

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -32,6 +33,16 @@ namespace GameCult.Mesh
         public CultNetDatabaseOptions? DatabaseOptions { get; set; }
 
         /// <summary>
+        /// Gets or sets whether CultMesh should attach a file-backed authoritative shard-log store when none is supplied.
+        /// </summary>
+        public bool EnableDurableShardLogs { get; set; }
+
+        /// <summary>
+        /// Gets or sets the directory used for file-backed authoritative shard logs.
+        /// </summary>
+        public string? ShardLogPath { get; set; }
+
+        /// <summary>
         /// Gets or sets the database server bridge options used for shard routing and forwarding.
         /// </summary>
         public CultNetDatabaseServerOptions? DatabaseServerOptions { get; set; }
@@ -41,17 +52,53 @@ namespace GameCult.Mesh
         /// </summary>
         public Action<Server>? ConfigureServer { get; set; }
 
-        internal CultNetHostOptions ToCultNetOptions()
+        internal CultNetHostOptions ToCultNetOptions(string cachePath)
         {
             return new CultNetHostOptions
             {
                 CacheOptions = CacheOptions,
                 Security = Security,
                 StartServer = StartServer,
-                DatabaseOptions = DatabaseOptions,
+                DatabaseOptions = CreateDatabaseOptions(cachePath),
                 DatabaseServerOptions = DatabaseServerOptions,
                 ConfigureServer = ConfigureServer
             };
+        }
+
+        private CultNetDatabaseOptions? CreateDatabaseOptions(string cachePath)
+        {
+            if (!EnableDurableShardLogs)
+            {
+                return DatabaseOptions;
+            }
+
+            var source = DatabaseOptions ?? new CultNetDatabaseOptions();
+            if (source.MutationLogStore != null)
+            {
+                return source;
+            }
+
+            return new CultNetDatabaseOptions
+            {
+                RuntimeId = source.RuntimeId,
+                Shards = source.Shards,
+                ClientAuthorityScopes = source.ClientAuthorityScopes,
+                DocumentRegistry = source.DocumentRegistry,
+                MutationLogStore = new CultNetFileShardMutationLogStore(ResolveShardLogPath(cachePath))
+            };
+        }
+
+        private string ResolveShardLogPath(string cachePath)
+        {
+            if (!string.IsNullOrWhiteSpace(ShardLogPath))
+            {
+                return ShardLogPath!;
+            }
+
+            var fullPath = Path.GetFullPath(cachePath);
+            var directory = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
+            var name = Path.GetFileNameWithoutExtension(fullPath);
+            return Path.Combine(directory, name + ".cultmesh", "shard-logs");
         }
     }
 
@@ -127,7 +174,7 @@ namespace GameCult.Mesh
         {
             var host = await CultNetLocal.CreateHostAsync(
                 cachePath,
-                (options ?? new CultMeshNodeOptions()).ToCultNetOptions()).ConfigureAwait(false);
+                (options ?? new CultMeshNodeOptions()).ToCultNetOptions(cachePath)).ConfigureAwait(false);
             return new CultMeshNode(host);
         }
 

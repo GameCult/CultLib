@@ -793,6 +793,64 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshNode_CanEnable_DurableShardLogs_WithDefaultPath()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-node", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var cachePath = Path.Combine(rootPath, "world.ccmp");
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var options = new CultMeshNodeOptions
+            {
+                StartServer = false,
+                EnableDurableShardLogs = true,
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry,
+                    Shards =
+                    [
+                        new CultNetShardDescriptor(
+                            "players-mesh-default-log",
+                            "mesh-runtime",
+                            epoch: 1,
+                            isPrimary: true,
+                            schemaIds: [schemaId],
+                            keyPrefix: "player:")
+                    ]
+                }
+            };
+            var key = new CultRecordKey("player:mesh-log");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "mesh-log@example.test",
+                PasswordHash = "hash",
+                Username = "MeshLog"
+            };
+
+            using (var node = await CultMesh.CreateNodeAsync(cachePath, options))
+            {
+                await node.Database.PutAsync(key, player);
+            }
+
+            using var restarted = await CultMesh.CreateNodeAsync(cachePath, options);
+            var response = restarted.DatabaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-mesh-default-log"
+            });
+
+            Assert.That(response.Entries, Has.Length.EqualTo(1));
+            Assert.That(response.Entries[0].Put, Is.Not.Null);
+            Assert.That(response.Entries[0].Put!.Document.RecordKey, Is.EqualTo(key.Value));
+            Assert.That(Directory.Exists(Path.Combine(rootPath, "world.cultmesh", "shard-logs")), Is.True);
+        }
+
+        [Test]
         public async Task CultNetDatabase_Appends_PerShardMutationLog()
         {
             var cache = new CultCache();

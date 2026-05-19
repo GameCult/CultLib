@@ -67,6 +67,8 @@ Implemented:
 - shard-bounded snapshots with shard id, epoch, and represented log sequence
 - replica snapshot recovery after compacted history, including local shard
   replacement and cursor advancement
+- CultMesh node option for file-backed authoritative shard logs with a default
+  `.cultmesh/shard-logs` path beside the cache file
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -119,7 +121,6 @@ Not implemented yet:
 
 Add discovery fanout and operational polish:
 
-- expose operator-facing defaults for durable shard-log paths in CultMesh nodes
 - add Verse discovery over the schema-v0 mesh lane
 - add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around

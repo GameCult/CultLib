@@ -26,6 +26,19 @@ var player = await node.Database.GetAsync<PlayerData>(playerKey);
 await node.Database.PutAsync(playerKey, player);
 ```
 
+Enable durable authoritative shard logs when a node should serve replica
+catch-up after restart:
+
+```csharp
+using var node = await CultMesh.StartNodeAsync("world.ccmp", new CultMeshNodeOptions
+{
+    EnableDurableShardLogs = true
+});
+```
+
+If `ShardLogPath` is omitted, CultMesh stores logs beside the cache under
+`world.cultmesh/shard-logs`.
+
 ## Verses
 
 A Verse is a rule-bearing consensus graph. Aetheria Main can be a
