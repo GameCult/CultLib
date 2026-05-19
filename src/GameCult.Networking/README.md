@@ -162,7 +162,11 @@ MessagePack log file per shard and lets a restarted primary continue answering
 `cultnet.shard_log_request.v0` from durable wire entries. The same store owns
 log compaction: once entries are compacted through a sequence, older catch-up
 requests return `ResyncRequired` with `reason = "compacted_history"` instead of
-silently handing a replica a partial history.
+silently handing a replica a partial history. `CultNetShardReplicator` can use
+an `ICultNetShardSnapshotFetcher` to recover from that response: it fetches a
+shard-bounded snapshot, replaces the local shard view, advances the cursor to
+the snapshot's represented log sequence, and resumes normal log pulls on later
+ticks.
 
 For client-side prediction, `CultNetClientAuthorityScope` declares which input
 documents a runtime may author optimistically. `PutPredictedAsync` updates the

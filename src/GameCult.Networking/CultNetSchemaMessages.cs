@@ -525,6 +525,14 @@ namespace GameCult.Networking
         /// Gets or sets the record keys.
         /// </summary>
         [Key("recordKeys")] public string[]? RecordKeys { get; set; }
+        /// <summary>
+        /// Gets or sets the shard id requested for a shard-bounded snapshot.
+        /// </summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>
+        /// Gets or sets the expected shard epoch.
+        /// </summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
     }
 
     /// <summary>
@@ -545,6 +553,18 @@ namespace GameCult.Networking
         /// Gets or sets the documents.
         /// </summary>
         [Key("documents")] public CultNetRawDocumentRecord[] Documents { get; set; } = Array.Empty<CultNetRawDocumentRecord>();
+        /// <summary>
+        /// Gets or sets the shard id represented by this snapshot.
+        /// </summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>
+        /// Gets or sets the shard epoch represented by this snapshot.
+        /// </summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+        /// <summary>
+        /// Gets or sets the shard-log sequence represented by this snapshot.
+        /// </summary>
+        [Key("shardLogSequence")] public long? ShardLogSequence { get; set; }
     }
 
     /// <summary>

@@ -87,7 +87,9 @@ CultMesh can persist authoritative shard logs through
 log per shard, so a restarted primary can still serve replica catch-up without
 depending on warm process memory. When retained log history is compacted, stale
 replicas get an explicit resync requirement instead of a partial log pretending
-to be enough.
+to be enough. The replicator can answer that by fetching a shard-bounded
+snapshot, replacing the local shard view, and advancing its cursor to the
+snapshot's represented log sequence.
 
 ## Documentation
 

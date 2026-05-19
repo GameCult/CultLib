@@ -491,6 +491,135 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Gets the latest known shard-log sequence for a shard.
+        /// </summary>
+        public long GetLatestMutationLogSequence(string shardId)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            var compactedThrough = GetCompactedMutationLogSequence(shardId);
+            var retained = _mutationLogStore != null
+                ? _mutationLogStore.Read(shardId).Select(entry => entry.Sequence)
+                : GetMutationLog(shardId).Select(entry => entry.Sequence);
+            return retained.DefaultIfEmpty(compactedThrough).Max();
+        }
+
+        /// <summary>
+        /// Creates a raw document snapshot bounded to one shard.
+        /// </summary>
+        public CultNetSnapshotResponseRawMessage CreateShardSnapshotResponse(
+            CultNetShardDescriptor shard,
+            string messageId,
+            CultNetSnapshotRequestMessage? filter = null)
+        {
+            ThrowIfDisposed();
+            if (shard == null) throw new ArgumentNullException(nameof(shard));
+
+            var requestedSchemaIds = filter?.SchemaIds != null
+                ? new HashSet<string>(filter.SchemaIds, StringComparer.Ordinal)
+                : null;
+            var requestedRecordKeys = filter?.RecordKeys != null
+                ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
+                : null;
+            var documents = new List<CultNetRawDocumentRecord>();
+            foreach (var document in _cache.AllEntries)
+            {
+                var documentType = document.GetType();
+                var descriptor = _cache.Registry.GetRequired(documentType);
+                var key = GetTrackedKey(document, documentType);
+                if (string.IsNullOrWhiteSpace(key.Value) ||
+                    !shard.Matches(descriptor.SchemaId, key) ||
+                    (requestedSchemaIds != null && !requestedSchemaIds.Contains(descriptor.SchemaId)) ||
+                    (requestedRecordKeys != null && !requestedRecordKeys.Contains(key.Value)))
+                {
+                    continue;
+                }
+
+                documents.Add(CreateRawDocumentRecord(key, document));
+            }
+
+            return new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
+                Documents = documents.ToArray(),
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch,
+                ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
+            };
+        }
+
+        /// <summary>
+        /// Applies a shard-bounded snapshot and advances the replica cursor to its represented sequence.
+        /// </summary>
+        public async Task<long> ApplyShardSnapshotResponseAsync(
+            CultNetShardDescriptor shard,
+            CultNetSnapshotResponseRawMessage response)
+        {
+            ThrowIfDisposed();
+            if (shard == null) throw new ArgumentNullException(nameof(shard));
+            if (response == null) throw new ArgumentNullException(nameof(response));
+            if (!string.IsNullOrWhiteSpace(response.ShardId) &&
+                !string.Equals(response.ShardId, shard.ShardId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Snapshot for shard '{response.ShardId}' cannot be applied to shard '{shard.ShardId}'.");
+            }
+
+            if (response.ShardEpoch.HasValue && response.ShardEpoch.Value != shard.Epoch)
+            {
+                throw new CultNetShardAuthorityException(
+                    shard,
+                    $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not snapshot epoch {response.ShardEpoch.Value}.",
+                    "stale_epoch");
+            }
+
+            var incomingKeys = response.Documents
+                .Where(document => ShardMatchesRawDocument(shard, document))
+                .Select(document => document.RecordKey)
+                .ToHashSet(StringComparer.Ordinal);
+            var local = GetLocalShardDocuments(shard).ToArray();
+            foreach (var existing in local.Where(item => !incomingKeys.Contains(item.Key.Value)))
+            {
+                RemoveTrackedDocument(existing.DocumentType, existing.Key);
+                PublishUntyped(
+                    existing.DocumentType,
+                    CultNetDatabaseChangeKind.Removed,
+                    existing.Key,
+                    existing.SchemaId,
+                    shard,
+                    document: null,
+                    previousDocument: existing.Document);
+            }
+
+            foreach (var document in response.Documents.Where(document => ShardMatchesRawDocument(shard, document)))
+            {
+                var key = new CultRecordKey(document.RecordKey);
+                var descriptor = _cache.Registry.GetRequiredBySchemaId(document.SchemaId);
+                var previous = _cache.Get(key);
+                var applied = await _documents.ApplyRawDocumentPutMessageAsync(
+                    _cache,
+                    new CultNetDocumentPutRawMessage
+                    {
+                        MessageId = response.MessageId,
+                        Document = document,
+                        ShardId = shard.ShardId,
+                        ShardEpoch = shard.Epoch
+                    }).ConfigureAwait(false);
+                PublishUntyped(
+                    descriptor.DocumentType,
+                    previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
+                    key,
+                    document.SchemaId,
+                    shard,
+                    applied,
+                    previous);
+            }
+
+            var sequence = response.ShardLogSequence ?? 0;
+            SetAppliedShardSequence(shard.ShardId, sequence);
+            return sequence;
+        }
+
+        /// <summary>
         /// Gets the last replicated sequence applied for a shard.
         /// </summary>
         public long GetAppliedShardSequence(string shardId)
@@ -914,9 +1043,56 @@ namespace GameCult.Networking
                 : new CultRecordKey(string.Empty);
         }
 
+        private IEnumerable<TrackedShardDocument> GetLocalShardDocuments(CultNetShardDescriptor shard)
+        {
+            foreach (var document in _cache.AllEntries)
+            {
+                var documentType = document.GetType();
+                var descriptor = _cache.Registry.GetRequired(documentType);
+                var key = GetTrackedKey(document, documentType);
+                if (!string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key))
+                {
+                    yield return new TrackedShardDocument(documentType, descriptor.SchemaId, key, document);
+                }
+            }
+        }
+
+        private bool ShardMatchesRawDocument(CultNetShardDescriptor shard, CultNetRawDocumentRecord document)
+        {
+            return document != null &&
+                   !string.IsNullOrWhiteSpace(document.SchemaId) &&
+                   !string.IsNullOrWhiteSpace(document.RecordKey) &&
+                   shard.Matches(document.SchemaId, new CultRecordKey(document.RecordKey));
+        }
+
+        private void RemoveTrackedDocument(Type documentType, CultRecordKey key)
+        {
+            var removeMethod = typeof(CultCache).GetMethod(nameof(CultCache.Remove))!
+                .MakeGenericMethod(documentType);
+            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
+            var handle = Activator.CreateInstance(handleType, new object[] { key });
+            removeMethod.Invoke(_cache, new[] { handle });
+        }
+
         private void Publish<T>(CultNetDatabaseChange<T> change) where T : class
         {
             _changes.OnNext(change);
+        }
+
+        private sealed class TrackedShardDocument
+        {
+            public TrackedShardDocument(Type documentType, string schemaId, CultRecordKey key, object document)
+            {
+                DocumentType = documentType;
+                SchemaId = schemaId;
+                Key = key;
+                Document = document;
+            }
+
+            public Type DocumentType { get; }
+            public string SchemaId { get; }
+            public CultRecordKey Key { get; }
+            public object Document { get; }
         }
 
         private void AppendMutationLogEntry(

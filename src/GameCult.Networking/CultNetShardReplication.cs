@@ -24,6 +24,17 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Fetches shard-bounded snapshots from an authoritative shard owner.
+    /// </summary>
+    public interface ICultNetShardSnapshotFetcher
+    {
+        /// <summary>
+        /// Fetches a shard snapshot.
+        /// </summary>
+        Task<CultNetSnapshotResponseRawMessage> FetchAsync(CultNetShardDescriptor shard);
+    }
+
+    /// <summary>
     /// Persisted replica cursor for one shard.
     /// </summary>
     [MessagePackObject]
@@ -82,6 +93,11 @@ namespace GameCult.Networking
         /// Gets or sets the fetcher used to read from shard primaries.
         /// </summary>
         public ICultNetShardLogFetcher? Fetcher { get; set; }
+
+        /// <summary>
+        /// Gets or sets the fetcher used when log history has been compacted.
+        /// </summary>
+        public ICultNetShardSnapshotFetcher? SnapshotFetcher { get; set; }
 
         /// <summary>
         /// Gets or sets a callback for background pull failures.
@@ -180,6 +196,21 @@ namespace GameCult.Networking
             var response = await _options.Fetcher
                 .FetchAsync(shard, afterSequence, _options.BatchSize)
                 .ConfigureAwait(false);
+            if (response.ResyncRequired &&
+                string.Equals(response.Reason, "compacted_history", StringComparison.Ordinal))
+            {
+                if (_options.SnapshotFetcher == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Shard '{shard.ShardId}' requires snapshot resync, but no shard snapshot fetcher is configured.");
+                }
+
+                var snapshot = await _options.SnapshotFetcher.FetchAsync(shard).ConfigureAwait(false);
+                var snapshotSequence = await _database.ApplyShardSnapshotResponseAsync(shard, snapshot).ConfigureAwait(false);
+                await WriteCursorAsync(shard, snapshotSequence).ConfigureAwait(false);
+                return snapshotSequence;
+            }
+
             var appliedSequence = await _database.ApplyShardLogResponseAsync(response).ConfigureAwait(false);
             await WriteCursorAsync(shard, appliedSequence).ConfigureAwait(false);
             return appliedSequence;
@@ -444,6 +475,121 @@ namespace GameCult.Networking
             if (completed != responseTask)
             {
                 throw new TimeoutException($"Timed out waiting for shard log response from {endpoint}.");
+            }
+
+            return await responseTask.ConfigureAwait(false);
+        }
+
+        private static string ResolvePrimaryEndpoint(CultNetShardDescriptor shard)
+        {
+            return shard.PrimaryEndpoints.FirstOrDefault()
+                   ?? throw new InvalidOperationException(
+                       $"Shard '{shard.ShardId}' does not advertise a primary endpoint.");
+        }
+    }
+
+    /// <summary>
+    /// Options for the schema-v0 client-based shard snapshot fetcher.
+    /// </summary>
+    public sealed class CultNetSchemaShardSnapshotFetcherOptions
+    {
+        /// <summary>
+        /// Gets or sets client security options used to connect to primary endpoints.
+        /// </summary>
+        public ClientSecurityOptions? Security { get; set; }
+
+        /// <summary>
+        /// Gets or sets how long to wait for a connection before failing.
+        /// </summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets how long to wait for a snapshot response before failing.
+        /// </summary>
+        public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets a callback used to customize each ephemeral fetch client.
+        /// </summary>
+        public Action<Client>? ConfigureClient { get; set; }
+    }
+
+    /// <summary>
+    /// Fetches shard snapshots over the CultNet schema-v0 client transport.
+    /// </summary>
+    public sealed class CultNetSchemaShardSnapshotFetcher : ICultNetShardSnapshotFetcher
+    {
+        private readonly CultNetSchemaShardSnapshotFetcherOptions _options;
+
+        /// <summary>
+        /// Creates a schema-v0 shard snapshot fetcher.
+        /// </summary>
+        public CultNetSchemaShardSnapshotFetcher(CultNetSchemaShardSnapshotFetcherOptions? options = null)
+        {
+            _options = options ?? new CultNetSchemaShardSnapshotFetcherOptions();
+        }
+
+        /// <inheritdoc />
+        public async Task<CultNetSnapshotResponseRawMessage> FetchAsync(CultNetShardDescriptor shard)
+        {
+            if (shard == null) throw new ArgumentNullException(nameof(shard));
+            var endpoint = ResolvePrimaryEndpoint(shard);
+            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+            var messageId = Guid.NewGuid().ToString("N");
+            var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using var client = new Client(_options.Security ?? ClientSecurityOptions.Development())
+            {
+                AllowUnverifiedCultNetMessages = true
+            };
+            _options.ConfigureClient?.Invoke(client);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                {
+                    completion.TrySetResult(response);
+                }
+            });
+            client.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+
+            client.Connect(host, port);
+            await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
+            client.SendCultNet(new CultNetSnapshotRequestMessage
+            {
+                MessageId = messageId,
+                SchemaIds = shard.SchemaIds.Count == 0 ? null : shard.SchemaIds.ToArray(),
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch
+            });
+
+            return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+        }
+
+        private async Task WaitForConnectionAsync(Client client, string endpoint)
+        {
+            var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
+            while (!client.Connected)
+            {
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"Timed out connecting to shard primary endpoint {endpoint}.");
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+            }
+        }
+
+        private async Task<CultNetSnapshotResponseRawMessage> WaitForResponseAsync(
+            Task<CultNetSnapshotResponseRawMessage> responseTask,
+            string endpoint)
+        {
+            var timeoutTask = Task.Delay(_options.ResponseTimeout);
+            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                throw new TimeoutException($"Timed out waiting for shard snapshot response from {endpoint}.");
             }
 
             return await responseTask.ConfigureAwait(false);

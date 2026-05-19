@@ -60,7 +60,9 @@ cursors can be stored with `ICultNetShardReplicaCursorStore`. Authoritative
 shard logs can be persisted with `ICultNetShardMutationLogStore`; the file
 implementation stores one MessagePack log per shard so catch-up survives a
 primary restart. Compacted history returns an explicit resync requirement so a
-replica can fall back to a snapshot before applying newer log entries.
+replica can fall back to a shard-bounded snapshot before applying newer log
+entries. Applying that snapshot replaces the local shard view and advances the
+replica cursor to the snapshot's represented log sequence.
 
 ### Simulation Witness Consensus
 

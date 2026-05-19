@@ -64,6 +64,9 @@ Implemented:
   implementation
 - shard-log compaction watermarks; requests for compacted history return
   `ResyncRequired` with `reason = "compacted_history"`
+- shard-bounded snapshots with shard id, epoch, and represented log sequence
+- replica snapshot recovery after compacted history, including local shard
+  replacement and cursor advancement
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -78,7 +81,7 @@ Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- automatic snapshot fallback after compacted log history
+- peer-to-peer snapshot fanout and throttling
 - peer-to-peer fanout for observation gossip and candidate propagation
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
@@ -98,6 +101,8 @@ Not implemented yet:
 - Log retention is part of the replication contract. A replica asking before
   the compaction watermark must resync from a snapshot before applying newer
   log entries.
+- A shard snapshot represents a log sequence. Applying it replaces the local
+  shard view and advances the replica cursor to that sequence.
 - Realtime subscriptions publish domain changes, not storage envelopes.
 - Client-owned input documents may be predicted locally only inside explicit
   `CultNetClientAuthorityScope` declarations.
@@ -112,12 +117,11 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add automatic snapshot fallback and discovery fanout:
+Add discovery fanout and operational polish:
 
-- teach the replication puller to request and apply a shard snapshot after
-  `compacted_history`
 - expose operator-facing defaults for durable shard-log paths in CultMesh nodes
 - add Verse discovery over the schema-v0 mesh lane
+- add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
 - add peer-to-peer fanout for observation gossip and candidate propagation
@@ -128,9 +132,9 @@ restart. Client-owned input documents can now be predicted locally and
 reconciled when the authoritative log arrives. Nodes can also aggregate witness
 observations into deterministic consensus candidates for simulation facts like
 "who shot first," and those reports now have schema-v0 wire contracts. The next
-useful layer is making the replication puller recover from compacted history
-automatically.
+useful layer is making Verse discovery and operator defaults first-class.
 Membership and leader election should wait until basic replica catch-up is
 boring. Authoritative mutation logs can now survive process restart through
 `ICultNetShardMutationLogStore`; compaction now has an honest resync boundary,
-and snapshot fallback is the next place where that boundary needs automation.
+and the shard replicator can recover from that boundary through snapshot
+replacement.

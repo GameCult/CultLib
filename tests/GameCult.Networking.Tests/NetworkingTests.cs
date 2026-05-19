@@ -187,6 +187,9 @@ namespace GameCult.Networking.Tests
             var message = new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "snapshot-1",
+                ShardId = "players-eu",
+                ShardEpoch = 12,
+                ShardLogSequence = 42,
                 Documents =
                 [
                     new CultNetRawDocumentRecord
@@ -208,6 +211,9 @@ namespace GameCult.Networking.Tests
             var roundTrip = (CultNetSnapshotResponseRawMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
 
             Assert.That(roundTrip.MessageId, Is.EqualTo("snapshot-1"));
+            Assert.That(roundTrip.ShardId, Is.EqualTo("players-eu"));
+            Assert.That(roundTrip.ShardEpoch, Is.EqualTo(12));
+            Assert.That(roundTrip.ShardLogSequence, Is.EqualTo(42));
             Assert.That(roundTrip.Documents, Has.Length.EqualTo(1));
             Assert.That(roundTrip.Documents[0].SchemaId, Is.EqualTo("sha256:ghostlight-agent-state"));
             Assert.That(roundTrip.Documents[0].PayloadEncoding, Is.EqualTo("messagepack"));
@@ -1449,6 +1455,79 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetShardReplicator_AppliesSnapshot_WhenLogHistoryWasCompacted()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var shard = new CultNetShardDescriptor(
+                "players-snapshot-resync",
+                "runtime-a",
+                epoch: 9,
+                isPrimary: false,
+                schemaIds: [schemaId],
+                keyPrefix: "player:",
+                primaryEndpoints: ["cultnet://primary.example.test:3075"]);
+            var keepKey = new CultRecordKey("player:keep");
+            var goneKey = new CultRecordKey("player:gone");
+            await cache.UpsertAsync(
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "keep-old@example.test", PasswordHash = "hash", Username = "KeepOld" },
+                new CultRecordHandle<PlayerData>(keepKey));
+            await cache.UpsertAsync(
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "gone@example.test", PasswordHash = "hash", Username = "Gone" },
+                new CultRecordHandle<PlayerData>(goneKey));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var keep = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "keep-new@example.test",
+                PasswordHash = "hash",
+                Username = "KeepNew"
+            };
+            var put = registry.CreateRawDocumentPutMessage(
+                "snapshot-keep",
+                new CultRecordHandle<PlayerData>(keepKey),
+                keep);
+            var logFetcher = new CapturingShardLogFetcher(new CultNetShardLogResponseMessage
+            {
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch,
+                ResyncRequired = true,
+                Reason = "compacted_history",
+                CompactedThrough = 2
+            });
+            var snapshotFetcher = new CapturingShardSnapshotFetcher(new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "snapshot-resync",
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch,
+                ShardLogSequence = 4,
+                Documents = [put.Document]
+            });
+            using var replicator = new CultNetShardReplicator(database, new CultNetShardReplicatorOptions
+            {
+                Fetcher = logFetcher,
+                SnapshotFetcher = snapshotFetcher
+            });
+
+            var sequence = await replicator.PullOnceAsync(shard);
+
+            Assert.That(sequence, Is.EqualTo(4));
+            Assert.That(database.GetAppliedShardSequence(shard.ShardId), Is.EqualTo(4));
+            Assert.That(snapshotFetcher.FetchCount, Is.EqualTo(1));
+            Assert.That(cache.Get<PlayerData>(goneKey), Is.Null);
+            Assert.That(cache.Get<PlayerData>(keepKey)!.Username, Is.EqualTo("KeepNew"));
+        }
+
+        [Test]
         public void CultNetSimulationConsensus_Builds_QuorumCandidate_FromWitnesses()
         {
             var hitA = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
@@ -1909,6 +1988,26 @@ namespace GameCult.Networking.Tests
                 LastShard = shard;
                 LastAfterSequence = afterSequence;
                 LastLimit = limit;
+                return Task.FromResult(_response);
+            }
+        }
+
+        private sealed class CapturingShardSnapshotFetcher : ICultNetShardSnapshotFetcher
+        {
+            private readonly CultNetSnapshotResponseRawMessage _response;
+
+            public CapturingShardSnapshotFetcher(CultNetSnapshotResponseRawMessage response)
+            {
+                _response = response;
+            }
+
+            public int FetchCount { get; private set; }
+            public CultNetShardDescriptor? LastShard { get; private set; }
+
+            public Task<CultNetSnapshotResponseRawMessage> FetchAsync(CultNetShardDescriptor shard)
+            {
+                FetchCount++;
+                LastShard = shard;
                 return Task.FromResult(_response);
             }
         }

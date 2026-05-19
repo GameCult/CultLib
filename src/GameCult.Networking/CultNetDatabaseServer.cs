@@ -82,6 +82,29 @@ namespace GameCult.Networking
         public CultNetSnapshotResponseRawMessage CreateSnapshotResponse(CultNetSnapshotRequestMessage request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
+            if (!string.IsNullOrWhiteSpace(request.ShardId))
+            {
+                var shard = _database.Shards.FirstOrDefault(candidate =>
+                    string.Equals(candidate.ShardId, request.ShardId, StringComparison.Ordinal));
+                if (shard == null)
+                {
+                    throw new InvalidOperationException($"Shard '{request.ShardId}' is not known by this database.");
+                }
+
+                if (request.ShardEpoch.HasValue && request.ShardEpoch.Value != shard.Epoch)
+                {
+                    throw new CultNetShardAuthorityException(
+                        shard,
+                        $"Shard '{shard.ShardId}' is at epoch {shard.Epoch}, not request epoch {request.ShardEpoch.Value}.",
+                        "stale_epoch");
+                }
+
+                return _database.CreateShardSnapshotResponse(
+                    shard,
+                    string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
+                    request);
+            }
+
             return _database.Documents.CreateRawSnapshotResponse(
                 _database.Cache,
                 string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
