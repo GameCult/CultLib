@@ -306,6 +306,95 @@ The lower-level API should still expose:
 
 That is the cache's responsibility, not the domain model's.
 
+## Concurrent Store Policy
+
+CultCache files are expected to become shared state, not private save blobs.
+Once multiple runtimes can read and write the same `.cc` file, the persistence
+contract must protect both durability and observation.
+
+The store header should declare the write policy a runtime must obey before it
+mutates the file:
+
+- `generation`: monotonic store generation, incremented on each committed
+  snapshot
+- `contentHash`: hash of the committed snapshot body
+- `concurrency.policy`: stable policy id, such as
+  `cultcache.concurrent.snapshot-lock.v1`
+- `concurrency.lockName`: how to derive the sidecar lock path
+- `concurrency.commit`: commit primitive, such as `atomic-replace`
+
+The header negotiates the protocol. It does not enforce the protocol by magic.
+Writers still need an external coordination primitive because replacing the
+main file also replaces whatever identity a platform may attach to that file
+handle.
+
+The v1 concurrent single-file policy is:
+
+1. Readers may read lock-free when they can tolerate a stale-but-complete
+   snapshot. Readers that need a stable read boundary take a shared sidecar
+   lock.
+2. Writers take an exclusive sidecar lock derived from the `.cc` path.
+3. Writers re-read the current snapshot after taking the lock.
+4. Writers merge or reject local staged changes against the latest generation.
+5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
+   release the lock.
+
+This preserves the key invariant: every reader sees a complete snapshot, and no
+writer commits over unseen data without passing through the merge/reject point.
+
+## Live Change Observation
+
+A shared CultCache file is also a low-ceremony realtime database for local
+applications. The filesystem is the transport. CultCache is the typed database
+surface. The cache should therefore expose domain-level change streams, not
+force applications to subscribe to raw storage envelopes.
+
+Recommended C# surface:
+
+```csharp
+Observable<CultCacheChange<T>> Watch<T>();
+Observable<T> WatchRecord<T>(CultRecordKey key);
+Observable<T> WatchGlobal<T>();
+Observable<T> WatchByName<T>(string name);
+```
+
+Change events should be emitted after a pulled or locally committed snapshot has
+been reconciled into the in-memory cache. Subscribers should see domain objects
+and cache-owned handles, not raw `schemaId`, `storedAt`, or MessagePack payload
+bytes unless they explicitly subscribe to the raw persistence lane.
+
+The event model should distinguish at least:
+
+- `added`
+- `updated`
+- `removed`
+- `schema_migrated`
+- `rejected`
+
+Local and remote-looking writes use the same reconciliation path. A write from
+another process is just a new committed generation discovered through file
+watching or polling, pulled into the cache, diffed against the current domain
+view, and published.
+
+### R3 Alignment
+
+The C# reactive surface should align with R3, Cysharp/neuecc's modern
+Reactive Extensions implementation and successor line to UniRx. CultCache
+should not invent a bespoke observer API when the .NET ecosystem already has a
+well-understood shape for composable streams.
+
+R3 should own the C# subscription ergonomics:
+
+- `Observable<T>` for public domain streams
+- `Subject<T>` or internal equivalents only at ownership boundaries
+- disposable subscriptions for lifecycle control
+- debounce/throttle operators for bursty filesystem notifications
+- scheduler hooks where Unity, desktop UI, or server callers need thread
+  affinity
+
+The invariant is simple: the persistence layer owns bytes and generations; the
+cache owns domain identity and diffing; R3 owns composition of observed changes.
+
 ## CultNet Alignment
 
 CultCache and CultNet should not grow rival schema religions.
