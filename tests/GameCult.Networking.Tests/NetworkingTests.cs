@@ -630,6 +630,81 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Appends_PerShardMutationLog()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-log",
+                        "runtime-a",
+                        epoch: 4,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+            var key = new CultRecordKey("player:log");
+            var player = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "log@example.test",
+                PasswordHash = "hash",
+                Username = "Log"
+            };
+
+            await database.PutAsync(key, player);
+            player.Username = "LogUpdated";
+            await database.PutAsync(key, player);
+            await database.DeleteAsync<PlayerData>(key);
+
+            var entries = database.GetMutationLog("players-log");
+
+            Assert.That(entries, Has.Count.EqualTo(3));
+            Assert.That(new[] { entries[0].Sequence, entries[1].Sequence, entries[2].Sequence }, Is.EqualTo([1, 2, 3]));
+            Assert.That(entries[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+            Assert.That(entries[1].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Updated));
+            Assert.That(entries[2].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Removed));
+            Assert.That(entries[0].ShardEpoch, Is.EqualTo(4));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_MutationLog_CanCatchUpAfterSequence()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "players-catchup",
+                        "runtime-a",
+                        epoch: 1,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "player:")
+                ]
+            });
+
+            await database.PutAsync(
+                new CultRecordKey("player:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "one@example.test", PasswordHash = "hash", Username = "One" });
+            await database.PutAsync(
+                new CultRecordKey("player:two"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "two@example.test", PasswordHash = "hash", Username = "Two" });
+
+            var entries = database.GetMutationLog("players-catchup", afterSequence: 1);
+
+            Assert.That(entries, Has.Count.EqualTo(1));
+            Assert.That(entries[0].Sequence, Is.EqualTo(2));
+            Assert.That(entries[0].Key.Value, Is.EqualTo("player:two"));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

@@ -164,15 +164,16 @@ Shard catalog exchange now exists:
 - injectable non-primary write forwarding policy
 - concrete schema-v0 write forwarder for `cultnet://host:port` primary
   endpoints
+- in-memory per-shard mutation logs and catch-up by last seen sequence
 
 ## Next Cut
 
-Build per-shard replica logs:
+Build wire-level replica log catch-up:
 
-- assign sequence numbers to accepted shard mutations
-- stream log entries to replicas and subscribers
-- compact logs into snapshots
-- make missed entries trigger explicit resync
+- `cultnet.shard_log_request.v0`
+- `cultnet.shard_log_response.v0`
+- raw put/delete representation for log entries
+- explicit resync-required failure when a replica asks for compacted history
 
 That is the next foundation needed before membership, Raft-style failover, or
 CRDT policy work can be honest.

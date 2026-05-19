@@ -47,12 +47,16 @@ Implemented:
 - injectable non-primary write forwarding policy
 - schema-v0 write forwarder that dials advertised `cultnet://host:port`
   primary endpoints
+- in-memory per-shard mutation logs with sequence numbers, epochs, mutation
+  kind, schema id, key, and document references
+- mutation-log catch-up by last seen sequence
 
 Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- replicated log
+- wire-level replica log request/response messages
+- durable log persistence and compaction
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -69,13 +73,15 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add per-shard replica logs:
+Add wire-level replica log catch-up:
 
-- assign monotonically increasing sequence numbers to accepted shard mutations
-- stream log entries to replicas and subscribers
-- compact log entries into CultCache snapshots
-- reject or resync replicas that miss entries
+- `cultnet.shard_log_request.v0`
+- `cultnet.shard_log_response.v0`
+- serialize accepted mutations as raw put/delete records
+- let replicas ask for entries after a known sequence
+- return an explicit resync-required error when the requested sequence has
+  already been compacted away
 
-Forwarding now has both a policy seam and a concrete schema-v0 dialer. The next
-useful layer is ordered replication. Membership and leader election should wait
-until the replication log shape is boring.
+The in-memory log shape now exists. The next useful layer is moving that log
+over the wire. Membership and leader election should wait until replication
+catch-up is boring.

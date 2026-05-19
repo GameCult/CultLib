@@ -230,6 +230,74 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// One ordered mutation accepted for a shard.
+    /// </summary>
+    public sealed class CultNetShardMutationLogEntry
+    {
+        /// <summary>
+        /// Creates a shard mutation log entry.
+        /// </summary>
+        public CultNetShardMutationLogEntry(
+            string shardId,
+            long shardEpoch,
+            long sequence,
+            string committedAt,
+            CultNetDatabaseChangeKind kind,
+            string schemaId,
+            CultRecordKey key,
+            object? document,
+            object? previousDocument)
+        {
+            ShardId = shardId;
+            ShardEpoch = shardEpoch;
+            Sequence = sequence;
+            CommittedAt = committedAt;
+            Kind = kind;
+            SchemaId = schemaId;
+            Key = key;
+            Document = document;
+            PreviousDocument = previousDocument;
+        }
+
+        /// <summary>
+        /// Gets the shard id.
+        /// </summary>
+        public string ShardId { get; }
+        /// <summary>
+        /// Gets the shard epoch.
+        /// </summary>
+        public long ShardEpoch { get; }
+        /// <summary>
+        /// Gets the per-shard mutation sequence.
+        /// </summary>
+        public long Sequence { get; }
+        /// <summary>
+        /// Gets the commit timestamp.
+        /// </summary>
+        public string CommittedAt { get; }
+        /// <summary>
+        /// Gets the mutation kind.
+        /// </summary>
+        public CultNetDatabaseChangeKind Kind { get; }
+        /// <summary>
+        /// Gets the schema id.
+        /// </summary>
+        public string SchemaId { get; }
+        /// <summary>
+        /// Gets the record key.
+        /// </summary>
+        public CultRecordKey Key { get; }
+        /// <summary>
+        /// Gets the current document, when present.
+        /// </summary>
+        public object? Document { get; }
+        /// <summary>
+        /// Gets the previous document, when present.
+        /// </summary>
+        public object? PreviousDocument { get; }
+    }
+
+    /// <summary>
     /// Raised when a database write targets a shard this node does not own.
     /// </summary>
     public sealed class CultNetShardAuthorityException : InvalidOperationException
@@ -261,6 +329,9 @@ namespace GameCult.Networking
         private readonly CultCache _cache;
         private readonly CultNetDocumentRegistry _documents;
         private readonly List<CultNetShardDescriptor> _shards;
+        private readonly Dictionary<string, List<CultNetShardMutationLogEntry>> _mutationLogs =
+            new(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
         private readonly Subject<object> _changes = new();
         private bool _disposed;
 
@@ -291,6 +362,30 @@ namespace GameCult.Networking
         /// Gets the shard map known to this database surface.
         /// </summary>
         public IReadOnlyList<CultNetShardDescriptor> Shards => _shards;
+
+        /// <summary>
+        /// Gets mutation log entries for a shard after the supplied sequence.
+        /// </summary>
+        public IReadOnlyList<CultNetShardMutationLogEntry> GetMutationLog(
+            string shardId,
+            long afterSequence = 0,
+            int? limit = null)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            if (!_mutationLogs.TryGetValue(shardId, out var entries))
+            {
+                return Array.Empty<CultNetShardMutationLogEntry>();
+            }
+
+            var query = entries.Where(entry => entry.Sequence > afterSequence);
+            if (limit.HasValue)
+            {
+                query = query.Take(limit.Value);
+            }
+
+            return query.ToArray();
+        }
 
         /// <summary>
         /// Creates a shard catalog response for optional schema/key filters.
@@ -353,6 +448,13 @@ namespace GameCult.Networking
 
             var previous = _cache.Get<T>(key);
             var handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
+            AppendMutationLogEntry(
+                shard,
+                previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
+                key,
+                descriptor.SchemaId,
+                document,
+                previous);
             Publish(new CultNetDatabaseChange<T>(
                 previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
                 key,
@@ -377,6 +479,13 @@ namespace GameCult.Networking
             if (previous != null)
             {
                 _cache.Remove(new CultRecordHandle<T>(key));
+                AppendMutationLogEntry(
+                    shard,
+                    CultNetDatabaseChangeKind.Removed,
+                    key,
+                    descriptor.SchemaId,
+                    document: null,
+                    previousDocument: previous);
                 Publish(new CultNetDatabaseChange<T>(
                     CultNetDatabaseChangeKind.Removed,
                     key,
@@ -407,6 +516,13 @@ namespace GameCult.Networking
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
+            AppendMutationLogEntry(
+                shard,
+                previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
+                key,
+                descriptor.SchemaId,
+                document,
+                previous);
             PublishUntyped(
                 descriptor.DocumentType,
                 previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
@@ -441,6 +557,13 @@ namespace GameCult.Networking
             var handleType = typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType);
             var handle = Activator.CreateInstance(handleType, new object[] { key });
             removeMethod.Invoke(_cache, new[] { handle });
+            AppendMutationLogEntry(
+                shard,
+                CultNetDatabaseChangeKind.Removed,
+                key,
+                descriptor.SchemaId,
+                document: null,
+                previousDocument: previous);
             PublishUntyped(
                 descriptor.DocumentType,
                 CultNetDatabaseChangeKind.Removed,
@@ -578,6 +701,39 @@ namespace GameCult.Networking
         private void Publish<T>(CultNetDatabaseChange<T> change) where T : class
         {
             _changes.OnNext(change);
+        }
+
+        private void AppendMutationLogEntry(
+            CultNetShardDescriptor shard,
+            CultNetDatabaseChangeKind kind,
+            CultRecordKey key,
+            string schemaId,
+            object? document,
+            object? previousDocument)
+        {
+            var sequence = _nextLogSequences.TryGetValue(shard.ShardId, out var next)
+                ? next
+                : 1;
+            _nextLogSequences[shard.ShardId] = sequence + 1;
+
+            var entry = new CultNetShardMutationLogEntry(
+                shard.ShardId,
+                shard.Epoch,
+                sequence,
+                DateTimeOffset.UtcNow.ToString("O"),
+                kind,
+                schemaId,
+                key,
+                document,
+                previousDocument);
+
+            if (!_mutationLogs.TryGetValue(shard.ShardId, out var entries))
+            {
+                entries = new List<CultNetShardMutationLogEntry>();
+                _mutationLogs[shard.ShardId] = entries;
+            }
+
+            entries.Add(entry);
         }
 
         private void PublishUntyped(

@@ -135,8 +135,9 @@ R3 watch streams, raw document puts/deletes, raw snapshot responses,
 schema/key-filtered live subscriptions, shard catalog exchange, and stale-epoch
 write rejection. Non-primary write forwarding is available behind an injectable
 `ICultNetShardWriteForwarder`, with `CultNetSchemaWriteForwarder` as the
-schema-v0 `cultnet://host:port` endpoint dialer. Per-shard replica logs are the
-next missing organ.
+schema-v0 `cultnet://host:port` endpoint dialer. It also records accepted
+mutations in per-shard ordered logs for local replica catch-up. Wire-level log
+catch-up is the next missing organ.
 
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner
