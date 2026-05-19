@@ -45,13 +45,14 @@ Implemented:
 - epoch-aware raw put/delete messages
 - routing hints on shard authority errors
 - injectable non-primary write forwarding policy
+- schema-v0 write forwarder that dials advertised `cultnet://host:port`
+  primary endpoints
 
 Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
 - replicated log
-- concrete endpoint dialer for forwarded writes
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -68,13 +69,13 @@ Not implemented yet:
 
 ## Next Coherent Slice
 
-Add a concrete endpoint dialer for write forwarding:
+Add per-shard replica logs:
 
-- implement `ICultNetShardWriteForwarder` over the schema-v0 client transport
-- choose the best primary endpoint from the shard descriptor
-- preserve shard id and epoch on forwarded messages
-- surface forwarding failures as routing errors with endpoint context
+- assign monotonically increasing sequence numbers to accepted shard mutations
+- stream log entries to replicas and subscribers
+- compact log entries into CultCache snapshots
+- reject or resync replicas that miss entries
 
-Forwarding now has the policy seam. The next useful layer is the actual network
-dialer. Membership, leader election, and replicated logs should wait until
-routing is boring.
+Forwarding now has both a policy seam and a concrete schema-v0 dialer. The next
+useful layer is ordered replication. Membership and leader election should wait
+until the replication log shape is boring.

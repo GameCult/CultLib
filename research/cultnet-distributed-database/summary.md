@@ -162,15 +162,17 @@ Shard catalog exchange now exists:
 - stale epoch rejection on writes
 - routing error that tells clients where the primary lives when known
 - injectable non-primary write forwarding policy
+- concrete schema-v0 write forwarder for `cultnet://host:port` primary
+  endpoints
 
 ## Next Cut
 
-Build a concrete schema-v0 write forwarder:
+Build per-shard replica logs:
 
-- dial the selected primary endpoint from the shard catalog
-- forwarded writes preserve shard id and epoch
-- stale epochs still fail before forwarding
-- failed forwarding returns endpoint-aware routing errors
+- assign sequence numbers to accepted shard mutations
+- stream log entries to replicas and subscribers
+- compact logs into snapshots
+- make missed entries trigger explicit resync
 
-That is the next foundation needed before membership, Raft-style replication,
-or CRDT policy work can be honest.
+That is the next foundation needed before membership, Raft-style failover, or
+CRDT policy work can be honest.

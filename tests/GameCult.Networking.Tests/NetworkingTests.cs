@@ -604,6 +604,32 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaWriteForwarder_Parses_CultNetEndpoints()
+        {
+            var parsed = CultNetSchemaWriteForwarder.ParseEndpoint("cultnet://primary.example.test:4075");
+
+            Assert.That(parsed.Host, Is.EqualTo("primary.example.test"));
+            Assert.That(parsed.Port, Is.EqualTo(4075));
+        }
+
+        [Test]
+        public void CultNetSchemaWriteForwarder_Uses_DefaultPort()
+        {
+            var parsed = CultNetSchemaWriteForwarder.ParseEndpoint("cultnet://primary.example.test");
+
+            Assert.That(parsed.Host, Is.EqualTo("primary.example.test"));
+            Assert.That(parsed.Port, Is.EqualTo(3075));
+        }
+
+        [Test]
+        public void CultNetSchemaWriteForwarder_Rejects_InvalidEndpoint()
+        {
+            Assert.That(
+                () => CultNetSchemaWriteForwarder.ParseEndpoint("http://primary.example.test:3075"),
+                Throws.TypeOf<FormatException>());
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

@@ -88,6 +88,11 @@ namespace GameCult.Networking
         public bool LogSensitivePayloads { get; set; }
 
         /// <summary>
+        /// Gets or sets whether CultNet schema-v0 messages may be sent before user session verification.
+        /// </summary>
+        public bool AllowUnverifiedCultNetMessages { get; set; }
+
+        /// <summary>
         /// Gets a value indicating whether the client currently has a verified session.
         /// </summary>
         public bool Verified => !string.IsNullOrWhiteSpace(_sessionToken);
@@ -152,7 +157,7 @@ namespace GameCult.Networking
 
             if (Connected && _peer != null)
             {
-                if (Verified || message is CultNetLoginMessage or CultNetRegisterMessage or CultNetVerifyMessage)
+                if (AllowUnverifiedCultNetMessages || Verified || message is CultNetLoginMessage or CultNetRegisterMessage or CultNetVerifyMessage)
                 {
                     Logger.LogDebug($"Sending CultNet schema message {message.SchemaVersion}");
                     _peer.SendCultNet(message);
