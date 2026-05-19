@@ -173,6 +173,7 @@ Shard catalog exchange now exists:
   implementation
 - client authority scopes for predicted local input documents
 - predicted/reconciled change events for client-side prediction
+- simulation witness observations and deterministic consensus candidates
 
 ## Next Cut
 
@@ -183,6 +184,7 @@ Build durable authoritative mutation logs:
 - return explicit resync-required responses when requested history is gone
 - then add simulation-frame rollback and resimulation helpers on top of
   predicted input streams
+- add observation gossip once the local witness model has earned its shape
 
 That is the next foundation needed before membership, Raft-style failover, or
 CRDT policy work can be honest.

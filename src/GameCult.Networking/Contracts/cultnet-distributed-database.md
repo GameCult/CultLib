@@ -61,6 +61,8 @@ Implemented:
   implementation
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
+- simulation witness observations for mesh-side opinions about frame facts
+- deterministic consensus candidates derived from witness observations
 
 Not implemented yet:
 
@@ -68,6 +70,7 @@ Not implemented yet:
 - leader election or automatic shard failover
 - durable log persistence and compaction
 - snapshot fallback for compacted log history
+- transport messages/documents for witness observation gossip
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
@@ -87,6 +90,11 @@ Not implemented yet:
 - Predicted input state is not authoritative shared state. The shard log still
   decides the committed ordering and emits reconciliation when it corrects or
   confirms local prediction.
+- Witness observations are immutable reports about a shard epoch, frame,
+  subject, claim kind, and claim hash.
+- Consensus candidates are derived from observations. They may inform the
+  authoritative commit path, but they are not themselves committed world state
+  until a shard owner writes them into the log.
 
 ## Next Coherent Slice
 
@@ -97,10 +105,14 @@ Add durable mutation-log storage and snapshot fallback:
 - return `ResyncRequired` when a replica asks for compacted history
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
+- add schema-v0 observation gossip once the local consensus document shape is
+  stable
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive
 restart. Client-owned input documents can now be predicted locally and
-reconciled when the authoritative log arrives. The next useful layer is making
-authoritative mutation logs durable and compaction-aware. Membership and leader
-election should wait until basic replica catch-up is boring.
+reconciled when the authoritative log arrives. Nodes can also aggregate witness
+observations into deterministic consensus candidates for simulation facts like
+"who shot first." The next useful layer is making authoritative mutation logs
+durable and compaction-aware. Membership and leader election should wait until
+basic replica catch-up is boring.

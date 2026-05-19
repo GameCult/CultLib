@@ -1214,6 +1214,119 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSimulationConsensus_Builds_QuorumCandidate_FromWitnesses()
+        {
+            var hitA = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+            var hitB = CultNetSimulationObservation.ComputeClaimHash("hit", "charlie", "bob", "frame:100");
+            var consensus = new CultNetSimulationConsensus(new CultNetSimulationConsensusOptions
+            {
+                MinimumWitnesses = 2,
+                QuorumRatio = 0.6d
+            });
+
+            var candidates = consensus.BuildCandidates(
+            [
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-1",
+                    ShardId = "arena",
+                    ShardEpoch = 4,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = hitA,
+                    ClaimSummary = "alice hit bob first"
+                },
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-2",
+                    ShardId = "arena",
+                    ShardEpoch = 4,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = hitA
+                },
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-3",
+                    ShardId = "arena",
+                    ShardEpoch = 4,
+                    Frame = 100,
+                    SubjectId = "bob",
+                    ClaimKind = "hit",
+                    ClaimHash = hitB,
+                    ClaimSummary = "charlie hit bob first"
+                }
+            ]);
+
+            Assert.That(candidates, Has.Count.EqualTo(1));
+            Assert.That(candidates[0].ClaimHash, Is.EqualTo(hitA));
+            Assert.That(candidates[0].WitnessCount, Is.EqualTo(2));
+            Assert.That(candidates[0].SupportWeight, Is.EqualTo(2d));
+            Assert.That(candidates[0].TotalWeight, Is.EqualTo(3d));
+            Assert.That(candidates[0].HasQuorum, Is.True);
+        }
+
+        [Test]
+        public void CultNetSimulationConsensus_DeduplicatesWitness_AndBreaksTiesDeterministically()
+        {
+            var lowerHash = CultNetSimulationObservation.ComputeClaimHash("a");
+            var higherHash = CultNetSimulationObservation.ComputeClaimHash("b");
+            if (string.CompareOrdinal(lowerHash, higherHash) > 0)
+            {
+                (lowerHash, higherHash) = (higherHash, lowerHash);
+            }
+            var consensus = new CultNetSimulationConsensus(new CultNetSimulationConsensusOptions
+            {
+                QuorumRatio = 0.5d
+            });
+
+            var candidates = consensus.BuildCandidates(
+            [
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-1",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 20,
+                    SubjectId = "door",
+                    ClaimKind = "state",
+                    ClaimHash = higherHash,
+                    Weight = 1d
+                },
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-1",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 20,
+                    SubjectId = "door",
+                    ClaimKind = "state",
+                    ClaimHash = lowerHash,
+                    Weight = 0.5d
+                },
+                new CultNetSimulationObservation
+                {
+                    WitnessRuntimeId = "watcher-2",
+                    ShardId = "arena",
+                    ShardEpoch = 1,
+                    Frame = 20,
+                    SubjectId = "door",
+                    ClaimKind = "state",
+                    ClaimHash = lowerHash,
+                    Weight = 1d
+                }
+            ]);
+
+            Assert.That(candidates, Has.Count.EqualTo(1));
+            Assert.That(candidates[0].ClaimHash, Is.EqualTo(lowerHash));
+            Assert.That(candidates[0].TotalWeight, Is.EqualTo(2d));
+            Assert.That(candidates[0].SupportWeight, Is.EqualTo(1d));
+            Assert.That(candidates[0].HasQuorum, Is.True);
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

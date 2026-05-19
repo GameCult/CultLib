@@ -154,6 +154,13 @@ local cache immediately and emits a `Predicted` change; when the authoritative
 shard log arrives for the same record, the database emits `Reconciled` and the
 cache holds the committed value.
 
+For mesh-side simulation agreement, `CultNetSimulationObservation` records what
+a witness saw for one shard epoch, frame, subject, and claim kind.
+`CultNetSimulationConsensus` deterministically aggregates those observations
+into candidates with support weight, total observed weight, confidence, and
+quorum status. Those candidates are opinions ready for an authoritative commit
+path, not committed world state by themselves.
+
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner
 node forwards a write to the owner or rejects it honestly when forwarding is
