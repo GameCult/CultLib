@@ -924,6 +924,125 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Predicts_ClientOwnedInput_AndReconciles_AuthoritativeLog()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var key = new CultRecordKey("input:client-a");
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                RuntimeId = "client-a",
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "inputs",
+                        "server",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: [schemaId],
+                        keyPrefix: "input:",
+                        primaryEndpoints: ["cultnet://server.example.test:3075"])
+                ],
+                ClientAuthorityScopes =
+                [
+                    new CultNetClientAuthorityScope(
+                        "client-a",
+                        schemaIds: [schemaId],
+                        keyPrefix: "input:client-a")
+                ]
+            });
+            var changes = new List<CultNetDatabaseChange<PlayerData>>();
+            using var subscription = database.WatchRecord<PlayerData>(key)
+                .Subscribe(change => changes.Add(change));
+            var predicted = new PlayerData
+            {
+                PlayerId = Guid.NewGuid(),
+                Email = "input@example.test",
+                PasswordHash = "hash",
+                Username = "Predicted"
+            };
+            var authoritative = new PlayerData
+            {
+                PlayerId = predicted.PlayerId,
+                Email = predicted.Email,
+                PasswordHash = predicted.PasswordHash,
+                Username = "Authoritative"
+            };
+            var put = registry.CreateRawDocumentPutMessage("input-commit", new CultRecordHandle<PlayerData>(key), authoritative);
+            put.ShardId = "inputs";
+            put.ShardEpoch = 1;
+
+            await database.PutPredictedAsync(key, predicted);
+            await database.ApplyShardLogResponseAsync(new CultNetShardLogResponseMessage
+            {
+                ShardId = "inputs",
+                ShardEpoch = 1,
+                Entries =
+                [
+                    new CultNetShardLogEntryMessage
+                    {
+                        Sequence = 1,
+                        CommittedAt = "2026-05-19T12:00:00.0000000Z",
+                        ChangeKind = "updated",
+                        Put = put
+                    }
+                ]
+            });
+
+            Assert.That(cache.Get<PlayerData>(key)!.Username, Is.EqualTo("Authoritative"));
+            Assert.That(changes.Exists(change => change.Kind == CultNetDatabaseChangeKind.Predicted), Is.True);
+            Assert.That(changes.Exists(change => change.Kind == CultNetDatabaseChangeKind.Reconciled), Is.True);
+        }
+
+        [Test]
+        public void CultNetDatabase_Rejects_Prediction_OutsideClientAuthorityScope()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                RuntimeId = "client-a",
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "inputs",
+                        "server",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: [schemaId],
+                        keyPrefix: "input:")
+                ],
+                ClientAuthorityScopes =
+                [
+                    new CultNetClientAuthorityScope(
+                        "client-a",
+                        schemaIds: [schemaId],
+                        keyPrefix: "input:client-a")
+                ]
+            });
+
+            Assert.That(
+                async () => await database.PutPredictedAsync(
+                    new CultRecordKey("input:client-b"),
+                    new PlayerData
+                    {
+                        PlayerId = Guid.NewGuid(),
+                        Email = "input-b@example.test",
+                        PasswordHash = "hash",
+                        Username = "WrongClient"
+                    }),
+                Throws.TypeOf<CultNetShardAuthorityException>()
+                    .With.Property(nameof(CultNetShardAuthorityException.Reason))
+                    .EqualTo("not_client_authority"));
+        }
+
+        [Test]
         public void CultNetDatabase_Rejects_ShardLogGap()
         {
             var cache = new CultCache();

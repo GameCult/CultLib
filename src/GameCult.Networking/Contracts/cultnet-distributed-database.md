@@ -59,6 +59,8 @@ Implemented:
 - schema-v0 shard log fetcher for `cultnet://host:port` endpoints
 - restart-safe replica cursor store, including a local MessagePack file-backed
   implementation
+- client-authority scopes for locally predicted input documents
+- predicted and reconciled database change kinds for client-side prediction
 
 Not implemented yet:
 
@@ -66,6 +68,7 @@ Not implemented yet:
 - leader election or automatic shard failover
 - durable log persistence and compaction
 - snapshot fallback for compacted log history
+- rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -79,6 +82,11 @@ Not implemented yet:
 - Raw snapshot/put/delete messages must pass through `CultNetDatabase`, not
   bypass shard policy.
 - Realtime subscriptions publish domain changes, not storage envelopes.
+- Client-owned input documents may be predicted locally only inside explicit
+  `CultNetClientAuthorityScope` declarations.
+- Predicted input state is not authoritative shared state. The shard log still
+  decides the committed ordering and emits reconciliation when it corrects or
+  confirms local prediction.
 
 ## Next Coherent Slice
 
@@ -87,9 +95,12 @@ Add durable mutation-log storage and snapshot fallback:
 - persist per-shard mutation logs instead of keeping them only in memory
 - define the compaction boundary that turns old log reads into snapshot reads
 - return `ResyncRequired` when a replica asks for compacted history
+- after that, add simulation-frame rollback/resimulation helpers around
+  predicted input streams
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive
-restart. The next useful layer is making authoritative mutation logs durable and
-compaction-aware. Membership and leader election should wait until basic replica
-catch-up is boring.
+restart. Client-owned input documents can now be predicted locally and
+reconciled when the authoritative log arrives. The next useful layer is making
+authoritative mutation logs durable and compaction-aware. Membership and leader
+election should wait until basic replica catch-up is boring.

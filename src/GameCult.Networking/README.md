@@ -148,6 +148,12 @@ transport path. Replica cursors can be stored through
 those cursors in one local MessagePack file so replicas can resume after a
 restart.
 
+For client-side prediction, `CultNetClientAuthorityScope` declares which input
+documents a runtime may author optimistically. `PutPredictedAsync` updates the
+local cache immediately and emits a `Predicted` change; when the authoritative
+shard log arrives for the same record, the database emits `Reconciled` and the
+cache holds the committed value.
+
 The first coherent shard policy is primary ownership. Each shard has one
 authoritative writer at a time. Clients may connect to any node; a non-owner
 node forwards a write to the owner or rejects it honestly when forwarding is

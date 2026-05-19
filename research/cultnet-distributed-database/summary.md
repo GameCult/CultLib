@@ -171,6 +171,8 @@ Shard catalog exchange now exists:
 - background shard log replicator plus schema-v0 fetcher for primary endpoints
 - restart-safe replica cursor store with a local MessagePack file
   implementation
+- client authority scopes for predicted local input documents
+- predicted/reconciled change events for client-side prediction
 
 ## Next Cut
 
@@ -179,6 +181,8 @@ Build durable authoritative mutation logs:
 - persist per-shard primary logs
 - define the snapshot fallback boundary for compacted history
 - return explicit resync-required responses when requested history is gone
+- then add simulation-frame rollback and resimulation helpers on top of
+  predicted input streams
 
 That is the next foundation needed before membership, Raft-style failover, or
 CRDT policy work can be honest.

@@ -31,7 +31,57 @@ namespace GameCult.Networking
         /// <summary>
         /// A document change was rejected.
         /// </summary>
-        Rejected
+        Rejected,
+        /// <summary>
+        /// A document was applied locally before authoritative commit.
+        /// </summary>
+        Predicted,
+        /// <summary>
+        /// A predicted document was replaced by the authoritative committed state.
+        /// </summary>
+        Reconciled
+    }
+
+    /// <summary>
+    /// Declares which documents this runtime may predict locally before authoritative commit.
+    /// </summary>
+    public sealed class CultNetClientAuthorityScope
+    {
+        /// <summary>
+        /// Creates a client authority scope.
+        /// </summary>
+        public CultNetClientAuthorityScope(
+            string ownerRuntimeId,
+            IEnumerable<string>? schemaIds = null,
+            string? keyPrefix = null)
+        {
+            OwnerRuntimeId = string.IsNullOrWhiteSpace(ownerRuntimeId)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(ownerRuntimeId))
+                : ownerRuntimeId;
+            SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray()
+                ?? Array.Empty<string>();
+            KeyPrefix = keyPrefix;
+        }
+
+        /// <summary>
+        /// Gets the runtime that owns authoring for this scope.
+        /// </summary>
+        public string OwnerRuntimeId { get; }
+        /// <summary>
+        /// Gets the schema ids governed by this scope. Empty means all schemas.
+        /// </summary>
+        public IReadOnlyList<string> SchemaIds { get; }
+        /// <summary>
+        /// Gets the optional record-key prefix governed by this scope.
+        /// </summary>
+        public string? KeyPrefix { get; }
+
+        internal bool Matches(string runtimeId, string schemaId, CultRecordKey key)
+        {
+            return string.Equals(OwnerRuntimeId, runtimeId, StringComparison.Ordinal) &&
+                   (SchemaIds.Count == 0 || SchemaIds.Contains(schemaId, StringComparer.Ordinal)) &&
+                   (string.IsNullOrEmpty(KeyPrefix) || key.Value.StartsWith(KeyPrefix!, StringComparison.Ordinal));
+        }
     }
 
     /// <summary>
@@ -167,6 +217,10 @@ namespace GameCult.Networking
         /// Gets or sets explicit shard descriptors. When omitted, this instance owns one primary shard for all records.
         /// </summary>
         public IReadOnlyList<CultNetShardDescriptor>? Shards { get; set; }
+        /// <summary>
+        /// Gets or sets document scopes this runtime may predict before authoritative commit.
+        /// </summary>
+        public IReadOnlyList<CultNetClientAuthorityScope>? ClientAuthorityScopes { get; set; }
         /// <summary>
         /// Gets or sets the document registry used to create and apply raw CultNet document messages.
         /// </summary>
@@ -328,7 +382,10 @@ namespace GameCult.Networking
     {
         private readonly CultCache _cache;
         private readonly CultNetDocumentRegistry _documents;
+        private readonly string _runtimeId;
         private readonly List<CultNetShardDescriptor> _shards;
+        private readonly List<CultNetClientAuthorityScope> _clientAuthorityScopes;
+        private readonly Dictionary<string, object> _predictedDocuments = new(StringComparer.Ordinal);
         private readonly Dictionary<string, List<CultNetShardMutationLogEntry>> _mutationLogs =
             new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
@@ -343,11 +400,13 @@ namespace GameCult.Networking
         {
             _cache = cache ?? throw new ArgumentNullException(nameof(cache));
             options ??= new CultNetDatabaseOptions();
+            _runtimeId = options.RuntimeId;
             _documents = options.DocumentRegistry ?? new CultNetDocumentRegistry(cache.Registry);
             _shards = (options.Shards == null || options.Shards.Count == 0
                     ? new[] { CultNetShardDescriptor.PrimaryAll(options.RuntimeId) }
                     : options.Shards)
                 .ToList();
+            _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
             _cache.OnUpdate += PublishCacheUpdate;
         }
 
@@ -363,6 +422,11 @@ namespace GameCult.Networking
         /// Gets the shard map known to this database surface.
         /// </summary>
         public IReadOnlyList<CultNetShardDescriptor> Shards => _shards;
+
+        /// <summary>
+        /// Gets the document scopes this runtime may predict before authoritative commit.
+        /// </summary>
+        public IReadOnlyList<CultNetClientAuthorityScope> ClientAuthorityScopes => _clientAuthorityScopes;
 
         /// <summary>
         /// Gets mutation log entries for a shard after the supplied sequence.
@@ -487,6 +551,31 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Applies a locally predicted document for a client-owned input scope.
+        /// </summary>
+        public async Task<CultRecordHandle<T>> PutPredictedAsync<T>(CultRecordKey key, T document) where T : class
+        {
+            ThrowIfDisposed();
+            if (document == null) throw new ArgumentNullException(nameof(document));
+
+            var descriptor = _cache.Registry.GetRequired<T>();
+            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            EnsureClientAuthority(descriptor.SchemaId, key);
+
+            var previous = _cache.Get<T>(key);
+            var handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
+            _predictedDocuments[PredictionKey(descriptor.SchemaId, key)] = document;
+            Publish(new CultNetDatabaseChange<T>(
+                CultNetDatabaseChangeKind.Predicted,
+                key,
+                descriptor.SchemaId,
+                shard,
+                document,
+                previous));
+            return handle;
+        }
+
+        /// <summary>
         /// Deletes a document by key.
         /// </summary>
         public Task DeleteAsync<T>(CultRecordKey key) where T : class
@@ -537,16 +626,23 @@ namespace GameCult.Networking
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
+            var kind = previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated;
+            var predictionKey = PredictionKey(descriptor.SchemaId, key);
+            if (_predictedDocuments.Remove(predictionKey))
+            {
+                kind = CultNetDatabaseChangeKind.Reconciled;
+            }
+
             AppendMutationLogEntry(
                 shard,
-                previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
+                kind == CultNetDatabaseChangeKind.Reconciled ? CultNetDatabaseChangeKind.Updated : kind,
                 key,
                 descriptor.SchemaId,
                 document,
                 previous);
             PublishUntyped(
                 descriptor.DocumentType,
-                previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
+                kind,
                 key,
                 descriptor.SchemaId,
                 shard,
@@ -872,12 +968,18 @@ namespace GameCult.Networking
                     $"Shard '{shard.ShardId}' log entry {entry.Sequence} has a removed kind with a put payload.");
             }
 
+            var predictionKey = PredictionKey(descriptor.SchemaId, key);
+            if (_predictedDocuments.Remove(predictionKey))
+            {
+                kind = CultNetDatabaseChangeKind.Reconciled;
+            }
+
             RecordMutationLogEntry(new CultNetShardMutationLogEntry(
                 shard.ShardId,
                 shard.Epoch,
                 entry.Sequence,
                 entry.CommittedAt,
-                kind,
+                kind == CultNetDatabaseChangeKind.Reconciled ? CultNetDatabaseChangeKind.Updated : kind,
                 descriptor.SchemaId,
                 key,
                 document,
@@ -947,6 +1049,25 @@ namespace GameCult.Networking
                 "removed" => CultNetDatabaseChangeKind.Removed,
                 _ => throw new InvalidOperationException($"Unsupported shard log change kind '{changeKind}'.")
             };
+        }
+
+        private void EnsureClientAuthority(string schemaId, CultRecordKey key)
+        {
+            if (_clientAuthorityScopes.Any(scope => scope.Matches(_runtimeId, schemaId, key)))
+            {
+                return;
+            }
+
+            var shard = ResolveShardInternal(schemaId, key);
+            throw new CultNetShardAuthorityException(
+                shard,
+                $"Runtime '{_runtimeId}' does not have client prediction authority for schema '{schemaId}' key '{key.Value}'.",
+                "not_client_authority");
+        }
+
+        private static string PredictionKey(string schemaId, CultRecordKey key)
+        {
+            return $"{schemaId}:{key.Value}";
         }
 
         private void PublishUntyped(
