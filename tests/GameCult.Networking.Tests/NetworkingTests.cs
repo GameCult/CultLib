@@ -1038,6 +1038,63 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetShardReplicator_Resumes_From_FileCursorStore()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultnet-cursors-{Guid.NewGuid():N}.mpack");
+            try
+            {
+                var store = new CultNetFileShardReplicaCursorStore(path);
+                await store.WriteAsync(new CultNetShardReplicaCursor
+                {
+                    ShardId = "players-cursor",
+                    ShardEpoch = 3,
+                    LastAppliedSequence = 5,
+                    UpdatedAt = "2026-05-19T12:00:00.0000000Z"
+                });
+                var cache = new CultCache();
+                var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+                var shard = new CultNetShardDescriptor(
+                    "players-cursor",
+                    "runtime-a",
+                    epoch: 3,
+                    isPrimary: false,
+                    schemaIds: [schemaId],
+                    keyPrefix: "player:",
+                    primaryEndpoints: ["cultnet://primary.example.test:3075"]);
+                var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+                {
+                    Shards = [shard]
+                });
+                var fetcher = new CapturingShardLogFetcher(new CultNetShardLogResponseMessage
+                {
+                    ShardId = "players-cursor",
+                    ShardEpoch = 3
+                });
+                using var replicator = new CultNetShardReplicator(database, new CultNetShardReplicatorOptions
+                {
+                    Fetcher = fetcher,
+                    CursorStore = store
+                });
+
+                var sequence = await replicator.PullOnceAsync("players-cursor");
+                var cursor = await store.ReadAsync("players-cursor");
+
+                Assert.That(fetcher.LastAfterSequence, Is.EqualTo(5));
+                Assert.That(sequence, Is.EqualTo(5));
+                Assert.That(database.GetAppliedShardSequence("players-cursor"), Is.EqualTo(5));
+                Assert.That(cursor, Is.Not.Null);
+                Assert.That(cursor!.LastAppliedSequence, Is.EqualTo(5));
+            }
+            finally
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

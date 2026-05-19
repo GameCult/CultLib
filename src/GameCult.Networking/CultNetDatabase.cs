@@ -400,6 +400,14 @@ namespace GameCult.Networking
                 : 0;
         }
 
+        internal void SetAppliedShardSequence(string shardId, long sequence)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            if (sequence < 0) throw new ArgumentOutOfRangeException(nameof(sequence), "Sequence must be non-negative.");
+            _appliedShardSequences[shardId] = sequence;
+        }
+
         /// <summary>
         /// Creates a shard catalog response for optional schema/key filters.
         /// </summary>

@@ -169,14 +169,16 @@ Shard catalog exchange now exists:
 - replica-side application of shard log responses with epoch checks, gap
   rejection, and idempotent replay
 - background shard log replicator plus schema-v0 fetcher for primary endpoints
+- restart-safe replica cursor store with a local MessagePack file
+  implementation
 
 ## Next Cut
 
-Build durable replica catch-up state:
+Build durable authoritative mutation logs:
 
-- persist per-shard logs and last-applied replica sequence
+- persist per-shard primary logs
 - define the snapshot fallback boundary for compacted history
-- store replica cursors across restarts
+- return explicit resync-required responses when requested history is gone
 
 That is the next foundation needed before membership, Raft-style failover, or
 CRDT policy work can be honest.

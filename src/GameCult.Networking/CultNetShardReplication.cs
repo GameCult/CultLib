@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MessagePack;
 
 namespace GameCult.Networking
 {
@@ -19,6 +21,46 @@ namespace GameCult.Networking
             CultNetShardDescriptor shard,
             long afterSequence,
             int? limit = null);
+    }
+
+    /// <summary>
+    /// Persisted replica cursor for one shard.
+    /// </summary>
+    [MessagePackObject]
+    public sealed class CultNetShardReplicaCursor
+    {
+        /// <summary>
+        /// Gets or sets the shard id.
+        /// </summary>
+        [Key("shardId")] public string ShardId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the shard epoch.
+        /// </summary>
+        [Key("shardEpoch")] public long ShardEpoch { get; set; }
+        /// <summary>
+        /// Gets or sets the last applied shard-log sequence.
+        /// </summary>
+        [Key("lastAppliedSequence")] public long LastAppliedSequence { get; set; }
+        /// <summary>
+        /// Gets or sets the cursor update timestamp.
+        /// </summary>
+        [Key("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Stores restart-safe replica cursors.
+    /// </summary>
+    public interface ICultNetShardReplicaCursorStore
+    {
+        /// <summary>
+        /// Reads the cursor for a shard, if one exists.
+        /// </summary>
+        Task<CultNetShardReplicaCursor?> ReadAsync(string shardId);
+
+        /// <summary>
+        /// Writes the cursor for a shard.
+        /// </summary>
+        Task WriteAsync(CultNetShardReplicaCursor cursor);
     }
 
     /// <summary>
@@ -45,6 +87,11 @@ namespace GameCult.Networking
         /// Gets or sets a callback for background pull failures.
         /// </summary>
         public Action<Exception>? OnError { get; set; }
+
+        /// <summary>
+        /// Gets or sets optional restart-safe cursor storage.
+        /// </summary>
+        public ICultNetShardReplicaCursorStore? CursorStore { get; set; }
     }
 
     /// <summary>
@@ -129,11 +176,13 @@ namespace GameCult.Networking
                 throw new InvalidOperationException($"Shard '{shard.ShardId}' is primary on this node and does not need replica pulling.");
             }
 
-            var afterSequence = _database.GetAppliedShardSequence(shard.ShardId);
+            var afterSequence = await GetAfterSequenceAsync(shard).ConfigureAwait(false);
             var response = await _options.Fetcher
                 .FetchAsync(shard, afterSequence, _options.BatchSize)
                 .ConfigureAwait(false);
-            return await _database.ApplyShardLogResponseAsync(response).ConfigureAwait(false);
+            var appliedSequence = await _database.ApplyShardLogResponseAsync(response).ConfigureAwait(false);
+            await WriteCursorAsync(shard, appliedSequence).ConfigureAwait(false);
+            return appliedSequence;
         }
 
         /// <inheritdoc />
@@ -175,12 +224,117 @@ namespace GameCult.Networking
             }
         }
 
+        private async Task<long> GetAfterSequenceAsync(CultNetShardDescriptor shard)
+        {
+            var afterSequence = _database.GetAppliedShardSequence(shard.ShardId);
+            if (afterSequence > 0 || _options.CursorStore == null)
+            {
+                return afterSequence;
+            }
+
+            var cursor = await _options.CursorStore.ReadAsync(shard.ShardId).ConfigureAwait(false);
+            if (cursor == null || cursor.ShardEpoch != shard.Epoch)
+            {
+                return afterSequence;
+            }
+
+            _database.SetAppliedShardSequence(shard.ShardId, cursor.LastAppliedSequence);
+            return cursor.LastAppliedSequence;
+        }
+
+        private async Task WriteCursorAsync(CultNetShardDescriptor shard, long appliedSequence)
+        {
+            if (_options.CursorStore == null)
+            {
+                return;
+            }
+
+            await _options.CursorStore.WriteAsync(new CultNetShardReplicaCursor
+            {
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch,
+                LastAppliedSequence = appliedSequence,
+                UpdatedAt = DateTimeOffset.UtcNow.ToString("O")
+            }).ConfigureAwait(false);
+        }
+
         private void ThrowIfDisposed()
         {
             if (_disposed)
             {
                 throw new ObjectDisposedException(nameof(CultNetShardReplicator));
             }
+        }
+    }
+
+    /// <summary>
+    /// Stores replica cursors in one local MessagePack file.
+    /// </summary>
+    public sealed class CultNetFileShardReplicaCursorStore : ICultNetShardReplicaCursorStore
+    {
+        private readonly string _filePath;
+        private readonly object _gate = new();
+
+        /// <summary>
+        /// Creates a file-backed cursor store.
+        /// </summary>
+        public CultNetFileShardReplicaCursorStore(string filePath)
+        {
+            _filePath = string.IsNullOrWhiteSpace(filePath)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(filePath))
+                : filePath;
+        }
+
+        /// <inheritdoc />
+        public Task<CultNetShardReplicaCursor?> ReadAsync(string shardId)
+        {
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            lock (_gate)
+            {
+                CultNetShardReplicaCursor? cursor = ReadAll().FirstOrDefault(candidate =>
+                    string.Equals(candidate.ShardId, shardId, StringComparison.Ordinal));
+                return Task.FromResult<CultNetShardReplicaCursor?>(cursor);
+            }
+        }
+
+        /// <inheritdoc />
+        public Task WriteAsync(CultNetShardReplicaCursor cursor)
+        {
+            if (cursor == null) throw new ArgumentNullException(nameof(cursor));
+            if (string.IsNullOrWhiteSpace(cursor.ShardId))
+            {
+                throw new ArgumentException("Cursor requires a shardId.", nameof(cursor));
+            }
+
+            lock (_gate)
+            {
+                var cursors = ReadAll()
+                    .Where(existing => !string.Equals(existing.ShardId, cursor.ShardId, StringComparison.Ordinal))
+                    .Concat(new[] { cursor })
+                    .OrderBy(existing => existing.ShardId, StringComparer.Ordinal)
+                    .ToArray();
+                var directory = Path.GetDirectoryName(Path.GetFullPath(_filePath));
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.WriteAllBytes(_filePath, MessagePackSerializer.Serialize(cursors));
+                return Task.CompletedTask;
+            }
+        }
+
+        private CultNetShardReplicaCursor[] ReadAll()
+        {
+            if (!File.Exists(_filePath))
+            {
+                return Array.Empty<CultNetShardReplicaCursor>();
+            }
+
+            var bytes = File.ReadAllBytes(_filePath);
+            return bytes.Length == 0
+                ? Array.Empty<CultNetShardReplicaCursor>()
+                : MessagePackSerializer.Deserialize<CultNetShardReplicaCursor[]>(bytes);
         }
     }
 
