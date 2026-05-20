@@ -82,6 +82,8 @@ Implemented:
 - deterministic consensus candidates derived from witness observations
 - committed CultMesh simulation fact documents written from quorum candidates
   through shard authority
+- gameplay-facing CultMesh session facade for prediction, observations,
+  catalogs, peer exchange, and quorum fact commits
 - schema-v0 simulation observation and consensus candidate messages
 - reactive simulation observation hub that receives witness gossip and emits
   consensus candidates
@@ -128,6 +130,9 @@ Not implemented yet:
 - `CultMeshSimulationFact` is the committed form of a quorum candidate. It is
   written through `CultNetDatabase`, so normal shard authority and replication
   rules still apply.
+- `CultMeshGameSession` composes common gameplay surfaces. It does not create a
+  second authority path; all committed state still flows through shard-owned
+  database writes.
 - Peer cards are contact candidates. They can advertise roles and authority
   lease ids, but they do not grant authority without Verse-specific validation.
 - Authority leases bind peer id, Verse id, roles, optional shard scope, issuer,
@@ -141,8 +146,8 @@ Add discovery fanout and operational polish:
 - add periodic gossip fanout over known peer cards
 - add real signature verification for authority leases
 - add snapshot throttling and size limits for public mesh edges
-- after that, add simulation-frame rollback/resimulation helpers around
-  predicted input streams
+- add simulation-frame rollback/resimulation helpers around predicted input
+  streams
 - add peer-to-peer fanout for observation gossip and candidate propagation
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can

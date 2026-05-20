@@ -221,6 +221,16 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a gameplay-facing session facade over a CultMesh node.
+        /// </summary>
+        public static CultMeshGameSession CreateGameSession(
+            CultMeshNode node,
+            CultMeshGameSessionOptions? options = null)
+        {
+            return new CultMeshGameSession(node, options);
+        }
+
+        /// <summary>
         /// Attaches Verse discovery responses to a CultMesh node.
         /// </summary>
         public static CultMeshVerseDiscoveryServer ServeVerseCatalog(

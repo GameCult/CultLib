@@ -136,6 +136,36 @@ using var sub = db.WatchRecord<PlayerInput>(inputKey)
     });
 ```
 
+## Game Session
+
+`CultMeshGameSession` wires the common gameplay loop: local catalogs,
+observation hub, observation server, peer exchange, Verse discovery, prediction,
+and quorum fact commits.
+
+```csharp
+using var session = CultMesh.CreateGameSession(node, new CultMeshGameSessionOptions
+{
+    ConsensusOptions = new CultNetSimulationConsensusOptions
+    {
+        MinimumWitnesses = 2,
+        QuorumRatio = 0.66d
+    }
+});
+
+await session.PredictAsync(inputKey, inputState);
+
+var committed = await session.SubmitAndCommitAsync(new CultNetSimulationObservation
+{
+    WitnessRuntimeId = "watcher-1",
+    ShardId = "arena",
+    ShardEpoch = 4,
+    Frame = 100,
+    SubjectId = "bob",
+    ClaimKind = "hit",
+    ClaimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100")
+});
+```
+
 ## Witness Consensus
 
 CultMesh nodes can publish observations about simulation facts: shard epoch,

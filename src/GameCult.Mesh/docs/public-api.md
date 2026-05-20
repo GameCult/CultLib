@@ -16,6 +16,7 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreatePeerExchangeClient(...)`
 - `CultMesh.CreateAuthorityLeaseCatalog()`
 - `CultMesh.CreateSimulationFactCommitter(...)`
+- `CultMesh.CreateGameSession(...)`
 - `CultMesh.CreateClient(...)`
 - `CultMesh.ConnectClient(...)`
 
@@ -112,3 +113,8 @@ replica cursor to the snapshot's represented log sequence.
 Candidates are opinions. `CultMeshSimulationFactCommitter` commits quorum
 candidates as `CultMeshSimulationFact` documents through `CultNetDatabase`, so
 final world state still belongs in the authoritative shard log.
+
+`CultMeshGameSession` is the gameplay-facing composition layer. It owns the
+common loop for prediction, observations, candidate watches, simulation fact
+watches, and committing new quorum facts without forcing game code to manually
+wire every bridge.

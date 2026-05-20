@@ -2098,6 +2098,74 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshGameSession_SubmitsWitnesses_AndCommitsQuorumFact()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-session", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var cachePath = Path.Combine(rootPath, "world.ccmp");
+            var schemaId = new CultCache().Registry.GetRequired<CultMeshSimulationFact>().SchemaId;
+            using var node = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    Shards =
+                    [
+                        new CultNetShardDescriptor(
+                            "arena",
+                            "runtime-a",
+                            epoch: 4,
+                            isPrimary: true,
+                            schemaIds: [schemaId],
+                            keyPrefix: "simulation:")
+                    ]
+                }
+            });
+            using var session = CultMesh.CreateGameSession(node, new CultMeshGameSessionOptions
+            {
+                ConsensusOptions = new CultNetSimulationConsensusOptions
+                {
+                    MinimumWitnesses = 2,
+                    QuorumRatio = 1d
+                },
+                ServeSimulationObservations = false,
+                ServeVerseDiscovery = false,
+                ServePeerExchange = false
+            });
+            var committed = new List<CultNetDatabaseChange<CultMeshSimulationFact>>();
+            using var facts = session.WatchSimulationFacts().Subscribe(committed.Add);
+            var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+
+            var firstCommit = await session.SubmitAndCommitAsync(new CultNetSimulationObservation
+            {
+                WitnessRuntimeId = "watcher-1",
+                ShardId = "arena",
+                ShardEpoch = 4,
+                Frame = 100,
+                SubjectId = "bob",
+                ClaimKind = "hit",
+                ClaimHash = claimHash,
+                ClaimSummary = "alice shot bob first"
+            });
+            var secondCommit = await session.SubmitAndCommitAsync(new CultNetSimulationObservation
+            {
+                WitnessRuntimeId = "watcher-2",
+                ShardId = "arena",
+                ShardEpoch = 4,
+                Frame = 100,
+                SubjectId = "bob",
+                ClaimKind = "hit",
+                ClaimHash = claimHash,
+                ClaimSummary = "alice shot bob first"
+            });
+
+            Assert.That(firstCommit, Is.Empty);
+            Assert.That(secondCommit, Has.Count.EqualTo(1));
+            Assert.That(node.Cache.Get<CultMeshSimulationFact>(secondCommit[0].Key)!.ClaimHash, Is.EqualTo(claimHash));
+            Assert.That(committed.Exists(change => change.Document?.ClaimHash == claimHash), Is.True);
+        }
+
+        [Test]
         public void CultMeshSimulationFactCommitter_Rejects_CandidateWithoutQuorum()
         {
             var cache = new CultCache();
