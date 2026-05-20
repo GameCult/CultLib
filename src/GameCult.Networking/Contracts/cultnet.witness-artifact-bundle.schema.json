@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json",
+  "title": "CultNet Witness Artifact Bundle",
+  "type": "object",
+  "required": [
+    "bundleId",
+    "witnessKind",
+    "capturedAt",
+    "subject",
+    "contracts",
+    "artifacts",
+    "timingWitnesses",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "bundleId": { "type": "string", "minLength": 1 },
+    "witnessKind": { "type": "string", "minLength": 1 },
+    "capturedAt": { "type": "string", "minLength": 1 },
+    "subject": { "$ref": "#/$defs/subject_pin" },
+    "contracts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/contract_pin" }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact_entry" }
+    },
+    "timingWitnesses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/timing_entry" }
+    },
+    "provenance": { "$ref": "#/$defs/provenance" }
+  },
+  "$defs": {
+    "subject_pin": {
+      "type": "object",
+      "required": [
+        "documentType",
+        "subjectId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "documentType": { "type": "string", "minLength": 1 },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "schemaId": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "minLength": 1 }
+      }
+    },
+    "contract_pin": {
+      "type": "object",
+      "required": [
+        "role",
+        "schemaId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "schemaId": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifact_entry": {
+      "type": "object",
+      "required": [
+        "role",
+        "uri",
+        "mediaType"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "mediaType": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "minLength": 1 },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "producedAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timing_entry": {
+      "type": "object",
+      "required": [
+        "stage",
+        "startedAt",
+        "completedAt",
+        "latencyMs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "type": "string", "minLength": 1 },
+        "startedAt": { "type": "string", "minLength": 1 },
+        "completedAt": { "type": "string", "minLength": 1 },
+        "latencyMs": { "type": "number", "minimum": 0 },
+        "witnessArtifactUri": { "type": "string", "minLength": 1 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "pipelineId",
+        "runId",
+        "runtimeId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pipelineId": { "type": "string", "minLength": 1 },
+        "runId": { "type": "string", "minLength": 1 },
+        "runtimeId": { "type": "string", "minLength": 1 },
+        "agentId": { "type": "string", "minLength": 1 },
+        "agentRole": { "type": "string", "minLength": 1 },
+        "toolVersion": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

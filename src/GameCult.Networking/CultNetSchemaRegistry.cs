@@ -375,6 +375,14 @@ namespace GameCult.Networking
                 SchemaVersion = "ghostlight.agent_state.v0",
                 DocumentType = "ghostlight.agent-state",
                 WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.witness-artifact-bundle.schema.json",
+                Kind = "document_payload",
+                SchemaVersion = CultNetSchemaVersions.WitnessArtifactBundle,
+                DocumentType = "cultnet.witness-artifact-bundle",
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
             }
         };
     }

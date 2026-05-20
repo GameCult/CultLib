@@ -116,6 +116,10 @@ namespace GameCult.Networking
         /// </summary>
         public const string SimulationConsensusCandidate = "cultnet.simulation_consensus_candidate.v0";
         /// <summary>
+        /// witness artifact bundle document contract identifier.
+        /// </summary>
+        public const string WitnessArtifactBundle = "cultnet.witness_artifact_bundle.v0";
+        /// <summary>
         /// CultMesh Verse catalog request contract identifier.
         /// </summary>
         public const string VerseCatalogRequest = "cultmesh.verse_catalog_request.v0";

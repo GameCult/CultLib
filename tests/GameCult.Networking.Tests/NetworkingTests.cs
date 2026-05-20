@@ -2287,6 +2287,39 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultWitnessArtifactBundle_Has_Stable_CacheContract()
+        {
+            var descriptor = new CultCache().Registry.GetRequired<CultWitnessArtifactBundle>();
+
+            Assert.That(descriptor.SchemaName, Is.EqualTo("cultnet.witness_artifact_bundle"));
+            Assert.That(descriptor.SchemaVersion, Is.EqualTo(CultNetSchemaVersions.WitnessArtifactBundle));
+            Assert.That(descriptor.NameMember, Is.EqualTo(nameof(CultWitnessArtifactBundle.BundleId)));
+            Assert.That(descriptor.CanonicalSchemaJson, Is.EqualTo(
+                "{\"schemaName\":\"cultnet.witness_artifact_bundle\",\"schemaVersion\":\"cultnet.witness_artifact_bundle.v0\",\"members\":[{\"slot\":0,\"name\":\"BundleId\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":true},{\"slot\":1,\"name\":\"WitnessKind\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":2,\"name\":\"CapturedAt\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":3,\"name\":\"Subject\",\"type\":\"GameCult.Networking.CultWitnessSubjectPin\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":4,\"name\":\"Contracts\",\"type\":\"GameCult.Networking.CultWitnessContractPin[]\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":5,\"name\":\"Artifacts\",\"type\":\"GameCult.Networking.CultWitnessArtifactEntry[]\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":6,\"name\":\"TimingWitnesses\",\"type\":\"GameCult.Networking.CultWitnessTimingEntry[]\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false},{\"slot\":7,\"name\":\"Provenance\",\"type\":\"GameCult.Networking.CultWitnessProvenance\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false}]}"));
+        }
+
+        [Test]
+        public void CultNetSchemaRegistry_BuiltInCatalog_Advertises_WitnessArtifactBundle()
+        {
+            var response = CultNetSchemaRegistry.BuiltIn.CreateCatalogResponse(
+                new CultNetSchemaCatalogRequestMessage
+                {
+                    MessageId = "catalog-witness",
+                    IncludeSchemaJson = true
+                });
+            var witnessBundle = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.WitnessArtifactBundle);
+
+            Assert.That(witnessBundle, Is.Not.Null);
+            Assert.That(witnessBundle!.DocumentType, Is.EqualTo("cultnet.witness-artifact-bundle"));
+            Assert.That(witnessBundle.Kind, Is.EqualTo("document_payload"));
+            Assert.That(witnessBundle.WireContracts, Is.EqualTo([CultNetWireContracts.SchemaV0]));
+            Assert.That(witnessBundle.SchemaJson, Does.Contain("\"bundleId\""));
+            Assert.That(witnessBundle.SchemaJson, Does.Contain("\"timingWitnesses\""));
+            Assert.That(witnessBundle.SchemaJson, Does.Contain("\"witnessArtifactUri\""));
+        }
+
+        [Test]
         public void Server_Separates_Connection_And_Auth_RateLimits()
         {
             var cache = new CultCache();
