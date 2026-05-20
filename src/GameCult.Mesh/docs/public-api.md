@@ -14,6 +14,7 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreatePeerCatalog()`
 - `CultMesh.CreateVerseDiscoveryClient(...)`
 - `CultMesh.CreatePeerExchangeClient(...)`
+- `CultMesh.CreateAuthorityLeaseCatalog()`
 - `CultMesh.CreateClient(...)`
 - `CultMesh.ConnectClient(...)`
 
@@ -65,6 +66,14 @@ responses to a node. The wire contracts are
 upsert them into a local catalog.
 Peer cards are discovery hints; authority still requires a valid lease or
 signature for the target Verse.
+
+### Authority Leases
+
+`CultMeshAuthorityLease` grants one peer specific roles for a Verse, optionally
+scoped to shard ids and bounded by time. `CultMeshAuthorityLeaseCatalog` checks
+whether a peer card is authorized for a requested role and shard. This keeps
+peer exchange separate from authority instead of letting contact gossip mutate
+the world.
 
 ### Shard Authority
 

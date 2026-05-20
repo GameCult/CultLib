@@ -205,6 +205,14 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a local authority lease catalog.
+        /// </summary>
+        public static CultMeshAuthorityLeaseCatalog CreateAuthorityLeaseCatalog()
+        {
+            return new CultMeshAuthorityLeaseCatalog();
+        }
+
+        /// <summary>
         /// Attaches Verse discovery responses to a CultMesh node.
         /// </summary>
         public static CultMeshVerseDiscoveryServer ServeVerseCatalog(

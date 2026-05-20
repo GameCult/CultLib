@@ -92,6 +92,20 @@ Peer cards are contact candidates, not authority by themselves. Public Verses
 should validate authority leases or signatures before trusting a peer for
 committed state.
 
+```csharp
+var leases = CultMesh.CreateAuthorityLeaseCatalog();
+leases.Upsert(new CultMeshAuthorityLease(
+    "lease:players-us-east:42",
+    "aetheria-main",
+    "gc-us-east-1",
+    [CultMeshPeerRoles.ShardPrimary],
+    ["players-us-east"],
+    "gamecult-operator",
+    DateTimeOffset.UtcNow.AddMinutes(-1),
+    DateTimeOffset.UtcNow.AddMinutes(10),
+    signature: "operator-signature"));
+```
+
 Clients can fetch more peers from known peers:
 
 ```csharp

@@ -1021,6 +1021,35 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultMeshAuthorityLeaseCatalog_Authorizes_PeerRoleAndShard()
+        {
+            var now = DateTimeOffset.Parse("2026-05-20T12:00:00.0000000Z");
+            var catalog = CultMesh.CreateAuthorityLeaseCatalog();
+            var peer = new CultMeshPeerCard(
+                "peer-primary",
+                "aetheria-main",
+                ["cultnet://primary.example.test:3075"],
+                roles: [CultMeshPeerRoles.ShardPrimary],
+                shardIds: ["players-us-east"],
+                authorityLeaseId: "lease-primary");
+            catalog.Upsert(new CultMeshAuthorityLease(
+                "lease-primary",
+                "aetheria-main",
+                "peer-primary",
+                [CultMeshPeerRoles.ShardPrimary],
+                ["players-us-east"],
+                "gc-operator",
+                now.AddMinutes(-5),
+                now.AddMinutes(5),
+                signature: "sig"));
+
+            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now), Is.True);
+            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-eu", now), Is.False);
+            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ReadReplica, "players-us-east", now), Is.False);
+            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now.AddMinutes(6)), Is.False);
+        }
+
+        [Test]
         public async Task CultMeshNode_CanEnable_DurableShardLogs_WithDefaultPath()
         {
             var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-node", Guid.NewGuid().ToString("N"));

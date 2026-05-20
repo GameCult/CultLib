@@ -64,3 +64,8 @@ primary shard, replica, read replica, and simulation observer roles, but those
 cards do not grant authority by themselves. Public operator Verses should treat
 authority lease ids and signatures as mandatory before accepting committed
 state from a peer.
+
+Authority leases are the narrow bridge between discovery and trust. A lease
+binds a peer id to a Verse, role, shard scope, issuer, validity window, and
+signature. Peer exchange can spread cards quickly; lease validation decides
+whether a card is allowed to touch committed state.

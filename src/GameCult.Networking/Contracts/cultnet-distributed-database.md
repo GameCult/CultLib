@@ -74,6 +74,8 @@ Implemented:
 - schema-v0 peer exchange request/response messages
 - CultMesh peer cards, peer catalog, peer exchange server bridge, and peer
   exchange client
+- CultMesh authority leases and lease catalog checks for peer role/shard
+  authorization
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -123,12 +125,16 @@ Not implemented yet:
   until a shard owner writes them into the log.
 - Peer cards are contact candidates. They can advertise roles and authority
   lease ids, but they do not grant authority without Verse-specific validation.
+- Authority leases bind peer id, Verse id, roles, optional shard scope, issuer,
+  validity window, and signature. They are the first trust boundary above peer
+  exchange.
 
 ## Next Coherent Slice
 
 Add discovery fanout and operational polish:
 
 - add periodic gossip fanout over known peer cards
+- add real signature verification for authority leases
 - add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams
