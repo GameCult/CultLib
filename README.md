@@ -34,11 +34,12 @@ the stack. If a design needs another peer-to-peer category, first check whether
 it is really Verse policy, peer exchange, or shard authority wearing a fake
 mustache.
 
-If you want one concrete path for "typed local document -> raw wire document ->
-mesh/runtime watch surface", start with
+If you want the smallest durable "open node -> put typed doc -> get typed doc"
+path, start with
+[`src/GameCult.Mesh/docs/durable-node-quickstart.md`](src/GameCult.Mesh/docs/durable-node-quickstart.md).
+If you want the lower-level "typed local document -> raw wire document ->
+mesh/runtime watch surface" handoff, follow it with
 [`src/GameCult.Mesh/docs/typed-document-path.md`](src/GameCult.Mesh/docs/typed-document-path.md).
-That sample shows which package owns each step and where wire provenance stays
-visible.
 
 ## Repository Scope
 
@@ -256,6 +257,7 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Caching.MessagePack.Analyzers](src/GameCult.Caching.MessagePack.Analyzers/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
 - [GameCult.Mesh](src/GameCult.Mesh/README.md)
+- [Durable Node Quickstart](src/GameCult.Mesh/docs/durable-node-quickstart.md)
 - [Typed Document Path](src/GameCult.Mesh/docs/typed-document-path.md)
 - [GameCult.Unity](src/GameCult.Unity/README.md)
 - [GameCult.Caching.Tests](tests/GameCult.Caching.Tests/README.md)

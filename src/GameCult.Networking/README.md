@@ -103,6 +103,8 @@ contracts. CultMesh owns the developer-facing mesh entrypoints and higher-level
 runtime documentation.
 
 See `src/GameCult.Mesh/README.md` for the public-facing CultMesh API.
+For one small end-to-end path from durable local typed state into `node.Database`,
+see `src/GameCult.Mesh/docs/durable-node-quickstart.md`.
 
 ## Distributed CultCache
 

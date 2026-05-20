@@ -1108,6 +1108,57 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshNode_CanRoundTrip_DurableTypedDocument_Through_PublicDatabaseSurface()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "cultmesh-quickstart", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            var cachePath = Path.Combine(rootPath, "world.ccmp");
+            var documents = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<MeshQuickstartNote>());
+            var key = new CultRecordKey("note:intro");
+
+            using (var node = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    RuntimeId = "quickstart-local",
+                    DocumentRegistry = documents
+                }
+            }))
+            {
+                await node.Database.PutAsync(key, new MeshQuickstartNote
+                {
+                    NoteId = key.Value,
+                    Body = "hello from a durable CultMesh node"
+                });
+
+                var live = await node.Database.GetAsync<MeshQuickstartNote>(key);
+
+                Assert.That(node.Store, Is.Not.Null);
+                Assert.That(live, Is.Not.Null);
+                Assert.That(live!.Body, Is.EqualTo("hello from a durable CultMesh node"));
+
+                await node.FlushAsync();
+            }
+
+            using var reopened = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    RuntimeId = "quickstart-local",
+                    DocumentRegistry = documents
+                }
+            });
+            var stored = await reopened.Database.GetAsync<MeshQuickstartNote>(key);
+
+            Assert.That(stored, Is.Not.Null);
+            Assert.That(stored!.NoteId, Is.EqualTo(key.Value));
+            Assert.That(stored.Body, Is.EqualTo("hello from a durable CultMesh node"));
+        }
+
+        [Test]
         public async Task CultNetDatabase_Appends_PerShardMutationLog()
         {
             var cache = new CultCache();
@@ -2419,6 +2470,18 @@ namespace GameCult.Networking.Tests
             Assert.That(client, Is.Not.Null);
             Assert.That(client.LogSensitivePayloads, Is.False);
             Assert.That(client.ReconnectState, Is.EqualTo(ClientReconnectState.Idle));
+        }
+
+        [CultDocument("sample.mesh_note", "sample.mesh_note.v0")]
+        [MessagePack.MessagePackObject]
+        public sealed class MeshQuickstartNote
+        {
+            [MessagePack.Key(0)]
+            [CultName]
+            public string NoteId { get; set; } = string.Empty;
+
+            [MessagePack.Key(1)]
+            public string Body { get; set; } = string.Empty;
         }
 
         private sealed class EnvironmentVariableScope : IDisposable

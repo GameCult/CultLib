@@ -26,6 +26,12 @@ var player = await node.Database.GetAsync<PlayerData>(playerKey);
 await node.Database.PutAsync(playerKey, player);
 ```
 
+If you want one inspectable path that starts with a durable local cache file and
+ends with a typed read/write through the public CultMesh surface, see
+[docs/durable-node-quickstart.md](docs/durable-node-quickstart.md).
+If you want the lower-level typed-to-raw handoff that CultNet moves across the
+wire, see [docs/typed-document-path.md](docs/typed-document-path.md).
+
 Enable durable authoritative shard logs when a node should serve replica
 catch-up after restart:
 
@@ -200,6 +206,7 @@ snapshot's represented log sequence.
 ## Documentation
 
 - [Public API](docs/public-api.md)
+- [Durable Node Quickstart](docs/durable-node-quickstart.md)
 - [Typed Document Path](docs/typed-document-path.md)
 - [Research Notes](docs/research.md)
 - [Verse Model](docs/verses.md)
