@@ -10,6 +10,30 @@ The libraries cover three main areas:
 - CultMesh distributed realtime database and simulation-consensus primitives
 - declarative Unity UI composition and reflective runtime inspector tooling
 
+## Which Package Do I Want?
+
+If the job is shared game state, start here before inventing a fourth drawer
+and pretending the label makes it furniture.
+
+| Job | Start With | Owns | Use When | Do Not Use It For |
+| --- | --- | --- | --- | --- |
+| Local typed state | `GameCult.Caching` / CultCache | Document identity, schema compatibility, record keys, indexes, globals, and local persistence | You need a typed cache, file-compatible save data, local reactive reads, or a stable domain document model | Peer discovery, transport security, shard routing, or mesh consensus |
+| Network transport and database plumbing | `GameCult.Networking` / CultNet | LiteNetLib transport, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
+| Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
+
+Quick rule:
+
+- Choose CultCache when the problem is "how do I model and persist typed state?"
+- Choose CultNet when the problem is "how do peers exchange authenticated,
+  schema-aware database messages?"
+- Choose CultMesh when the problem is "how does a game join a Verse and share
+  realtime state across a mesh?"
+
+CultMesh sits on CultNet, and CultNet distributes CultCache documents. That is
+the stack. If a design needs another peer-to-peer category, first check whether
+it is really Verse policy, peer exchange, or shard authority wearing a fake
+mustache.
+
 ## Repository Scope
 
 The solution includes:
@@ -225,6 +249,7 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Caching.MessagePack.Generator](src/GameCult.Caching.MessagePack.Generator/README.md)
 - [GameCult.Caching.MessagePack.Analyzers](src/GameCult.Caching.MessagePack.Analyzers/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
+- [GameCult.Mesh](src/GameCult.Mesh/README.md)
 - [GameCult.Unity](src/GameCult.Unity/README.md)
 - [GameCult.Caching.Tests](tests/GameCult.Caching.Tests/README.md)
 - [GameCult.Networking.Tests](tests/GameCult.Networking.Tests/README.md)
