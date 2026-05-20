@@ -200,5 +200,6 @@ snapshot's represented log sequence.
 ## Documentation
 
 - [Public API](docs/public-api.md)
+- [Typed Document Path](docs/typed-document-path.md)
 - [Research Notes](docs/research.md)
 - [Verse Model](docs/verses.md)

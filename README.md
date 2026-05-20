@@ -34,6 +34,12 @@ the stack. If a design needs another peer-to-peer category, first check whether
 it is really Verse policy, peer exchange, or shard authority wearing a fake
 mustache.
 
+If you want one concrete path for "typed local document -> raw wire document ->
+mesh/runtime watch surface", start with
+[`src/GameCult.Mesh/docs/typed-document-path.md`](src/GameCult.Mesh/docs/typed-document-path.md).
+That sample shows which package owns each step and where wire provenance stays
+visible.
+
 ## Repository Scope
 
 The solution includes:
@@ -250,6 +256,7 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Caching.MessagePack.Analyzers](src/GameCult.Caching.MessagePack.Analyzers/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
 - [GameCult.Mesh](src/GameCult.Mesh/README.md)
+- [Typed Document Path](src/GameCult.Mesh/docs/typed-document-path.md)
 - [GameCult.Unity](src/GameCult.Unity/README.md)
 - [GameCult.Caching.Tests](tests/GameCult.Caching.Tests/README.md)
 - [GameCult.Networking.Tests](tests/GameCult.Networking.Tests/README.md)
