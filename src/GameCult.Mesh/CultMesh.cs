@@ -197,6 +197,14 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a local reactive catalog for discovered peers.
+        /// </summary>
+        public static CultMeshPeerCatalog CreatePeerCatalog()
+        {
+            return new CultMeshPeerCatalog();
+        }
+
+        /// <summary>
         /// Attaches Verse discovery responses to a CultMesh node.
         /// </summary>
         public static CultMeshVerseDiscoveryServer ServeVerseCatalog(
@@ -205,6 +213,26 @@ namespace GameCult.Mesh
         {
             if (node == null) throw new ArgumentNullException(nameof(node));
             return new CultMeshVerseDiscoveryServer(node.Server, catalog);
+        }
+
+        /// <summary>
+        /// Creates a client for fetching Verse catalogs from discovery endpoints.
+        /// </summary>
+        public static CultMeshVerseDiscoveryClient CreateVerseDiscoveryClient(
+            CultMeshVerseDiscoveryClientOptions? options = null)
+        {
+            return new CultMeshVerseDiscoveryClient(options);
+        }
+
+        /// <summary>
+        /// Attaches peer exchange responses to a CultMesh node.
+        /// </summary>
+        public static CultMeshPeerExchangeServer ServePeerExchange(
+            CultMeshNode node,
+            CultMeshPeerCatalog catalog)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return new CultMeshPeerExchangeServer(node.Server, catalog);
         }
 
         /// <summary>

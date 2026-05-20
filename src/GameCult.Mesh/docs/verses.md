@@ -56,3 +56,11 @@ Authority is a Verse-level policy, not a transport accident.
 static config, cloud discovery, peer gossip, or mod portals. It does not care
 where the descriptor came from. That keeps discovery pluggable while the Verse
 model stays stable.
+
+Peer exchange is the torrent-shaped layer under Verse discovery. A Verse
+catalog says which graph exists; a peer catalog says which nodes can currently
+serve or observe parts of that graph. Peer cards can advertise discovery,
+primary shard, replica, read replica, and simulation observer roles, but those
+cards do not grant authority by themselves. Public operator Verses should treat
+authority lease ids and signatures as mandatory before accepting committed
+state from a peer.

@@ -70,6 +70,8 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.SimulationConsensusCandidate => Deserialize<CultNetSimulationConsensusCandidateMessage>(payload),
                 CultNetSchemaVersions.VerseCatalogRequest => Deserialize<CultMeshVerseCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.VerseCatalogResponse => Deserialize<CultMeshVerseCatalogResponseMessage>(payload),
+                CultNetSchemaVersions.PeerExchangeRequest => Deserialize<CultMeshPeerExchangeRequestMessage>(payload),
+                CultNetSchemaVersions.PeerExchangeResponse => Deserialize<CultMeshPeerExchangeResponseMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogRequest => Deserialize<CultNetSchemaCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogResponse => Deserialize<CultNetSchemaCatalogResponseMessage>(payload),
                 _ => throw new MessagePackSerializationException(

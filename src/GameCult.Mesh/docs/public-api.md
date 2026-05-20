@@ -11,6 +11,8 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreateNodeAsync(...)`
 - `CultMesh.StartNodeAsync(...)`
 - `CultMesh.CreateVerseCatalog()`
+- `CultMesh.CreatePeerCatalog()`
+- `CultMesh.CreateVerseDiscoveryClient(...)`
 - `CultMesh.CreateClient(...)`
 - `CultMesh.ConnectClient(...)`
 
@@ -47,6 +49,19 @@ responses to a node. The wire contracts are
 `cultmesh.verse_catalog_request.v0` and `cultmesh.verse_catalog_response.v0`.
 Consumers can apply a response directly with
 `CultMeshVerseCatalog.Upsert(CultMeshVerseCatalogResponseMessage)`.
+
+### Peer Exchange
+
+`CultMeshPeerCatalog` is the local reactive catalog for peer cards.
+`CultMeshPeerCard` describes a candidate peer endpoint for one Verse with
+roles, shard hints, optional region, optional authority lease id, expiry, and
+signature.
+
+`CultMesh.ServePeerExchange(node, catalog)` attaches schema-v0 peer exchange
+responses to a node. The wire contracts are
+`cultmesh.peer_exchange_request.v0` and `cultmesh.peer_exchange_response.v0`.
+Peer cards are discovery hints; authority still requires a valid lease or
+signature for the target Verse.
 
 ### Shard Authority
 

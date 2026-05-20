@@ -123,6 +123,14 @@ namespace GameCult.Networking
         /// CultMesh Verse catalog response contract identifier.
         /// </summary>
         public const string VerseCatalogResponse = "cultmesh.verse_catalog_response.v0";
+        /// <summary>
+        /// CultMesh peer exchange request contract identifier.
+        /// </summary>
+        public const string PeerExchangeRequest = "cultmesh.peer_exchange_request.v0";
+        /// <summary>
+        /// CultMesh peer exchange response contract identifier.
+        /// </summary>
+        public const string PeerExchangeResponse = "cultmesh.peer_exchange_response.v0";
     }
 
     /// <summary>
@@ -1075,6 +1083,102 @@ namespace GameCult.Networking
         /// Gets or sets optional plugin ids.
         /// </summary>
         [Key("optionalPluginIds")] public string[] OptionalPluginIds { get; set; } = Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// Requests known peers for a CultMesh Verse.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshPeerExchangeRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.PeerExchangeRequest;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the Verse id to discover peers for.
+        /// </summary>
+        [Key("verseId")] public string VerseId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets optional role filters.
+        /// </summary>
+        [Key("roles")] public string[]? Roles { get; set; }
+        /// <summary>
+        /// Gets or sets peer ids the requester already knows.
+        /// </summary>
+        [Key("knownPeerIds")] public string[]? KnownPeerIds { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum number of peer cards to return.
+        /// </summary>
+        [Key("limit")] public int? Limit { get; set; }
+    }
+
+    /// <summary>
+    /// Returns known peers for a CultMesh Verse.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshPeerExchangeResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.PeerExchangeResponse;
+        /// <summary>
+        /// Gets or sets the request id.
+        /// </summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets peer cards.
+        /// </summary>
+        [Key("peers")] public CultMeshPeerCardMessage[] Peers { get; set; } = Array.Empty<CultMeshPeerCardMessage>();
+    }
+
+    /// <summary>
+    /// Wire representation of a CultMesh peer candidate.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshPeerCardMessage
+    {
+        /// <summary>
+        /// Gets or sets the stable peer id.
+        /// </summary>
+        [Key("peerId")] public string PeerId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the Verse id this peer participates in.
+        /// </summary>
+        [Key("verseId")] public string VerseId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets reachable endpoints.
+        /// </summary>
+        [Key("endpoints")] public string[] Endpoints { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets advertised peer roles.
+        /// </summary>
+        [Key("roles")] public string[] Roles { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets shard ids this peer can serve or observe.
+        /// </summary>
+        [Key("shardIds")] public string[] ShardIds { get; set; } = Array.Empty<string>();
+        /// <summary>
+        /// Gets or sets an optional region/locality label.
+        /// </summary>
+        [Key("region")] public string? Region { get; set; }
+        /// <summary>
+        /// Gets or sets the authority lease id, when the card advertises authority.
+        /// </summary>
+        [Key("authorityLeaseId")] public string? AuthorityLeaseId { get; set; }
+        /// <summary>
+        /// Gets or sets the expiry timestamp for this card.
+        /// </summary>
+        [Key("expiresAt")] public string? ExpiresAt { get; set; }
+        /// <summary>
+        /// Gets or sets an optional signature over the card.
+        /// </summary>
+        [Key("signature")] public string? Signature { get; set; }
     }
 
     /// <summary>

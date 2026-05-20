@@ -71,6 +71,8 @@ Implemented:
   `.cultmesh/shard-logs` path beside the cache file
 - schema-v0 Verse catalog request/response messages
 - CultMesh Verse discovery server bridge over the local Verse catalog
+- schema-v0 peer exchange request/response messages
+- CultMesh peer cards, peer catalog, and peer exchange server bridge
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -118,12 +120,14 @@ Not implemented yet:
 - Consensus candidates are derived from observations. They may inform the
   authoritative commit path, but they are not themselves committed world state
   until a shard owner writes them into the log.
+- Peer cards are contact candidates. They can advertise roles and authority
+  lease ids, but they do not grant authority without Verse-specific validation.
 
 ## Next Coherent Slice
 
 Add discovery fanout and operational polish:
 
-- add peer-to-peer Verse discovery fetchers and gossip fanout
+- add peer exchange clients and periodic gossip fanout
 - add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams

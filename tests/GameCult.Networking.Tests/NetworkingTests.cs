@@ -366,6 +366,39 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_PeerExchangeResponse()
+        {
+            var message = new CultMeshPeerExchangeResponseMessage
+            {
+                MessageId = "pex-1",
+                Peers =
+                [
+                    new CultMeshPeerCardMessage
+                    {
+                        PeerId = "peer-a",
+                        VerseId = "aetheria-main",
+                        Endpoints = ["cultnet://peer-a.example.test:3075"],
+                        Roles = [CultMeshPeerRoles.Discovery, CultMeshPeerRoles.ReadReplica],
+                        ShardIds = ["players"],
+                        Region = "eu-west",
+                        AuthorityLeaseId = "lease-1",
+                        ExpiresAt = "2026-05-20T12:00:00.0000000Z",
+                        Signature = "sig"
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultMeshPeerExchangeResponseMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo("pex-1"));
+            Assert.That(roundTrip.Peers, Has.Length.EqualTo(1));
+            Assert.That(roundTrip.Peers[0].PeerId, Is.EqualTo("peer-a"));
+            Assert.That(roundTrip.Peers[0].Roles, Does.Contain(CultMeshPeerRoles.ReadReplica));
+            Assert.That(roundTrip.Peers[0].AuthorityLeaseId, Is.EqualTo("lease-1"));
+        }
+
+        [Test]
         public void CultNetSchemaMessageSerialization_RoundTrips_SimulationObservation()
         {
             var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
@@ -787,6 +820,18 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultMesh_CreateVerseDiscoveryClient_Returns_DiscoveryClient()
+        {
+            var client = CultMesh.CreateVerseDiscoveryClient(new CultMeshVerseDiscoveryClientOptions
+            {
+                ConnectTimeout = TimeSpan.FromMilliseconds(250),
+                ResponseTimeout = TimeSpan.FromMilliseconds(250)
+            });
+
+            Assert.That(client, Is.Not.Null);
+        }
+
+        [Test]
         public void CultMeshVerseCatalog_Finds_CompatibleTransferTargets()
         {
             var vanillaRules = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "rules:v1", "vanilla");
@@ -894,6 +939,72 @@ namespace GameCult.Networking.Tests
             Assert.That(verse, Is.Not.Null);
             Assert.That(verse!.AuthorityModel, Is.EqualTo(CultMeshVerseAuthorityModel.SubscribedOverlay));
             Assert.That(verse.ParentVerseId, Is.EqualTo("aetheria-main"));
+            Assert.That(updates, Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public void CultMeshPeerExchangeServer_Creates_FilteredPeerResponse()
+        {
+            using var catalog = CultMesh.CreatePeerCatalog();
+            catalog.Upsert(new CultMeshPeerCard(
+                "peer-primary",
+                "aetheria-main",
+                ["cultnet://primary.example.test:3075"],
+                roles: [CultMeshPeerRoles.ShardPrimary],
+                shardIds: ["players"],
+                region: "us-east",
+                authorityLeaseId: "lease-primary"));
+            catalog.Upsert(new CultMeshPeerCard(
+                "peer-read",
+                "aetheria-main",
+                ["cultnet://read.example.test:3075"],
+                roles: [CultMeshPeerRoles.ReadReplica],
+                shardIds: ["players"],
+                region: "eu-west"));
+            using var server = new Server(new CultCache(), DevelopmentServerSecurity);
+            using var exchange = new CultMeshPeerExchangeServer(server, catalog);
+
+            var response = exchange.CreateResponse(new CultMeshPeerExchangeRequestMessage
+            {
+                MessageId = "pex-filter",
+                VerseId = "aetheria-main",
+                Roles = [CultMeshPeerRoles.ReadReplica],
+                KnownPeerIds = ["already-known"]
+            });
+
+            Assert.That(response.MessageId, Is.EqualTo("pex-filter"));
+            Assert.That(response.Peers, Has.Length.EqualTo(1));
+            Assert.That(response.Peers[0].PeerId, Is.EqualTo("peer-read"));
+            Assert.That(response.Peers[0].Roles, Does.Contain(CultMeshPeerRoles.ReadReplica));
+        }
+
+        [Test]
+        public void CultMeshPeerCatalog_Upserts_WirePeerExchangeResponse()
+        {
+            using var catalog = CultMesh.CreatePeerCatalog();
+            var updates = new List<CultMeshPeerCard>();
+            using var subscription = catalog.Watch().Subscribe(updates.Add);
+
+            catalog.Upsert(new CultMeshPeerExchangeResponseMessage
+            {
+                MessageId = "pex-apply",
+                Peers =
+                [
+                    new CultMeshPeerCardMessage
+                    {
+                        PeerId = "peer-observer",
+                        VerseId = "aetheria-main",
+                        Endpoints = ["cultnet://observer.example.test:3075"],
+                        Roles = [CultMeshPeerRoles.SimulationObserver],
+                        ShardIds = ["arena"]
+                    }
+                ]
+            });
+
+            var peers = catalog.Find("aetheria-main", CultMeshPeerRoles.SimulationObserver);
+
+            Assert.That(peers, Has.Count.EqualTo(1));
+            Assert.That(peers[0].PeerId, Is.EqualTo("peer-observer"));
             Assert.That(updates, Has.Count.EqualTo(1));
         }
 

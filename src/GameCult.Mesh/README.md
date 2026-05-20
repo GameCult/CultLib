@@ -70,6 +70,28 @@ Peers can request Verse catalogs over schema-v0 with
 `cultmesh.verse_catalog_request.v0` and receive transport-filtered
 `cultmesh.verse_catalog_response.v0` descriptors.
 
+## Peer Exchange
+
+Verse discovery tells a node which consensus graph exists. Peer exchange tells
+it who else is already in that graph.
+
+```csharp
+using var peers = CultMesh.CreatePeerCatalog();
+peers.Upsert(new CultMeshPeerCard(
+    "gc-us-east-1",
+    "aetheria-main",
+    ["cultnet://us-east.aetheria.gamecult.net:3075"],
+    roles: [CultMeshPeerRoles.Discovery, CultMeshPeerRoles.ShardPrimary],
+    shardIds: ["players-us-east"],
+    authorityLeaseId: "lease:players-us-east:42"));
+
+using var exchange = CultMesh.ServePeerExchange(node, peers);
+```
+
+Peer cards are contact candidates, not authority by themselves. Public Verses
+should validate authority leases or signatures before trusting a peer for
+committed state.
+
 ## Client-Side Prediction
 
 CultMesh lets a runtime declare which input documents it may author

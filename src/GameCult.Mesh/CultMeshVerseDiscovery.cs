@@ -131,4 +131,139 @@ namespace GameCult.Mesh
             return Task.CompletedTask;
         }
     }
+
+    /// <summary>
+    /// Options for schema-v0 CultMesh Verse discovery clients.
+    /// </summary>
+    public sealed class CultMeshVerseDiscoveryClientOptions
+    {
+        /// <summary>
+        /// Gets or sets client security options used to connect to discovery endpoints.
+        /// </summary>
+        public ClientSecurityOptions? Security { get; set; }
+
+        /// <summary>
+        /// Gets or sets how long to wait for a connection before failing.
+        /// </summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets how long to wait for a discovery response before failing.
+        /// </summary>
+        public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets a callback used to customize each ephemeral discovery client.
+        /// </summary>
+        public Action<Client>? ConfigureClient { get; set; }
+    }
+
+    /// <summary>
+    /// Fetches CultMesh Verse catalogs from discovery endpoints.
+    /// </summary>
+    public sealed class CultMeshVerseDiscoveryClient
+    {
+        private readonly CultMeshVerseDiscoveryClientOptions _options;
+
+        /// <summary>
+        /// Creates a Verse discovery client.
+        /// </summary>
+        public CultMeshVerseDiscoveryClient(CultMeshVerseDiscoveryClientOptions? options = null)
+        {
+            _options = options ?? new CultMeshVerseDiscoveryClientOptions();
+        }
+
+        /// <summary>
+        /// Fetches a Verse catalog response from one discovery endpoint.
+        /// </summary>
+        public async Task<CultMeshVerseCatalogResponseMessage> FetchAsync(
+            string endpoint,
+            CultMeshVerseCatalogRequestMessage? request = null)
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+            var messageId = Guid.NewGuid().ToString("N");
+            var completion = new TaskCompletionSource<CultMeshVerseCatalogResponseMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using var client = new Client(_options.Security ?? ClientSecurityOptions.Development())
+            {
+                AllowUnverifiedCultNetMessages = true
+            };
+            _options.ConfigureClient?.Invoke(client);
+            client.OnCultNet<CultMeshVerseCatalogResponseMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                {
+                    completion.TrySetResult(response);
+                }
+            });
+            client.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+
+            client.Connect(host, port);
+            await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
+            client.SendCultNet(new CultMeshVerseCatalogRequestMessage
+            {
+                MessageId = messageId,
+                TransportVersion = request?.TransportVersion,
+                VerseIds = request?.VerseIds
+            });
+
+            return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Fetches Verse catalogs from endpoints and upserts every response into a local catalog.
+        /// </summary>
+        public async Task<int> DiscoverAsync(
+            CultMeshVerseCatalog catalog,
+            IEnumerable<string> endpoints,
+            string? transportVersion = null)
+        {
+            if (catalog == null) throw new ArgumentNullException(nameof(catalog));
+            if (endpoints == null) throw new ArgumentNullException(nameof(endpoints));
+
+            var count = 0;
+            foreach (var endpoint in endpoints.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal))
+            {
+                var response = await FetchAsync(endpoint, new CultMeshVerseCatalogRequestMessage
+                {
+                    TransportVersion = transportVersion
+                }).ConfigureAwait(false);
+                catalog.Upsert(response);
+                count += response.Verses.Length;
+            }
+
+            return count;
+        }
+
+        private async Task WaitForConnectionAsync(Client client, string endpoint)
+        {
+            var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
+            while (!client.Connected)
+            {
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"Timed out connecting to Verse discovery endpoint {endpoint}.");
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+            }
+        }
+
+        private async Task<CultMeshVerseCatalogResponseMessage> WaitForResponseAsync(
+            Task<CultMeshVerseCatalogResponseMessage> responseTask,
+            string endpoint)
+        {
+            var timeoutTask = Task.Delay(_options.ResponseTimeout);
+            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                throw new TimeoutException($"Timed out waiting for Verse discovery response from {endpoint}.");
+            }
+
+            return await responseTask.ConfigureAwait(false);
+        }
+    }
 }
