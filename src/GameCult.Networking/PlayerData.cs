@@ -1,39 +1,46 @@
+using System;
 using GameCult.Caching;
 using MessagePack;
 
 namespace GameCult.Networking
 {
     /// <summary>
-    /// Player data stored in the database.
-    /// For MessagePack serialization, uses [MessagePackObject] and [Key(n)] attributes.
+    /// Basic player account document used by the sample networking stack.
     /// </summary>
-    public class PlayerData : DatabaseEntry, INamedEntry
+    [CultDocument("gamecult.player_data", "gamecult.player_data.v2")]
+    public class PlayerData
     {
+        /// <summary>
+        /// Unique player identifier.
+        /// </summary>
+        [Key(0)]
+        [CultIndex]
+        public Guid PlayerId = Guid.NewGuid();
 
         /// <summary>
-        /// Email address of the player.
+        /// Player email address.
         /// </summary>
         [Key(1)]
+        [CultIndex]
         public string Email = string.Empty;
 
         /// <summary>
-        /// Password hash of the player.
+        /// Stored password hash.
         /// </summary>
         [Key(2)]
         public string PasswordHash = string.Empty;
 
         /// <summary>
-        /// Username of the player.
+        /// Player display name.
         /// </summary>
         [Key(3)]
+        [CultName]
         public string Username = string.Empty;
 
-        /// <inheritdoc/>
-        [IgnoreMember]
-        public string EntryName
-        {
-            get => Username;
-            set => Username = value;
-        }
+        /// <summary>
+        /// Monotonic session version used to supersede older issued tokens.
+        /// </summary>
+        [Key(4)]
+        public long SessionVersion;
     }
 }

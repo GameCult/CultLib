@@ -8,21 +8,33 @@ namespace GameCult.Networking
     /// </summary>
     public static class CultNetSchemaMessageSerialization
     {
+        /// <summary>
+        /// Gets the serializer options used for CultNet schema-v0 messages.
+        /// </summary>
         public static readonly MessagePackSerializerOptions Options =
             MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData);
 
+        /// <summary>
+        /// Serializes a typed CultNet schema message.
+        /// </summary>
         public static byte[] Serialize<T>(T message) where T : ICultNetSchemaMessage
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
             return MessagePackSerializer.Serialize(message, Options);
         }
 
+        /// <summary>
+        /// Deserializes a typed CultNet schema message.
+        /// </summary>
         public static T Deserialize<T>(byte[] payload) where T : ICultNetSchemaMessage
         {
             if (payload == null) throw new ArgumentNullException(nameof(payload));
             return MessagePackSerializer.Deserialize<T>(payload, Options);
         }
 
+        /// <summary>
+        /// Deserializes a CultNet schema message by inspecting its schema version.
+        /// </summary>
         public static ICultNetSchemaMessage Deserialize(byte[] payload)
         {
             if (payload == null) throw new ArgumentNullException(nameof(payload));
@@ -47,6 +59,19 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.DocumentPutRaw => Deserialize<CultNetDocumentPutRawMessage>(payload),
                 CultNetSchemaVersions.SnapshotRequest => Deserialize<CultNetSnapshotRequestMessage>(payload),
                 CultNetSchemaVersions.SnapshotResponseRaw => Deserialize<CultNetSnapshotResponseRawMessage>(payload),
+                CultNetSchemaVersions.DatabaseSubscribe => Deserialize<CultNetDatabaseSubscribeMessage>(payload),
+                CultNetSchemaVersions.DatabaseUnsubscribe => Deserialize<CultNetDatabaseUnsubscribeMessage>(payload),
+                CultNetSchemaVersions.DatabaseChangeRaw => Deserialize<CultNetDatabaseChangeRawMessage>(payload),
+                CultNetSchemaVersions.ShardCatalogRequest => Deserialize<CultNetShardCatalogRequestMessage>(payload),
+                CultNetSchemaVersions.ShardCatalogResponse => Deserialize<CultNetShardCatalogResponseMessage>(payload),
+                CultNetSchemaVersions.ShardLogRequest => Deserialize<CultNetShardLogRequestMessage>(payload),
+                CultNetSchemaVersions.ShardLogResponse => Deserialize<CultNetShardLogResponseMessage>(payload),
+                CultNetSchemaVersions.SimulationObservation => Deserialize<CultNetSimulationObservationMessage>(payload),
+                CultNetSchemaVersions.SimulationConsensusCandidate => Deserialize<CultNetSimulationConsensusCandidateMessage>(payload),
+                CultNetSchemaVersions.VerseCatalogRequest => Deserialize<CultMeshVerseCatalogRequestMessage>(payload),
+                CultNetSchemaVersions.VerseCatalogResponse => Deserialize<CultMeshVerseCatalogResponseMessage>(payload),
+                CultNetSchemaVersions.PeerExchangeRequest => Deserialize<CultMeshPeerExchangeRequestMessage>(payload),
+                CultNetSchemaVersions.PeerExchangeResponse => Deserialize<CultMeshPeerExchangeResponseMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogRequest => Deserialize<CultNetSchemaCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogResponse => Deserialize<CultNetSchemaCatalogResponseMessage>(payload),
                 _ => throw new MessagePackSerializationException(
@@ -54,7 +79,7 @@ namespace GameCult.Networking
             };
         }
 
-        [MessagePackObject]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class CultNetSchemaHeader
         {
             [Key("schemaVersion")] public string SchemaVersion { get; set; } = string.Empty;

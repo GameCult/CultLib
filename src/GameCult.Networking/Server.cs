@@ -25,12 +25,16 @@ namespace GameCult.Networking
         private const int ServerPort = 3075;
         private const float SessionTimeoutSeconds = 1800; // 30 minutes
         private const float SessionRefreshThresholdSeconds = 300; // 5 minutes
+        private const int MaxConnectionAttemptsPerMinute = 30;
         private const int MaxLoginAttemptsPerMinute = 5;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
+        private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
         private readonly ConcurrentDictionary<long, User> _users = new();
-        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _loginAttempts = new();
-        private readonly ConcurrentDictionary<string, object> _loginAttemptLocks = new();
+        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _connectionAttempts = new();
+        private readonly ConcurrentDictionary<string, object> _connectionAttemptLocks = new();
+        private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _authAttempts = new();
+        private readonly ConcurrentDictionary<string, object> _authAttemptLocks = new();
         private readonly IDisposable _cleanupSubscription;
         private readonly CultCache _database;
         private readonly ServerSecurityOptions _security;
@@ -48,6 +52,11 @@ namespace GameCult.Networking
             set => _logger = value ?? new NullLogger();
         }
 
+        /// <summary>
+        /// Gets or sets whether raw payload bodies may be logged for diagnostics.
+        /// </summary>
+        public bool LogSensitivePayloads { get; set; }
+
         private float Time => (float)(_timer?.Elapsed.TotalSeconds ?? 0d);
 
         /// <summary>
@@ -59,7 +68,7 @@ namespace GameCult.Networking
         {
             _database = cache;
             _security = security ?? ServerSecurityOptions.FromEnvironment();
-            _database.RegisterIndex<PlayerData>("Email");
+            LogSensitivePayloads = _security.IsDevelopment;
             _cleanupSubscription = Observable.Timer(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60))
                 .Subscribe(_ => CleanupExpiredSessions());
         }
@@ -84,6 +93,7 @@ namespace GameCult.Networking
         public void ClearMessageListeners()
         {
             _messageDelegates.Clear();
+            _cultNetMessageDelegates.Clear();
         }
 
         /// <summary>
@@ -104,6 +114,57 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a listener for a specific authenticated message type.
+        /// </summary>
+        public void On<T>(Action<T> callback) where T : Message
+        {
+            AddMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Func<T, NetPeer, Task> callback) where T : ICultNetSchemaMessage
+        {
+            var type = typeof(T);
+            _cultNetMessageDelegates.AddOrUpdate(type,
+                _ => callback,
+                (t, current) =>
+                {
+                    var combined = Delegate.Combine(current, callback) as Func<T, NetPeer, Task>;
+                    return combined ?? throw new InvalidOperationException($"Failed to combine delegates for {t.Name}");
+                });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Action<T, NetPeer> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener<T>((message, peer) =>
+            {
+                callback(message, peer);
+                return Task.CompletedTask;
+            });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Func<T, NetPeer, Task> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Action<T, NetPeer> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -114,6 +175,33 @@ namespace GameCult.Networking
             {
                 var newDelegate = Delegate.Remove(currentDelegate, callback) as Action<T>;
                 _messageDelegates[typeof(T)] = newDelegate!;
+            }
+        }
+
+        /// <summary>
+        /// Removes a previously registered listener for a specific authenticated message type.
+        /// </summary>
+        public void Off<T>(Action<T> callback) where T : Message
+        {
+            RemoveMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void RemoveCultNetMessageListener<T>(Delegate callback) where T : ICultNetSchemaMessage
+        {
+            if (_cultNetMessageDelegates.TryGetValue(typeof(T), out var currentDelegate))
+            {
+                var newDelegate = Delegate.Remove(currentDelegate, callback);
+                if (newDelegate == null)
+                {
+                    _cultNetMessageDelegates.TryRemove(typeof(T), out _);
+                }
+                else
+                {
+                    _cultNetMessageDelegates[typeof(T)] = newDelegate;
+                }
             }
         }
 
@@ -151,7 +239,7 @@ namespace GameCult.Networking
 
             listener.ConnectionRequestEvent += request =>
             {
-                if (CheckRateLimit(request.RemoteEndPoint.Address.ToString()))
+                if (CheckConnectionRateLimit(request.RemoteEndPoint.Address.ToString()))
                 {
                     request.AcceptIfKey(_security.ConnectionKey);
                 }
@@ -186,16 +274,29 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
+                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
+                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    {
+                        Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
+                        await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
+                        return;
+                    }
+
                     var message = MessageSerialization.Deserialize<Message>(bytes);
-                    Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    if (LogSensitivePayloads)
+                    {
+                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    }
+                    else
+                    {
+                        Logger.LogDebug($"Received message {message?.GetType().Name ?? "unknown"}");
+                    }
                     if (message == null)
                     {
                         return;
                     }
 
                     message.Peer = peer;
-                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
-
                     if (message is LoginMessage or RegisterMessage or VerifyMessage)
                     {
                         if (IsVerified(user))
@@ -204,7 +305,7 @@ namespace GameCult.Networking
                             return;
                         }
 
-                        if (message is LoginMessage or RegisterMessage && !CheckRateLimit(peer.Address.ToString()))
+                        if (message is LoginMessage or RegisterMessage && !CheckAuthRateLimit(peer.Address.ToString()))
                         {
                             peer.Send(new ErrorMessage { Error = "Too Many Attempts" });
                             return;
@@ -256,7 +357,7 @@ namespace GameCult.Networking
                     return;
                 }
 
-                if (_database.GetIdByName<PlayerData>(message.Name) != null)
+                if (_database.GetByName<PlayerData>(message.Name) != null)
                 {
                     message.Peer?.Send(new ErrorMessage { Error = "Username Taken" });
                     return;
@@ -277,6 +378,53 @@ namespace GameCult.Networking
             });
 
             Logger.LogInfo($"Server started on port {ServerPort}.");
+        }
+
+        private async Task HandleCultNetSchemaMessageAsync(NetPeer peer, User user, ICultNetSchemaMessage message)
+        {
+            if (!IsVerified(user) && !CanProcessBeforeVerification(message))
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "User Not Verified" });
+                return;
+            }
+
+            if (_cultNetMessageDelegates.TryGetValue(message.GetType(), out var del) && del != null)
+            {
+                foreach (var listener in del.GetInvocationList())
+                {
+                    var result = listener.DynamicInvoke(message, peer);
+                    if (result is Task task)
+                    {
+                        await task.ConfigureAwait(false);
+                    }
+                }
+
+                user.SessionExpiresAt = DateTimeOffset.UtcNow.AddSeconds(SessionTimeoutSeconds);
+                RefreshSessionIfNeeded(peer, user);
+            }
+            else
+            {
+                Logger.LogWarning($"No listener for CultNet schema message {message.SchemaVersion}");
+            }
+        }
+
+        private static bool CanProcessBeforeVerification(ICultNetSchemaMessage message)
+        {
+            return message is CultNetHelloMessage or CultNetSchemaCatalogRequestMessage;
+        }
+
+        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
+        {
+            try
+            {
+                message = CultNetSchemaMessageSerialization.Deserialize(payload);
+                return true;
+            }
+            catch (MessagePackSerializationException)
+            {
+                message = null!;
+                return false;
+            }
         }
 
         /// <inheritdoc />
@@ -310,13 +458,13 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (_database.GetIdByIndex<PlayerData>("Email", email) != null)
+            if (_database.GetByIndex<PlayerData>("Email", email) != null)
             {
                 peer.Send(new ErrorMessage { Error = "Email Taken" });
                 return;
             }
 
-            if (_database.GetIdByName<PlayerData>(name) != null)
+            if (_database.GetByName<PlayerData>(name) != null)
             {
                 peer.Send(new ErrorMessage { Error = "Username Taken" });
                 return;
@@ -330,34 +478,41 @@ namespace GameCult.Networking
 
             var newUserData = new PlayerData
             {
-                ID = Guid.NewGuid(),
+                PlayerId = Guid.NewGuid(),
                 Email = email,
                 PasswordHash = Argon2.Hash(password, memoryCost: 16384),
                 Username = name
             };
 
             await _database.AddAsync(newUserData);
-            AttachUser(user, newUserData.ID);
-            SendSessionToken(peer, newUserData.ID);
+            AttachUser(user, newUserData.PlayerId);
+            SendSessionToken(peer, newUserData.PlayerId);
         }
 
         private void HandleVerify(NetPeer peer, User user, VerifyMessage verify)
         {
             var token = Secret.DecryptString(verify.Session, verify.Nonce, _security);
-            if (!Secret.TryValidateSessionToken(token, _security, out var playerId, out _))
+            if (!Secret.TryValidateSessionToken(token, _security, out var playerId, out _, out var sessionVersion))
             {
                 peer.Send(new ErrorMessage { Error = "Session Invalid" });
                 return;
             }
 
-            if (_database.Get<PlayerData>(playerId) == null)
+            var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
+            if (player == null)
             {
                 peer.Send(new ErrorMessage { Error = "Session Not Found" });
                 return;
             }
 
+            if (player.SessionVersion != sessionVersion)
+            {
+                peer.Send(new ErrorMessage { Error = "Session Superseded" });
+                return;
+            }
+
             AttachUser(user, playerId);
-            SendSessionToken(peer, playerId);
+            SendSessionToken(peer, player);
         }
 
         private void HandleLogin(NetPeer peer, User user, LoginMessage login)
@@ -387,36 +542,27 @@ namespace GameCult.Networking
                 return;
             }
 
-            AttachUser(user, userData.ID);
-            SendSessionToken(peer, userData.ID);
+            AttachUser(user, userData.PlayerId);
+            SendSessionToken(peer, userData);
         }
 
         private bool IsVerified(User? user) =>
             user != null &&
             user.PlayerId != Guid.Empty &&
             user.SessionExpiresAt > DateTimeOffset.UtcNow &&
-            _database.Get<PlayerData>(user.PlayerId) != null;
+            _database.GetByIndex<PlayerData>("PlayerId", user.PlayerId.ToString("D")) != null;
 
         private PlayerData? SessionData(User user) =>
-            IsVerified(user) ? _database.Get<PlayerData>(user.PlayerId) : null;
+            IsVerified(user) ? _database.GetByIndex<PlayerData>("PlayerId", user.PlayerId.ToString("D")) : null;
 
-        private bool CheckRateLimit(string ip)
+        internal bool CheckConnectionRateLimit(string ip)
         {
-            var now = DateTimeOffset.UtcNow;
-            var windowStart = now.AddMinutes(-1);
-            var queue = _loginAttempts.GetOrAdd(ip, _ => new Queue<DateTimeOffset>());
-            var gate = _loginAttemptLocks.GetOrAdd(ip, _ => new object());
+            return CheckRateLimit(ip, MaxConnectionAttemptsPerMinute, _connectionAttempts, _connectionAttemptLocks);
+        }
 
-            lock (gate)
-            {
-                while (queue.Count > 0 && queue.Peek() < windowStart)
-                {
-                    queue.Dequeue();
-                }
-
-                queue.Enqueue(now);
-                return queue.Count <= MaxLoginAttemptsPerMinute;
-            }
+        internal bool CheckAuthRateLimit(string ip)
+        {
+            return CheckRateLimit(ip, MaxLoginAttemptsPerMinute, _authAttempts, _authAttemptLocks);
         }
 
         private void CleanupExpiredSessions()
@@ -441,13 +587,28 @@ namespace GameCult.Networking
 
         private void SendSessionToken(NetPeer peer, Guid playerId)
         {
+            var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
+            if (player == null)
+            {
+                peer.Send(new ErrorMessage { Error = "Session Not Found" });
+                return;
+            }
+
+            SendSessionToken(peer, player);
+        }
+
+        private void SendSessionToken(NetPeer peer, PlayerData player)
+        {
             var expiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(SessionTimeoutSeconds);
-            var token = Secret.CreateSessionToken(playerId, expiresAtUtc, _security);
+            player.SessionVersion++;
+            var token = Secret.CreateSessionToken(player.PlayerId, expiresAtUtc, player.SessionVersion, _security);
+            _database.AddAsync(player).GetAwaiter().GetResult();
 
             if (_users.TryGetValue(peer.Id, out var user))
             {
-                user.PlayerId = playerId;
+                user.PlayerId = player.PlayerId;
                 user.SessionExpiresAt = expiresAtUtc;
+                user.SessionVersion = player.SessionVersion;
                 user.SessionToken = token;
             }
 
@@ -467,6 +628,29 @@ namespace GameCult.Networking
             }
 
             SendSessionToken(peer, user.PlayerId);
+        }
+
+        private static bool CheckRateLimit(
+            string ip,
+            int maxAttemptsPerMinute,
+            ConcurrentDictionary<string, Queue<DateTimeOffset>> attemptBuckets,
+            ConcurrentDictionary<string, object> attemptLocks)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var windowStart = now.AddMinutes(-1);
+            var queue = attemptBuckets.GetOrAdd(ip, _ => new Queue<DateTimeOffset>());
+            var gate = attemptLocks.GetOrAdd(ip, _ => new object());
+
+            lock (gate)
+            {
+                while (queue.Count > 0 && queue.Peek() < windowStart)
+                {
+                    queue.Dequeue();
+                }
+
+                queue.Enqueue(now);
+                return queue.Count <= maxAttemptsPerMinute;
+            }
         }
     }
 
@@ -515,5 +699,10 @@ namespace GameCult.Networking
         /// The latest signed session token issued to the peer.
         /// </summary>
         public string SessionToken = string.Empty;
+
+        /// <summary>
+        /// The session version associated with the latest issued token.
+        /// </summary>
+        public long SessionVersion;
     }
 }

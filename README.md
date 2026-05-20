@@ -7,6 +7,7 @@ The libraries cover three main areas:
 - logging primitives and implementations
 - a typed in-memory cache with pluggable persistence
 - LiteNetLib-based networking with encrypted credential exchange and signed session tokens
+- CultMesh distributed realtime database and simulation-consensus primitives
 - declarative Unity UI composition and reflective runtime inspector tooling
 
 ## Repository Scope
@@ -20,6 +21,7 @@ The solution includes:
 - `GameCult.Caching.MessagePack.Generator`: source generator for MessagePack formatters for cache models
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
 - `GameCult.Networking`: encrypted login/register/verify flows and message dispatch over LiteNetLib
+- `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
 - `GameCult.Unity`: CultUI, a Unity runtime UI composition framework with reflective inspector generation, prefab-backed field resolvers, reusable controls, and a demo project packaged for UPM-style consumption
@@ -35,6 +37,7 @@ src/
   GameCult.Caching.MessagePack.Generator/
   GameCult.Caching.MessagePack.Analyzers/
   GameCult.Networking/
+  GameCult.Mesh/
   GameCult.Unity/
 tests/
   GameCult.Caching.Tests/

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using GameCult.Logging;
 using LiteNetLib;
 using MessagePack;
@@ -7,6 +8,27 @@ using R3;
 
 namespace GameCult.Networking
 {
+    /// <summary>
+    /// Describes the client's reconnect posture.
+    /// </summary>
+    public enum ClientReconnectState
+    {
+        /// <summary>
+        /// The client is connected or otherwise not trying to reconnect.
+        /// </summary>
+        Idle,
+
+        /// <summary>
+        /// The client is waiting for the next reconnect attempt.
+        /// </summary>
+        WaitingToReconnect,
+
+        /// <summary>
+        /// The client is actively attempting a reconnect.
+        /// </summary>
+        Reconnecting
+    }
+
     /// <summary>
     /// Provides client-side connection, authentication, and message dispatch logic.
     /// </summary>
@@ -16,6 +38,10 @@ namespace GameCult.Networking
         /// Raised when the client encounters a user-visible error.
         /// </summary>
         public event Action<string>? OnError; // Hook for important user-facing feedback (e.g. via modal UI element)
+        /// <summary>
+        /// Raised when reconnect state changes.
+        /// </summary>
+        public event Action<ClientReconnectState>? OnReconnectStateChanged;
         private NetManager? _client;
         private NetPeer? _peer;
         private IDisposable? _pollSubscription;
@@ -23,15 +49,19 @@ namespace GameCult.Networking
         private bool _disposed;
         private bool _manualDisconnect;
         private bool _isReconnecting;
+        private int _reconnectAttemptCount;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
+        private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
 
         private string? _sessionToken;
         private string _lastHost = "localhost";
         private int _lastPort;
         private readonly ClientSecurityOptions _security;
         private ILogger _logger = new NullLogger();
-        private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan BaseReconnectDelay = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan MaxReconnectJitter = TimeSpan.FromMilliseconds(250);
         
         /// <summary>
         /// Gets or sets the logger used by the client.
@@ -46,6 +76,21 @@ namespace GameCult.Networking
         /// Gets the last reported round-trip latency in milliseconds.
         /// </summary>
         public int Ping { get; private set; }
+
+        /// <summary>
+        /// Gets the current reconnect posture exposed to consumers.
+        /// </summary>
+        public ClientReconnectState ReconnectState { get; private set; } = ClientReconnectState.Idle;
+
+        /// <summary>
+        /// Gets or sets whether raw payload bodies may be logged for diagnostics.
+        /// </summary>
+        public bool LogSensitivePayloads { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether CultNet schema-v0 messages may be sent before user session verification.
+        /// </summary>
+        public bool AllowUnverifiedCultNetMessages { get; set; }
 
         /// <summary>
         /// Gets a value indicating whether the client currently has a verified session.
@@ -83,7 +128,14 @@ namespace GameCult.Networking
             {
                 if (Verified || m is LoginMessage || m is RegisterMessage || m is VerifyMessage)
                 {
-                    Logger.LogDebug($"Sending message {MessagePackSerializer.SerializeToJson(m)}");
+                    if (LogSensitivePayloads)
+                    {
+                        Logger.LogDebug($"Sending message {MessagePackSerializer.SerializeToJson(m)}");
+                    }
+                    else
+                    {
+                        Logger.LogDebug($"Sending message {typeof(T).Name}");
+                    }
                     _peer.Send(m);
                 }
                 else Logger.LogError("Cannot send, client is not verified!");
@@ -92,11 +144,42 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends a modern CultNet schema-v0 message when the client is connected and authorized.
+        /// </summary>
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(Client));
+            }
+
+            if (message == null) throw new ArgumentNullException(nameof(message));
+
+            if (Connected && _peer != null)
+            {
+                if (AllowUnverifiedCultNetMessages || Verified || message is CultNetLoginMessage or CultNetRegisterMessage or CultNetVerifyMessage)
+                {
+                    Logger.LogDebug($"Sending CultNet schema message {message.SchemaVersion}");
+                    _peer.SendCultNet(message);
+                }
+                else
+                {
+                    Logger.LogError("Cannot send CultNet schema message, client is not verified!");
+                }
+            }
+            else
+            {
+                Logger.LogError("Cannot send CultNet schema message, client is not connected!");
+            }
+        }
+
+        /// <summary>
         /// Removes all registered message listeners.
         /// </summary>
         public void ClearMessageListeners()
         {
             _messageDelegates.Clear();
+            _cultNetMessageDelegates.Clear();
         }
 
         /// <summary>
@@ -119,6 +202,37 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a listener for a specific message type.
+        /// </summary>
+        public void On<T>(Action<T> callback) where T : Message
+        {
+            AddMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            var type = typeof(T);
+            _cultNetMessageDelegates.AddOrUpdate(type,
+                _ => callback,
+                (t, current) =>
+                {
+                    var combined = Delegate.Combine(current, callback) as Action<T>;
+                    return combined ?? throw new InvalidOperationException($"Failed to combine delegates for {t.Name}");
+                });
+        }
+
+        /// <summary>
+        /// Adds a listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -130,6 +244,34 @@ namespace GameCult.Networking
                 var newDelegate = Delegate.Remove(currentDelegate, callback) as Action<T>;
                 _messageDelegates[typeof(T)] = newDelegate ?? (_ => { });  // Null if empty
             }
+        }
+
+        /// <summary>
+        /// Removes a previously registered listener for a specific message type.
+        /// </summary>
+        public void Off<T>(Action<T> callback) where T : Message
+        {
+            RemoveMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void RemoveCultNetMessageListener<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (_cultNetMessageDelegates.TryGetValue(typeof(T), out var currentDelegate))
+            {
+                var newDelegate = Delegate.Remove(currentDelegate, callback) as Action<T>;
+                _cultNetMessageDelegates[typeof(T)] = newDelegate ?? (_ => { });
+            }
+        }
+
+        /// <summary>
+        /// Removes a previously registered modern CultNet schema-v0 listener.
+        /// </summary>
+        public void OffCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            RemoveCultNetMessageListener(callback);
         }
 
         /// <summary>
@@ -193,6 +335,11 @@ namespace GameCult.Networking
         /// <param name="port">The remote server port.</param>
         public void Connect(string host = "localhost", int port = 3075)
         {
+            ConnectCore(host, port, resetReconnectBackoff: true);
+        }
+
+        private void ConnectCore(string host, int port, bool resetReconnectBackoff)
+        {
             if (_disposed)
             {
                 throw new ObjectDisposedException(nameof(Client));
@@ -200,6 +347,11 @@ namespace GameCult.Networking
 
             _manualDisconnect = false;
             _isReconnecting = false;
+            if (resetReconnectBackoff)
+            {
+                _reconnectAttemptCount = 0;
+            }
+            SetReconnectState(ClientReconnectState.Idle);
             _reconnectSubscription?.Dispose();
             _reconnectSubscription = null;
             _lastHost = host;
@@ -221,8 +373,32 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
-                    Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    {
+                        Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
+                        var cultNetType = cultNetMessage.GetType();
+                        if (_cultNetMessageDelegates.TryGetValue(cultNetType, out var cultNetDelegate) &&
+                            cultNetDelegate != null)
+                        {
+                            cultNetDelegate.DynamicInvoke(cultNetMessage);
+                        }
+                        else
+                        {
+                            Logger.LogWarning($"No listener for CultNet schema message {cultNetMessage.SchemaVersion}");
+                        }
+
+                        return;
+                    }
+
                     var message = MessageSerialization.Deserialize<Message>(bytes);
+                    if (LogSensitivePayloads)
+                    {
+                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                    }
+                    else
+                    {
+                        Logger.LogDebug($"Received message {message.GetType().Name}");
+                    }
                     var type = message.GetType();
 
                     switch (message)
@@ -252,6 +428,8 @@ namespace GameCult.Networking
             {
                 Logger.LogInfo($"Peer {peer.Address}:{peer.Port} connected.");
                 _peer = peer;
+                _reconnectAttemptCount = 0;
+                SetReconnectState(ClientReconnectState.Idle);
                 if (Verified)
                 {
                     var nonce = Secret.NewNonce;
@@ -274,6 +452,20 @@ namespace GameCult.Networking
                 (peer, latency) => Ping = latency; //Logger($"Ping received: {latency} ms");
         }
 
+        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
+        {
+            try
+            {
+                message = CultNetSchemaMessageSerialization.Deserialize(payload);
+                return true;
+            }
+            catch (MessagePackSerializationException)
+            {
+                message = null!;
+                return false;
+            }
+        }
+
         /// <summary>
         /// Disconnects the client and suppresses automatic reconnect.
         /// </summary>
@@ -282,6 +474,7 @@ namespace GameCult.Networking
             _manualDisconnect = true;
             _reconnectSubscription?.Dispose();
             _reconnectSubscription = null;
+            SetReconnectState(ClientReconnectState.Idle);
             DisposeTransport();
         }
 
@@ -297,6 +490,7 @@ namespace GameCult.Networking
             _manualDisconnect = true;
             _reconnectSubscription?.Dispose();
             _reconnectSubscription = null;
+            SetReconnectState(ClientReconnectState.Idle);
             DisposeTransport();
         }
 
@@ -308,15 +502,19 @@ namespace GameCult.Networking
             }
 
             _isReconnecting = true;
-            _reconnectSubscription = Observable.Timer(ReconnectDelay).Subscribe(_ =>
+            _reconnectAttemptCount++;
+            var delay = GetReconnectDelayForAttempt(_reconnectAttemptCount);
+            SetReconnectState(ClientReconnectState.WaitingToReconnect);
+            _reconnectSubscription = Observable.Timer(delay).Subscribe(_ =>
             {
                 _isReconnecting = false;
                 _reconnectSubscription?.Dispose();
                 _reconnectSubscription = null;
+                SetReconnectState(ClientReconnectState.Reconnecting);
 
                 try
                 {
-                    Connect(_lastHost, _lastPort);
+                    ConnectCore(_lastHost, _lastPort, resetReconnectBackoff: false);
                 }
                 catch (Exception ex)
                 {
@@ -324,6 +522,16 @@ namespace GameCult.Networking
                     ScheduleReconnect();
                 }
             });
+        }
+
+        internal static TimeSpan GetReconnectDelayForAttempt(int attempt)
+        {
+            var normalizedAttempt = Math.Max(1, attempt);
+            var exponentialSeconds = Math.Min(
+                MaxReconnectDelay.TotalSeconds,
+                BaseReconnectDelay.TotalSeconds * Math.Pow(2, normalizedAttempt - 1));
+            var jitterMilliseconds = RandomNumberGenerator.GetInt32((int)MaxReconnectJitter.TotalMilliseconds + 1);
+            return TimeSpan.FromSeconds(exponentialSeconds) + TimeSpan.FromMilliseconds(jitterMilliseconds);
         }
 
         private void DisposeTransport()
@@ -355,6 +563,17 @@ namespace GameCult.Networking
                     _peer = null;
                 }
             }
+        }
+
+        private void SetReconnectState(ClientReconnectState state)
+        {
+            if (ReconnectState == state)
+            {
+                return;
+            }
+
+            ReconnectState = state;
+            OnReconnectStateChanged?.Invoke(state);
         }
     }
 }

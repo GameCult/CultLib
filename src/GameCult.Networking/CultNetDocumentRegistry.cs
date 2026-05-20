@@ -9,101 +9,111 @@ using GameCult.Caching.MessagePack;
 namespace GameCult.Networking
 {
     /// <summary>
-    /// Optional metadata attached when CultNet emits a document message.
+    /// Optional metadata applied when creating CultNet document messages.
     /// </summary>
     public sealed class CultNetDocumentMessageOptions
     {
+        /// <summary>
+        /// Gets or sets an explicit storage timestamp.
+        /// </summary>
         public string? StoredAt { get; set; }
+        /// <summary>
+        /// Gets or sets the runtime that produced the document.
+        /// </summary>
         public string? SourceRuntimeId { get; set; }
+        /// <summary>
+        /// Gets or sets the agent that produced the document.
+        /// </summary>
         public string? SourceAgentId { get; set; }
+        /// <summary>
+        /// Gets or sets the role that produced the document.
+        /// </summary>
         public string? SourceRole { get; set; }
+        /// <summary>
+        /// Gets or sets optional document tags.
+        /// </summary>
         public string[]? Tags { get; set; }
     }
 
     /// <summary>
-    /// Maps a concrete CultCache entry type to a shared CultNet document contract.
+    /// Binds a CultCache document type to CultNet payload serialization.
     /// </summary>
     public sealed class CultNetDocumentBinding
     {
         internal CultNetDocumentBinding(
-            Type entryType,
-            string documentType,
-            string? payloadSchemaVersion,
-            Func<DatabaseEntry, string> documentKeySelector,
-            Func<DatabaseEntry, byte[]> payloadSerializer,
-            Func<byte[], DatabaseEntry> payloadDeserializer)
+            Type documentType,
+            string schemaId,
+            Func<object, byte[]> payloadSerializer,
+            Func<byte[], object> payloadDeserializer)
         {
-            EntryType = entryType ?? throw new ArgumentNullException(nameof(entryType));
-            DocumentType = string.IsNullOrWhiteSpace(documentType)
-                ? throw new ArgumentException("DocumentType must be non-empty.", nameof(documentType))
-                : documentType;
-            PayloadSchemaVersion = payloadSchemaVersion;
-            DocumentKeySelector = documentKeySelector ?? throw new ArgumentNullException(nameof(documentKeySelector));
-            PayloadSerializer = payloadSerializer ?? throw new ArgumentNullException(nameof(payloadSerializer));
-            PayloadDeserializer = payloadDeserializer ?? throw new ArgumentNullException(nameof(payloadDeserializer));
+            DocumentType = documentType;
+            SchemaId = schemaId;
+            PayloadSerializer = payloadSerializer;
+            PayloadDeserializer = payloadDeserializer;
         }
 
-        public Type EntryType { get; }
-        public string DocumentType { get; }
-        public string? PayloadSchemaVersion { get; }
-        public Func<DatabaseEntry, string> DocumentKeySelector { get; }
-        public Func<DatabaseEntry, byte[]> PayloadSerializer { get; }
-        public Func<byte[], DatabaseEntry> PayloadDeserializer { get; }
+        /// <summary>
+        /// Gets the bound document type.
+        /// </summary>
+        public Type DocumentType { get; }
+        /// <summary>
+        /// Gets the bound schema identifier.
+        /// </summary>
+        public string SchemaId { get; }
+        /// <summary>
+        /// Gets the payload serializer.
+        /// </summary>
+        public Func<object, byte[]> PayloadSerializer { get; }
+        /// <summary>
+        /// Gets the payload deserializer.
+        /// </summary>
+        public Func<byte[], object> PayloadDeserializer { get; }
 
-        public static CultNetDocumentBinding ForEntry<T>(
-            string documentType,
-            string? payloadSchemaVersion = null,
-            Func<T, string>? documentKeySelector = null,
+        /// <summary>
+        /// Creates a document binding for a typed CultCache document.
+        /// </summary>
+        public static CultNetDocumentBinding ForDocument<T>(
+            CultDocumentRegistry? registry = null,
+            string? schemaId = null,
             Func<T, byte[]>? payloadSerializer = null,
             Func<byte[], T>? payloadDeserializer = null)
-            where T : DatabaseEntry
+            where T : class
         {
+            var descriptor = (registry ?? CultDocumentRegistry.Shared).GetRequired<T>();
             return new CultNetDocumentBinding(
                 typeof(T),
-                documentType,
-                payloadSchemaVersion,
-                entry =>
+                string.IsNullOrWhiteSpace(schemaId) ? descriptor.SchemaId : schemaId!,
+                document =>
                 {
-                    if (entry is not T typedEntry)
-                    {
-                        throw new InvalidOperationException(
-                            $"Document binding for {typeof(T).Name} received {entry.GetType().Name}.");
-                    }
-
-                    return documentKeySelector != null
-                        ? documentKeySelector(typedEntry)
-                        : typedEntry.ID.ToString("D", CultureInfo.InvariantCulture);
-                },
-                entry =>
-                {
-                    if (entry is not T typedEntry)
-                    {
-                        throw new InvalidOperationException(
-                            $"Document binding for {typeof(T).Name} received {entry.GetType().Name}.");
-                    }
-
+                    var typed = (T)document;
                     return payloadSerializer != null
-                        ? payloadSerializer(typedEntry)
-                        : CultCacheEnvelopeSerialization.SerializePayload(typedEntry);
+                        ? payloadSerializer(typed)
+                        : CultDocumentMessagePackSerialization.Serialize(typed);
                 },
                 payload => payloadDeserializer != null
                     ? payloadDeserializer(payload)
-                    : CultCacheEnvelopeSerialization.DeserializePayload<T>(payload));
+                    : CultDocumentMessagePackSerialization.Deserialize<T>(payload));
         }
     }
 
     /// <summary>
-    /// Creates and applies CultNet raw document/snapshot messages for bound CultCache entry types.
+    /// Creates and applies CultNet messages that replicate CultCache documents.
     /// </summary>
     public sealed class CultNetDocumentRegistry
     {
-        private readonly Dictionary<string, CultNetDocumentBinding> _bindingsByDocumentType =
-            new Dictionary<string, CultNetDocumentBinding>(StringComparer.Ordinal);
-        private readonly Dictionary<Type, CultNetDocumentBinding> _bindingsByEntryType =
-            new Dictionary<Type, CultNetDocumentBinding>();
+        private readonly CultDocumentRegistry _documents;
+        private readonly Dictionary<string, CultNetDocumentBinding> _bindingsBySchemaId =
+            new(StringComparer.Ordinal);
+        private readonly Dictionary<Type, CultNetDocumentBinding> _bindingsByType = new();
 
-        public CultNetDocumentRegistry(IEnumerable<CultNetDocumentBinding>? bindings = null)
+        /// <summary>
+        /// Creates a document registry with optional bindings.
+        /// </summary>
+        public CultNetDocumentRegistry(
+            CultDocumentRegistry? documents = null,
+            IEnumerable<CultNetDocumentBinding>? bindings = null)
         {
+            _documents = documents ?? CultDocumentRegistry.Shared;
             if (bindings == null)
             {
                 return;
@@ -115,133 +125,164 @@ namespace GameCult.Networking
             }
         }
 
+        /// <summary>
+        /// Registers a document binding.
+        /// </summary>
         public CultNetDocumentRegistry Register(CultNetDocumentBinding binding)
         {
-            if (binding == null) throw new ArgumentNullException(nameof(binding));
-            _bindingsByDocumentType[binding.DocumentType] = binding;
-            _bindingsByEntryType[binding.EntryType] = binding;
+            _bindingsBySchemaId[binding.SchemaId] = binding;
+            _bindingsByType[binding.DocumentType] = binding;
             return this;
         }
 
-        public CultNetDocumentBinding? GetByDocumentType(string documentType)
+        /// <summary>
+        /// Gets a binding by schema identifier.
+        /// </summary>
+        public CultNetDocumentBinding? GetBySchemaId(string schemaId)
         {
-            if (documentType == null) throw new ArgumentNullException(nameof(documentType));
-            return _bindingsByDocumentType.TryGetValue(documentType, out var binding) ? binding : null;
+            return _bindingsBySchemaId.TryGetValue(schemaId, out var binding) ? binding : null;
         }
 
-        public CultNetDocumentBinding? GetByEntryType(Type entryType)
+        /// <summary>
+        /// Gets a binding by CLR document type.
+        /// </summary>
+        public CultNetDocumentBinding? GetByDocumentType(Type documentType)
         {
-            if (entryType == null) throw new ArgumentNullException(nameof(entryType));
-            return _bindingsByEntryType.TryGetValue(entryType, out var binding) ? binding : null;
+            return _bindingsByType.TryGetValue(documentType, out var binding) ? binding : null;
         }
 
+        /// <summary>
+        /// Creates a document delete message.
+        /// </summary>
         public CultNetDocumentDeleteMessage CreateDocumentDeleteMessage(
             string messageId,
-            string documentType,
-            string documentKey)
+            string schemaId,
+            string recordKey)
         {
             return new CultNetDocumentDeleteMessage
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
-                DocumentType = RequireNonEmpty(documentType, nameof(documentType)),
-                DocumentKey = RequireNonEmpty(documentKey, nameof(documentKey))
+                SchemaId = RequireNonEmpty(schemaId, nameof(schemaId)),
+                RecordKey = RequireNonEmpty(recordKey, nameof(recordKey))
             };
         }
 
-        public CultNetDocumentPutRawMessage CreateRawDocumentPutMessage(
+        /// <summary>
+        /// Creates a raw document put message for a typed document.
+        /// </summary>
+        public CultNetDocumentPutRawMessage CreateRawDocumentPutMessage<T>(
             string messageId,
-            DatabaseEntry entry,
+            CultRecordHandle<T> handle,
+            T document,
             CultNetDocumentMessageOptions? options = null)
+            where T : class
         {
-            if (entry == null) throw new ArgumentNullException(nameof(entry));
-            var binding = RequireBinding(entry.GetType());
+            var descriptor = _documents.GetRequired<T>();
+            var binding = GetByDocumentType(typeof(T)) ?? CultNetDocumentBinding.ForDocument<T>(_documents);
             var storedAt = ResolveStoredAt(options);
-            var documentKey = binding.DocumentKeySelector(entry);
-
-            return new CultNetDocumentPutRawMessage
-            {
-                MessageId = RequireNonEmpty(messageId, nameof(messageId)),
-                Document = CreateRawDocumentRecord(binding, entry, documentKey, storedAt, options)
-            };
-        }
-
-        public CultNetDocumentPutRawMessage CreateRawDocumentPutMessageFromEnvelope(
-            string messageId,
-            CultCacheEnvelope envelope)
-        {
-            if (envelope == null) throw new ArgumentNullException(nameof(envelope));
-            var binding = RequireBinding(envelope.Type);
 
             return new CultNetDocumentPutRawMessage
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
                 Document = new CultNetRawDocumentRecord
                 {
-                    DocumentType = envelope.Type,
-                    DocumentKey = envelope.Key,
-                    StoredAt = envelope.StoredAt,
-                    PayloadSchemaVersion = binding.PayloadSchemaVersion,
+                    SchemaId = binding.SchemaId,
+                    RecordKey = handle.Key.Value,
+                    StoredAt = storedAt,
                     PayloadEncoding = "messagepack",
-                    Payload = envelope.Payload.ToArray()
+                    Payload = binding.PayloadSerializer(document),
+                    SourceRuntimeId = options?.SourceRuntimeId,
+                    SourceAgentId = options?.SourceAgentId,
+                    SourceRole = options?.SourceRole,
+                    Tags = options?.Tags
                 }
             };
         }
 
+        /// <summary>
+        /// Creates a snapshot request message.
+        /// </summary>
         public CultNetSnapshotRequestMessage CreateSnapshotRequest(
             string messageId,
-            IEnumerable<string>? documentTypes = null,
-            IEnumerable<string>? documentKeys = null)
+            IEnumerable<string>? schemaIds = null,
+            IEnumerable<string>? recordKeys = null)
         {
             return new CultNetSnapshotRequestMessage
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
-                DocumentTypes = documentTypes?.ToArray(),
-                DocumentKeys = documentKeys?.ToArray()
+                SchemaIds = schemaIds?.ToArray(),
+                RecordKeys = recordKeys?.ToArray()
             };
         }
 
+        /// <summary>
+        /// Creates a raw snapshot response from the cache.
+        /// </summary>
         public CultNetSnapshotResponseRawMessage CreateRawSnapshotResponse(
             CultCache cache,
             string messageId,
             CultNetSnapshotRequestMessage? filter = null,
             CultNetDocumentMessageOptions? options = null)
         {
-            if (cache == null) throw new ArgumentNullException(nameof(cache));
-
-            var requestedDocumentTypes = filter?.DocumentTypes != null
-                ? new HashSet<string>(filter.DocumentTypes, StringComparer.Ordinal)
+            var requestedSchemaIds = filter?.SchemaIds != null
+                ? new HashSet<string>(filter.SchemaIds, StringComparer.Ordinal)
                 : null;
-            var requestedDocumentKeys = filter?.DocumentKeys != null
-                ? new HashSet<string>(filter.DocumentKeys, StringComparer.Ordinal)
+            var requestedRecordKeys = filter?.RecordKeys != null
+                ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
                 : null;
             var storedAt = ResolveStoredAt(options);
 
             var documents = new List<CultNetRawDocumentRecord>();
-            foreach (var entry in cache.AllEntries)
+            foreach (var document in cache.AllEntries)
             {
-                var binding = GetByEntryType(entry.GetType());
-                if (binding == null)
+                var descriptor = _documents.GetRequired(document.GetType());
+                var binding = GetByDocumentType(document.GetType()) ??
+                              new CultNetDocumentBinding(
+                                  document.GetType(),
+                                  descriptor.SchemaId,
+                                  value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
+                                  payload => CultDocumentMessagePackSerialization.DeserializeUntyped(document.GetType(), payload));
+
+                if (requestedSchemaIds != null && !requestedSchemaIds.Contains(descriptor.SchemaId))
+                {
+                    if (!requestedSchemaIds.Contains(binding.SchemaId))
+                    {
+                        continue;
+                    }
+                }
+
+                var handleMethod = typeof(CultCache)
+                    .GetMethod(nameof(CultCache.TryGetHandle))!
+                    .MakeGenericMethod(document.GetType());
+                var handleObject = handleMethod.Invoke(cache, new[] { document });
+                if (handleObject == null)
                 {
                     continue;
                 }
 
-                if (requestedDocumentTypes != null && !requestedDocumentTypes.Contains(binding.DocumentType))
+                var keyProperty = handleObject.GetType().GetProperty("Value");
+                var handleValue = keyProperty?.GetValue(handleObject) ?? handleObject;
+                var recordKeyProperty = handleValue.GetType().GetProperty("Key");
+                var recordKey = recordKeyProperty?.GetValue(handleValue);
+                var valueProperty = recordKey?.GetType().GetProperty("Value");
+                var key = (string?)(valueProperty?.GetValue(recordKey)) ?? string.Empty;
+                if (requestedRecordKeys != null && !requestedRecordKeys.Contains(key))
                 {
                     continue;
                 }
 
-                var documentKey = binding.DocumentKeySelector(entry);
-                if (requestedDocumentKeys != null && !requestedDocumentKeys.Contains(documentKey))
+                documents.Add(new CultNetRawDocumentRecord
                 {
-                    continue;
-                }
-
-                documents.Add(CreateRawDocumentRecord(
-                    binding,
-                    entry,
-                    documentKey,
-                    storedAt,
-                    options));
+                    SchemaId = binding.SchemaId,
+                    RecordKey = key,
+                    StoredAt = storedAt,
+                    PayloadEncoding = "messagepack",
+                    Payload = binding.PayloadSerializer(document),
+                    SourceRuntimeId = options?.SourceRuntimeId,
+                    SourceAgentId = options?.SourceAgentId,
+                    SourceRole = options?.SourceRole,
+                    Tags = options?.Tags
+                });
             }
 
             return new CultNetSnapshotResponseRawMessage
@@ -251,124 +292,81 @@ namespace GameCult.Networking
             };
         }
 
-        public async Task<DatabaseEntry> ApplyRawDocumentPutMessageAsync(
+        /// <summary>
+        /// Applies a raw document put message to a cache.
+        /// </summary>
+        public async Task<object> ApplyRawDocumentPutMessageAsync(
             CultCache cache,
             CultNetDocumentPutRawMessage message)
         {
-            if (cache == null) throw new ArgumentNullException(nameof(cache));
-            if (message == null) throw new ArgumentNullException(nameof(message));
-            if (message.Document == null) throw new ArgumentException("CultNet raw document message is missing its document payload.", nameof(message));
+            if (message.Document == null)
+            {
+                throw new ArgumentException("CultNet raw document message is missing its document payload.", nameof(message));
+            }
 
-            var binding = RequireBinding(message.Document.DocumentType);
             ValidateRawDocumentRecord(message.Document);
+            var binding = GetBySchemaId(message.Document.SchemaId);
+            var descriptor = binding != null
+                ? _documents.GetRequired(binding.DocumentType)
+                : _documents.GetRequiredBySchemaId(message.Document.SchemaId);
+            binding ??= new CultNetDocumentBinding(
+                descriptor.DocumentType,
+                descriptor.SchemaId,
+                value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
+                payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload));
+            var document = binding.PayloadDeserializer(message.Document.Payload);
 
-            var entry = binding.PayloadDeserializer(message.Document.Payload);
-            if (!binding.EntryType.IsInstanceOfType(entry))
-            {
-                throw new InvalidOperationException(
-                    $"CultNet raw document type \"{message.Document.DocumentType}\" expected {binding.EntryType.Name} but decoded {entry.GetType().Name}.");
-            }
-
-            var expectedKey = binding.DocumentKeySelector(entry);
-            if (!string.Equals(expectedKey, message.Document.DocumentKey, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"CultNet raw document key mismatch for \"{message.Document.DocumentType}\": payload resolved to \"{expectedKey}\" but wire metadata said \"{message.Document.DocumentKey}\".");
-            }
-
-            await cache.AddAsync(entry);
-            return entry;
+            var addMethod = typeof(CultCache).GetMethod(nameof(CultCache.AddAsync))!
+                .MakeGenericMethod(descriptor.DocumentType);
+            var handleType = typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType);
+            var optionalHandle = Activator.CreateInstance(typeof(Nullable<>).MakeGenericType(handleType), new object[] { Activator.CreateInstance(handleType, new object[] { new CultRecordKey(message.Document.RecordKey) })! });
+            var task = (Task)addMethod.Invoke(cache, [document, optionalHandle])!;
+            await task.ConfigureAwait(false);
+            return document;
         }
 
+        /// <summary>
+        /// Applies a raw document put message and returns the typed document.
+        /// </summary>
         public async Task<T> ApplyRawDocumentPutMessageAsync<T>(
             CultCache cache,
             CultNetDocumentPutRawMessage message)
-            where T : DatabaseEntry
+            where T : class
         {
-            var entry = await ApplyRawDocumentPutMessageAsync(cache, message);
-            if (entry is not T typedEntry)
-            {
-                throw new InvalidOperationException(
-                    $"CultNet raw document message resolved to {entry.GetType().Name}, not {typeof(T).Name}.");
-            }
-
-            return typedEntry;
+            return (T)await ApplyRawDocumentPutMessageAsync(cache, message).ConfigureAwait(false);
         }
 
-        public async Task<IReadOnlyList<DatabaseEntry>> ApplyRawSnapshotResponseAsync(
+        /// <summary>
+        /// Applies all documents from a raw snapshot response.
+        /// </summary>
+        public async Task<IReadOnlyList<object>> ApplyRawSnapshotResponseAsync(
             CultCache cache,
             CultNetSnapshotResponseRawMessage response)
         {
-            if (cache == null) throw new ArgumentNullException(nameof(cache));
-            if (response == null) throw new ArgumentNullException(nameof(response));
-
-            var applied = new List<DatabaseEntry>(response.Documents.Length);
+            var applied = new List<object>(response.Documents.Length);
             foreach (var document in response.Documents)
             {
-                var entry = await ApplyRawDocumentPutMessageAsync(
+                applied.Add(await ApplyRawDocumentPutMessageAsync(
                     cache,
                     new CultNetDocumentPutRawMessage
                     {
                         MessageId = response.MessageId,
                         Document = document
-                    });
-                applied.Add(entry);
+                    }).ConfigureAwait(false));
             }
 
             return applied;
         }
 
+        /// <summary>
+        /// Applies all typed documents from a raw snapshot response.
+        /// </summary>
         public async Task<IReadOnlyList<T>> ApplyRawSnapshotResponseAsync<T>(
             CultCache cache,
             CultNetSnapshotResponseRawMessage response)
-            where T : DatabaseEntry
+            where T : class
         {
-            var applied = await ApplyRawSnapshotResponseAsync(cache, response);
-            return applied.OfType<T>().ToArray();
-        }
-
-        private CultNetRawDocumentRecord CreateRawDocumentRecord(
-            CultNetDocumentBinding binding,
-            DatabaseEntry entry,
-            string documentKey,
-            string storedAt,
-            CultNetDocumentMessageOptions? options)
-        {
-            var envelope = new CultCacheEnvelope
-            {
-                Key = documentKey,
-                Type = binding.DocumentType,
-                StoredAt = storedAt,
-                Payload = binding.PayloadSerializer(entry)
-            };
-
-            return new CultNetRawDocumentRecord
-            {
-                DocumentType = envelope.Type,
-                DocumentKey = envelope.Key,
-                StoredAt = envelope.StoredAt,
-                PayloadSchemaVersion = binding.PayloadSchemaVersion,
-                PayloadEncoding = "messagepack",
-                Payload = envelope.Payload,
-                SourceRuntimeId = options?.SourceRuntimeId,
-                SourceAgentId = options?.SourceAgentId,
-                SourceRole = options?.SourceRole,
-                Tags = options?.Tags
-            };
-        }
-
-        private CultNetDocumentBinding RequireBinding(Type entryType)
-        {
-            return GetByEntryType(entryType)
-                ?? throw new InvalidOperationException(
-                    $"No CultNet document binding is registered for {entryType.FullName}.");
-        }
-
-        private CultNetDocumentBinding RequireBinding(string documentType)
-        {
-            return GetByDocumentType(documentType)
-                ?? throw new InvalidOperationException(
-                    $"No CultNet document binding is registered for \"{documentType}\".");
+            return (await ApplyRawSnapshotResponseAsync(cache, response).ConfigureAwait(false)).OfType<T>().ToArray();
         }
 
         private static void ValidateRawDocumentRecord(CultNetRawDocumentRecord document)
@@ -379,14 +377,13 @@ namespace GameCult.Networking
                     $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{document.PayloadEncoding}\".");
             }
 
+            RequireNonEmpty(document.SchemaId, nameof(document.SchemaId));
+            RequireNonEmpty(document.RecordKey, nameof(document.RecordKey));
+            RequireNonEmpty(document.StoredAt, nameof(document.StoredAt));
             if (document.Payload == null || document.Payload.Length == 0)
             {
                 throw new InvalidOperationException("CultNet raw document payload must be non-empty.");
             }
-
-            RequireNonEmpty(document.DocumentType, nameof(document.DocumentType));
-            RequireNonEmpty(document.DocumentKey, nameof(document.DocumentKey));
-            RequireNonEmpty(document.StoredAt, nameof(document.StoredAt));
         }
 
         private static string ResolveStoredAt(CultNetDocumentMessageOptions? options)

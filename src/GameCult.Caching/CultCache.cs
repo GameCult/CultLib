@@ -4,83 +4,1175 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
+using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
-using ConcurrentCollections;
 using GameCult.Logging;
 using R3;
 
 namespace GameCult.Caching
 {
     /// <summary>
-    /// Specifies that the decorated class contains global settings.
-    /// Use this attribute to mark classes intended to hold application-wide configuration or settings.
+    /// Persisted schema metadata embedded in a CultCache backing store.
     /// </summary>
-    [AttributeUsage(AttributeTargets.Class)]
-    public class GlobalSettingsAttribute : Attribute { }
-    
-    /// <summary>
-    /// Represents an in-memory and persistent cache for <see cref="DatabaseEntry"/> objects, supporting global entries,
-    /// named entries, generic field indexes, and multiple backing stores. Provides thread-safe operations for adding,
-    /// retrieving, indexing, and removing entries, with support for event notifications and logging.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Features:</b>
-    /// <list type="bullet">
-    /// <item>Supports multiple <see cref="CacheBackingStore"/>s for persistence and synchronization.</item>
-    /// <item>Handles global settings entries via <see cref="GlobalSettingsAttribute"/>.</item>
-    /// <item>Provides fast lookup by ID, name (for <see cref="INamedEntry"/>), and indexed fields.</item>
-    /// <item>Allows registering generic indexes for any public field of a <see cref="DatabaseEntry"/> type.</item>
-    /// <item>Thread-safe via <see cref="ConcurrentDictionary{TKey, TValue}"/> and <see cref="ConcurrentHashSet{T}"/>.</item>
-    /// <item>Notifies on entry updates via <see cref="OnUpdate"/> event.</item>
-    /// <item>Supports both synchronous and asynchronous add operations.</item>
-    /// <item>Integrates with <see cref="ILogger"/> for error and event logging.</item>
-    /// </list>
-    /// </para>
-    /// <para>
-    /// <b>Usage:</b>
-    /// <code>
-    /// var cache = new CultCache();
-    /// cache.RegisterIndex&lt;PlayerData&gt;("Email");
-    /// cache.AddAsync(new PlayerData { ... }).GetAwaiter().GetResult();
-    /// var player = cache.GetByIndex&lt;PlayerData&gt;("Email", "user@example.com");
-    /// </code>
-    /// </para>
-    /// </remarks>
-    public class CultCache : IDisposable
+    public sealed class CultSchemaCatalogEntry
     {
-        private readonly object addLock = new object(); // Retained for synchronous Add compatibility
-
         /// <summary>
-        /// Occurs when a <see cref="DatabaseEntry"/> is updated.
-        /// The event provides the old and new <see cref="DatabaseEntry"/> instances.
+        /// Gets or sets the content-derived schema identifier.
         /// </summary>
-        /// <remarks>
-        /// The first parameter is the previous entry, and the second parameter is the updated entry.
-        /// The first parameter will be <c>null</c> if the entry is newly added,
-        /// and the second parameter will be <c>null</c> if the entry is deleted.
-        /// </remarks>
-        public event Action<DatabaseEntry?, DatabaseEntry?>? OnUpdate;
-
-        private readonly List<CacheBackingStore> _backingStores = new();
-        private readonly ConcurrentDictionary<Type, CacheBackingStore> _typeStores = new();
-        private readonly ConcurrentDictionary<CacheBackingStore, Type[]> _storeTypes = new();
-        private readonly ConcurrentDictionary<Guid, DatabaseEntry> _entries = new();
-        private readonly ConcurrentDictionary<Type, DatabaseEntry?> _globals = new();
-        private readonly ConcurrentDictionary<Type, ConcurrentHashSet<DatabaseEntry>> _types = new();
-        private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, Guid>> _nameToIdMap = new();
-        private readonly ConcurrentDictionary<long, Task> _pendingStoreOperations = new();
-        // Generic indexes: Map (Type, FieldName) -> (Value -> ID). Allows registering indexes for any field
-        private readonly ConcurrentDictionary<(Type Type, string FieldName), ConcurrentDictionary<string, Guid>> _indexes = new();
-        // Cache getters per type (list of (field, getter) for that type only). Avoids scanning all indexes.
-        private readonly ConcurrentDictionary<Type, List<(string FieldName, Func<DatabaseEntry, string> Getter)>> _typeToGetters = new();
-        private ILogger _logger = new NullLogger();
-        private long _storeOperationId;
-        
+        public string SchemaId { get; set; } = string.Empty;
         /// <summary>
-        /// Gets or sets the <see cref="ILogger"/> instance used for logging within the cache.
-        /// If set to <c>null</c>, a <see cref="NullLogger"/> will be used as a fallback.
+        /// Gets or sets the stable schema name.
+        /// </summary>
+        public string SchemaName { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the schema version string.
+        /// </summary>
+        public string SchemaVersion { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the canonical schema content hash.
+        /// </summary>
+        public string ContentHash { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the canonical schema description.
+        /// </summary>
+        public string CanonicalSchemaJson { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets schema identifiers compatible with this entry.
+        /// </summary>
+        public string[] CompatibleSchemaIds { get; set; } = Array.Empty<string>();
+
+        /// <summary>
+        /// Gets or sets the persisted member descriptors used for compatibility checks.
+        /// </summary>
+        public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
+    }
+
+    /// <summary>
+    /// Persisted catalog entry describing one schema member.
+    /// </summary>
+    public sealed class CultSchemaMemberCatalogEntry
+    {
+        /// <summary>
+        /// Gets or sets the persisted slot number.
+        /// </summary>
+        public int Slot { get; set; }
+
+        /// <summary>
+        /// Gets or sets the member name.
+        /// </summary>
+        public string MemberName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the persisted type name.
+        /// </summary>
+        public string TypeName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets whether the member is a reference.
+        /// </summary>
+        public bool IsReference { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the member stores many values.
+        /// </summary>
+        public bool IsMany { get; set; }
+
+        /// <summary>
+        /// Gets or sets the referenced schema name, when the member is a reference.
+        /// </summary>
+        public string? TargetSchemaName { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the member provides the name lookup.
+        /// </summary>
+        public bool IsName { get; set; }
+
+        /// <summary>
+        /// Gets or sets the index alias, when the member participates in lookups.
+        /// </summary>
+        public string? IndexAlias { get; set; }
+    }
+
+    /// <summary>
+    /// Persisted serialized document record.
+    /// </summary>
+    public sealed class CultPersistedRecord
+    {
+        /// <summary>
+        /// Gets or sets the persisted record key.
+        /// </summary>
+        public string Key { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the schema identifier used to deserialize the payload.
+        /// </summary>
+        public string SchemaId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the storage timestamp.
+        /// </summary>
+        public string StoredAt { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the serialized document payload.
+        /// </summary>
+        public byte[] Payload { get; set; } = Array.Empty<byte>();
+    }
+
+    /// <summary>
+    /// Complete snapshot persisted by a single-file CultCache backing store.
+    /// </summary>
+    public sealed class CultPersistedStoreSnapshot
+    {
+        /// <summary>
+        /// Gets or sets the backing store format version.
+        /// </summary>
+        public string FormatVersion { get; set; } = "cultcache.store.v1";
+        /// <summary>
+        /// Gets or sets the embedded schema catalog.
+        /// </summary>
+        public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
+        /// <summary>
+        /// Gets or sets the persisted records.
+        /// </summary>
+        public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
+    }
+
+    /// <summary>
+    /// Classifies how a persisted schema mapped onto the local document registry.
+    /// </summary>
+    public enum CultSchemaMigrationKind
+    {
+        /// <summary>
+        /// The persisted schema matched the local schema exactly.
+        /// </summary>
+        Exact,
+
+        /// <summary>
+        /// The persisted schema required a compatible soft-migration path.
+        /// </summary>
+        CompatibleDrift
+    }
+
+    /// <summary>
+    /// Describes one schema-resolution warning emitted during load.
+    /// </summary>
+    public sealed class CultSchemaMigrationWarning
+    {
+        /// <summary>
+        /// Gets or sets the stable warning code.
+        /// </summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the human-readable warning text.
+        /// </summary>
+        public string Message { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Reports how one persisted schema entry resolved against the local schema catalog.
+    /// </summary>
+    public sealed class CultSchemaMigrationReport
+    {
+        /// <summary>
+        /// Gets or sets the persisted schema identifier.
+        /// </summary>
+        public string PersistedSchemaId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the local schema identifier selected for reading.
+        /// </summary>
+        public string LocalSchemaId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the persisted schema name.
+        /// </summary>
+        public string PersistedSchemaName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the local schema name.
+        /// </summary>
+        public string LocalSchemaName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets how the persisted schema matched locally.
+        /// </summary>
+        public CultSchemaMigrationKind Kind { get; set; }
+
+        /// <summary>
+        /// Gets or sets the persisted member slots ignored by the local reader.
+        /// </summary>
+        public int[] IgnoredExtraSlots { get; set; } = Array.Empty<int>();
+
+        /// <summary>
+        /// Gets or sets the local member slots defaulted because the persisted record did not contain them.
+        /// </summary>
+        public int[] DefaultedMissingSlots { get; set; } = Array.Empty<int>();
+
+        /// <summary>
+        /// Gets or sets emitted migration warnings.
+        /// </summary>
+        public CultSchemaMigrationWarning[] Warnings { get; set; } = Array.Empty<CultSchemaMigrationWarning>();
+    }
+
+    internal sealed class CultSchemaResolutionResult
+    {
+        public CultSchemaResolutionResult(CultDocumentDescriptor descriptor, CultSchemaMigrationReport report)
+        {
+            Descriptor = descriptor;
+            Report = report;
+        }
+
+        public CultDocumentDescriptor Descriptor { get; }
+
+        public CultSchemaMigrationReport Report { get; }
+    }
+
+    /// <summary>
+    /// Runtime descriptor for a CultCache document type.
+    /// </summary>
+    public sealed class CultDocumentDescriptor
+    {
+        internal CultDocumentDescriptor(
+            Type documentType,
+            string schemaName,
+            string schemaVersion,
+            string schemaId,
+            string contentHash,
+            string canonicalSchemaJson,
+            bool isGlobal,
+            string? nameMember,
+            Func<object, string?>? nameAccessor,
+            Func<object, byte[]>? generatedPayloadSerializer,
+            Func<byte[], object>? generatedPayloadDeserializer,
+            IReadOnlyDictionary<string, Func<object, string>> indexAccessors,
+            IReadOnlyList<CultDocumentMemberDescriptor> members)
+        {
+            DocumentType = documentType;
+            SchemaName = schemaName;
+            SchemaVersion = schemaVersion;
+            SchemaId = schemaId;
+            ContentHash = contentHash;
+            CanonicalSchemaJson = canonicalSchemaJson;
+            IsGlobal = isGlobal;
+            NameMember = nameMember;
+            NameAccessor = nameAccessor;
+            GeneratedPayloadSerializer = generatedPayloadSerializer;
+            GeneratedPayloadDeserializer = generatedPayloadDeserializer;
+            IndexAccessors = indexAccessors;
+            Members = members;
+        }
+
+        /// <summary>
+        /// Gets the CLR document type.
+        /// </summary>
+        public Type DocumentType { get; }
+        /// <summary>
+        /// Gets the stable schema name.
+        /// </summary>
+        public string SchemaName { get; }
+        /// <summary>
+        /// Gets the schema version string.
+        /// </summary>
+        public string SchemaVersion { get; }
+        /// <summary>
+        /// Gets the content-derived schema identifier.
+        /// </summary>
+        public string SchemaId { get; }
+        /// <summary>
+        /// Gets the canonical schema content hash.
+        /// </summary>
+        public string ContentHash { get; }
+        /// <summary>
+        /// Gets the canonical schema description.
+        /// </summary>
+        public string CanonicalSchemaJson { get; }
+        /// <summary>
+        /// Gets whether this document type stores one global record.
+        /// </summary>
+        public bool IsGlobal { get; }
+        /// <summary>
+        /// Gets the document name member, if any.
+        /// </summary>
+        public string? NameMember { get; }
+        internal Func<object, string?>? NameAccessor { get; }
+        /// <summary>
+        /// Gets the generated payload serializer, if one is available.
+        /// </summary>
+        public Func<object, byte[]>? GeneratedPayloadSerializer { get; }
+        /// <summary>
+        /// Gets the generated payload deserializer, if one is available.
+        /// </summary>
+        public Func<byte[], object>? GeneratedPayloadDeserializer { get; }
+        internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
+        internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
+
+        /// <summary>
+        /// Converts this descriptor into a persisted schema catalog entry.
+        /// </summary>
+        public CultSchemaCatalogEntry ToCatalogEntry()
+        {
+            return new CultSchemaCatalogEntry
+            {
+                SchemaId = SchemaId,
+                SchemaName = SchemaName,
+                SchemaVersion = SchemaVersion,
+                ContentHash = ContentHash,
+                CanonicalSchemaJson = CanonicalSchemaJson,
+                CompatibleSchemaIds = [SchemaId],
+                Members = Members
+                    .OrderBy(member => member.Slot)
+                    .Select(member => new CultSchemaMemberCatalogEntry
+                    {
+                        Slot = member.Slot,
+                        MemberName = member.MemberName,
+                        TypeName = member.TypeName,
+                        IsReference = member.IsReference,
+                        IsMany = member.IsMany,
+                        TargetSchemaName = member.TargetSchemaName,
+                        IsName = member.IsName,
+                        IndexAlias = member.IndexAlias
+                    })
+                    .ToArray()
+            };
+        }
+
+        internal string GetPreferredFileStem(object document)
+        {
+            var preferred = NameAccessor?.Invoke(document);
+            return string.IsNullOrWhiteSpace(preferred)
+                ? SchemaName
+                : preferred!;
+        }
+    }
+
+    internal sealed class CultDocumentMemberDescriptor
+    {
+        public string MemberName { get; set; } = string.Empty;
+        public int Slot { get; set; }
+        public string TypeName { get; set; } = string.Empty;
+        public bool IsReference { get; set; }
+        public bool IsMany { get; set; }
+        public string? TargetSchemaName { get; set; }
+        public bool IsName { get; set; }
+        public string? IndexAlias { get; set; }
+    }
+
+    /// <summary>
+    /// Stores a resolved document together with its descriptor and key.
+    /// </summary>
+    public sealed class CultStoredDocument
+    {
+        /// <summary>
+        /// Creates a stored document wrapper.
+        /// </summary>
+        public CultStoredDocument(
+            CultRecordKey key,
+            string storedAt,
+            CultDocumentDescriptor descriptor,
+            object document)
+        {
+            Key = key;
+            StoredAt = storedAt;
+            Descriptor = descriptor;
+            Document = document;
+        }
+
+        /// <summary>
+        /// Gets the record key.
+        /// </summary>
+        public CultRecordKey Key { get; }
+        /// <summary>
+        /// Gets the storage timestamp.
+        /// </summary>
+        public string StoredAt { get; }
+        /// <summary>
+        /// Gets the document descriptor.
+        /// </summary>
+        public CultDocumentDescriptor Descriptor { get; }
+        /// <summary>
+        /// Gets the document instance.
+        /// </summary>
+        public object Document { get; }
+    }
+
+    /// <summary>
+    /// Discovers, indexes, and resolves CultCache document descriptors.
+    /// </summary>
+    public sealed class CultDocumentRegistry
+    {
+        private static readonly Lazy<CultDocumentRegistry> SharedRegistry =
+            new(() => new CultDocumentRegistry());
+
+        private readonly ConcurrentDictionary<Type, CultDocumentDescriptor> _byType = new();
+        private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaId =
+            new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaName =
+            new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets the shared process-wide document registry.
+        /// </summary>
+        public static CultDocumentRegistry Shared => SharedRegistry.Value;
+
+        /// <summary>
+        /// Creates a registry and discovers currently loaded document metadata.
+        /// </summary>
+        public CultDocumentRegistry()
+        {
+            Refresh();
+        }
+
+        /// <summary>
+        /// Gets all known document descriptors.
+        /// </summary>
+        public IEnumerable<CultDocumentDescriptor> AllDescriptors => _byType.Values.OrderBy(d => d.SchemaName, StringComparer.Ordinal);
+
+        /// <summary>
+        /// Rebuilds the registry from generated metadata and reflected document attributes.
+        /// </summary>
+        public void Refresh()
+        {
+            _byType.Clear();
+            _bySchemaId.Clear();
+            _bySchemaName.Clear();
+
+            var generatedTypes = new HashSet<Type>();
+            foreach (var definition in CultGeneratedDocumentMetadataLoader.LoadDefinitions())
+            {
+                var descriptor = BuildDescriptor(definition);
+                RegisterDescriptor(descriptor);
+                generatedTypes.Add(descriptor.DocumentType);
+            }
+
+            foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes().Where(type => !generatedTypes.Contains(type)))
+            {
+                RegisterDescriptor(BuildDescriptor(type));
+            }
+        }
+
+        /// <summary>
+        /// Gets the descriptor for a document type, building it when needed.
+        /// </summary>
+        public CultDocumentDescriptor GetRequired(Type type)
+        {
+            if (_byType.TryGetValue(type, out var descriptor))
+            {
+                return descriptor;
+            }
+
+            descriptor = TryBuildGeneratedDescriptor(type);
+            if (descriptor != null)
+            {
+                RegisterDescriptor(descriptor);
+                return descriptor;
+            }
+
+            var attribute = type.GetCustomAttribute<CultDocumentAttribute>();
+            if (attribute == null)
+            {
+                throw new InvalidOperationException(
+                    $"Type {type.FullName} is not marked with {nameof(CultDocumentAttribute)}.");
+            }
+
+            descriptor = BuildDescriptor(type);
+            RegisterDescriptor(descriptor);
+            return descriptor;
+        }
+
+        /// <summary>
+        /// Gets the descriptor for a document type.
+        /// </summary>
+        public CultDocumentDescriptor GetRequired<T>() where T : class
+        {
+            return GetRequired(typeof(T));
+        }
+
+        /// <summary>
+        /// Gets a descriptor by its schema identifier.
+        /// </summary>
+        public CultDocumentDescriptor GetRequiredBySchemaId(string schemaId)
+        {
+            if (_bySchemaId.TryGetValue(schemaId, out var descriptor))
+            {
+                return descriptor;
+            }
+
+            throw new InvalidOperationException($"Unknown CultCache schema id '{schemaId}'.");
+        }
+
+        /// <summary>
+        /// Resolves a persisted schema identifier against the local registry and embedded catalog.
+        /// </summary>
+        public CultDocumentDescriptor ResolvePersistedSchema(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
+            return ResolvePersistedSchemaDetailed(schemaId, catalog).Descriptor;
+        }
+
+        /// <summary>
+        /// Resolves a persisted schema identifier and returns the selected descriptor with migration diagnostics.
+        /// </summary>
+        public CultSchemaMigrationReport ResolvePersistedSchemaReport(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
+            return ResolvePersistedSchemaDetailed(schemaId, catalog).Report;
+        }
+
+        internal CultSchemaResolutionResult ResolvePersistedSchemaDetailed(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+        {
+            if (_bySchemaId.TryGetValue(schemaId, out var exact))
+            {
+                return new CultSchemaResolutionResult(
+                    exact,
+                    new CultSchemaMigrationReport
+                    {
+                        PersistedSchemaId = schemaId,
+                        LocalSchemaId = exact.SchemaId,
+                        PersistedSchemaName = exact.SchemaName,
+                        LocalSchemaName = exact.SchemaName,
+                        Kind = CultSchemaMigrationKind.Exact
+                    });
+            }
+
+            var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal));
+            if (persisted == null)
+            {
+                throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
+            }
+
+            foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
+            {
+                if (_bySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
+                {
+                    return BuildCompatibleResolutionResult(persisted, compatibleLocal);
+                }
+            }
+
+            if (_bySchemaName.TryGetValue(persisted.SchemaName, out var local))
+            {
+                return BuildCompatibleResolutionResult(persisted, local);
+            }
+
+            throw new InvalidOperationException(
+                $"No local CultCache schema matches persisted schema '{persisted.SchemaName}' ({schemaId}).");
+        }
+
+        private void RegisterDescriptor(CultDocumentDescriptor descriptor)
+        {
+            _byType[descriptor.DocumentType] = descriptor;
+            _bySchemaId[descriptor.SchemaId] = descriptor;
+            _bySchemaName[descriptor.SchemaName] = descriptor;
+        }
+
+        private static CultDocumentDescriptor? TryBuildGeneratedDescriptor(Type type)
+        {
+            var definition = CultGeneratedDocumentMetadataLoader.LoadDefinitions(type.Assembly)
+                .FirstOrDefault(candidate => candidate.DocumentType == type);
+            return definition == null
+                ? null
+                : BuildDescriptor(definition);
+        }
+
+        private static CultDocumentDescriptor BuildDescriptor(Type type)
+        {
+            var attribute = type.GetCustomAttribute<CultDocumentAttribute>()
+                            ?? throw new InvalidOperationException(
+                                $"Type {type.FullName} is not marked with {nameof(CultDocumentAttribute)}.");
+            var members = DiscoverMembers(type);
+            var nameMember = members.FirstOrDefault(member => member.IsName);
+            var indexAccessors = members
+                .Where(member => member.IndexAlias != null)
+                .ToDictionary(
+                    member => member.IndexAlias!,
+                    member => member.Getter,
+                    StringComparer.Ordinal);
+            var descriptorMembers = members
+                .Select(member => new CultDocumentMemberDescriptor
+                {
+                    MemberName = member.Member.Name,
+                    Slot = member.Slot,
+                    TypeName = CultSchemaTypeNames.FromType(member.MemberType),
+                    IsReference = member.IsReference,
+                    IsMany = member.IsMany,
+                    TargetSchemaName = member.TargetSchemaName,
+                    IsName = member.IsName,
+                    IndexAlias = member.IndexAlias
+                })
+                .ToArray();
+            var schemaJson = BuildCanonicalSchemaJson(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
+            var contentHash = Sha256(schemaJson);
+            var semanticFingerprint = BuildSemanticFingerprint(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
+            var schemaId = Sha256(semanticFingerprint);
+
+            return new CultDocumentDescriptor(
+                type,
+                attribute.SchemaName,
+                attribute.SchemaVersion,
+                schemaId,
+                contentHash,
+                schemaJson,
+                type.GetCustomAttribute<CultGlobalAttribute>() != null,
+                nameMember?.Member.Name,
+                nameMember?.GetterNullable,
+                null,
+                null,
+                indexAccessors,
+                descriptorMembers);
+        }
+
+        private static CultDocumentDescriptor BuildDescriptor(CultGeneratedDocumentDefinition definition)
+        {
+            var descriptorMembers = definition.Members
+                .OrderBy(member => member.Slot)
+                .Select(member => new CultDocumentMemberDescriptor
+                {
+                    MemberName = member.MemberName,
+                    Slot = member.Slot,
+                    TypeName = member.TypeName,
+                    IsReference = member.IsReference,
+                    IsMany = member.IsMany,
+                    TargetSchemaName = member.TargetSchemaName,
+                    IsName = member.IsName,
+                    IndexAlias = member.IndexAlias
+                })
+                .ToArray();
+            var schemaJson = BuildCanonicalSchemaJson(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
+            var contentHash = Sha256(schemaJson);
+            var semanticFingerprint = BuildSemanticFingerprint(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
+            var schemaId = Sha256(semanticFingerprint);
+
+            return new CultDocumentDescriptor(
+                definition.DocumentType,
+                definition.SchemaName,
+                definition.SchemaVersion,
+                schemaId,
+                contentHash,
+                schemaJson,
+                definition.IsGlobal,
+                definition.NameMember,
+                definition.NameAccessor,
+                definition.SerializePayload,
+                definition.DeserializePayload,
+                definition.IndexAccessors.ToDictionary(accessor => accessor.Alias, accessor => accessor.Accessor, StringComparer.Ordinal),
+                descriptorMembers);
+        }
+
+        private static string BuildSemanticFingerprint(
+            string schemaName,
+            string schemaVersion,
+            IReadOnlyList<CultDocumentMemberDescriptor> members)
+        {
+            var builder = new StringBuilder();
+            builder.Append(schemaName)
+                .Append('|')
+                .Append(schemaVersion);
+            foreach (var member in members.OrderBy(member => member.Slot))
+            {
+                builder.Append('|')
+                    .Append(member.Slot)
+                    .Append(':')
+                    .Append(member.MemberName)
+                    .Append(':')
+                    .Append(member.TypeName)
+                    .Append(':')
+                    .Append(member.IsReference ? "ref" : "value")
+                    .Append(':')
+                    .Append(member.TargetSchemaName ?? string.Empty)
+                    .Append(':')
+                    .Append(member.IsMany ? "many" : "one");
+            }
+
+            return builder.ToString();
+        }
+
+        private static string BuildCanonicalSchemaJson(
+            string schemaName,
+            string schemaVersion,
+            IReadOnlyList<CultDocumentMemberDescriptor> members)
+        {
+            var builder = new StringBuilder();
+            builder.Append("{\"schemaName\":\"")
+                .Append(CultSchemaTypeNames.EscapeForLiteral(schemaName))
+                .Append("\",\"schemaVersion\":\"")
+                .Append(CultSchemaTypeNames.EscapeForLiteral(schemaVersion))
+                .Append("\",\"members\":[");
+            for (var index = 0; index < members.Count; index++)
+            {
+                var member = members[index];
+                if (index > 0)
+                {
+                    builder.Append(',');
+                }
+
+                builder.Append("{\"slot\":")
+                    .Append(member.Slot)
+                    .Append(",\"name\":\"")
+                    .Append(CultSchemaTypeNames.EscapeForLiteral(member.MemberName))
+                    .Append("\",\"type\":\"")
+                    .Append(CultSchemaTypeNames.EscapeForLiteral(member.TypeName))
+                    .Append("\",\"isReference\":")
+                    .Append(member.IsReference ? "true" : "false")
+                    .Append(",\"many\":")
+                    .Append(member.IsMany ? "true" : "false")
+                    .Append(",\"targetSchemaName\":");
+                if (member.TargetSchemaName == null)
+                {
+                    builder.Append("null");
+                }
+                else
+                {
+                    builder.Append('"').Append(CultSchemaTypeNames.EscapeForLiteral(member.TargetSchemaName)).Append('"');
+                }
+
+                builder.Append(",\"indexAlias\":");
+                if (member.IndexAlias == null)
+                {
+                    builder.Append("null");
+                }
+                else
+                {
+                    builder.Append('"').Append(CultSchemaTypeNames.EscapeForLiteral(member.IndexAlias)).Append('"');
+                }
+
+                builder.Append(",\"isName\":")
+                    .Append(member.IsName ? "true" : "false")
+                    .Append('}');
+            }
+
+            builder.Append("]}");
+            return builder.ToString();
+        }
+
+        private static CultSchemaResolutionResult BuildCompatibleResolutionResult(
+            CultSchemaCatalogEntry persisted,
+            CultDocumentDescriptor local)
+        {
+            if (string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal))
+            {
+                return new CultSchemaResolutionResult(
+                    local,
+                    new CultSchemaMigrationReport
+                    {
+                        PersistedSchemaId = persisted.SchemaId,
+                        LocalSchemaId = local.SchemaId,
+                        PersistedSchemaName = persisted.SchemaName,
+                        LocalSchemaName = local.SchemaName,
+                        Kind = CultSchemaMigrationKind.Exact
+                    });
+            }
+
+            var persistedSchema = new CanonicalSchemaShape(
+                persisted.SchemaName,
+                persisted.SchemaVersion,
+                persisted.Members.Select(member => new CanonicalSchemaMember(
+                    member.Slot,
+                    member.MemberName,
+                    member.TypeName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.TargetSchemaName,
+                    member.IsName,
+                    member.IndexAlias)).ToArray());
+            var localSchema = new CanonicalSchemaShape(
+                local.SchemaName,
+                local.SchemaVersion,
+                local.Members.Select(member => new CanonicalSchemaMember(
+                    member.Slot,
+                    member.MemberName,
+                    member.TypeName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.TargetSchemaName,
+                    member.IsName,
+                    member.IndexAlias)).ToArray());
+            var comparison = CompareSchemaShapes(persistedSchema, localSchema);
+            if (!comparison.IsCompatible)
+            {
+                throw new InvalidOperationException(
+                    $"Persisted schema '{persisted.SchemaName}' ({persisted.SchemaId}) is incompatible with local schema '{local.SchemaName}' ({local.SchemaId}): {string.Join("; ", comparison.Errors)}");
+            }
+
+            var warnings = new List<CultSchemaMigrationWarning>();
+            if (!string.Equals(persisted.SchemaId, local.SchemaId, StringComparison.Ordinal))
+            {
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "compatible_schema_id_drift",
+                    Message = $"Persisted schema '{persisted.SchemaId}' resolved to local schema '{local.SchemaId}'."
+                });
+            }
+
+            if (!string.Equals(persisted.ContentHash, local.ContentHash, StringComparison.Ordinal))
+            {
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "content_hash_drift",
+                    Message = $"Persisted schema content hash '{persisted.ContentHash}' differs from local hash '{local.ContentHash}'."
+                });
+            }
+
+            warnings.AddRange(comparison.Warnings);
+
+            return new CultSchemaResolutionResult(
+                local,
+                new CultSchemaMigrationReport
+                {
+                    PersistedSchemaId = persisted.SchemaId,
+                    LocalSchemaId = local.SchemaId,
+                    PersistedSchemaName = persisted.SchemaName,
+                    LocalSchemaName = local.SchemaName,
+                    Kind = CultSchemaMigrationKind.CompatibleDrift,
+                    IgnoredExtraSlots = comparison.IgnoredExtraSlots.OrderBy(slot => slot).ToArray(),
+                    DefaultedMissingSlots = comparison.DefaultedMissingSlots.OrderBy(slot => slot).ToArray(),
+                    Warnings = warnings.ToArray()
+                });
+        }
+
+        private static SchemaShapeComparison CompareSchemaShapes(CanonicalSchemaShape persisted, CanonicalSchemaShape local)
+        {
+            var errors = new List<string>();
+            var warnings = new List<CultSchemaMigrationWarning>();
+            var ignoredExtraSlots = new List<int>();
+            var defaultedMissingSlots = new List<int>();
+
+            if (!string.Equals(persisted.SchemaName, local.SchemaName, StringComparison.Ordinal))
+            {
+                errors.Add($"schema name drift '{persisted.SchemaName}' -> '{local.SchemaName}'");
+            }
+
+            var persistedBySlot = persisted.Members.ToDictionary(member => member.Slot);
+            var localBySlot = local.Members.ToDictionary(member => member.Slot);
+
+            foreach (var localMember in local.Members.OrderBy(member => member.Slot))
+            {
+                if (!persistedBySlot.TryGetValue(localMember.Slot, out var persistedMember))
+                {
+                    defaultedMissingSlots.Add(localMember.Slot);
+                    warnings.Add(new CultSchemaMigrationWarning
+                    {
+                        Code = "defaulted_missing_slot",
+                        Message = $"Local slot {localMember.Slot} ('{localMember.Name}') is missing from the persisted schema and will use the local default value."
+                    });
+                    continue;
+                }
+
+                if (!string.Equals(localMember.TypeName, persistedMember.TypeName, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed type '{persistedMember.TypeName}' -> '{localMember.TypeName}'");
+                }
+
+                if (localMember.IsReference != persistedMember.IsReference)
+                {
+                    errors.Add($"slot {localMember.Slot} changed reference semantics");
+                }
+
+                if (localMember.IsMany != persistedMember.IsMany)
+                {
+                    errors.Add($"slot {localMember.Slot} changed cardinality");
+                }
+
+                if (!string.Equals(localMember.TargetSchemaName, persistedMember.TargetSchemaName, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed target schema '{persistedMember.TargetSchemaName ?? "<none>"}' -> '{localMember.TargetSchemaName ?? "<none>"}'");
+                }
+
+                if (localMember.IsName != persistedMember.IsName)
+                {
+                    errors.Add($"slot {localMember.Slot} changed name-lookup semantics");
+                }
+
+                if (!string.Equals(localMember.IndexAlias, persistedMember.IndexAlias, StringComparison.Ordinal))
+                {
+                    errors.Add($"slot {localMember.Slot} changed index alias '{persistedMember.IndexAlias ?? "<none>"}' -> '{localMember.IndexAlias ?? "<none>"}'");
+                }
+            }
+
+            foreach (var persistedMember in persisted.Members.OrderBy(member => member.Slot))
+            {
+                if (localBySlot.ContainsKey(persistedMember.Slot))
+                {
+                    continue;
+                }
+
+                ignoredExtraSlots.Add(persistedMember.Slot);
+                warnings.Add(new CultSchemaMigrationWarning
+                {
+                    Code = "ignored_extra_slot",
+                    Message = $"Persisted slot {persistedMember.Slot} ('{persistedMember.Name}') is not present locally and will be ignored."
+                });
+            }
+
+            return new SchemaShapeComparison(
+                errors.Count == 0,
+                errors.ToArray(),
+                warnings.ToArray(),
+                ignoredExtraSlots.ToArray(),
+                defaultedMissingSlots.ToArray());
+        }
+
+        private sealed class CanonicalSchemaShape
+        {
+            public CanonicalSchemaShape(string schemaName, string schemaVersion, CanonicalSchemaMember[] members)
+            {
+                SchemaName = schemaName;
+                SchemaVersion = schemaVersion;
+                Members = members;
+            }
+
+            public string SchemaName { get; }
+
+            public string SchemaVersion { get; }
+
+            public CanonicalSchemaMember[] Members { get; }
+        }
+
+        private sealed class CanonicalSchemaMember
+        {
+            public CanonicalSchemaMember(
+                int slot,
+                string name,
+                string typeName,
+                bool isReference,
+                bool isMany,
+                string? targetSchemaName,
+                bool isName,
+                string? indexAlias)
+            {
+                Slot = slot;
+                Name = name;
+                TypeName = typeName;
+                IsReference = isReference;
+                IsMany = isMany;
+                TargetSchemaName = targetSchemaName;
+                IsName = isName;
+                IndexAlias = indexAlias;
+            }
+
+            public int Slot { get; }
+
+            public string Name { get; }
+
+            public string TypeName { get; }
+
+            public bool IsReference { get; }
+
+            public bool IsMany { get; }
+
+            public string? TargetSchemaName { get; }
+
+            public bool IsName { get; }
+
+            public string? IndexAlias { get; }
+        }
+
+        private sealed class SchemaShapeComparison
+        {
+            public SchemaShapeComparison(
+                bool isCompatible,
+                string[] errors,
+                CultSchemaMigrationWarning[] warnings,
+                int[] ignoredExtraSlots,
+                int[] defaultedMissingSlots)
+            {
+                IsCompatible = isCompatible;
+                Errors = errors;
+                Warnings = warnings;
+                IgnoredExtraSlots = ignoredExtraSlots;
+                DefaultedMissingSlots = defaultedMissingSlots;
+            }
+
+            public bool IsCompatible { get; }
+
+            public string[] Errors { get; }
+
+            public CultSchemaMigrationWarning[] Warnings { get; }
+
+            public int[] IgnoredExtraSlots { get; }
+
+            public int[] DefaultedMissingSlots { get; }
+        }
+
+        private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
+        {
+            var members = new List<PersistedMember>();
+
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (IsIgnored(field))
+                {
+                    continue;
+                }
+
+                members.Add(PersistedMember.FromMember(field, field.FieldType, value => field.GetValue(value), GetKeyValue(field)));
+            }
+
+            foreach (var property in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (property.GetMethod == null || property.SetMethod == null || IsIgnored(property))
+                {
+                    continue;
+                }
+
+                members.Add(PersistedMember.FromMember(property, property.PropertyType, value => property.GetValue(value), GetKeyValue(property)));
+            }
+
+            var explicitMembers = members.Where(member => member.ExplicitSlot.HasValue).OrderBy(member => member.ExplicitSlot.GetValueOrDefault()).ToArray();
+            var implicitMembers = members.Where(member => !member.ExplicitSlot.HasValue).OrderBy(member => member.MetadataToken).ToArray();
+            var assigned = new List<PersistedMember>(members.Count);
+            var nextSlot = explicitMembers.Length == 0 ? 0 : explicitMembers.Max(member => member.ExplicitSlot.GetValueOrDefault()) + 1;
+
+            foreach (var member in explicitMembers)
+            {
+                member.Slot = member.ExplicitSlot.GetValueOrDefault();
+                assigned.Add(member);
+            }
+
+            foreach (var member in implicitMembers)
+            {
+                member.Slot = nextSlot++;
+                assigned.Add(member);
+            }
+
+            return assigned.OrderBy(member => member.Slot).ToArray();
+        }
+
+        private static bool IsIgnored(MemberInfo member)
+        {
+            return member.GetCustomAttributes().Any(attribute =>
+            {
+                var name = attribute.GetType().FullName;
+                return name == "MessagePack.IgnoreMemberAttribute";
+            });
+        }
+
+        private static int? GetKeyValue(MemberInfo member)
+        {
+            foreach (var attribute in member.GetCustomAttributes())
+            {
+                var name = attribute.GetType().FullName;
+                if (name == "MessagePack.KeyAttribute")
+                {
+                    var property = attribute.GetType().GetProperty("IntKey");
+                    if (property?.GetValue(attribute) is int intKey)
+                    {
+                        return intKey;
+                    }
+
+                    var ctorArg = attribute.GetType().GetProperty("StringKey");
+                    if (ctorArg?.GetValue(attribute) is string)
+                    {
+                        return null;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string Sha256(string input)
+        {
+            using var sha = SHA256.Create();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
+            return "sha256:" + BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
+        }
+
+        private sealed class PersistedMember
+        {
+            public MemberInfo Member { get; set; } = default!;
+            public Type MemberType { get; set; } = default!;
+            public int MetadataToken { get; set; }
+            public int? ExplicitSlot { get; set; }
+            public int Slot { get; set; }
+            public bool IsName { get; set; }
+            public string? IndexAlias { get; set; }
+            public bool IsReference { get; set; }
+            public bool IsMany { get; set; }
+            public string? TargetSchemaName { get; set; }
+            public Func<object, string> Getter { get; set; } = default!;
+            public Func<object, string?> GetterNullable { get; set; } = default!;
+
+            public static PersistedMember FromMember(
+                MemberInfo member,
+                Type memberType,
+                Func<object, object?> getValue,
+                int? explicitSlot)
+            {
+                var referenceAttribute = member.GetCustomAttribute<CultReferenceAttribute>();
+                var targetType = ResolveReferenceTarget(memberType, referenceAttribute?.TargetType);
+                var targetSchemaName = targetType?.GetCustomAttribute<CultDocumentAttribute>()?.SchemaName;
+                return new PersistedMember
+                {
+                    Member = member,
+                    MemberType = memberType,
+                    MetadataToken = member.MetadataToken,
+                    ExplicitSlot = explicitSlot,
+                    Slot = explicitSlot ?? -1,
+                    IsName = member.GetCustomAttribute<CultNameAttribute>() != null,
+                    IndexAlias = ResolveIndexAlias(member),
+                    IsReference = targetType != null || referenceAttribute != null,
+                    IsMany = referenceAttribute?.Many ?? false,
+                    TargetSchemaName = targetSchemaName,
+                    Getter = document => getValue(document)?.ToString() ?? string.Empty,
+                    GetterNullable = document => getValue(document)?.ToString()
+                };
+            }
+
+            private static string? ResolveIndexAlias(MemberInfo member)
+            {
+                var indexAttribute = member.GetCustomAttribute<CultIndexAttribute>();
+                if (indexAttribute == null)
+                {
+                    return null;
+                }
+
+                return string.IsNullOrWhiteSpace(indexAttribute.Alias)
+                    ? member.Name
+                    : indexAttribute.Alias;
+            }
+
+            private static Type? ResolveReferenceTarget(Type memberType, Type? explicitTarget)
+            {
+                if (explicitTarget != null)
+                {
+                    return explicitTarget;
+                }
+
+                if (memberType.IsGenericType &&
+                    memberType.GetGenericTypeDefinition() == typeof(CultRecordRef<>))
+                {
+                    return memberType.GetGenericArguments()[0];
+                }
+
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// In-memory document cache with pluggable persisted backing stores.
+    /// </summary>
+    public sealed class CultCache : IDisposable
+    {
+        private readonly CultDocumentRegistry _registry;
+        private readonly List<CacheBackingStore> _backingStores = new();
+        private readonly ConcurrentDictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, string>> _nameMaps = new();
+        private readonly ConcurrentDictionary<(Type Type, string Alias), ConcurrentDictionary<string, string>> _indexMaps = new();
+        private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
+        private readonly ConditionalWeakTable<object, DocumentHandleBox> _documentHandles = new();
+        private ILogger _logger = new NullLogger();
+        private bool _hasUnflushedMutations;
+
+        /// <summary>
+        /// Creates a cache using the supplied document registry or the shared registry.
+        /// </summary>
+        public CultCache(CultDocumentRegistry? registry = null)
+        {
+            _registry = registry ?? CultDocumentRegistry.Shared;
+            InitializeGlobals();
+        }
+
+        /// <summary>
+        /// Gets or sets the cache logger.
         /// </summary>
         public ILogger Logger
         {
@@ -89,1098 +1181,803 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Gets all <see cref="DatabaseEntry"/> objects currently stored in the cache.
+        /// Gets whether the cache currently holds unflushed mutations in any attached backing store or only in memory.
         /// </summary>
-        public IEnumerable<DatabaseEntry> AllEntries => _entries.Values;
+        public bool IsDirty => _hasUnflushedMutations || _backingStores.Any(store => store.IsDirty);
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="CultCache"/> class.
-        /// Sets up the cache by registering all child classes of <see cref="DatabaseEntry"/>.
-        /// For each child type:
-        /// <list type="bullet">
-        /// <item>Adds a concurrent hash set for caching entries of that type.</item>
-        /// <item>If the type is marked with <see cref="GlobalSettingsAttribute"/>, adds it to the global settings and creates an instance.</item>
-        /// <item>If the type implements <see cref="INamedEntry"/>, initializes a name-to-ID mapping dictionary.</item>
-        /// </list>
-        /// Also sets the static cache reference in <see cref="DatabaseLinkBase"/>.
+        /// Gets the UTC timestamp of the last successful flush across all attached backing stores.
         /// </summary>
-        public CultCache()
-        {
-            DatabaseLinkBase.Cache = this;
-
-            foreach (var type in typeof(DatabaseEntry).GetAllChildClasses())
-            {
-                _types.TryAdd(type, new ConcurrentHashSet<DatabaseEntry>());
-                if (type.GetCustomAttribute<GlobalSettingsAttribute>() != null)
-                {
-                    _globals.TryAdd(type, null);
-                    try
-                    {
-                        var global = (DatabaseEntry)Activator.CreateInstance(type)!;
-                        AddAsync(global).GetAwaiter().GetResult();
-                        _globals[type] = global;  // Update after successful add
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogError($"Failed to initialize global {type.Name}: {ex.Message}");
-                        _globals[type] = null;
-                    }
-                }
-                // Initialize name-to-ID map for INamedEntry types
-                if (typeof(INamedEntry).IsAssignableFrom(type))
-                {
-                    _nameToIdMap.TryAdd(type, new ConcurrentDictionary<string, Guid>());
-                }
-            }
-        }
+        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; private set; }
 
         /// <summary>
-        /// Adds a backing store to the cache system and configures domain type associations and event subscriptions.
+        /// Gets or sets whether disposing the cache should flush attached dirty backing stores first.
         /// </summary>
-        /// <param name="store">The <see cref="CacheBackingStore"/> instance to add.</param>
-        /// <param name="domain">
-        /// Optional array of <see cref="Type"/> objects representing domain types associated with the backing store.
-        /// If provided, the store is mapped to these types; otherwise, the store is added to the general backing store list and subscribes to existing stores.
-        /// </param>
-        /// <remarks>
-        /// <para>
-        /// If no domain types are specified, the store subscribes to all existing backing stores to receive their updates,
-        /// ensuring synchronization across stores, with the first store added acting as the primary source of truth.
-        /// </para>
-        /// <para>
-        /// Specifying domain types allows for targeted storage and retrieval of specific <see cref="DatabaseEntry"/> types,
-        /// for example, using a database store for user data and a file-based store for configuration data or game assets.
-        /// </para>
-        /// </remarks>
-        public void AddBackingStore(CacheBackingStore store, params Type[] domain)
-        {
-            if (domain.Length > 0)
-            {
-                _storeTypes.TryAdd(store, domain);
-                foreach (var t in domain) _typeStores.TryAdd(t, store);
-            }
-            else
-            {
-                foreach (var existingStore in _backingStores) store.SubscribeTo(existingStore);
-                _backingStores.Add(store);
-            }
-            store.EntryAdded.Subscribe(entry => TrackStoreOperation(async () =>
-            {
-                try // Try-catch logs without swallowing. Added to EntryDeleted for consistency (even though sync)
-                {
-                    await AddAsync(entry, store);
-                    OnUpdate?.Invoke(null, entry);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError($"EntryAdded processing failed for {entry?.ID}: {ex.Message}");
-                }
-            }));
-            store.EntryUpdated.Subscribe(entry => TrackStoreOperation(async () =>
-            {
-                try
-                {
-                    await AddAsync(entry, store);
-                    OnUpdate?.Invoke(entry, entry);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError($"EntryUpdated processing failed for {entry?.ID}: {ex.Message}");
-                }
-            }));
-            store.EntryDeleted.Subscribe(entry => TrackStoreOperation(() =>
-            {
-                try
-                {
-                    Remove(entry, store);
-                    OnUpdate?.Invoke(entry, null);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError($"EntryDeleted processing failed for {entry?.ID}: {ex.Message}");
-                }
+        public bool FlushAttachedStoresOnDispose { get; set; }
 
-                return Task.CompletedTask;
-            }));
+        /// <summary>
+        /// Raised when a backing store adds, updates, or removes a document.
+        /// </summary>
+        public event Action<object?, object?>? OnUpdate;
+
+        /// <summary>
+        /// Gets attached backing stores in registration order.
+        /// </summary>
+        public IReadOnlyList<CacheBackingStore> BackingStores => _backingStores;
+
+        /// <summary>
+        /// Gets all document instances currently held by the cache.
+        /// </summary>
+        public IEnumerable<object> AllEntries => _entries.Values.Select(entry => entry.Document);
+
+        /// <summary>
+        /// Gets the document registry used by this cache.
+        /// </summary>
+        public CultDocumentRegistry Registry => _registry;
+
+        /// <summary>
+        /// Attaches a backing store to this cache.
+        /// </summary>
+        public void AddBackingStore(CacheBackingStore store)
+        {
+            if (store == null) throw new ArgumentNullException(nameof(store));
+            store.AttachRegistry(_registry);
             store.Logger = Logger;
+            store.EntryAdded.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
+            store.EntryUpdated.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
+            store.EntryDeleted.Subscribe(entry => RemoveStoredDocumentInternal(entry, store, raiseUpdate: true));
+
+            foreach (var entry in _entries.Values.OrderBy(entry => entry.Key.Value, StringComparer.Ordinal))
+            {
+                store.Push(entry);
+            }
+
+            _backingStores.Add(store);
         }
-        
+
         /// <summary>
-        /// Asynchronously pulls all data from the backing stores.
-        /// Initiates parallel tasks to execute the <c>PullAll</c> method on each backing store and store type,
-        /// and waits for all tasks to complete.
+        /// Pulls all documents from every attached backing store.
         /// </summary>
-        /// <returns>A task that represents the asynchronous operation.</returns>
         public async Task PullAllBackingStoresAsync()
         {
-            var tasks = _backingStores.Select(store => Task.Run(store.PullAll))
-                .Concat(_storeTypes.Keys.Select(store => Task.Run(store.PullAll)))
-                .ToArray();
-            await Task.WhenAll(tasks);
-            await WaitForPendingStoreOperationsAsync();
-        }
-
-        /// <summary>
-        /// Adds a <see cref="DatabaseEntry"/> to the cache asynchronously, updating all relevant maps and indexes.
-        /// If the entry already exists, cleans up old mappings before updating.
-        /// Also persists the entry to the backing store if available.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to add or update in the cache.</param>
-        /// <param name="source">
-        /// The <see cref="CacheBackingStore"/> source from which the entry originated, used internally to avoid redundant writes.
-        /// Optional; defaults to <c>null</c>.
-        /// </param>
-        /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
-        public async Task AddAsync(DatabaseEntry entry, CacheBackingStore? source = null)
-        {
-            if (entry == null) return;
-
-            var type = entry.GetType();
-
-            try
+            foreach (var store in _backingStores)
             {
-                if (_typeStores.TryGetValue(type, out var store))
-                {
-                    if (store != source)
-                        await Task.Run(() => store.Push(entry));
-                }
-                else if (_backingStores.Any() && _backingStores.First() != source)
-                {
-                    await Task.Run(() => _backingStores.First().Push(entry));
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Failed to persist entry {entry.ID}: {ex.Message}");
-                throw;
+                store.PullAll();
             }
 
-            // Pre-fetch existing to detect updates (for map/index cleanup)
-            if (!_entries.TryGetValue(entry.ID, out var existing)) existing = null;
-
-            // Cleanup old maps/indexes BEFORE updating _entries
-            if (existing != null)
-            {
-                // For name map (if updating existing)
-                if (existing is INamedEntry existingNamed && _nameToIdMap.TryGetValue(type, out var nameMap))
-                {
-                    nameMap.TryRemove(existingNamed.EntryName, out _);
-                }
-
-                // For generic indexes (if registered)
-                if (_typeToGetters.TryGetValue(type, out var getters))
-                {
-                    foreach (var (fieldName, getter) in getters)
-                    {
-                        var oldValue = getter(existing);
-                        if (!string.IsNullOrEmpty(oldValue))
-                        {
-                            var indexKey = (type, fieldName);
-                            _indexes[indexKey].TryRemove(oldValue, out _);
-                        }
-                    }
-                }
-                
-                // For type sets
-                _types[existing.GetType()].TryRemove(existing);
-                foreach (var parentType in existing.GetType().GetParentTypes())
-                {
-                    if (_types.TryGetValue(parentType, out var typeSet))
-                        typeSet.TryRemove(existing);
-                }
-            }
-
-            _entries[entry.ID] = entry;
-            _types[type].Add(entry);  // Assumes exists; throws if not (edge case)
-            foreach (var parentType in type.GetParentTypes())
-            {
-                if (_types.TryGetValue(parentType, out var typeSet))
-                    typeSet.Add(entry);
-            }
-
-            if (_globals.ContainsKey(type))
-            {
-                _globals.AddOrUpdate(type, entry, (_, old) => entry);
-            }
-
-            // Add new values (always, for both new and updates)
-            // Update name-to-ID map if INamedEntry
-            if (entry is INamedEntry namedEntry && _nameToIdMap.TryGetValue(type, out var nameMap2))
-            {
-                nameMap2[namedEntry.EntryName] = entry.ID;
-            }
-
-            // Update generic indexes if registered for this type
-            if (_typeToGetters.TryGetValue(type, out var getters2))
-            {
-                foreach (var (fieldName, getter) in getters2)
-                {
-                    var value = getter(entry);
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        var indexKey = (type, fieldName);
-                        _indexes[indexKey][value] = entry.ID;
-                    }
-                }
-            }
-
+            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+            await Task.CompletedTask;
         }
 
         /// <summary>
-        /// Determines whether the specified <see cref="DatabaseEntry"/> is a global settings entry.
+        /// Flushes all attached backing stores.
         /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to check.</param>
-        /// <returns><c>true</c> if the entry is global; otherwise, <c>false</c>.</returns>
-        public bool IsGlobal(DatabaseEntry entry) => _globals.ContainsKey(entry.GetType());
-
-        /// <summary>
-        /// Adds all <see cref="DatabaseEntry"/> objects from the specified collection to the cache asynchronously.
-        /// </summary>
-        /// <param name="entries">The collection of <see cref="DatabaseEntry"/> objects to add.</param>
-        /// <param name="source">
-        /// The <see cref="CacheBackingStore"/> source from which the entries originated, used to avoid redundant writes.
-        /// Optional; defaults to <c>null</c>.
-        /// </param>
-        /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
-        public Task AddAllAsync(IEnumerable<DatabaseEntry> entries, CacheBackingStore? source = null)
-        {
-            var tasks = entries.Select(entry => AddAsync(entry, source)).ToArray();
-            return Task.WhenAll(tasks);
-        }
-
-        /// <summary>
-        /// Retrieves a <see cref="DatabaseEntry"/> from the cache by its unique <see cref="Guid"/> identifier.
-        /// </summary>
-        /// <param name="guid">The unique identifier of the entry to retrieve.</param>
-        /// <returns>The <see cref="DatabaseEntry"/> associated with the specified <see cref="Guid"/>, or <c>null</c> if not found.</returns>
-        public DatabaseEntry Get(Guid guid)
-        {
-            _entries.TryGetValue(guid, out var entry);
-            return entry;
-        }
-
-        /// <summary>
-        /// Retrieves a <see cref="DatabaseEntry"/> of type <typeparamref name="T"/> from the cache by its unique <see cref="Guid"/> identifier.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> to retrieve.</typeparam>
-        /// <param name="guid">The unique identifier of the entry to retrieve.</param>
-        /// <returns>The entry of type <typeparamref name="T"/> associated with the specified <see cref="Guid"/>, or <c>null</c> if not found or not of type <typeparamref name="T"/>.</returns>
-        public T? Get<T>(Guid guid) where T : DatabaseEntry
-        {
-            return Get(guid) as T;
-        }
-
-        /// <summary>
-        /// Retrieves the global <see cref="DatabaseEntry"/> instance for the specified type, if it exists.
-        /// </summary>
-        /// <param name="type">The type of the global entry to retrieve.</param>
-        /// <returns>The global <see cref="DatabaseEntry"/> instance associated with the specified type, or <c>null</c> if not found.</returns>
-        public DatabaseEntry? GetGlobal(Type type)
-        {
-            _globals.TryGetValue(type, out var entry);
-            return entry;
-        }
-
-        /// <summary>
-        /// Retrieves the global <see cref="DatabaseEntry"/> instance of type <typeparamref name="T"/>, if it exists.
-        /// </summary>
-        /// <typeparam name="T">The type of the global entry to retrieve.</typeparam>
-        /// <returns>The global entry of type <typeparamref name="T"/>, or <c>null</c> if not found.</returns>
-        public T? GetGlobal<T>() where T : DatabaseEntry
-        {
-            return GetGlobal(typeof(T)) as T;
-        }
-
-        /// <summary>
-        /// Retrieves all <see cref="DatabaseEntry"/> objects of the specified type from the cache.
-        /// </summary>
-        /// <param name="type">The type of <see cref="DatabaseEntry"/> to retrieve.</param>
-        /// <returns>An enumerable collection of <see cref="DatabaseEntry"/> objects of the specified type.</returns>
-        public IEnumerable<DatabaseEntry> GetAll(Type type)
-        {
-            return _types.TryGetValue(type, out var entries) ? entries : Enumerable.Empty<DatabaseEntry>();
-        }
-
-        /// <summary>
-        /// Retrieves all <see cref="DatabaseEntry"/> objects of type <typeparamref name="T"/> from the cache.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> to retrieve.</typeparam>
-        /// <returns>An enumerable collection of <typeparamref name="T"/> objects from the cache.</returns>
-        public IEnumerable<T> GetAll<T>() where T : DatabaseEntry
-        {
-            return _types.TryGetValue(typeof(T), out var entries) ? entries.Cast<T>() : Enumerable.Empty<T>();
-        }
-        
-        /// <summary>
-        /// Retrieves the unique identifier (<see cref="Guid"/>) of an entry of type <typeparamref name="T"/> by its name.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> that implements <see cref="INamedEntry"/>.</typeparam>
-        /// <param name="name">The name of the entry to look up.</param>
-        /// <returns>The <see cref="Guid"/> of the entry if found; otherwise, <c>null</c>.</returns>
-        public Guid? GetIdByName<T>(string name) where T : DatabaseEntry, INamedEntry
-        {
-            var type = typeof(T);
-            if (_nameToIdMap.TryGetValue(type, out var nameMap) && nameMap.TryGetValue(name, out var id))
-                return id;
-            return null;
-        }
-
-        /// <summary>
-        /// Retrieves an entry of type <typeparamref name="T"/> by its name from the cache.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> that implements <see cref="INamedEntry"/>.</typeparam>
-        /// <param name="name">The name of the entry to retrieve.</param>
-        /// <returns>The entry of type <typeparamref name="T"/> if found; otherwise, <c>null</c>.</returns>
-        public T? GetByName<T>(string name) where T : DatabaseEntry, INamedEntry
-        {
-            return GetIdByName<T>(name) is { } id ? Get<T>(id) : null;
-        }
-        
-        /// <summary>
-        /// Registers an index for a public member (field or property) of the specified <see cref="DatabaseEntry"/> type.
-        /// This enables fast lookup of entries by the value of the indexed member.
-        /// Call this method once per member to be indexed.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> for which to register the index.</typeparam>
-        /// <param name="memberName">The name of the public member to index.</param>
-        /// <exception cref="ArgumentException">Thrown if the specified member does not exist on the type.</exception>
-        public void RegisterIndex<T>(string memberName) where T : DatabaseEntry
-        {
-            var type = typeof(T);
-            var key = (type, memberName);
-            if (_indexes.ContainsKey(key))
-                return;  // Already registered; ignore
-
-            _indexes[key] = new ConcurrentDictionary<string, Guid>();
-
-            // Cache a getter func for perf.
-            if (type.GetField(memberName) is { } field)
-            {
-                var getter = (Func<DatabaseEntry, string>)(entry => field.GetValue(entry)?.ToString() ?? string.Empty);
-                _typeToGetters.AddOrUpdate(type,
-                    _ => new List<(string, Func<DatabaseEntry, string>)> { (memberName, getter) },
-                    (_, list) => { list.Add((memberName, getter)); return list; });
-            }
-            else if (type.GetProperty(memberName) is { } property)
-            {
-                var getter = (Func<DatabaseEntry, string>)(entry => property.GetValue(entry)?.ToString() ?? string.Empty);
-                _typeToGetters.AddOrUpdate(type,
-                    _ => new List<(string, Func<DatabaseEntry, string>)> { (memberName, getter) },
-                    (_, list) => { list.Add((memberName, getter)); return list; });
-            }
-            else
-            {
-                throw new ArgumentException($"No public field or property '{memberName}' on {type.Name}");
-            }
-        }
-
-        /// <summary>
-        /// Retrieves the unique identifier (<see cref="Guid"/>) of an entry of type <typeparamref name="T"/> by the value of an indexed field.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> for which the index is registered.</typeparam>
-        /// <param name="fieldName">The name of the indexed field.</param>
-        /// <param name="value">The value of the indexed field to look up.</param>
-        /// <returns>The <see cref="Guid"/> of the entry if found; otherwise, <c>null</c>.</returns>
-        public Guid? GetIdByIndex<T>(string fieldName, string value) where T : DatabaseEntry
-        {
-            var key = (typeof(T), fieldName);
-            if (_indexes.TryGetValue(key, out var indexMap) && indexMap.TryGetValue(value, out var id))
-                return id;
-            return null;
-        }
-
-        /// <summary>
-        /// Retrieves an entry of type <typeparamref name="T"/> by the value of an indexed field from the cache.
-        /// </summary>
-        /// <typeparam name="T">The type of <see cref="DatabaseEntry"/> for which the index is registered.</typeparam>
-        /// <param name="fieldName">The name of the indexed field.</param>
-        /// <param name="value">The value of the indexed field to look up.</param>
-        /// <returns>The entry of type <typeparamref name="T"/> if found; otherwise, <c>null</c>.</returns>
-        public T? GetByIndex<T>(string fieldName, string value) where T : DatabaseEntry
-        {
-            return GetIdByIndex<T>(fieldName, value) is { } id ? Get<T>(id) : null;
-        }
-        
-        /// <summary>
-        /// Removes the specified <see cref="DatabaseEntry"/> from the cache, including all associated indexes, type stores, 
-        /// global references, parent type sets, and name-to-ID mappings.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to remove from the cache.</param>
-        /// <param name="source">
-        /// The <see cref="CacheBackingStore"/> to exclude from deletion. Used internally to avoid redundant deletions when the entry originates from a specific store.
-        /// </param>
-        public void Remove(DatabaseEntry entry, CacheBackingStore? source = null)
-        {
-            var type = entry.GetType();
-            if (!_entries.TryRemove(entry.ID, out _)) return;
-
-            // Clean up type sets
-            _types[type].TryRemove(entry);
-            foreach (var parentType in type.GetParentTypes())
-            {
-                if (_types.TryGetValue(parentType, out var typeSet))
-                    typeSet.TryRemove(entry);
-            }
-
-            // Clean up global if applicable
-            if (_globals.TryGetValue(type, out var global) && global != null && global.Equals(entry)) _globals[type] = null!;
-
-            // Propagate delete to backing stores (except source)
-            if (_typeStores.TryGetValue(type, out var typeStore))
-                typeStore.Delete(entry);
-            else
-            {
-                foreach (var store in _backingStores)
-                {
-                    if (store != source)
-                        store.Delete(entry);
-                }
-            }
-
-            // Clean up name-to-ID map if INamedEntry
-            if (entry is INamedEntry namedEntry && _nameToIdMap.TryGetValue(type, out var nameMap))
-            {
-                nameMap.TryRemove(namedEntry.EntryName, out _);
-            }
-
-            // Clean up generic indexes if registered for this type
-            if (_typeToGetters.TryGetValue(type, out var getters))
-            {
-                foreach (var (fieldName, getter) in getters)
-                {
-                    var value = getter(entry);
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        var indexKey = (type, fieldName);
-                        _indexes[indexKey].TryRemove(value, out _);
-                    }
-                }
-            }
-        }
-        
-        /// <inheritdoc/>
-        public void Dispose()
+        public void FlushAllBackingStores(bool soft = false)
         {
             foreach (var store in _backingStores)
-                if (store is IDisposable d) d.Dispose();
-            foreach (var store in _storeTypes.Keys)
-                if (store is IDisposable d) d.Dispose();
-        }
-
-        private void TrackStoreOperation(Func<Task> operationFactory)
-        {
-            var operationId = Interlocked.Increment(ref _storeOperationId);
-            var operationTask = Task.Run(operationFactory);
-            _pendingStoreOperations[operationId] = operationTask;
-
-            _ = operationTask.ContinueWith(
-                (_, state) => _pendingStoreOperations.TryRemove((long)state!, out _),
-                operationId,
-                TaskScheduler.Default);
-        }
-
-        private async Task WaitForPendingStoreOperationsAsync()
-        {
-            while (true)
             {
-                var pendingOperations = _pendingStoreOperations.Values.ToArray();
-                if (pendingOperations.Length == 0)
-                {
-                    return;
-                }
+                FlushBackingStore(store, soft);
+            }
 
-                await Task.WhenAll(pendingOperations);
+            RecomputeDirtyState();
+            if (!IsDirty)
+            {
+                LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
             }
         }
-    }
 
-    /// <summary>
-    /// Represents a backing store that supports observing real-time changes.
-    /// </summary>
-    public interface IRealtimeBackingStore
-    {
         /// <summary>
-        /// Begins observing real-time changes in the backing store and triggers appropriate events when changes occur.
+        /// Flushes all attached backing stores.
         /// </summary>
-        public void ObserveChanges();
+        public Task FlushAsync(bool soft = false)
+        {
+            FlushAllBackingStores(soft);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Flushes one attached backing store.
+        /// </summary>
+        public void FlushBackingStore(CacheBackingStore store, bool soft = false)
+        {
+            if (store == null) throw new ArgumentNullException(nameof(store));
+            if (!_backingStores.Contains(store))
+            {
+                throw new InvalidOperationException("Backing store is not attached to this cache.");
+            }
+
+            store.PushAll(soft);
+            RecomputeDirtyState();
+            if (!store.IsDirty)
+            {
+                LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
+            }
+        }
+
+        /// <summary>
+        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
+        /// </summary>
+        public void PrepareForReloadOrShutdown(bool soft = false)
+        {
+            FlushAllBackingStores(soft);
+        }
+
+        /// <summary>
+        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
+        /// </summary>
+        public Task PrepareForReloadOrShutdownAsync(bool soft = false)
+        {
+            PrepareForReloadOrShutdown(soft);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Adds or replaces a typed document and returns its record handle.
+        /// </summary>
+        public async Task<CultRecordHandle<T>> AddAsync<T>(T document, CultRecordHandle<T>? handle = null)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            var stored = await AddStoredDocumentInternal(
+                CreateStoredDocument(typeof(T), document, handle?.Key),
+                source: null,
+                raiseUpdate: false);
+            return new CultRecordHandle<T>(stored.Key);
+        }
+
+        /// <summary>
+        /// Adds or replaces a typed document and returns its record handle.
+        /// </summary>
+        public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
+        {
+            return AddAsync(document, handle);
+        }
+
+        /// <summary>
+        /// Gets the record handle for a document instance, if it is tracked.
+        /// </summary>
+        public CultRecordHandle<T>? TryGetHandle<T>(T document)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            return _documentHandles.TryGetValue(document, out var box)
+                ? new CultRecordHandle<T>(box.Key)
+                : null;
+        }
+
+        /// <summary>
+        /// Gets a document by record key.
+        /// </summary>
+        public object? Get(CultRecordKey key)
+        {
+            return _entries.TryGetValue(key.Value, out var stored)
+                ? stored.Document
+                : null;
+        }
+
+        /// <summary>
+        /// Gets a typed document by record key.
+        /// </summary>
+        public T? Get<T>(CultRecordKey key) where T : class
+        {
+            return Get(key) as T;
+        }
+
+        /// <summary>
+        /// Tries to get a typed document by record key.
+        /// </summary>
+        public bool TryGet<T>(CultRecordKey key, out T? document) where T : class
+        {
+            document = Get<T>(key);
+            return document != null;
+        }
+
+        /// <summary>
+        /// Gets all cached documents assignable to the requested type.
+        /// </summary>
+        public IEnumerable<T> GetAll<T>() where T : class
+        {
+            var type = typeof(T);
+            return _entries.Values
+                .Where(entry => type.IsAssignableFrom(entry.Descriptor.DocumentType))
+                .Select(entry => (T)entry.Document);
+        }
+
+        /// <summary>
+        /// Gets the global document for the requested type, if one exists.
+        /// </summary>
+        public T? GetGlobal<T>() where T : class
+        {
+            return _globalKeys.TryGetValue(typeof(T), out var key)
+                ? Get<T>(new CultRecordKey(key))
+                : null;
+        }
+
+        /// <summary>
+        /// Gets a typed document by its CultName value.
+        /// </summary>
+        public T? GetByName<T>(string name) where T : class
+        {
+            var type = typeof(T);
+            if (_nameMaps.TryGetValue(type, out var map) &&
+                map.TryGetValue(name, out var key))
+            {
+                return Get<T>(new CultRecordKey(key));
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Tries to get a typed document by its CultName value.
+        /// </summary>
+        public bool TryGetByName<T>(string name, out T? document) where T : class
+        {
+            document = GetByName<T>(name);
+            return document != null;
+        }
+
+        /// <summary>
+        /// Gets a typed document by an indexed value.
+        /// </summary>
+        public T? GetByIndex<T>(string alias, string value) where T : class
+        {
+            if (_indexMaps.TryGetValue((typeof(T), alias), out var map) &&
+                map.TryGetValue(value, out var key))
+            {
+                return Get<T>(new CultRecordKey(key));
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Tries to get a typed document by an indexed value.
+        /// </summary>
+        public bool TryGetByIndex<T>(string alias, string value, out T? document) where T : class
+        {
+            document = GetByIndex<T>(alias, value);
+            return document != null;
+        }
+
+        /// <summary>
+        /// Resolves a typed document reference against this cache.
+        /// </summary>
+        public T? Resolve<T>(CultRecordRef<T> reference) where T : class
+        {
+            return Get<T>(reference.Key);
+        }
+
+        /// <summary>
+        /// Removes a document by typed handle.
+        /// </summary>
+        public void Remove<T>(CultRecordHandle<T> handle)
+        {
+            if (_entries.TryGetValue(handle.Key.Value, out var stored))
+            {
+                RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
+            }
+        }
+
+        /// <summary>
+        /// Removes a document by typed handle.
+        /// </summary>
+        public Task DeleteAsync<T>(CultRecordHandle<T> handle)
+        {
+            Remove(handle);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Disposes attached disposable backing stores.
+        /// </summary>
+        public void Dispose()
+        {
+            if (FlushAttachedStoresOnDispose && IsDirty)
+            {
+                FlushAllBackingStores();
+            }
+
+            foreach (var store in _backingStores.OfType<IDisposable>())
+            {
+                store.Dispose();
+            }
+        }
+
+        internal CultStoredDocument CreateStoredDocument(Type documentType, object document, CultRecordKey? key = null, string? storedAt = null)
+        {
+            var descriptor = _registry.GetRequired(documentType);
+            var resolvedKey = key ?? ResolveKey(document, descriptor);
+            return new CultStoredDocument(
+                resolvedKey,
+                storedAt ?? DateTimeOffset.UtcNow.ToString("O"),
+                descriptor,
+                document);
+        }
+
+        private async Task<CultStoredDocument> AddStoredDocumentInternal(
+            CultStoredDocument stored,
+            CacheBackingStore? source,
+            bool raiseUpdate)
+        {
+            CultStoredDocument? existing = null;
+            _entries.TryGetValue(stored.Key.Value, out existing);
+            if (existing != null)
+            {
+                RemoveIndexes(existing);
+            }
+
+            _entries[stored.Key.Value] = stored;
+            _documentHandles.Remove(stored.Document);
+            _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
+            AddIndexes(stored);
+
+            foreach (var store in _backingStores)
+            {
+                if (store != source)
+                {
+                    store.Push(stored);
+                }
+            }
+
+            if (source == null)
+            {
+                _hasUnflushedMutations = true;
+            }
+            else
+            {
+                RecomputeDirtyState();
+            }
+
+            if (raiseUpdate)
+            {
+                OnUpdate?.Invoke(existing?.Document, stored.Document);
+            }
+
+            await Task.CompletedTask;
+            return stored;
+        }
+
+        private void RemoveStoredDocumentInternal(
+            CultStoredDocument stored,
+            CacheBackingStore? source,
+            bool raiseUpdate)
+        {
+            if (!_entries.TryRemove(stored.Key.Value, out var existing))
+            {
+                return;
+            }
+
+            RemoveIndexes(existing);
+            _documentHandles.Remove(existing.Document);
+
+            foreach (var store in _backingStores)
+            {
+                if (store != source)
+                {
+                    store.Delete(existing);
+                }
+            }
+
+            if (source == null)
+            {
+                _hasUnflushedMutations = true;
+            }
+            else
+            {
+                RecomputeDirtyState();
+            }
+
+            if (raiseUpdate)
+            {
+                OnUpdate?.Invoke(existing.Document, null);
+            }
+        }
+
+        private void InitializeGlobals()
+        {
+            foreach (var descriptor in _registry.AllDescriptors.Where(candidate => candidate.IsGlobal))
+            {
+                if (descriptor.DocumentType.GetConstructor(Type.EmptyTypes) == null)
+                {
+                    continue;
+                }
+
+                var instance = Activator.CreateInstance(descriptor.DocumentType);
+                if (instance == null)
+                {
+                    continue;
+                }
+
+                AddStoredDocumentInternal(
+                    new CultStoredDocument(
+                        new CultRecordKey($"global:{descriptor.SchemaId}"),
+                        DateTimeOffset.UtcNow.ToString("O"),
+                        descriptor,
+                        instance),
+                    source: null,
+                    raiseUpdate: false).GetAwaiter().GetResult();
+            }
+        }
+
+        private CultRecordKey ResolveKey(object document, CultDocumentDescriptor descriptor)
+        {
+            if (_documentHandles.TryGetValue(document, out var existing))
+            {
+                return existing.Key;
+            }
+
+            if (descriptor.IsGlobal)
+            {
+                return new CultRecordKey($"global:{descriptor.SchemaId}");
+            }
+
+            return new CultRecordKey(Guid.NewGuid().ToString("N"));
+        }
+
+        private void AddIndexes(CultStoredDocument stored)
+        {
+            if (stored.Descriptor.IsGlobal)
+            {
+                _globalKeys[stored.Descriptor.DocumentType] = stored.Key.Value;
+            }
+
+            if (stored.Descriptor.NameAccessor?.Invoke(stored.Document) is { Length: > 0 } name)
+            {
+                var map = _nameMaps.GetOrAdd(
+                    stored.Descriptor.DocumentType,
+                    _ => new ConcurrentDictionary<string, string>(StringComparer.Ordinal));
+                map[name] = stored.Key.Value;
+            }
+
+            foreach (var pair in stored.Descriptor.IndexAccessors)
+            {
+                var value = pair.Value(stored.Document);
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                var map = _indexMaps.GetOrAdd(
+                    (stored.Descriptor.DocumentType, pair.Key),
+                    _ => new ConcurrentDictionary<string, string>(StringComparer.Ordinal));
+                map[value] = stored.Key.Value;
+            }
+        }
+
+        private void RemoveIndexes(CultStoredDocument stored)
+        {
+            if (stored.Descriptor.IsGlobal)
+            {
+                _globalKeys.TryRemove(stored.Descriptor.DocumentType, out _);
+            }
+
+            if (stored.Descriptor.NameAccessor?.Invoke(stored.Document) is { Length: > 0 } name &&
+                _nameMaps.TryGetValue(stored.Descriptor.DocumentType, out var nameMap))
+            {
+                nameMap.TryRemove(name, out _);
+            }
+
+            foreach (var pair in stored.Descriptor.IndexAccessors)
+            {
+                var value = pair.Value(stored.Document);
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                if (_indexMaps.TryGetValue((stored.Descriptor.DocumentType, pair.Key), out var map))
+                {
+                    map.TryRemove(value, out _);
+                }
+            }
+        }
+
+        private sealed class DocumentHandleBox
+        {
+            public DocumentHandleBox(CultRecordKey key)
+            {
+                Key = key;
+            }
+
+            public CultRecordKey Key { get; }
+        }
+
+        private void RecomputeDirtyState()
+        {
+            _hasUnflushedMutations = _backingStores.Count == 0
+                ? _hasUnflushedMutations
+                : _backingStores.Any(store => store.IsDirty);
+        }
     }
 
     /// <summary>
-    /// Represents an abstract backing store for caching <see cref="DatabaseEntry"/> objects.
-    /// Provides mechanisms for pulling, pushing, deleting, and synchronizing entries, as well as event notifications for entry changes.
+    /// Base class for CultCache persistence adapters.
     /// </summary>
     public abstract class CacheBackingStore : IDisposable
     {
+        private CultDocumentRegistry? _registry;
         private ILogger _logger = new NullLogger();
-        
+        private bool _isDirty;
+        private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
+
         /// <summary>
-        /// Gets or sets the <see cref="ILogger"/> instance used for logging within the cache.
-        /// If set to <c>null</c>, a <see cref="NullLogger"/> will be used as a fallback.
+        /// Gets the attached document registry.
+        /// </summary>
+        protected CultDocumentRegistry Registry =>
+            _registry ?? throw new InvalidOperationException("Backing store is not attached to a CultDocumentRegistry.");
+
+        /// <summary>
+        /// Gets the backing store entries by record key.
+        /// </summary>
+        protected ConcurrentDictionary<string, CultStoredDocument> Entries { get; } =
+            new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Gets or sets the backing store logger.
         /// </summary>
         public ILogger Logger
         {
             get => _logger;
             set => _logger = value ?? new NullLogger();
         }
-        
+
         /// <summary>
-        /// Initializes a new instance of the <see cref="CacheBackingStore"/> class.
-        /// Sets up subjects for entry added, deleted, and updated events.
+        /// Gets whether the backing store holds staged mutations not yet durably flushed.
         /// </summary>
-        protected CacheBackingStore()
+        public bool IsDirty
         {
-            EntryAdded = new Subject<DatabaseEntry>();
-            EntryDeleted = new Subject<DatabaseEntry>();
-            EntryUpdated = new Subject<DatabaseEntry>();
+            get => _isDirty;
+            protected set => _isDirty = value;
         }
 
         /// <summary>
-        /// Pulls all entries from the backing store into the cache.
-        /// Implementations should load all persisted <see cref="DatabaseEntry"/> objects and notify via <see cref="EntryAdded"/>.
+        /// Gets the UTC timestamp of the last successful durable flush.
+        /// </summary>
+        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; protected set; }
+
+        /// <summary>
+        /// Gets or sets whether disposing the backing store should flush staged mutations first.
+        /// </summary>
+        public bool FlushOnDispose { get; set; }
+
+        /// <summary>
+        /// Gets schema migration reports emitted during the most recent pull.
+        /// </summary>
+        public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
+
+        /// <summary>
+        /// Publishes documents added by the backing store.
+        /// </summary>
+        public Subject<CultStoredDocument> EntryAdded { get; } = new();
+        /// <summary>
+        /// Publishes documents updated by the backing store.
+        /// </summary>
+        public Subject<CultStoredDocument> EntryUpdated { get; } = new();
+        /// <summary>
+        /// Publishes documents deleted by the backing store.
+        /// </summary>
+        public Subject<CultStoredDocument> EntryDeleted { get; } = new();
+
+        internal void AttachRegistry(CultDocumentRegistry registry)
+        {
+            _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        }
+
+        /// <summary>
+        /// Pulls all persisted records into the backing store.
         /// </summary>
         public abstract void PullAll();
         /// <summary>
-        /// Persists the specified <see cref="DatabaseEntry"/> to the backing store.
-        /// Implementations should save or update the entry in the underlying storage.
+        /// Pushes one stored document into the backing store.
         /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to persist.</param>
-        public abstract void Push(DatabaseEntry entry);
+        public abstract void Push(CultStoredDocument entry);
         /// <summary>
-        /// Deletes the specified <see cref="DatabaseEntry"/> from the backing store.
-        /// Implementations should remove the entry from the underlying storage.
+        /// Deletes one stored document from the backing store.
         /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to delete.</param>
-        public abstract void Delete(DatabaseEntry entry);
+        public abstract void Delete(CultStoredDocument entry);
         /// <summary>
-        /// Persists all <see cref="DatabaseEntry"/> objects to the backing store.
-        /// Implementations should save or update all entries in the underlying storage.
+        /// Persists all current backing store entries.
         /// </summary>
-        /// <param name="soft">
-        /// If <c>true</c>, performs a soft push (implementation-specific); otherwise, performs a full push.
-        /// </param>
         public abstract void PushAll(bool soft = false);
-        
         /// <summary>
-        /// Gets the subject that notifies when a <see cref="DatabaseEntry"/> is added to the backing store.
+        /// Releases backing store event subjects.
         /// </summary>
-        public Subject<DatabaseEntry> EntryAdded { get; }
-        /// <summary>
-        /// Gets the subject that notifies when a <see cref="DatabaseEntry"/> is deleted from the backing store.
-        /// </summary>
-        public Subject<DatabaseEntry> EntryDeleted { get; }
-        /// <summary>
-        /// Gets the subject that notifies when a <see cref="DatabaseEntry"/> is updated in the backing store.
-        /// </summary>
-        public Subject<DatabaseEntry> EntryUpdated { get; }
-
-        /// <summary>
-        /// Stores all <see cref="DatabaseEntry"/> objects managed by this backing store, keyed by their unique <see cref="Guid"/> identifier.
-        /// </summary>
-        protected ConcurrentDictionary<Guid, DatabaseEntry> Entries = new();
-
-        /// <summary>
-        /// Subscribes this backing store to the entry events of another <see cref="CacheBackingStore"/>, 
-        /// so that added, deleted, and updated entries in the target store are automatically pushed or deleted in this store.
-        /// </summary>
-        /// <param name="targetStore">The target <see cref="CacheBackingStore"/> to subscribe to.</param>
-        public void SubscribeTo(CacheBackingStore targetStore)
-        {
-            targetStore.EntryAdded.Subscribe(Push);
-            targetStore.EntryDeleted.Subscribe(Delete);
-            targetStore.EntryUpdated.Subscribe(Push);
-        }
-
-        /// <inheritdoc/>
         public virtual void Dispose()
         {
-            EntryAdded?.Dispose();
-            EntryDeleted?.Dispose();
-            EntryUpdated?.Dispose();
-        }
-    }
-    
-    /// <summary>
-    /// An abstract cache backing store that persists <see cref="DatabaseEntry"/> objects as individual files,
-    /// organizing them by entry type in subdirectories under a root directory. Supports real-time change observation
-    /// via <see cref="FileSystemWatcher"/> and provides serialization/deserialization hooks for custom formats.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Each entry type is mapped to its own directory, and entries are stored as files with a configurable extension.
-    /// The class maintains a mapping between file paths and entry IDs for efficient lookup and change tracking.
-    /// </para>
-    /// <para>
-    /// Real-time changes (creation, modification, deletion) to files are observed and propagated to upstream subscribers
-    /// using Rx subjects and debounced event handling.
-    /// </para>
-    /// <para>
-    /// Subclasses must implement <see cref="Serialize(DatabaseEntry)"/>, <see cref="Deserialize(byte[])"/>, and <see cref="Extension"/>
-    /// to define the file format.
-    /// </para>
-    /// </remarks>
-    public abstract class MultiFileBackingStore : CacheBackingStore, IRealtimeBackingStore, IDisposable
-    {
-        /// <summary>
-        /// Gets the root directory where all entry files are stored.
-        /// </summary>
-        public DirectoryInfo RootDirectory { get; }
-        /// <summary>
-        /// Maps each <see cref="DatabaseEntry"/> type to its corresponding subdirectory.
-        /// </summary>
-        protected readonly Dictionary<Type, DirectoryInfo> EntryTypeDirectories = new();
-        /// <summary>
-        /// Maps file paths to their corresponding <see cref="DatabaseEntry"/> IDs for quick lookup during change detection.
-        /// </summary>
-        protected readonly ConcurrentDictionary<string, Guid> _filePathToIdMap = new();
-        private FileSystemWatcher? watcher;
-        private Subject<string>? _changedSubject;
-        private IDisposable? _changedSubscription;
-
-        /// <summary>
-        /// Serializes a <see cref="DatabaseEntry"/> into a byte array for file storage.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to serialize.</param>
-        /// <returns>A byte array representing the serialized entry.</returns>
-        public abstract byte[] Serialize(DatabaseEntry entry);
-        /// <summary>
-        /// Deserializes a byte array into a <see cref="DatabaseEntry"/> object.
-        /// </summary>
-        /// <param name="data">The byte array containing the serialized entry.</param>
-        /// <returns>The deserialized <see cref="DatabaseEntry"/> object.</returns>
-        public abstract DatabaseEntry Deserialize(byte[] data);
-        /// <summary>
-        /// Gets the file extension used for storing entries (e.g., ".json", ".msgpack").
-        /// </summary>
-        public abstract string Extension { get; }
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="MultiFileBackingStore"/> class.
-        /// Creates the root directory if it does not exist and sets up subdirectories for each <see cref="DatabaseEntry"/> child type.
-        /// </summary>
-        /// <param name="path">The path to the root directory for storing entry files.</param>
-        public MultiFileBackingStore(string path)
-        {
-            RootDirectory = new DirectoryInfo(path);
-            foreach (var type in typeof(DatabaseEntry).GetAllChildClasses())
+            if (FlushOnDispose && IsDirty)
             {
-                EntryTypeDirectories[type] = GetDirectoryForType(type);
-            }
-        }
-
-        private DirectoryInfo GetDirectoryForType(Type type)
-        {
-            var stack = new Stack<string>();
-            var t = type;
-            while (t != null && t != typeof(DatabaseEntry))
-            {
-                stack.Push(t.Name);
-                t = t.BaseType;
-            }
-            stack.Push(RootDirectory.FullName);
-            // ToArray() copies in LIFO order (top/first: root, then parents, deepest child last)
-            // Ensures Path.Combine yields: Root\Parent\...\Child
-            return Directory.CreateDirectory(Path.Combine(stack.ToArray()));
-        }
-        
-        /// <summary>
-        /// Loads all <see cref="DatabaseEntry"/> objects from individual files in the root directory and its subdirectories,
-        /// organized by entry type. Each file is deserialized using <see cref="Deserialize(byte[])"/>,
-        /// added to the local <see cref="CacheBackingStore.Entries"/> dictionary, and notifies upstream via <see cref="CacheBackingStore.EntryAdded"/>.
-        /// Skips files that cannot be deserialized, logging errors without failing the entire operation.
-        /// Only processes files matching the <see cref="Extension"/>.
-        /// </summary>
-        public override void PullAll()
-        {
-            if (!RootDirectory.Exists) return;
-
-            foreach (var directory in EntryTypeDirectories.Values)
-            {
-                foreach (var file in directory.EnumerateFiles($"*.{Extension}"))
-                {
-                    try
-                    {
-                        var entry = Deserialize(File.ReadAllBytes(file.FullName));
-                        Entries[entry.ID] = entry;
-                        EntryAdded.OnNext(entry);
-                        _filePathToIdMap[file.FullName] = entry.ID;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogError($"Failed to pull entry from {file.FullName}: {ex.Message}");
-                    }
-                }
-            }
-        }
-
-        private string GetFileName(DatabaseEntry entry)
-        {
-            string name = entry is INamedEntry namedEntry ? namedEntry.EntryName : entry.ID.ToString();
-            // Sanitize to prevent invalid chars/path traversal
-            foreach (char invalid in Path.GetInvalidFileNameChars())
-                name = name.Replace(invalid, '_');
-            return $"{name}.{Extension}";
-        }
-        
-        /// <summary>
-        /// Persists the specified <see cref="DatabaseEntry"/> to a file in the appropriate type subdirectory.
-        /// The file name is generated using <see cref="GetFileName(DatabaseEntry)"/>, which prefers the entry name if available.
-        /// The entry is serialized via <see cref="Serialize(DatabaseEntry)"/> and written to disk.
-        /// Updates the local <see cref="CacheBackingStore.Entries"/> dictionary and the <see cref="_filePathToIdMap"/> for change tracking.
-        /// Logs errors if the write fails but re-throws to allow caller handling.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to persist to a file.</param>
-        public override void Push(DatabaseEntry entry)
-        {
-            var type = entry.GetType();
-            Entries[entry.ID] = entry;
-            var directory = EntryTypeDirectories[type];
-            var filePath = Path.Combine(directory.FullName, GetFileName(entry));
-            if (TryGetExistingPath(entry.ID, out var existingPath) &&
-                !string.Equals(existingPath, filePath, StringComparison.OrdinalIgnoreCase))
-            {
-                TryDeleteFile(existingPath);
-                _filePathToIdMap.TryRemove(existingPath, out _);
+                PushAll();
             }
 
-            WriteAllBytesAtomic(filePath, Serialize(entry));
-            _filePathToIdMap[filePath] = entry.ID;
+            EntryAdded.Dispose();
+            EntryUpdated.Dispose();
+            EntryDeleted.Dispose();
         }
 
         /// <summary>
-        /// Removes the specified <see cref="DatabaseEntry"/> from the local <see cref="CacheBackingStore.Entries"/> dictionary
-        /// and deletes its corresponding file in the type subdirectory.
-        /// Updates the <see cref="_filePathToIdMap"/> and notifies upstream via <see cref="CacheBackingStore.EntryDeleted"/>.
-        /// File deletion failures are logged but do not prevent local removal or notification.
+        /// Converts a stored document into a persisted record.
         /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to delete from storage.</param>
-        public override void Delete(DatabaseEntry entry)
+        protected CultPersistedRecord ToPersistedRecord(CultStoredDocument entry, Func<object, byte[]> serializePayload)
         {
-            if (Entries.ContainsKey(entry.ID))
+            return new CultPersistedRecord
             {
-                Entries.TryRemove(entry.ID, out _);
-                var filePath = TryGetExistingPath(entry.ID, out var existingPath)
-                    ? existingPath
-                    : Path.Combine(EntryTypeDirectories[entry.GetType()].FullName, GetFileName(entry));
-                _filePathToIdMap.TryRemove(filePath, out _);
-                TryDeleteFile(filePath);
-            }
-        }
-
-        /// <summary>
-        /// Persists all entries in <see cref="CacheBackingStore.Entries"/> to their respective files by invoking <see cref="Push(DatabaseEntry)"/> for each.
-        /// The <paramref name="soft"/> parameter is ignored in this implementation, as all pushes are full writes.
-        /// Errors during individual pushes are logged but do not halt the process.
-        /// Suitable for batch synchronization after bulk changes.
-        /// </summary>
-        /// <param name="soft">If <c>true</c>, performs a soft push (not supported; treated as full push).</param>
-        public override void PushAll(bool soft = false)
-        {
-            foreach (var entry in Entries.Values.ToArray()) Push(entry);
-        }
-        
-        /// <summary>
-        /// Starts monitoring the root directory and its subdirectories for file system changes related to entry files.
-        /// Initializes a <see cref="FileSystemWatcher"/> with filters for creation, modification, and deletion events on files matching <see cref="Extension"/>.
-        /// Uses debouncing for change events to handle bursty writes (100ms delay via <see cref="_changedSubject"/> and R3).
-        /// Disposes any existing watcher before creating a new one to prevent duplicates.
-        /// Logs a warning if the root directory does not exist and skips observation.
-        /// Logs info when observation starts successfully.
-        /// Call this method to enable real-time synchronization with external file modifications.
-        /// </summary>
-        public void ObserveChanges()
-        {
-            if (watcher != null) // Guard against re-creation
-                StopObservingChanges();
-
-            watcher = new FileSystemWatcher(RootDirectory.FullName, $"*.{Extension}")
-            {
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName,
-                EnableRaisingEvents = true,
-                IncludeSubdirectories = true
-            };
-
-            // Use R3 to throttle events if file writes are bursty
-            _changedSubject = new Subject<string>();  // For paths
-            _changedSubscription = _changedSubject.Debounce(TimeSpan.FromMilliseconds(100)).Subscribe(HandleFileChange);
-
-            watcher.Changed += (sender, args) =>
-            {
-                _changedSubject.OnNext(args.FullPath);  // Debounced handling
-            };
-            watcher.Created += (sender, args) =>
-            {
-                HandleFileCreation(args.FullPath);
-            };
-            watcher.Deleted += (sender, args) =>
-            {
-                HandleFileRemoval(args.FullPath);
+                Key = entry.Key.Value,
+                SchemaId = entry.Descriptor.SchemaId,
+                StoredAt = entry.StoredAt,
+                Payload = serializePayload(entry.Document)
             };
         }
 
-        private void HandleFileCreation(string fullPath)
+        /// <summary>
+        /// Converts a persisted record into a stored document.
+        /// </summary>
+        protected CultStoredDocument ToStoredDocument(
+            CultPersistedRecord record,
+            IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+            Func<Type, byte[], object> deserializePayload)
         {
-            try
-            {
-                var entry = Deserialize(File.ReadAllBytes(fullPath));
-                Entries[entry.ID] = entry;
-                _filePathToIdMap[fullPath] = entry.ID;
-                EntryAdded.OnNext(entry);  // Upstream notify
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Failed to handle creation of {fullPath}: {ex.Message}");
-            }
+            var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
+            var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
+            return new CultStoredDocument(
+                new CultRecordKey(record.Key),
+                record.StoredAt,
+                resolution.Descriptor,
+                document);
         }
 
-        private void HandleFileChange(string fullPath)
+        /// <summary>
+        /// Records schema migration reports captured during a pull.
+        /// </summary>
+        protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
         {
-            try
-            {
-                var entry = Deserialize(File.ReadAllBytes(fullPath));
-                Entries[entry.ID] = entry;
-                _filePathToIdMap[fullPath] = entry.ID;
-                EntryUpdated.OnNext(entry);  // Upstream notify
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Failed to handle change in {fullPath}: {ex.Message}");
-            }
+            _lastSchemaMigrationReports = reports?.ToArray() ?? Array.Empty<CultSchemaMigrationReport>();
         }
 
-        private void HandleFileRemoval(string fullPath)
+        /// <summary>
+        /// Marks the backing store as durably flushed.
+        /// </summary>
+        protected void MarkFlushSucceeded()
         {
-            try
-            {
-                // External deletion detected—handle without deserializing
-                if (_filePathToIdMap.TryGetValue(fullPath, out var id))
-                {
-                    _filePathToIdMap.TryRemove(fullPath, out _);  // Clean map immediately
-
-                    // Emit delete if we have the entry locally
-                    if (Entries.TryGetValue(id, out var entry))
-                    {
-                        Entries.TryRemove(id, out _);  // Sync local dict
-                        EntryDeleted.OnNext(entry);
-                    }
-                    else
-                    {
-                        // Fallback: Stub if race/removed already (rare)
-                        var type = GetTypeFromPath(fullPath);  // See helper below
-                        var stub = CreateStubEntry(id, type);
-                        EntryDeleted.OnNext(stub);
-                        Logger.LogWarning($"External deletion of {fullPath} (ID: {id}) with no local entry; emitted stub for cleanup.");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Failed to handle deletion of {fullPath}: {ex.Message}");
-            }
-        }
-
-        // Helper: Infer type from path (e.g., based on directory name matching EntryTypeDirectories keys)
-        private Type GetTypeFromPath(string filePath)
-        {
-            var currentDir = new DirectoryInfo(Path.GetDirectoryName(filePath) ?? string.Empty);
-            // Walk up the directory tree to find matching EntryTypeDirectories (handles sub-subdirs)
-            while (currentDir is { Exists: true })
-            {
-                var matchingType = EntryTypeDirectories.FirstOrDefault(kvp => kvp.Value.FullName == currentDir.FullName).Key;
-                if (matchingType != null)
-                    return matchingType;
-                currentDir = currentDir.Parent;  // Walk up (e.g., from "PlayerData/backup" to "PlayerData")
-            }
-            return typeof(DatabaseEntry);  // Fallback if no match (e.g., manual file)
-        }
-
-        // Stub creator (minimal; only for rare fallback—extend if Deletion events need more data)
-        private DatabaseEntry CreateStubEntry(Guid id, Type type)
-        {
-            var entry = type == typeof(DatabaseEntry)
-                ? new DeletedDatabaseEntry()
-                : (DatabaseEntry)Activator.CreateInstance(type)!;
-            typeof(DatabaseEntry).GetField("ID")?.SetValue(entry, id);  // Set ID via reflection
-            return entry;
-        }
-
-        /// <inheritdoc/>
-        public override void Dispose()
-        {
-            StopObservingChanges();
-            base.Dispose();
-        }
-
-        private bool TryGetExistingPath(Guid id, out string path)
-        {
-            foreach (var pair in _filePathToIdMap)
-            {
-                if (pair.Value == id)
-                {
-                    path = pair.Key;
-                    return true;
-                }
-            }
-
-            path = string.Empty;
-            return false;
-        }
-
-        private static void WriteAllBytesAtomic(string filePath, byte[] data)
-        {
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            var tempFilePath = Path.Combine(directory ?? string.Empty, $"{Path.GetFileName(filePath)}.{Guid.NewGuid():N}.tmp");
-            File.WriteAllBytes(tempFilePath, data);
-
-            if (File.Exists(filePath))
-            {
-                File.Replace(tempFilePath, filePath, null);
-            }
-            else
-            {
-                File.Move(tempFilePath, filePath);
-            }
-        }
-
-        private static void TryDeleteFile(string filePath)
-        {
-            var file = new FileInfo(filePath);
-            if (file.Exists)
-            {
-                file.Delete();
-            }
-        }
-
-        private void StopObservingChanges()
-        {
-            _changedSubscription?.Dispose();
-            _changedSubscription = null;
-            _changedSubject?.Dispose();
-            _changedSubject = null;
-            watcher?.Dispose();
-            watcher = null;
-        }
-
-        private sealed class DeletedDatabaseEntry : DatabaseEntry
-        {
+            IsDirty = false;
+            LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
         }
     }
 
     /// <summary>
-    /// An abstract cache backing store that persists all <see cref="DatabaseEntry"/> objects in a single file.
-    /// Supports serialization of the entire collection and provides hooks for custom binary formats.
-    /// Suitable for smaller datasets or when atomic updates are preferred over individual file management.
+    /// Base class for backing stores that persist a complete snapshot to one file.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// All entries are loaded and saved as a single array in the specified file.
-    /// Changes do not trigger a write, must manually call PushAll to persist.
-    /// </para>
-    /// <para>
-    /// Subclasses must implement <see cref="Serialize(DatabaseEntry[])"/> and <see cref="Deserialize(byte[])"/>
-    /// to define the storage format (e.g., JSON array, MessagePack array).
-    /// </para>
-    /// </remarks>
     public abstract class SingleFileBackingStore : CacheBackingStore
     {
         /// <summary>
-        /// Gets the file where all entries are stored.
+        /// Creates a single-file backing store.
         /// </summary>
-        public FileInfo FileInfo { get; }
-
-        /// <summary>
-        /// Serializes an array of <see cref="DatabaseEntry"/> objects into a byte array for single-file storage.
-        /// </summary>
-        /// <param name="entries">The array of <see cref="DatabaseEntry"/> objects to serialize.</param>
-        /// <returns>A byte array representing the serialized entries.</returns>
-        public abstract byte[] Serialize(DatabaseEntry[] entries);
-        /// <summary>
-        /// Deserializes a byte array into an array of <see cref="DatabaseEntry"/> objects.
-        /// </summary>
-        /// <param name="data">The byte array containing the serialized entries.</param>
-        /// <returns>An array of deserialized <see cref="DatabaseEntry"/> objects.</returns>
-        public abstract DatabaseEntry[] Deserialize(byte[] data);
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SingleFileBackingStore"/> class.
-        /// </summary>
-        /// <param name="filePath">The path to the single file for storing all entries.</param>
-        public SingleFileBackingStore(string filePath)
+        protected SingleFileBackingStore(string filePath)
         {
             FileInfo = new FileInfo(filePath);
         }
-        
+
         /// <summary>
-        /// Loads all <see cref="DatabaseEntry"/> objects from the single storage file by reading its contents,
-        /// deserializing via <see cref="Deserialize(byte[])"/> into an array, and adding each to the local <see cref="CacheBackingStore.Entries"/> dictionary.
-        /// Notifies upstream via <see cref="CacheBackingStore.EntryAdded"/> for each entry.
-        /// If the file does not exist or deserialization fails, logs an error and returns without adding entries.
-        /// Logs the number of loaded entries for debugging.
+        /// Gets the file used by this backing store.
+        /// </summary>
+        protected FileInfo FileInfo { get; }
+        /// <summary>
+        /// Serializes a full store snapshot.
+        /// </summary>
+        protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
+        /// <summary>
+        /// Deserializes a full store snapshot.
+        /// </summary>
+        protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
+        /// <summary>
+        /// Serializes one document payload.
+        /// </summary>
+        protected abstract byte[] SerializePayload(object document);
+        /// <summary>
+        /// Deserializes one document payload.
+        /// </summary>
+        protected abstract object DeserializePayload(Type documentType, byte[] payload);
+
+        /// <summary>
+        /// Loads every persisted record from disk.
         /// </summary>
         public override void PullAll()
         {
-            if (!FileInfo.Exists) return;
-
-            foreach (var entry in Deserialize(File.ReadAllBytes(FileInfo.FullName)))
+            if (!FileInfo.Exists)
             {
-                Entries[entry.ID] = entry;
-                EntryAdded.OnNext(entry);
+                SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
+                IsDirty = false;
+                return;
             }
-        }
 
-        /// <summary>
-        /// Adds or updates the specified <see cref="DatabaseEntry"/> in the local <see cref="CacheBackingStore.Entries"/> dictionary.
-        /// Does not immediately persist to the single file; call <see cref="PushAll(bool)"/> to save changes.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to persist.</param>
-        public override void Push(DatabaseEntry entry)
-        {
-            var type = entry.GetType();
-            Entries[entry.ID] = entry;
-        }
-
-        /// <summary>
-        /// Removes the specified <see cref="DatabaseEntry"/> from the local <see cref="CacheBackingStore.Entries"/> dictionary.
-        /// Does not immediately persist to the single file; call <see cref="PushAll(bool)"/> to save changes.
-        /// </summary>
-        /// <param name="entry">The <see cref="DatabaseEntry"/> to delete.</param>
-        public override void Delete(DatabaseEntry entry)
-        {
-            if (Entries.TryGetValue(entry.ID, out _))
+            var snapshot = DeserializeSnapshot(File.ReadAllBytes(FileInfo.FullName));
+            var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
+            foreach (var record in snapshot.Records)
             {
-                Entries.TryRemove(entry.ID, out _);
+                reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, snapshot.SchemaCatalog));
+                var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload);
+                Entries[stored.Key.Value] = stored;
+                EntryAdded.OnNext(stored);
             }
+
+            SetLastSchemaMigrationReports(reports);
+            IsDirty = false;
         }
 
         /// <summary>
-        /// Serializes all entries in <see cref="CacheBackingStore.Entries"/> to a byte array using <see cref="Serialize(DatabaseEntry[])"/>
-        /// and writes it to the single storage file, overwriting any existing content.
-        /// The <paramref name="soft"/> parameter is ignored in this implementation, as saves are always full rewrites.
-        /// Logs the number of saved entries and errors if the write fails, re-throwing for caller handling.
+        /// Stages one stored document in memory.
         /// </summary>
-        /// <param name="soft">If <c>true</c>, performs a soft push (not supported; treated as full push).</param>
+        public override void Push(CultStoredDocument entry)
+        {
+            Entries[entry.Key.Value] = entry;
+            IsDirty = true;
+        }
+
+        /// <summary>
+        /// Removes one staged document.
+        /// </summary>
+        public override void Delete(CultStoredDocument entry)
+        {
+            Entries.TryRemove(entry.Key.Value, out _);
+            IsDirty = true;
+        }
+
+        /// <summary>
+        /// Writes the staged snapshot to disk.
+        /// </summary>
         public override void PushAll(bool soft = false)
         {
-            var entriesArray = Entries.Values.ToArray();
-            var directory = FileInfo.DirectoryName;
-            if (!string.IsNullOrEmpty(directory))
+            var snapshot = new CultPersistedStoreSnapshot
             {
-                Directory.CreateDirectory(directory);
-            }
+                SchemaCatalog = Entries.Values
+                    .Select(entry => entry.Descriptor.ToCatalogEntry())
+                    .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+                    .ToArray(),
+                Records = Entries.Values
+                    .OrderBy(entry => entry.Key.Value, StringComparer.Ordinal)
+                    .Select(entry => ToPersistedRecord(entry, SerializePayload))
+                    .ToArray()
+            };
 
-            var tempFilePath = Path.Combine(directory ?? string.Empty, $"{Path.GetFileName(FileInfo.FullName)}.{Guid.NewGuid():N}.tmp");
-            File.WriteAllBytes(tempFilePath, Serialize(entriesArray));
-            if (FileInfo.Exists)
+            Directory.CreateDirectory(FileInfo.DirectoryName!);
+            WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+            MarkFlushSucceeded();
+        }
+
+        private static void WriteSnapshotAtomically(string path, byte[] payload)
+        {
+            var directory = Path.GetDirectoryName(path)!;
+            var tempPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+
+            try
             {
-                File.Replace(tempFilePath, FileInfo.FullName, null);
+                using (var stream = new FileStream(
+                           tempPath,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           bufferSize: 4096,
+                           FileOptions.WriteThrough))
+                {
+                    stream.Write(payload, 0, payload.Length);
+                    stream.Flush(true);
+                }
+
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
             }
-            else
+            finally
             {
-                File.Move(tempFilePath, FileInfo.FullName);
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
             }
         }
     }
