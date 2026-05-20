@@ -832,6 +832,18 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultMesh_CreatePeerExchangeClient_Returns_ExchangeClient()
+        {
+            var client = CultMesh.CreatePeerExchangeClient(new CultMeshPeerExchangeClientOptions
+            {
+                ConnectTimeout = TimeSpan.FromMilliseconds(250),
+                ResponseTimeout = TimeSpan.FromMilliseconds(250)
+            });
+
+            Assert.That(client, Is.Not.Null);
+        }
+
+        [Test]
         public void CultMeshVerseCatalog_Finds_CompatibleTransferTargets()
         {
             var vanillaRules = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "rules:v1", "vanilla");

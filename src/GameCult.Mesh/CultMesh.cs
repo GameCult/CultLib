@@ -236,6 +236,15 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a client for fetching peer cards from peer exchange endpoints.
+        /// </summary>
+        public static CultMeshPeerExchangeClient CreatePeerExchangeClient(
+            CultMeshPeerExchangeClientOptions? options = null)
+        {
+            return new CultMeshPeerExchangeClient(options);
+        }
+
+        /// <summary>
         /// Creates a CultNet client configured for CultMesh use.
         /// </summary>
         public static Client CreateClient(ClientSecurityOptions? security = null, Action<Client>? configureClient = null)

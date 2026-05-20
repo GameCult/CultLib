@@ -285,4 +285,150 @@ namespace GameCult.Mesh
             return Task.CompletedTask;
         }
     }
+
+    /// <summary>
+    /// Options for schema-v0 CultMesh peer exchange clients.
+    /// </summary>
+    public sealed class CultMeshPeerExchangeClientOptions
+    {
+        /// <summary>
+        /// Gets or sets client security options used to connect to peer exchange endpoints.
+        /// </summary>
+        public ClientSecurityOptions? Security { get; set; }
+
+        /// <summary>
+        /// Gets or sets how long to wait for a connection before failing.
+        /// </summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets how long to wait for a peer exchange response before failing.
+        /// </summary>
+        public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Gets or sets a callback used to customize each ephemeral exchange client.
+        /// </summary>
+        public Action<Client>? ConfigureClient { get; set; }
+    }
+
+    /// <summary>
+    /// Fetches peer cards from CultMesh peers.
+    /// </summary>
+    public sealed class CultMeshPeerExchangeClient
+    {
+        private readonly CultMeshPeerExchangeClientOptions _options;
+
+        /// <summary>
+        /// Creates a peer exchange client.
+        /// </summary>
+        public CultMeshPeerExchangeClient(CultMeshPeerExchangeClientOptions? options = null)
+        {
+            _options = options ?? new CultMeshPeerExchangeClientOptions();
+        }
+
+        /// <summary>
+        /// Fetches peer cards from one endpoint.
+        /// </summary>
+        public async Task<CultMeshPeerExchangeResponseMessage> FetchAsync(
+            string endpoint,
+            CultMeshPeerExchangeRequestMessage request)
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.VerseId)) throw new ArgumentException("Peer exchange requires a verseId.", nameof(request));
+
+            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+            var messageId = Guid.NewGuid().ToString("N");
+            var completion = new TaskCompletionSource<CultMeshPeerExchangeResponseMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using var client = new Client(_options.Security ?? ClientSecurityOptions.Development())
+            {
+                AllowUnverifiedCultNetMessages = true
+            };
+            _options.ConfigureClient?.Invoke(client);
+            client.OnCultNet<CultMeshPeerExchangeResponseMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                {
+                    completion.TrySetResult(response);
+                }
+            });
+            client.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+
+            client.Connect(host, port);
+            await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
+            client.SendCultNet(new CultMeshPeerExchangeRequestMessage
+            {
+                MessageId = messageId,
+                VerseId = request.VerseId,
+                Roles = request.Roles,
+                KnownPeerIds = request.KnownPeerIds,
+                Limit = request.Limit
+            });
+
+            return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Fetches peer cards from endpoints and upserts every response into a local peer catalog.
+        /// </summary>
+        public async Task<int> DiscoverAsync(
+            CultMeshPeerCatalog catalog,
+            IEnumerable<string> endpoints,
+            string verseId,
+            IEnumerable<string>? roles = null,
+            int? limit = null)
+        {
+            if (catalog == null) throw new ArgumentNullException(nameof(catalog));
+            if (endpoints == null) throw new ArgumentNullException(nameof(endpoints));
+            if (string.IsNullOrWhiteSpace(verseId)) throw new ArgumentException("Value must be non-empty.", nameof(verseId));
+
+            var count = 0;
+            foreach (var endpoint in endpoints.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal))
+            {
+                var response = await FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage
+                {
+                    VerseId = verseId,
+                    Roles = roles?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                    KnownPeerIds = catalog.Find(verseId).Select(peer => peer.PeerId).ToArray(),
+                    Limit = limit
+                }).ConfigureAwait(false);
+                catalog.Upsert(response);
+                count += response.Peers.Length;
+            }
+
+            return count;
+        }
+
+        private async Task WaitForConnectionAsync(Client client, string endpoint)
+        {
+            var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
+            while (!client.Connected)
+            {
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"Timed out connecting to peer exchange endpoint {endpoint}.");
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+            }
+        }
+
+        private async Task<CultMeshPeerExchangeResponseMessage> WaitForResponseAsync(
+            Task<CultMeshPeerExchangeResponseMessage> responseTask,
+            string endpoint)
+        {
+            var timeoutTask = Task.Delay(_options.ResponseTimeout);
+            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                throw new TimeoutException($"Timed out waiting for peer exchange response from {endpoint}.");
+            }
+
+            return await responseTask.ConfigureAwait(false);
+        }
+    }
 }

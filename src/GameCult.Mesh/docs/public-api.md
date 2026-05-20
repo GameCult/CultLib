@@ -13,6 +13,7 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreateVerseCatalog()`
 - `CultMesh.CreatePeerCatalog()`
 - `CultMesh.CreateVerseDiscoveryClient(...)`
+- `CultMesh.CreatePeerExchangeClient(...)`
 - `CultMesh.CreateClient(...)`
 - `CultMesh.ConnectClient(...)`
 
@@ -60,6 +61,8 @@ signature.
 `CultMesh.ServePeerExchange(node, catalog)` attaches schema-v0 peer exchange
 responses to a node. The wire contracts are
 `cultmesh.peer_exchange_request.v0` and `cultmesh.peer_exchange_response.v0`.
+`CultMeshPeerExchangeClient` can fetch peer cards from known endpoints and
+upsert them into a local catalog.
 Peer cards are discovery hints; authority still requires a valid lease or
 signature for the target Verse.
 

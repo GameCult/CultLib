@@ -72,7 +72,8 @@ Implemented:
 - schema-v0 Verse catalog request/response messages
 - CultMesh Verse discovery server bridge over the local Verse catalog
 - schema-v0 peer exchange request/response messages
-- CultMesh peer cards, peer catalog, and peer exchange server bridge
+- CultMesh peer cards, peer catalog, peer exchange server bridge, and peer
+  exchange client
 - client-authority scopes for locally predicted input documents
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
@@ -127,7 +128,7 @@ Not implemented yet:
 
 Add discovery fanout and operational polish:
 
-- add peer exchange clients and periodic gossip fanout
+- add periodic gossip fanout over known peer cards
 - add snapshot throttling and size limits for public mesh edges
 - after that, add simulation-frame rollback/resimulation helpers around
   predicted input streams

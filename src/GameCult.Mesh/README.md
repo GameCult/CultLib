@@ -92,6 +92,17 @@ Peer cards are contact candidates, not authority by themselves. Public Verses
 should validate authority leases or signatures before trusting a peer for
 committed state.
 
+Clients can fetch more peers from known peers:
+
+```csharp
+var exchangeClient = CultMesh.CreatePeerExchangeClient();
+await exchangeClient.DiscoverAsync(
+    peers,
+    aetheria.DiscoveryEndpoints,
+    "aetheria-main",
+    roles: [CultMeshPeerRoles.ReadReplica]);
+```
+
 ## Client-Side Prediction
 
 CultMesh lets a runtime declare which input documents it may author
