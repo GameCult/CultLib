@@ -15,6 +15,7 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreateVerseDiscoveryClient(...)`
 - `CultMesh.CreatePeerExchangeClient(...)`
 - `CultMesh.CreateAuthorityLeaseCatalog()`
+- `CultMesh.CreateSimulationFactCommitter(...)`
 - `CultMesh.CreateClient(...)`
 - `CultMesh.ConnectClient(...)`
 
@@ -108,5 +109,6 @@ replica cursor to the snapshot's represented log sequence.
 `CultNetSimulationObservationHub` collects those observations and emits
 `CultNetSimulationConsensusCandidate` updates.
 
-Candidates are opinions. Final world state still belongs in the authoritative
-shard log.
+Candidates are opinions. `CultMeshSimulationFactCommitter` commits quorum
+candidates as `CultMeshSimulationFact` documents through `CultNetDatabase`, so
+final world state still belongs in the authoritative shard log.

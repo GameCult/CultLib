@@ -144,7 +144,17 @@ aggregates those observations deterministically into candidate facts with
 support weight, total observed weight, confidence, and quorum status.
 
 Those candidates are not committed world state by themselves. They are the fast
-mesh opinion layer that can feed an authoritative shard commit path.
+mesh opinion layer that can feed an authoritative shard commit path. Once a
+candidate has quorum, a shard-authoritative node can commit it as a
+`CultMeshSimulationFact`.
+
+```csharp
+var committer = CultMesh.CreateSimulationFactCommitter(node.Database);
+await committer.CommitAsync(candidate);
+```
+
+The central server does not need to decide what every witness saw. It only
+needs to accept the quorum result through the shard log.
 
 ## Durable Catch-Up
 

@@ -2052,6 +2052,89 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshSimulationFactCommitter_Commits_QuorumCandidate_ToShardLog()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<CultMeshSimulationFact>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "arena",
+                        "runtime-a",
+                        epoch: 4,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "simulation:")
+                ]
+            });
+            var claimHash = CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100");
+            var candidate = new CultNetSimulationConsensusCandidate(
+                "arena",
+                4,
+                100,
+                "bob",
+                "hit",
+                claimHash,
+                "alice shot bob first",
+                witnessCount: 3,
+                supportWeight: 3d,
+                totalWeight: 3d,
+                hasQuorum: true);
+            var committer = CultMesh.CreateSimulationFactCommitter(database);
+
+            var handle = await committer.CommitAsync(candidate);
+            var fact = cache.Get<CultMeshSimulationFact>(handle.Key);
+            var log = database.GetMutationLog("arena");
+
+            Assert.That(handle.Key, Is.EqualTo(CultMeshSimulationFact.CreateRecordKey(candidate)));
+            Assert.That(fact, Is.Not.Null);
+            Assert.That(fact!.ClaimHash, Is.EqualTo(claimHash));
+            Assert.That(fact.ClaimSummary, Is.EqualTo("alice shot bob first"));
+            Assert.That(fact.Confidence, Is.EqualTo(1d));
+            Assert.That(log, Has.Count.EqualTo(1));
+            Assert.That(log[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+        }
+
+        [Test]
+        public void CultMeshSimulationFactCommitter_Rejects_CandidateWithoutQuorum()
+        {
+            var cache = new CultCache();
+            var schemaId = cache.Registry.GetRequired<CultMeshSimulationFact>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "arena",
+                        "runtime-a",
+                        epoch: 4,
+                        isPrimary: true,
+                        schemaIds: [schemaId],
+                        keyPrefix: "simulation:")
+                ]
+            });
+            var candidate = new CultNetSimulationConsensusCandidate(
+                "arena",
+                4,
+                100,
+                "bob",
+                "hit",
+                CultNetSimulationObservation.ComputeClaimHash("hit", "alice", "bob", "frame:100"),
+                null,
+                witnessCount: 1,
+                supportWeight: 1d,
+                totalWeight: 3d,
+                hasQuorum: false);
+            var committer = CultMesh.CreateSimulationFactCommitter(database);
+
+            Assert.That(
+                async () => await committer.CommitAsync(candidate),
+                Throws.TypeOf<InvalidOperationException>().With.Message.Contains("before quorum"));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange()
         {
             var cache = new CultCache();

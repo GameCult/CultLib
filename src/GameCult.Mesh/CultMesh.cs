@@ -213,6 +213,14 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a committer for writing quorum simulation facts to a mesh database.
+        /// </summary>
+        public static CultMeshSimulationFactCommitter CreateSimulationFactCommitter(CultNetDatabase database)
+        {
+            return new CultMeshSimulationFactCommitter(database);
+        }
+
+        /// <summary>
         /// Attaches Verse discovery responses to a CultMesh node.
         /// </summary>
         public static CultMeshVerseDiscoveryServer ServeVerseCatalog(

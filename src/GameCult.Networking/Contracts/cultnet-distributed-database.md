@@ -80,6 +80,8 @@ Implemented:
 - predicted and reconciled database change kinds for client-side prediction
 - simulation witness observations for mesh-side opinions about frame facts
 - deterministic consensus candidates derived from witness observations
+- committed CultMesh simulation fact documents written from quorum candidates
+  through shard authority
 - schema-v0 simulation observation and consensus candidate messages
 - reactive simulation observation hub that receives witness gossip and emits
   consensus candidates
@@ -123,6 +125,9 @@ Not implemented yet:
 - Consensus candidates are derived from observations. They may inform the
   authoritative commit path, but they are not themselves committed world state
   until a shard owner writes them into the log.
+- `CultMeshSimulationFact` is the committed form of a quorum candidate. It is
+  written through `CultNetDatabase`, so normal shard authority and replication
+  rules still apply.
 - Peer cards are contact candidates. They can advertise roles and authority
   lease ids, but they do not grant authority without Verse-specific validation.
 - Authority leases bind peer id, Verse id, roles, optional shard scope, issuer,
