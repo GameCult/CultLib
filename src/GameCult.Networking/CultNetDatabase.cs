@@ -841,11 +841,7 @@ namespace GameCult.Networking
                 return Task.CompletedTask;
             }
 
-            var removeMethod = typeof(CultCache).GetMethod(nameof(CultCache.Remove))!
-                .MakeGenericMethod(descriptor.DocumentType);
-            var handleType = typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType);
-            var handle = Activator.CreateInstance(handleType, new object[] { key });
-            removeMethod.Invoke(_cache, new[] { handle });
+            _cache.Remove(key);
             AppendMutationLogEntry(
                 shard,
                 CultNetDatabaseChangeKind.Removed,
@@ -1067,11 +1063,7 @@ namespace GameCult.Networking
 
         private void RemoveTrackedDocument(Type documentType, CultRecordKey key)
         {
-            var removeMethod = typeof(CultCache).GetMethod(nameof(CultCache.Remove))!
-                .MakeGenericMethod(documentType);
-            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
-            var handle = Activator.CreateInstance(handleType, new object[] { key });
-            removeMethod.Invoke(_cache, new[] { handle });
+            _cache.Remove(key);
         }
 
         private void Publish<T>(CultNetDatabaseChange<T> change) where T : class
@@ -1271,11 +1263,7 @@ namespace GameCult.Networking
             var previous = _cache.Get(key);
             if (previous != null)
             {
-                var removeMethod = typeof(CultCache).GetMethod(nameof(CultCache.Remove))!
-                    .MakeGenericMethod(descriptor.DocumentType);
-                var handleType = typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType);
-                var handle = Activator.CreateInstance(handleType, new object[] { key });
-                removeMethod.Invoke(_cache, new[] { handle });
+                _cache.Remove(key);
             }
 
             RecordMutationLogEntry(new CultNetShardMutationLogEntry(

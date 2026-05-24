@@ -1211,6 +1211,13 @@ namespace GameCult.Caching
         public IEnumerable<object> AllEntries => _entries.Values.Select(entry => entry.Document);
 
         /// <summary>
+        /// Gets all stored document records currently held by the cache.
+        /// </summary>
+        public IEnumerable<CultStoredDocument> AllStoredDocuments =>
+            _entries.Values.OrderBy(entry => entry.Descriptor.SchemaName, StringComparer.Ordinal)
+                .ThenBy(entry => entry.Key.Value, StringComparer.Ordinal);
+
+        /// <summary>
         /// Gets the document registry used by this cache.
         /// </summary>
         public CultDocumentRegistry Registry => _registry;
@@ -1330,6 +1337,27 @@ namespace GameCult.Caching
         public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
             return AddAsync(document, handle);
+        }
+
+        /// <summary>
+        /// Adds or replaces a document whose concrete type is known at runtime.
+        /// </summary>
+        public async Task<CultRecordKey> UpsertAsync(Type documentType, object document, CultRecordKey? key = null)
+        {
+            if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (!documentType.IsInstanceOfType(document))
+            {
+                throw new ArgumentException(
+                    $"Document instance must be assignable to {documentType.FullName}.",
+                    nameof(document));
+            }
+
+            var stored = await AddStoredDocumentInternal(
+                CreateStoredDocument(documentType, document, key),
+                source: null,
+                raiseUpdate: false).ConfigureAwait(false);
+            return stored.Key;
         }
 
         /// <summary>
@@ -1455,6 +1483,20 @@ namespace GameCult.Caching
             {
                 RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
             }
+        }
+
+        /// <summary>
+        /// Removes a document by cache-owned record key.
+        /// </summary>
+        public bool Remove(CultRecordKey key)
+        {
+            if (!_entries.TryGetValue(key.Value, out var stored))
+            {
+                return false;
+            }
+
+            RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
+            return true;
         }
 
         /// <summary>

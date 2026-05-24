@@ -123,6 +123,32 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task CultCache_RuntimeType_Upsert_Snapshot_And_Remove_Work_For_Editor_Tooling()
+        {
+            var cache = new CultCache();
+            var entry = new NamedTestEntry
+            {
+                Name = "editor",
+                Value = "first"
+            };
+
+            var key = await cache.UpsertAsync(typeof(NamedTestEntry), entry);
+            var stored = cache.AllStoredDocuments.Single(document => document.Key.Equals(key));
+
+            Assert.That(stored.Document, Is.SameAs(entry));
+            Assert.That(stored.Descriptor.DocumentType, Is.EqualTo(typeof(NamedTestEntry)));
+
+            entry.Value = "second";
+            var sameKey = await cache.UpsertAsync(typeof(NamedTestEntry), entry, key);
+
+            Assert.That(sameKey, Is.EqualTo(key));
+            Assert.That(cache.Get<NamedTestEntry>(key)!.Value, Is.EqualTo("second"));
+            Assert.That(cache.Remove(key), Is.True);
+            Assert.That(cache.Get<NamedTestEntry>(key), Is.Null);
+            Assert.That(cache.Remove(key), Is.False);
+        }
+
+        [Test]
         public async Task CultCache_FlushOnDispose_Persists_When_Enabled()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");

@@ -7,6 +7,8 @@ contracts can be changed and tested in one place.
 ## Layout
 
 - `src/`: C# CultCache, CultNet, CultMesh, logging, and Unity-facing packages.
+- `src/GameCult.Unity/Assets/Caching`: Unity editor tooling for inspecting and
+  editing CultCache `.cc` stores.
 - `packages/cultcache-ts`: TypeScript CultCache package.
 - `packages/cultnet-ts`: TypeScript CultNet package.
 - `packages/cultmesh-ts`: TypeScript CultMesh local-first package.
