@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json",
+  "title": "CultNet Interop Note",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "authorRuntimeId",
+    "title",
+    "body",
+    "tags"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.interop_note.v0" },
+    "documentId": { "type": "string", "minLength": 1 },
+    "authorRuntimeId": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

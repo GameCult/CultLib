@@ -1,0 +1,60 @@
+name: CultNet Interop
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  interop:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out cultnet-ts
+        uses: actions/checkout@v4
+        with:
+          path: CultNetTS
+
+      - name: Check out cultnet-rs
+        uses: actions/checkout@v4
+        with:
+          repository: GameCult/cultnet-rs
+          path: cultnet-rs
+
+      - name: Check out cultcache-rs
+        uses: actions/checkout@v4
+        with:
+          repository: GameCult/cultcache-rs
+          path: cultcache-rs
+
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+        with:
+          repository: GameCult/CultLib
+          path: CultLib
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: CultNetTS/package-lock.json
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          include-prerelease: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cultnet-ts dependencies
+        working-directory: CultNetTS
+        run: npm ci
+
+      - name: Run cross-runtime interop harness
+        working-directory: CultNetTS
+        run: npm run test:interop
