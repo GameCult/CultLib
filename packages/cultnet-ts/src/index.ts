@@ -54,6 +54,14 @@ export {
 export { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
 export { CultNetPeer, type CultNetPeerEvents } from "./peer";
 export {
+  createCultNetDuplexTransport,
+  createCultNetWebSocketTransport,
+  isCultNetTransport,
+  type CultNetLegacyDuplexLike,
+  type CultNetTransport,
+  type CultNetWebSocketLike,
+} from "./transport";
+export {
   defineJsonSchemaContract,
   type JsonSchemaContract,
   type JsonSchemaContractDefinition,

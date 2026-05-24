@@ -21,6 +21,7 @@ import {
   CultNetServerSecurityOptions,
   cultNetSchemas,
   cultNetBuiltinSchemaRegistry,
+  createCultNetWebSocketTransport,
   defineCultNetDocumentBinding,
   encodeCultNetMessageForWire,
   ghostlightAgentStateGeneratedContract,
@@ -28,6 +29,7 @@ import {
   validateGhostlightAgentStateGenerated,
   validateGhostlightAgentState,
   type CultNetLoginMessage,
+  type CultNetWebSocketLike,
   type GhostlightAgentStateShape,
   type GhostlightAgentStateDocument,
 } from "../src";
@@ -63,6 +65,60 @@ class LinkedDuplex extends Duplex {
 function createDuplexPair(): { a: Duplex; b: Duplex } {
   const a = new LinkedDuplex();
   const b = new LinkedDuplex();
+  a.peer = b;
+  b.peer = a;
+  return { a, b };
+}
+
+class LinkedWebSocket implements CultNetWebSocketLike {
+  binaryType?: BinaryType;
+  peer?: LinkedWebSocket;
+  readonly #messageHandlers = new Set<(event: MessageEvent<ArrayBuffer | Blob | Uint8Array>) => void>();
+  readonly #closeHandlers = new Set<() => void>();
+  readonly #errorHandlers = new Set<(event: Event) => void>();
+
+  send(data: ArrayBuffer | ArrayBufferView): void {
+    const bytes = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    const copy = new Uint8Array(bytes);
+    if (this.peer) {
+      for (const handler of this.peer.#messageHandlers) {
+        handler({ data: copy } as MessageEvent<Uint8Array>);
+      }
+    }
+  }
+
+  close(): void {
+    for (const handler of this.#closeHandlers) {
+      handler();
+    }
+    if (this.peer) {
+      for (const handler of this.peer.#closeHandlers) {
+        handler();
+      }
+    }
+  }
+
+  addEventListener(
+    type: "message" | "close" | "error",
+    handler: ((event: MessageEvent<ArrayBuffer | Blob | Uint8Array>) => void) | (() => void) | ((event: Event) => void),
+  ): void {
+    if (type === "message") {
+      this.#messageHandlers.add(handler as (event: MessageEvent<ArrayBuffer | Blob | Uint8Array>) => void);
+      return;
+    }
+    if (type === "close") {
+      this.#closeHandlers.add(handler as () => void);
+      return;
+    }
+    this.#errorHandlers.add(handler as (event: Event) => void);
+  }
+}
+
+function createWebSocketPair(): { a: LinkedWebSocket; b: LinkedWebSocket } {
+  const a = new LinkedWebSocket();
+  const b = new LinkedWebSocket();
   a.peer = b;
   b.peer = a;
   return { a, b };
@@ -108,6 +164,36 @@ test("CultNet peer frames and decodes typed messages over a direct pipe", async 
   if (message.schemaVersion === "cultnet.hello.v0") {
     assert.equal(message.runtimeId, "voidbot-main");
     assert.equal(message.agentId, "void");
+  }
+
+  sender.close();
+  receiver.close();
+});
+
+test("CultNet peer frames and decodes typed messages over a browser WebSocket transport", async () => {
+  const { a, b } = createWebSocketPair();
+  const sender = new CultNetPeer(createCultNetWebSocketTransport(a), { wireContract: "cultnet.schema.v0" });
+  const receiver = new CultNetPeer(createCultNetWebSocketTransport(b), { wireContract: "cultnet.schema.v0" });
+
+  const message = await new Promise<ReturnType<typeof parseCultNetMessage>>((resolve, reject) => {
+    receiver.once("message", resolve);
+    receiver.once("invalidMessage", reject);
+    sender.sendHello({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "ipad-safari",
+      runtimeKind: "browser",
+      agentId: "cultmesh-web",
+      displayName: "CultMesh Web",
+      supportedDocumentTypes: ["ghostlight.agent-state"],
+    });
+  });
+
+  assert.equal(a.binaryType, "arraybuffer");
+  assert.equal(b.binaryType, "arraybuffer");
+  assert.equal(message.schemaVersion, "cultnet.hello.v0");
+  if (message.schemaVersion === "cultnet.hello.v0") {
+    assert.equal(message.runtimeId, "ipad-safari");
+    assert.equal(message.runtimeKind, "browser");
   }
 
   sender.close();

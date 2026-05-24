@@ -1,10 +1,14 @@
-import { EventEmitter } from "node:events";
-import type { Duplex } from "node:stream";
-
 import { decode, encode } from "@msgpack/msgpack";
 
 import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetDocumentDeleteMessage, type CultNetDocumentPutMessage, type CultNetErrorMessage, type CultNetHelloMessage, type CultNetLoginMessage, type CultNetLoginSuccessMessage, type CultNetMessage, type CultNetRegisterMessage, type CultNetSampleChangeNameMessage, type CultNetSampleChatMessage, type CultNetSchemaCatalogRequestMessage, type CultNetSchemaCatalogResponseMessage, type CultNetSnapshotRequestMessage, type CultNetSnapshotResponseMessage, type CultNetVerifyMessage, type CultNetWireContract } from "./contracts";
 import { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
+import {
+  createCultNetDuplexTransport,
+  isCultNetTransport,
+  toError,
+  type CultNetLegacyDuplexLike,
+  type CultNetTransport,
+} from "./transport";
 
 export interface CultNetPeerEvents {
   message: (message: CultNetMessage) => void;
@@ -17,37 +21,70 @@ export interface CultNetPeerOptions {
   wireContract: CultNetWireContract;
 }
 
-export class CultNetPeer extends EventEmitter {
-  readonly #stream: Duplex;
+export class CultNetPeer {
+  readonly #events = new CultNetPeerEventEmitter();
   readonly #framer = new LengthPrefixedMessageFramer();
+  readonly #transport: CultNetTransport;
   readonly #wireContract: CultNetWireContract;
 
-  constructor(stream: Duplex, options: CultNetPeerOptions) {
-    super();
+  constructor(transport: CultNetTransport | CultNetLegacyDuplexLike, options: CultNetPeerOptions) {
     if (!options?.wireContract) {
       throw new Error("CultNetPeer requires an explicit wireContract.");
     }
 
-    this.#stream = stream;
+    this.#transport = isCultNetTransport(transport)
+      ? transport
+      : createCultNetDuplexTransport(transport);
     this.#wireContract = options.wireContract;
-    this.#stream.on("data", (chunk: Buffer) => {
+    this.#transport.onBytes((chunk) => {
       for (const frame of this.#framer.push(chunk)) {
         try {
           const decoded = decode(frame);
           const message = parseCultNetMessage(decoded, this.#wireContract);
           this.emit("message", message);
         } catch (error) {
-          this.emit("invalidMessage", error instanceof Error ? error : new Error(String(error)));
+          this.emit("invalidMessage", toError(error));
         }
       }
     });
-    this.#stream.on("close", () => this.emit("close"));
-    this.#stream.on("error", (error) => this.emit("error", error instanceof Error ? error : new Error(String(error))));
+    this.#transport.onClose(() => this.emit("close"));
+    this.#transport.onError((error) => this.emit("error", error));
+  }
+
+  on<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): this {
+    this.#events.on(event, handler);
+    return this;
+  }
+
+  once<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): this {
+    this.#events.once(event, handler);
+    return this;
+  }
+
+  off<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): this {
+    this.#events.off(event, handler);
+    return this;
+  }
+
+  emit<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    ...args: Parameters<CultNetPeerEvents[TEvent]>
+  ): boolean {
+    return this.#events.emit(event, ...args);
   }
 
   send(message: CultNetMessage): void {
     const wireValue = encodeCultNetMessageForWire(message, this.#wireContract);
-    this.#stream.write(encodeFrame(encode(wireValue)));
+    this.#transport.send(encodeFrame(encode(wireValue)));
   }
 
   sendHello(message: CultNetHelloMessage): void {
@@ -107,6 +144,51 @@ export class CultNetPeer extends EventEmitter {
   }
 
   close(): void {
-    this.#stream.end();
+    this.#transport.close();
+  }
+}
+
+class CultNetPeerEventEmitter {
+  readonly #handlers = new Map<keyof CultNetPeerEvents, Set<(...args: never[]) => void>>();
+
+  on<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): void {
+    const handlers = this.#handlers.get(event) ?? new Set();
+    handlers.add(handler as (...args: never[]) => void);
+    this.#handlers.set(event, handlers);
+  }
+
+  once<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): void {
+    const onceHandler = ((...args: Parameters<CultNetPeerEvents[TEvent]>) => {
+      this.off(event, onceHandler as CultNetPeerEvents[TEvent]);
+      (handler as (...handlerArgs: Parameters<CultNetPeerEvents[TEvent]>) => void)(...args);
+    }) as CultNetPeerEvents[TEvent];
+    this.on(event, onceHandler);
+  }
+
+  off<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    handler: CultNetPeerEvents[TEvent],
+  ): void {
+    this.#handlers.get(event)?.delete(handler as (...args: never[]) => void);
+  }
+
+  emit<TEvent extends keyof CultNetPeerEvents>(
+    event: TEvent,
+    ...args: Parameters<CultNetPeerEvents[TEvent]>
+  ): boolean {
+    const handlers = this.#handlers.get(event);
+    if (!handlers || handlers.size === 0) {
+      return false;
+    }
+    for (const handler of [...handlers]) {
+      handler(...args as never[]);
+    }
+    return true;
   }
 }

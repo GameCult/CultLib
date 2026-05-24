@@ -14,7 +14,8 @@ The library currently includes:
 
 - JSON-schema-backed wire contracts for the first CultNet message set
 - a MessagePack codec plus 4-byte length-prefixed framing for direct pipes
-- a `CultNetPeer` wrapper over any Node `Duplex`
+- a `CultNetPeer` over a transport-neutral byte channel, with a Node `Duplex`
+  adapter and browser WebSocket adapter
 - CultLib-style client/server security options and `Secret` helpers
 - session-token signing/validation compatible with the C# CultLib semantics
 - explicit wire-contract selection instead of heuristic payload guessing
@@ -146,6 +147,30 @@ This is cheaper. It is not magic:
 But for local or near-local runtimes sharing the same contract, the fast lane
 cuts out the dumbest part of the trip.
 
+## Transports
+
+`CultNetPeer` owns the CultNet message contract, frame codec, and typed message
+events. It does not own sockets.
+
+The current transport boundary is:
+
+```ts
+interface CultNetTransport {
+  send(bytes: Uint8Array): void;
+  close(): void;
+  onBytes(handler: (bytes: Uint8Array) => void): void;
+  onClose(handler: () => void): void;
+  onError(handler: (error: Error) => void): void;
+}
+```
+
+Use `createCultNetDuplexTransport(...)` for existing Node streams and
+`createCultNetWebSocketTransport(...)` for browser-safe CultNet peers.
+
+Legacy code can still pass a Node `Duplex` directly to `new CultNetPeer(...)`;
+the constructor adapts it to the transport interface. New code should pass an
+explicit transport so endpoint ownership stays visible.
+
 ## Schema Discovery
 
 Apps sharing a CultNet space should be able to ask each other what they can
@@ -179,6 +204,7 @@ import { CultCache, defineDocumentType } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
+  createCultNetWebSocketTransport,
   defineCultNetDocumentBinding,
   ghostlightAgentStateGeneratedContract,
 } from "cultnet-ts";
@@ -198,6 +224,11 @@ const registry = new CultNetDocumentRegistry([
 const peer = new CultNetPeer(stream, {
   wireContract: "cultnet.schema.v0",
 });
+
+const browserPeer = new CultNetPeer(
+  createCultNetWebSocketTransport(new WebSocket("ws://127.0.0.1:3075")),
+  { wireContract: "cultnet.schema.v0" },
+);
 ```
 
 ## Security Model
@@ -225,8 +256,10 @@ maps them back to the exact C# union payload shape at the wire boundary.
 - The Ghostlight agent-state mirror is an exact copy of Ghostlight's current
   canonical schema. If Ghostlight changes the contract, this mirror must be
   updated in lockstep instead of playing coy with partial validation.
-- The direct transport is any Node `Duplex`; named-pipe/socket server wrappers
-  can be added without changing the message contract.
+- Browser CultNet peers can exchange framed schema-v0 messages over WebSocket.
+  Full browser CultMesh still needs IndexedDB persistence, browser-safe crypto,
+  Verse discovery, and shard authority/catch-up parity before it should claim
+  the complete C# CultMesh surface.
 
 ## Development
 
