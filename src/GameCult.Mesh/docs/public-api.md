@@ -118,3 +118,11 @@ final world state still belongs in the authoritative shard log.
 common loop for prediction, observations, candidate watches, simulation fact
 watches, and committing new quorum facts without forcing game code to manually
 wire every bridge.
+
+### Worker Payload Transfer
+
+Worker payload transfer is the planned lane for file and assembly movement
+between compatible CultMesh runtimes. The design keeps artifact transfer,
+payload admission, local execution, witness observations, and shard commits as
+separate authorities. See
+[`worker-payload-transfer.md`](worker-payload-transfer.md).

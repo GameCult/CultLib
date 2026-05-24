@@ -192,6 +192,17 @@ await committer.CommitAsync(candidate);
 The central server does not need to decide what every witness saw. It only
 needs to accept the quorum result through the shard log.
 
+## Worker Payload Transfer
+
+CultMesh can grow a local worker horde without letting file transfer pretend to
+be execution authority. Artifact transfer moves content-addressed bytes.
+Worker admission decides whether a verified payload may run. Worker output
+enters the mesh as simulation observations, then follows the same quorum and
+shard commit path as any other simulation fact.
+
+See [docs/worker-payload-transfer.md](docs/worker-payload-transfer.md) for the
+authority map and first contract slice.
+
 ## Durable Catch-Up
 
 CultMesh can persist authoritative shard logs through
@@ -208,5 +219,6 @@ snapshot's represented log sequence.
 - [Public API](docs/public-api.md)
 - [Durable Node Quickstart](docs/durable-node-quickstart.md)
 - [Typed Document Path](docs/typed-document-path.md)
+- [Worker Payload Transfer](docs/worker-payload-transfer.md)
 - [Research Notes](docs/research.md)
 - [Verse Model](docs/verses.md)
