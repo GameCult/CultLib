@@ -5,6 +5,7 @@
 This repository serves two purposes:
 
 - the source of the `org.gamecult.ui` package
+- the source of the `org.gamecult.caching.unity` CultCache editor package
 - a Unity project for developing and demonstrating the package in a real scene
 
 ## Scope
@@ -52,6 +53,7 @@ The demo project provides:
 - a sample scene under `Assets/Scenes`
 - package assets wired into a working Unity editor project
 - demo menu flow showing how CultUI panels can be assembled at runtime
+- CultCache Studio, a Unity editor window for opening and editing `.cc` files
 - a place to iterate on prefabs, resources, and inspector behavior without needing a separate host project
 
 ## Installation
@@ -125,6 +127,7 @@ The development project also includes additional Unity packages and NuGet-manage
 ## Repository Structure
 
 - `Assets/UI`: package source
+- `Assets/Caching`: CultCache Unity editor package source
 - `Assets/Scenes`: demo scene content
 - `Assets/Prefabs`, `Assets/Resources`, `Assets/Scripts`: demo-project support assets and scripts
 - `Packages`, `ProjectSettings`: Unity project configuration for package development and demonstration

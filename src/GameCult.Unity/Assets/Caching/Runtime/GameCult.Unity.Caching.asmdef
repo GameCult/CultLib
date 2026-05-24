@@ -1,0 +1,14 @@
+{
+    "name": "GameCult.Unity.Caching",
+    "rootNamespace": "GameCult.Unity.Caching",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}
