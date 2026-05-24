@@ -20,10 +20,10 @@ const execAsync = promisify(exec);
 const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
 const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
 const cultCacheTsRoot = resolve(__dirname, "../..");
-const cultcacheRsRoot = resolve(cultCacheTsRoot, "..", "cultcache-rs");
-const cultLibRoot = resolve(cultCacheTsRoot, "..", "CultLib");
+const cultLibRoot = resolve(cultCacheTsRoot, "..", "..");
+const cultcacheRsRoot = resolve(cultLibRoot, "crates", "cultcache-rs");
 const rustInteropBinary = resolve(
-  cultcacheRsRoot,
+  cultLibRoot,
   "target",
   "debug",
   "examples",

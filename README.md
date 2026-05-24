@@ -1,6 +1,7 @@
 # CultLib
 
-CultLib is a set of reusable C# libraries for game backends, game-adjacent services, and Unity-integrated tooling, including a declarative runtime UI composition framework for Unity.
+CultLib is the GameCult compatibility monorepo for persistence, protocol, mesh,
+and shared runtime packages across C#, TypeScript, Rust, and Python.
 
 The libraries cover three main areas:
 
@@ -53,6 +54,12 @@ The solution includes:
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
 - `GameCult.Networking`: encrypted login/register/verify flows and message dispatch over LiteNetLib
 - `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
+- `cultcache-ts`: TypeScript CultCache package
+- `cultnet-ts`: TypeScript CultNet package
+- `cultmesh-ts`: local-first TypeScript CultMesh package for VoidBot, Mimir, and similar local runtimes
+- `cultcache-rs`: Rust CultCache crate and derive macro
+- `cultnet-rs`: Rust CultNet crate
+- `cultcache-py`: Python CultCache package
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
 - `GameCult.Unity`: CultUI, a Unity runtime UI composition framework with reflective inspector generation, prefab-backed field resolvers, reusable controls, and a demo project packaged for UPM-style consumption
@@ -73,6 +80,15 @@ src/
 tests/
   GameCult.Caching.Tests/
   GameCult.Networking.Tests/
+packages/
+  cultcache-ts/
+  cultnet-ts/
+  cultmesh-ts/
+crates/
+  cultcache-rs/
+  cultnet-rs/
+python/
+  cultcache-py/
 ```
 
 ## Build

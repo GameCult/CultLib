@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[workspace]
-members = ["cultcache-rs-derive"]
-
 [lib]
 name = "cultcache_rs"
 path = "src/lib.rs"

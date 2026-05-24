@@ -1,0 +1,21 @@
+[package]
+name = "cultmesh-rs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "CultMesh ergonomic node/database surface over CultCache and CultNet for Rust runtimes."
+
+[lib]
+name = "cultmesh_rs"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+cultcache-rs = { path = "../cultcache-rs" }
+cultnet-rs = { path = "../cultnet-rs" }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"

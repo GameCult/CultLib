@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/cultcache-rs",
+  "crates/cultcache-rs/cultcache-rs-derive",
+  "crates/cultmesh-rs",
+  "crates/cultnet-rs"
+]

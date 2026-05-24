@@ -1,0 +1,33 @@
+{
+  "name": "cultmesh-ts",
+  "version": "0.1.0",
+  "description": "Local-first TypeScript CultMesh facade over CultCache and CultNet document contracts.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+  },
+  "keywords": [
+    "cultmesh",
+    "cultcache",
+    "cultnet",
+    "gamecult",
+    "typescript"
+  ],
+  "author": "metacratic",
+  "license": "MIT",
+  "dependencies": {
+    "cultcache-ts": "file:../cultcache-ts",
+    "cultnet-ts": "file:../cultnet-ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "zod": "^3.25.76"
+  }
+}

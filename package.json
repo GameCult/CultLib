@@ -1,0 +1,20 @@
+{
+  "name": "cultlib-monorepo",
+  "private": true,
+  "description": "CultLib compatibility monorepo for GameCult persistence, protocol, and mesh packages.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:dotnet": "dotnet build CultLib.sln",
+    "test:dotnet": "dotnet test CultLib.sln --no-restore",
+    "build:ts": "npm run build -w cultcache-ts && npm run build -w cultnet-ts && npm run build -w cultmesh-ts",
+    "typecheck:ts": "npm run typecheck -w cultcache-ts && npm run typecheck -w cultnet-ts && npm run typecheck -w cultmesh-ts",
+    "test:ts": "npm run test -w cultcache-ts && npm run test -w cultnet-ts && npm run test -w cultmesh-ts",
+    "test:rust": "cargo test --workspace",
+    "test:python": "python -m pytest python/cultcache-py/tests"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
