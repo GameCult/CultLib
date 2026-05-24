@@ -1,0 +1,11 @@
+{
+  "contracts": [
+    {
+      "schemaPath": "./ghostlight.agent-state.schema.json",
+      "typeName": "GhostlightAgentStateShape",
+      "contractExportName": "ghostlightAgentStateGeneratedContract",
+      "validateExportName": "validateGhostlightAgentStateGenerated",
+      "parseExportName": "parseGhostlightAgentStateGenerated"
+    }
+  ]
+}

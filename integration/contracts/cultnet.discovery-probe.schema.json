@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.discovery-probe.schema.json",
+  "title": "CultNet Discovery Probe",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "requesterRuntimeId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.discovery_probe.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "requesterRuntimeId": { "type": "string", "minLength": 1 }
+  }
+}
