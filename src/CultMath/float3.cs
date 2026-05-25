@@ -5,6 +5,11 @@ public readonly record struct float3(float x, float y, float z)
     public static readonly float3 zero = new(0.0f, 0.0f, 0.0f);
     public static readonly float3 one = new(1.0f, 1.0f, 1.0f);
 
+    public float3(float2 xy, float z)
+        : this(xy.x, xy.y, z)
+    {
+    }
+
     public float2 xy => new(x, y);
     public float2 xz => new(x, z);
     public float2 yz => new(y, z);

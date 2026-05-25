@@ -8,6 +8,14 @@ public static class math
 
     public static float radians(float degrees) => degrees * (PI / 180.0f);
     public static float degrees(float radians) => radians * (180.0f / PI);
+    public static float sin(float value) => MathF.Sin(value);
+    public static float cos(float value) => MathF.Cos(value);
+    public static float tan(float value) => MathF.Tan(value);
+    public static float asin(float value) => MathF.Asin(value);
+    public static float acos(float value) => MathF.Acos(value);
+    public static float atan(float value) => MathF.Atan(value);
+    public static float atan2(float y, float x) => MathF.Atan2(y, x);
+    public static float sqrt(float value) => MathF.Sqrt(value);
 
     public static float abs(float value) => MathF.Abs(value);
     public static float2 abs(float2 value) => new(abs(value.x), abs(value.y));

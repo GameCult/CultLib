@@ -5,6 +5,16 @@ public readonly record struct float4(float x, float y, float z, float w)
     public static readonly float4 zero = new(0.0f, 0.0f, 0.0f, 0.0f);
     public static readonly float4 one = new(1.0f, 1.0f, 1.0f, 1.0f);
 
+    public float4(float2 xy, float z, float w)
+        : this(xy.x, xy.y, z, w)
+    {
+    }
+
+    public float4(float3 xyz, float w)
+        : this(xyz.x, xyz.y, xyz.z, w)
+    {
+    }
+
     public float2 xy => new(x, y);
     public float3 xyz => new(x, y, z);
 
