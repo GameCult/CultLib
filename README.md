@@ -61,10 +61,16 @@ The solution includes:
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
 - `GameCult.Unity`: CultUI, a Unity runtime UI composition framework with reflective inspector generation, prefab-backed field resolvers, reusable controls, and a demo project packaged for UPM-style consumption
+- `packages/cultcache-ts`: TypeScript CultCache with MessagePack persistence and inspector tooling
+- `packages/cultnet-ts`: TypeScript CultNet schema-v0 contracts, framing, discovery, raw document replication, and interop tests
+- `packages/cultmesh-ts`: TypeScript CultMesh local node and mesh catalog surface for local runtimes such as VoidBot
+- `packages/cultcache-rs`: Rust CultCache and derive macro
+- `packages/cultnet-rs`: Rust CultNet contracts, framing, discovery, and interop peer
 
 ## Repository Layout
 
 ```text
+package.json
 src/
   GameCult.Logging/
   GameCult.Caching/
@@ -80,6 +86,12 @@ tests/
   GameCult.Caching.Tests/
   GameCult.Geometry.Tests/
   GameCult.Networking.Tests/
+packages/
+  cultcache-ts/
+  cultnet-ts/
+  cultmesh-ts/
+  cultcache-rs/
+  cultnet-rs/
 ```
 
 ## Build
@@ -92,6 +104,22 @@ dotnet build CultLib.sln
 
 ```powershell
 dotnet test CultLib.sln
+```
+
+TypeScript package tests:
+
+```powershell
+npm test --workspace packages/cultcache-ts
+npm test --workspace packages/cultnet-ts
+npm run test:interop --workspace packages/cultnet-ts
+npm test --workspace packages/cultmesh-ts
+```
+
+Rust package tests:
+
+```powershell
+cargo test --manifest-path packages/cultcache-rs/Cargo.toml
+cargo test --manifest-path packages/cultnet-rs/Cargo.toml
 ```
 
 ## Common Concepts
