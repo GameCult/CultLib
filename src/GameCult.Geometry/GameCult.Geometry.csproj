@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Typed CultCache geometry domain and chunk artifact documents for VibeGeometry and Fensalir</Description>
+    <PackageId>GameCult.Geometry</PackageId>
+    <PackageTags>game;geometry;csg;lod;cultcache;cultmesh;vibegeometry;fensalir</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <PackageReference Include="MessagePack" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
