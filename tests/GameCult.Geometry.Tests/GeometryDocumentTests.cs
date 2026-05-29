@@ -1,8 +1,13 @@
 using FluentAssertions;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Mesh;
 using GameCult.Networking;
 using NUnit.Framework;
+using R3;
+using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 
 namespace GameCult.Geometry.Tests
@@ -157,6 +162,69 @@ namespace GameCult.Geometry.Tests
             replicated.Should().NotBeNull();
             replicated!.ChunkId.Should().Be(chunk.ChunkId);
             replicated.RenderMesh.Indices.Should().Equal(chunk.RenderMesh.Indices);
+        }
+
+        [Test]
+        public async Task ChunkArtifact_IsTypedSharedState_InLocalCultMeshNode()
+        {
+            var cachePath = Path.Combine(
+                TestContext.CurrentContext.WorkDirectory,
+                "geometry-node-" + Guid.NewGuid().ToString("N") + ".ccmp");
+            var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
+                .Register(CultNetDocumentBinding.ForDocument<CultGeometryChunkArtifact>(CultDocumentRegistry.Shared));
+            var chunk = SampleChunk();
+            var key = CultGeometryChunkArtifact.CreateRecordKey(chunk);
+            var changes = new List<CultNetDatabaseChange<CultGeometryChunkArtifact>>();
+
+            try
+            {
+                using (var node = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+                {
+                    StartServer = false,
+                    DatabaseOptions = new CultNetDatabaseOptions
+                    {
+                        RuntimeId = "geometry-runtime",
+                        DocumentRegistry = registry
+                    }
+                }))
+                {
+                    using var subscription = node.Database
+                        .WatchRecord<CultGeometryChunkArtifact>(key)
+                        .Subscribe(change => changes.Add(change));
+
+                    await node.Database.PutAsync(key, chunk);
+                    await node.FlushAsync();
+                }
+
+                using (var reopened = await CultMesh.CreateNodeAsync(cachePath, new CultMeshNodeOptions
+                {
+                    StartServer = false,
+                    DatabaseOptions = new CultNetDatabaseOptions
+                    {
+                        RuntimeId = "unity-runtime",
+                        DocumentRegistry = registry
+                    }
+                }))
+                {
+                    var persisted = await reopened.Database.GetAsync<CultGeometryChunkArtifact>(key);
+
+                    persisted.Should().NotBeNull();
+                    persisted!.ChunkId.Should().Be(chunk.ChunkId);
+                    persisted.RenderMesh.Positions.Should().Equal(chunk.RenderMesh.Positions);
+                }
+            }
+            finally
+            {
+                if (File.Exists(cachePath))
+                {
+                    File.Delete(cachePath);
+                }
+            }
+
+            changes.Should().ContainSingle();
+            changes[0].Kind.Should().Be(CultNetDatabaseChangeKind.Added);
+            changes[0].Document.Should().NotBeNull();
+            changes[0].Document!.ChunkId.Should().Be(chunk.ChunkId);
         }
 
         private static CultGeometryDomainDocument SampleDomain()

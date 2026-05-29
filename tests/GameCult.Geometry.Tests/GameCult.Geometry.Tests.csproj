@@ -8,6 +8,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Geometry\GameCult.Geometry.csproj" />
+    <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Networking\GameCult.Networking.csproj" />
   </ItemGroup>
 
