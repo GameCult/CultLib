@@ -71,6 +71,22 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
+        public void FeatureClaim_StableFingerprint_UsesRustCanonicalOrder()
+        {
+            var claim = SampleDomain().Root.Children[0].Claims[0];
+
+            claim.StableFingerprint().Should().Be(string.Join('\u001e',
+                "column-support-shell",
+                "0,0,0",
+                "0,0,0,1",
+                "0,0,45",
+                "18,18,96",
+                "SupportShell",
+                "10",
+                "RenderAndCollider"));
+        }
+
+        [Test]
         public async Task ChunkArtifact_Replicates_ThroughCultNetRawDocumentLane()
         {
             var sourceCache = new CultCache();

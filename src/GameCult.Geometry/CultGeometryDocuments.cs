@@ -83,23 +83,19 @@ namespace GameCult.Geometry
 
         public string StableFingerprint()
         {
-            var builder = new StringBuilder()
-                .Append(Name).Append('\u001f')
-                .Append(Kind).Append('\u001f')
-                .Append(Seed.ToString(CultureInfo.InvariantCulture)).Append('\u001f')
-                .AppendVector(Translation).Append('\u001f')
-                .AppendVector(RotationXyzw);
-            foreach (var claim in Claims)
+            var parts = new[]
             {
-                builder.Append('\u001e').Append(claim.StableFingerprint());
+                Name,
+                Kind,
+                StableVector(Translation),
+                StableVector(RotationXyzw),
+                Seed.ToString(CultureInfo.InvariantCulture)
             }
+                .Concat(Claims.Select(claim => claim.StableFingerprint()))
+                .Concat(Children.Select(child => child.StableFingerprint()))
+                .ToArray();
 
-            foreach (var child in Children)
-            {
-                builder.Append('\u001d').Append(child.StableFingerprint());
-            }
-
-            return builder.ToString();
+            return StableArray(parts);
         }
     }
 
@@ -133,16 +129,16 @@ namespace GameCult.Geometry
         [Key(7)]
         public string LoweringPolicy { get; set; } = string.Empty;
 
-        public string StableFingerprint() => new StringBuilder()
-            .Append(Name).Append('\u001f')
-            .Append(Kind).Append('\u001f')
-            .Append(Material.ToString(CultureInfo.InvariantCulture)).Append('\u001f')
-            .Append(LoweringPolicy).Append('\u001f')
-            .AppendVector(Translation).Append('\u001f')
-            .AppendVector(RotationXyzw).Append('\u001f')
-            .AppendVector(SupportCenter).Append('\u001f')
-            .AppendVector(SupportSize)
-            .ToString();
+        public string StableFingerprint() => StableArray([
+            Name,
+            StableVector(Translation),
+            StableVector(RotationXyzw),
+            StableVector(SupportCenter),
+            StableVector(SupportSize),
+            Kind,
+            Material.ToString(CultureInfo.InvariantCulture),
+            LoweringPolicy
+        ]);
     }
 
     /// <summary>
@@ -421,15 +417,6 @@ namespace GameCult.Geometry
         public static string StableArray(string[] values)
         {
             return string.Join("\u001e", values);
-        }
-    }
-
-    internal static class CultGeometryStringBuilderExtensions
-    {
-        public static StringBuilder AppendVector(this StringBuilder builder, float[] values)
-        {
-            builder.Append(StableVector(values));
-            return builder;
         }
     }
 }
