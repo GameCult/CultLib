@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.discovery-announce.schema.json",
+  "title": "CultNet Discovery Announce",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "runtimeId",
+    "runtimeKind",
+    "displayName",
+    "tcpHost",
+    "tcpPort",
+    "wireContract",
+    "supportedDocumentTypes",
+    "supportsSchemaCatalog"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.discovery_announce.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "runtimeId": { "type": "string", "minLength": 1 },
+    "runtimeKind": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "agentId": { "type": "string", "minLength": 1 },
+    "tcpHost": { "type": "string", "minLength": 1 },
+    "tcpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "wireContract": { "const": "cultnet.schema.v0" },
+    "supportedDocumentTypes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "supportsSchemaCatalog": { "type": "boolean" }
+  }
+}

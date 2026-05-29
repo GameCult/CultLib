@@ -293,6 +293,25 @@ FakesAssemblies/
 .ntvs_analysis.dat
 node_modules/
 
+# CultLib language packages are source workspaces, not NuGet restore output.
+!packages/
+!packages/cultcache-ts/
+!packages/cultcache-ts/**
+!packages/cultnet-ts/
+!packages/cultnet-ts/**
+!packages/cultmesh-ts/
+!packages/cultmesh-ts/**
+!packages/cultcache-rs/
+!packages/cultcache-rs/**
+!packages/cultnet-rs/
+!packages/cultnet-rs/**
+packages/**/node_modules/
+packages/**/dist/
+packages/**/dist-test/
+packages/**/dist-inspector/
+packages/**/release/
+packages/**/release-inspector/
+
 # Visual Studio 6 build log
 *.plg
 

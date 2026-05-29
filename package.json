@@ -1,0 +1,13 @@
+{
+  "name": "cultlib",
+  "private": true,
+  "workspaces": [
+    "packages/cultcache-ts",
+    "packages/cultnet-ts",
+    "packages/cultmesh-ts"
+  ],
+  "scripts": {
+    "build:ts": "npm --workspaces run build",
+    "test:ts": "npm --workspaces run test"
+  }
+}
