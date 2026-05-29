@@ -1,7 +1,9 @@
 using FluentAssertions;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Networking;
 using NUnit.Framework;
+using System.Threading.Tasks;
 
 namespace GameCult.Geometry.Tests
 {
@@ -57,28 +59,7 @@ namespace GameCult.Geometry.Tests
         [Test]
         public void ChunkArtifact_RoundTrips_ThroughCultCacheMessagePack()
         {
-            var chunk = new CultGeometryChunkArtifact
-            {
-                ChunkId = "chunk/ragnarok-column/column-00",
-                CutKey = "geometry:cut:test",
-                SelectedCutId = "cut-test",
-                BoundsMin = [-1f, -1f, 0f],
-                BoundsMax = [1f, 1f, 1f],
-                SourceDomainKeys = ["ragnarok-column/stellarator-column-00"],
-                SourceClaimKeys = ["ragnarok-column/stellarator-column-00/claim/support"],
-                RenderMesh = new CultGeometryTriangleMesh
-                {
-                    Positions = [0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f],
-                    Normals = [0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f, 1f],
-                    Uvs = [0f, 0f, 1f, 0f, 0f, 1f],
-                    Indices = [0u, 1u, 2u],
-                    TriangleMaterials = [20u]
-                },
-                ColliderMesh = null,
-                InputBrushes = 1,
-                StableClipSeed = 1234,
-                SupportsParentChildCoexistence = true
-            };
+            var chunk = SampleChunk();
 
             var payload = CultDocumentMessagePackSerialization.Serialize(chunk);
             var decoded = CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload);
@@ -87,6 +68,79 @@ namespace GameCult.Geometry.Tests
             decoded.RenderMesh.TriangleCount.Should().Be(1);
             CultGeometryChunkArtifact.CreateRecordKey(decoded)
                 .Should().Be(CultGeometryChunkArtifact.CreateRecordKey(chunk));
+        }
+
+        [Test]
+        public async Task ChunkArtifact_Replicates_ThroughCultNetRawDocumentLane()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var schemaId = sourceCache.Registry.GetRequired<CultGeometryChunkArtifact>().SchemaId;
+            var registry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<CultGeometryChunkArtifact>(sourceCache.Registry));
+            var chunk = SampleChunk();
+            var handle = new CultRecordHandle<CultGeometryChunkArtifact>(
+                CultGeometryChunkArtifact.CreateRecordKey(chunk));
+
+            await sourceCache.AddAsync(chunk, handle);
+
+            var put = registry.CreateRawDocumentPutMessage(
+                "geometry-chunk-put",
+                handle,
+                chunk,
+                new CultNetDocumentMessageOptions
+                {
+                    SourceRuntimeId = "vg-csg",
+                    SourceRole = "geometry-worker",
+                    Tags = ["ragnarok", "chunk"]
+                });
+
+            put.Document.SchemaId.Should().Be(schemaId);
+            put.Document.PayloadEncoding.Should().Be("messagepack");
+            put.Document.Payload.Should().NotBeEmpty();
+            put.Document.RecordKey.Should().Be(handle.Key.Value);
+
+            var applied = await registry.ApplyRawDocumentPutMessageAsync<CultGeometryChunkArtifact>(targetCache, put);
+            var replicated = targetCache.Get<CultGeometryChunkArtifact>(handle.Key);
+
+            applied.ChunkId.Should().Be(chunk.ChunkId);
+            replicated.Should().NotBeNull();
+            replicated!.RenderMesh.TriangleCount.Should().Be(1);
+            CultGeometryChunkArtifact.CreateRecordKey(replicated)
+                .Should().Be(handle.Key);
+        }
+
+        [Test]
+        public async Task ChunkArtifact_Replicates_ThroughCultNetRawSnapshot()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var schemaId = sourceCache.Registry.GetRequired<CultGeometryChunkArtifact>().SchemaId;
+            var registry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<CultGeometryChunkArtifact>(sourceCache.Registry));
+            var chunk = SampleChunk();
+            var handle = new CultRecordHandle<CultGeometryChunkArtifact>(
+                CultGeometryChunkArtifact.CreateRecordKey(chunk));
+
+            await sourceCache.AddAsync(chunk, handle);
+
+            var request = registry.CreateSnapshotRequest(
+                "geometry-snapshot-request",
+                schemaIds: [schemaId],
+                recordKeys: [handle.Key.Value]);
+            var response = registry.CreateRawSnapshotResponse(sourceCache, "geometry-snapshot", request);
+
+            response.Documents.Should().ContainSingle();
+            response.Documents[0].SchemaId.Should().Be(schemaId);
+            response.Documents[0].RecordKey.Should().Be(handle.Key.Value);
+
+            var applied = await registry.ApplyRawSnapshotResponseAsync<CultGeometryChunkArtifact>(targetCache, response);
+            var replicated = targetCache.Get<CultGeometryChunkArtifact>(handle.Key);
+
+            applied.Should().ContainSingle();
+            replicated.Should().NotBeNull();
+            replicated!.ChunkId.Should().Be(chunk.ChunkId);
+            replicated.RenderMesh.Indices.Should().Equal(chunk.RenderMesh.Indices);
         }
 
         private static CultGeometryDomainDocument SampleDomain()
@@ -132,6 +186,32 @@ namespace GameCult.Geometry.Tests
                         }
                     ]
                 }
+            };
+        }
+
+        private static CultGeometryChunkArtifact SampleChunk()
+        {
+            return new CultGeometryChunkArtifact
+            {
+                ChunkId = "chunk/ragnarok-column/column-00",
+                CutKey = "geometry:cut:test",
+                SelectedCutId = "cut-test",
+                BoundsMin = [-1f, -1f, 0f],
+                BoundsMax = [1f, 1f, 1f],
+                SourceDomainKeys = ["ragnarok-column/stellarator-column-00"],
+                SourceClaimKeys = ["ragnarok-column/stellarator-column-00/claim/support"],
+                RenderMesh = new CultGeometryTriangleMesh
+                {
+                    Positions = [0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f],
+                    Normals = [0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f, 1f],
+                    Uvs = [0f, 0f, 1f, 0f, 0f, 1f],
+                    Indices = [0u, 1u, 2u],
+                    TriangleMaterials = [20u]
+                },
+                ColliderMesh = null,
+                InputBrushes = 1,
+                StableClipSeed = 1234,
+                SupportsParentChildCoexistence = true
             };
         }
     }
