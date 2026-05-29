@@ -262,6 +262,7 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Caching.NewtonsoftJson](src/GameCult.Caching.NewtonsoftJson/README.md)
 - [GameCult.Caching.MessagePack.Generator](src/GameCult.Caching.MessagePack.Generator/README.md)
 - [GameCult.Caching.MessagePack.Analyzers](src/GameCult.Caching.MessagePack.Analyzers/README.md)
+- [GameCult.Geometry](src/GameCult.Geometry/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
 - [GameCult.Mesh](src/GameCult.Mesh/README.md)
 - [Durable Node Quickstart](src/GameCult.Mesh/docs/durable-node-quickstart.md)
