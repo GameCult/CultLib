@@ -411,7 +411,13 @@ namespace GameCult.Geometry
 
         public static string StableVector(float[] values)
         {
-            return string.Join(",", values.Select(value => value.ToString("R", CultureInfo.InvariantCulture)));
+            return string.Join(",", values.Select(StableFloat));
+        }
+
+        public static string StableFloat(float value)
+        {
+            return BitConverter.ToUInt32(BitConverter.GetBytes(value), 0)
+                .ToString("x8", CultureInfo.InvariantCulture);
         }
 
         public static string StableArray(string[] values)

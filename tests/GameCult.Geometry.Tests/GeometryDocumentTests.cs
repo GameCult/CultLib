@@ -82,13 +82,39 @@ namespace GameCult.Geometry.Tests
 
             claim.StableFingerprint().Should().Be(string.Join('\u001e',
                 "column-support-shell",
-                "0,0,0",
-                "0,0,0,1",
-                "0,0,45",
-                "18,18,96",
+                "00000000,00000000,00000000",
+                "00000000,00000000,00000000,3f800000",
+                "00000000,00000000,42340000",
+                "41900000,41900000,42c00000",
                 "SupportShell",
                 "10",
                 "RenderAndCollider"));
+        }
+
+        [Test]
+        public void RustExportedDomainDocument_DecodesWithStableCultCacheKey()
+        {
+            var payload = File.ReadAllBytes(FixturePath("ragnarok-domain.msgpack"));
+            var domain = CultDocumentMessagePackSerialization.Deserialize<CultGeometryDomainDocument>(payload);
+
+            domain.DomainId.Should().Be("ragnarok-column");
+            domain.Root.Children.Should().NotBeEmpty();
+            domain.Root.Children[0].Name.Should().Be("stellarator-column-00");
+            CultGeometryDomainDocument.CreateRecordKey(domain).Value
+                .Should().Be("geometry:domain:02c9b5810977406b0c206f3a3494327a423abb9448192be1b9a1863cd0f2ed95");
+        }
+
+        [Test]
+        public void RustExportedChunkArtifact_DecodesWithStableCultCacheKey()
+        {
+            var payload = File.ReadAllBytes(FixturePath("ragnarok-first-chunk.msgpack"));
+            var chunk = CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload);
+
+            chunk.ChunkId.Should().StartWith("chunk/");
+            chunk.RenderMesh.TriangleCount.Should().BeGreaterThan(0);
+            chunk.SourceDomainKeys.Should().NotBeEmpty();
+            CultGeometryChunkArtifact.CreateRecordKey(chunk).Value
+                .Should().Be("geometry:chunk:b94dcd7d6776df15d0fa5fcf7f4b24f1384876b13b2d38cc57c4468136521af5");
         }
 
         [Test]
@@ -271,6 +297,15 @@ namespace GameCult.Geometry.Tests
                     ]
                 }
             };
+        }
+
+        private static string FixturePath(string fileName)
+        {
+            return Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "Fixtures",
+                "vg-csg-ragnarok",
+                fileName);
         }
 
         private static CultGeometryChunkArtifact SampleChunk()
