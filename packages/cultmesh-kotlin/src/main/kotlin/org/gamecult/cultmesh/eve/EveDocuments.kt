@@ -56,6 +56,7 @@ data class EveDashboardStateDocument(
     val selectedNodeId: String,
     val lutPreset: String,
     val nodes: List<EveDashboardNodeSnapshot>,
+    val surface: EveDashboardSurface? = null,
 ) {
     companion object Codec : CultDocumentCodec<EveDashboardStateDocument> {
         override val documentType = "mimir.eve_dashboard_state"
@@ -75,9 +76,146 @@ data class EveDashboardStateDocument(
                 reader.readString(),
                 reader.readString(),
                 List(reader.readArrayHeader()) { EveDashboardNodeSnapshot.decode(reader) },
+                if (count > 7) EveDashboardSurface.decodeNullable(reader) else null,
+            )
+            repeat((count - 8).coerceAtLeast(0)) { reader.skip() }
+            return state
+        }
+    }
+}
+
+data class EveDashboardSurface(
+    val schema: String,
+    val id: String,
+    val title: String,
+    val root: EveDashboardUiElement,
+    val assets: List<EveDashboardSurfaceAsset>,
+) {
+    companion object {
+        fun decodeNullable(reader: MessagePackReader): EveDashboardSurface? {
+            val count = reader.readNullableArrayHeader() ?: return null
+            if (count < 5) throw IOException("dashboard surface document too short")
+            val surface = EveDashboardSurface(
+                reader.readString(),
+                reader.readString(),
+                reader.readString(),
+                EveDashboardUiElement.decode(reader),
+                List(reader.readArrayHeader()) { EveDashboardSurfaceAsset.decode(reader) },
+            )
+            repeat((count - 5).coerceAtLeast(0)) { reader.skip() }
+            return surface
+        }
+    }
+}
+
+data class EveDashboardSurfaceAsset(
+    val id: String,
+    val kind: String,
+    val uri: String,
+) {
+    companion object {
+        fun decode(reader: MessagePackReader): EveDashboardSurfaceAsset {
+            val count = reader.readArrayHeader()
+            val asset = EveDashboardSurfaceAsset(reader.readString(), reader.readString(), reader.readString())
+            repeat((count - 3).coerceAtLeast(0)) { reader.skip() }
+            return asset
+        }
+    }
+}
+
+data class EveDashboardUiElement(
+    val id: String,
+    val kind: String,
+    val role: String?,
+    val text: String?,
+    val assetRef: String?,
+    val assetUri: String?,
+    val bindNodeId: String?,
+    val commandId: String?,
+    val layout: EveDashboardUiLayout?,
+    val style: EveDashboardUiStyle?,
+    val metric: EveDashboardUiMetric?,
+    val children: List<EveDashboardUiElement>,
+) {
+    companion object {
+        fun decode(reader: MessagePackReader): EveDashboardUiElement {
+            val count = reader.readArrayHeader()
+            if (count < 12) throw IOException("dashboard ui element document too short")
+            val element = EveDashboardUiElement(
+                reader.readString(),
+                reader.readString(),
+                reader.readNullableString(),
+                reader.readNullableString(),
+                reader.readNullableString(),
+                reader.readNullableString(),
+                reader.readNullableString(),
+                reader.readNullableString(),
+                EveDashboardUiLayout.decodeNullable(reader),
+                EveDashboardUiStyle.decodeNullable(reader),
+                EveDashboardUiMetric.decodeNullable(reader),
+                List(reader.readArrayHeader()) { decode(reader) },
+            )
+            repeat((count - 12).coerceAtLeast(0)) { reader.skip() }
+            return element
+        }
+    }
+}
+
+data class EveDashboardUiLayout(
+    val direction: String,
+    val width: Double?,
+    val height: Double?,
+    val grow: Double?,
+    val gap: Double?,
+    val padding: Double?,
+    val overflow: String?,
+) {
+    companion object {
+        fun decodeNullable(reader: MessagePackReader): EveDashboardUiLayout? {
+            val count = reader.readNullableArrayHeader() ?: return null
+            if (count < 7) throw IOException("dashboard ui layout document too short")
+            val layout = EveDashboardUiLayout(
+                reader.readString(),
+                reader.readNullableDouble(),
+                reader.readNullableDouble(),
+                reader.readNullableDouble(),
+                reader.readNullableDouble(),
+                reader.readNullableDouble(),
+                reader.readNullableString(),
             )
             repeat((count - 7).coerceAtLeast(0)) { reader.skip() }
-            return state
+            return layout
+        }
+    }
+}
+
+data class EveDashboardUiStyle(
+    val variant: String,
+    val tone: String?,
+) {
+    companion object {
+        fun decodeNullable(reader: MessagePackReader): EveDashboardUiStyle? {
+            val count = reader.readNullableArrayHeader() ?: return null
+            if (count < 2) throw IOException("dashboard ui style document too short")
+            val style = EveDashboardUiStyle(reader.readString(), reader.readNullableString())
+            repeat((count - 2).coerceAtLeast(0)) { reader.skip() }
+            return style
+        }
+    }
+}
+
+data class EveDashboardUiMetric(
+    val label: String,
+    val value: Double,
+    val tone: String,
+) {
+    companion object {
+        fun decodeNullable(reader: MessagePackReader): EveDashboardUiMetric? {
+            val count = reader.readNullableArrayHeader() ?: return null
+            if (count < 3) throw IOException("dashboard ui metric document too short")
+            val metric = EveDashboardUiMetric(reader.readString(), reader.readDouble(), reader.readString())
+            repeat((count - 3).coerceAtLeast(0)) { reader.skip() }
+            return metric
         }
     }
 }

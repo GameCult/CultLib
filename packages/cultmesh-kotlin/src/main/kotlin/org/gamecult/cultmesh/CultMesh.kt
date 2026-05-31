@@ -180,6 +180,13 @@ class MessagePackReader(payload: ByteArray) {
         throw IOException("expected array")
     }
 
+    fun readNullableArrayHeader(): Int? {
+        val code = readCode()
+        if (code == 0xc0) return null
+        unread(code)
+        return readArrayHeader()
+    }
+
     fun readString(): String = readNullableString() ?: ""
 
     fun readNullableString(): String? {
@@ -226,6 +233,13 @@ class MessagePackReader(payload: ByteArray) {
         if (code == 0xcb) return input.readDouble()
         unread(code)
         return readLong().toDouble()
+    }
+
+    fun readNullableDouble(): Double? {
+        val code = readCode()
+        if (code == 0xc0) return null
+        unread(code)
+        return readDouble()
     }
 
     fun skip() {
