@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 
 namespace GameCult.Caching.MessagePack
@@ -37,6 +38,21 @@ namespace GameCult.Caching.MessagePack
         /// Gets or sets an optional callback used to customize the backing store before opening.
         /// </summary>
         public Action<SingleFileMessagePackBackingStore>? ConfigureStore { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the cache should use a paged directory store instead of one whole-file snapshot.
+        /// </summary>
+        public bool UseDirectoryStore { get; set; }
+
+        /// <summary>
+        /// Gets or sets the directory used for paged records. When omitted, the store uses the file path plus ".records".
+        /// </summary>
+        public string? DirectoryStorePath { get; set; }
+
+        /// <summary>
+        /// Gets or sets an optional callback used to customize the directory backing store before opening.
+        /// </summary>
+        public Action<DirectoryMessagePackBackingStore>? ConfigureDirectoryStore { get; set; }
     }
 
     /// <summary>
@@ -62,13 +78,25 @@ namespace GameCult.Caching.MessagePack
             };
             options.ConfigureCache?.Invoke(cache);
 
-            var store = new SingleFileMessagePackBackingStore(filePath)
+            if (options.UseDirectoryStore || Directory.Exists(options.DirectoryStorePath ?? DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath)))
             {
-                FlushOnDispose = options.StoreFlushOnDispose
-            };
-            options.ConfigureStore?.Invoke(store);
+                var directoryStore = new DirectoryMessagePackBackingStore(filePath, options.DirectoryStorePath)
+                {
+                    FlushOnDispose = options.StoreFlushOnDispose
+                };
+                options.ConfigureDirectoryStore?.Invoke(directoryStore);
+                cache.AddBackingStore(directoryStore);
+            }
+            else
+            {
+                var store = new SingleFileMessagePackBackingStore(filePath)
+                {
+                    FlushOnDispose = options.StoreFlushOnDispose
+                };
+                options.ConfigureStore?.Invoke(store);
+                cache.AddBackingStore(store);
+            }
 
-            cache.AddBackingStore(store);
             return cache;
         }
 

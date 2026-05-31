@@ -123,6 +123,66 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_Writes_Record_Pages_Without_Rewriting_Cold_Records()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                var cache = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                var first = await cache.UpsertAsync(new NamedTestEntry
+                {
+                    Name = "cold",
+                    Value = new string('a', 4096)
+                });
+                await cache.FlushAsync();
+                cache.Dispose();
+
+                var firstRecord = Directory.GetFiles(recordsPath, "*.msgpack").Single();
+                var firstWrite = File.GetLastWriteTimeUtc(firstRecord);
+
+                await Task.Delay(1100);
+
+                var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                var second = await reopened.UpsertAsync(new NamedTestEntry
+                {
+                    Name = "hot",
+                    Value = "new"
+                });
+                await reopened.FlushAsync();
+                reopened.Dispose();
+
+                var recordFiles = Directory.GetFiles(recordsPath, "*.msgpack");
+                Assert.That(recordFiles, Has.Length.EqualTo(2));
+                Assert.That(File.GetLastWriteTimeUtc(firstRecord), Is.EqualTo(firstWrite));
+                Assert.That(new FileInfo(filePath).Length, Is.LessThan(new FileInfo(firstRecord).Length));
+
+                var read = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(read.Get<NamedTestEntry>(first.Key)!.Value, Is.EqualTo(new string('a', 4096)));
+                Assert.That(read.Get<NamedTestEntry>(second.Key)!.Value, Is.EqualTo("new"));
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+
+                if (Directory.Exists(recordsPath))
+                {
+                    Directory.Delete(recordsPath, recursive: true);
+                }
+            }
+        }
+
+        [Test]
         public async Task CultCache_RuntimeType_Upsert_Snapshot_And_Remove_Work_For_Editor_Tooling()
         {
             var cache = new CultCache();
