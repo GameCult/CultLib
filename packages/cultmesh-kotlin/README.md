@@ -10,6 +10,11 @@ an in-memory CultCache, and the first Eve dashboard/sensor document contracts.
 references, and the flat `nodes` projection remains a compatibility and binding
 surface for selection, commands, and fallback rendering.
 
+`EveMediaObservationDocument` carries byte-backed device streams such as camera
+luma frames and microphone PCM blocks. The document is observation transport,
+not synchronization authority: the device owns capture and local timestamps,
+while Mimir or another consumer owns alignment and interpretation.
+
 ## Build
 
 ```powershell

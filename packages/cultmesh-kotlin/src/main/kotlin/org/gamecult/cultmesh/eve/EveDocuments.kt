@@ -308,3 +308,52 @@ data class EveSensorObservationDocument(
             throw UnsupportedOperationException("sensor decode is consumer-owned")
     }
 }
+
+data class EveMediaObservationDocument(
+    val observationId: String,
+    val deviceId: String,
+    val streamId: String,
+    val kind: String,
+    val sequence: Long,
+    val sensorTimestampNs: Long,
+    val elapsedRealtimeNs: Long,
+    val wallClockUtc: String,
+    val clockDomainId: String,
+    val format: String,
+    val width: Int? = null,
+    val height: Int? = null,
+    val sampleRate: Int? = null,
+    val channels: Int? = null,
+    val frameCount: Int? = null,
+    val payloadEncoding: String,
+    val payload: ByteArray,
+) {
+    companion object Codec : CultDocumentCodec<EveMediaObservationDocument> {
+        override val documentType = "mimir.eve_media_observation"
+        override val schemaVersion = "mimir.eve_media_observation.v1"
+        override fun encode(value: EveMediaObservationDocument): ByteArray =
+            MessagePackWriter()
+                .array(17)
+                .string(value.observationId)
+                .string(value.deviceId)
+                .string(value.streamId)
+                .string(value.kind)
+                .longValue(value.sequence)
+                .longValue(value.sensorTimestampNs)
+                .longValue(value.elapsedRealtimeNs)
+                .string(value.wallClockUtc)
+                .string(value.clockDomainId)
+                .string(value.format)
+                .nullableLong(value.width?.toLong())
+                .nullableLong(value.height?.toLong())
+                .nullableLong(value.sampleRate?.toLong())
+                .nullableLong(value.channels?.toLong())
+                .nullableLong(value.frameCount?.toLong())
+                .string(value.payloadEncoding)
+                .binary(value.payload)
+                .toByteArray()
+
+        override fun decode(payload: ByteArray): EveMediaObservationDocument =
+            throw UnsupportedOperationException("media decode is consumer-owned")
+    }
+}

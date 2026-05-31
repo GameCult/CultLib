@@ -298,6 +298,15 @@ class MessagePackWriter {
         out.write(bytes)
     }
 
+    fun binary(value: ByteArray): MessagePackWriter = apply {
+        when {
+            value.size < 256 -> { out.write(0xc4); out.write(value.size) }
+            value.size <= 65535 -> { out.write(0xc5); out.write((value.size shr 8) and 0xff); out.write(value.size and 0xff) }
+            else -> { out.write(0xc6); out.write(ByteBuffer.allocate(4).putInt(value.size).array()) }
+        }
+        out.write(value)
+    }
+
     fun nullableString(value: String?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else string(value) }
     fun nullableBoolean(value: Boolean?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else out.write(if (value) 0xc3 else 0xc2) }
     fun nullableDouble(value: Double?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else doubleValue(value) }
