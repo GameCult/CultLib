@@ -166,6 +166,190 @@ export class CultMeshAuthorityLeaseCatalog {
   }
 }
 
+export type CultMeshStreamKind = "audio" | "video" | "tensor" | "bytes";
+
+export type CultMeshStreamBodyTransport =
+  | "shared-memory"
+  | "shared-d3d12-texture"
+  | "shared-d3d11-texture"
+  | "dma-buf"
+  | "iosurface"
+  | "ahardwarebuffer"
+  | "cultcache-page"
+  | "inline-bytes";
+
+export type CultMeshStreamAccess = "read" | "write" | "read-write";
+
+export interface CultMeshStreamClock {
+  clockDomainId: string;
+  sourceId?: string;
+  sampleRate?: number;
+  offsetToVerseTimeNs?: number;
+  confidence?: number;
+  evidenceKind?: string;
+}
+
+export interface CultMeshAudioStreamFormat {
+  sampleRate: number;
+  channels: number;
+  sampleFormat: "float32" | "int16" | "int24" | "int32";
+  framesPerPacket?: number;
+}
+
+export interface CultMeshVideoStreamFormat {
+  width: number;
+  height: number;
+  pixelFormat: string;
+  framesPerSecond?: number;
+  planeCount?: number;
+}
+
+export interface CultMeshStreamDescriptor {
+  streamId: string;
+  verseId: string;
+  ownerPeerId: string;
+  kind: CultMeshStreamKind;
+  label?: string;
+  clock: CultMeshStreamClock;
+  audio?: CultMeshAudioStreamFormat;
+  video?: CultMeshVideoStreamFormat;
+  preferredTransports: readonly CultMeshStreamBodyTransport[];
+  requiredAccess?: CultMeshStreamAccess;
+  maxInFlightFrames?: number;
+  metadataSchemaId?: string;
+}
+
+export interface CultMeshStreamConsumerProfile {
+  peerId: string;
+  verseId: string;
+  supportedTransports: readonly CultMeshStreamBodyTransport[];
+  acceptedKinds?: readonly CultMeshStreamKind[];
+  canImportGpuHandles?: boolean;
+  canMapSharedMemory?: boolean;
+  maxInFlightFrames?: number;
+}
+
+export interface CultMeshStreamNegotiation {
+  streamId: string;
+  producerPeerId: string;
+  consumerPeerId: string;
+  transport: CultMeshStreamBodyTransport;
+  access: CultMeshStreamAccess;
+  maxInFlightFrames: number;
+  copyBudget: "zero-copy-target" | "one-copy-fallback" | "opaque-runtime";
+}
+
+export interface CultMeshStreamFrameHandle {
+  streamId: string;
+  sequence: bigint;
+  timestampNs: bigint;
+  durationNs?: bigint;
+  transport: CultMeshStreamBodyTransport;
+  byteLength?: number;
+  nativeHandle?: string;
+  resourceKey?: string;
+  pageRef?: string;
+  fenceHandle?: string;
+  fenceValue?: bigint;
+  unavoidableCopyCount?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export class CultMeshStreamCatalog {
+  readonly #streams = new Map<string, CultMeshStreamDescriptor>();
+  readonly #latestFrames = new Map<string, CultMeshStreamFrameHandle>();
+
+  public get streams(): readonly CultMeshStreamDescriptor[] {
+    return [...this.#streams.values()].sort((left, right) =>
+      left.streamId.localeCompare(right.streamId),
+    );
+  }
+
+  public declare(stream: CultMeshStreamDescriptor): CultMeshStreamDescriptor {
+    requireNonEmpty(stream.streamId, "stream.streamId");
+    requireNonEmpty(stream.verseId, "stream.verseId");
+    requireNonEmpty(stream.ownerPeerId, "stream.ownerPeerId");
+    requireNonEmpty(stream.clock.clockDomainId, "stream.clock.clockDomainId");
+    if (stream.preferredTransports.length === 0) {
+      throw new Error("stream.preferredTransports must not be empty.");
+    }
+
+    this.#streams.set(stream.streamId, stream);
+    return stream;
+  }
+
+  public get(streamId: string): CultMeshStreamDescriptor | undefined {
+    requireNonEmpty(streamId, "streamId");
+    return this.#streams.get(streamId);
+  }
+
+  public find(
+    verseId: string,
+    kind?: CultMeshStreamKind,
+  ): readonly CultMeshStreamDescriptor[] {
+    requireNonEmpty(verseId, "verseId");
+    return this.streams.filter(
+      (stream) => stream.verseId === verseId && (!kind || stream.kind === kind),
+    );
+  }
+
+  public negotiate(
+    streamId: string,
+    consumer: CultMeshStreamConsumerProfile,
+  ): CultMeshStreamNegotiation {
+    const stream = this.get(streamId);
+    if (!stream) {
+      throw new Error(`Unknown CultMesh stream '${streamId}'.`);
+    }
+
+    if (consumer.verseId !== stream.verseId) {
+      throw new Error("stream and consumer must belong to the same Verse.");
+    }
+
+    if (
+      consumer.acceptedKinds &&
+      !consumer.acceptedKinds.includes(stream.kind)
+    ) {
+      throw new Error(`consumer does not accept ${stream.kind} streams.`);
+    }
+
+    const transport = stream.preferredTransports.find((candidate) =>
+      consumer.supportedTransports.includes(candidate),
+    );
+    if (!transport) {
+      throw new Error("stream and consumer have no compatible body transport.");
+    }
+
+    return {
+      streamId: stream.streamId,
+      producerPeerId: stream.ownerPeerId,
+      consumerPeerId: consumer.peerId,
+      transport,
+      access: stream.requiredAccess ?? "read",
+      maxInFlightFrames: Math.min(
+        stream.maxInFlightFrames ?? Number.MAX_SAFE_INTEGER,
+        consumer.maxInFlightFrames ?? Number.MAX_SAFE_INTEGER,
+      ),
+      copyBudget: copyBudgetFor(transport),
+    };
+  }
+
+  public publishFrame(frame: CultMeshStreamFrameHandle): CultMeshStreamFrameHandle {
+    requireNonEmpty(frame.streamId, "frame.streamId");
+    if (!this.#streams.has(frame.streamId)) {
+      throw new Error(`Unknown CultMesh stream '${frame.streamId}'.`);
+    }
+
+    this.#latestFrames.set(frame.streamId, frame);
+    return frame;
+  }
+
+  public latestFrame(streamId: string): CultMeshStreamFrameHandle | undefined {
+    requireNonEmpty(streamId, "streamId");
+    return this.#latestFrames.get(streamId);
+  }
+}
+
 export class CultMesh {
   public static async createNode(
     cachePath: string,
@@ -209,10 +393,32 @@ export class CultMesh {
   public static createAuthorityLeaseCatalog(): CultMeshAuthorityLeaseCatalog {
     return new CultMeshAuthorityLeaseCatalog();
   }
+
+  public static createStreamCatalog(): CultMeshStreamCatalog {
+    return new CultMeshStreamCatalog();
+  }
 }
 
 function requireNonEmpty(value: string, name: string): void {
   if (!value || value.trim().length === 0) {
     throw new Error(`${name} must be non-empty.`);
+  }
+}
+
+function copyBudgetFor(
+  transport: CultMeshStreamBodyTransport,
+): CultMeshStreamNegotiation["copyBudget"] {
+  switch (transport) {
+    case "shared-memory":
+    case "shared-d3d12-texture":
+    case "shared-d3d11-texture":
+    case "dma-buf":
+    case "iosurface":
+    case "ahardwarebuffer":
+      return "zero-copy-target";
+    case "cultcache-page":
+      return "one-copy-fallback";
+    case "inline-bytes":
+      return "opaque-runtime";
   }
 }

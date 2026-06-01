@@ -67,3 +67,64 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
 
   assert.equal(leases.isAuthorized(peer, "shard-primary"), true);
 });
+
+test("CultMesh TS negotiates streaming frame body transports explicitly", () => {
+  const streams = CultMesh.createStreamCatalog();
+  streams.declare({
+    streamId: "mimir:kiyo-pro",
+    verseId: "studio",
+    ownerPeerId: "starfire",
+    kind: "video",
+    label: "Kiyo Pro",
+    clock: {
+      clockDomainId: "starfire-qpc",
+      confidence: 0.25,
+      evidenceKind: "provisional-clock-domain-edge-fit",
+    },
+    video: {
+      width: 1920,
+      height: 1080,
+      pixelFormat: "YUY2",
+      framesPerSecond: 30,
+    },
+    preferredTransports: [
+      "shared-d3d12-texture",
+      "shared-memory",
+      "cultcache-page",
+    ],
+    maxInFlightFrames: 3,
+  });
+
+  const negotiation = streams.negotiate("mimir:kiyo-pro", {
+    peerId: "fensalir",
+    verseId: "studio",
+    supportedTransports: ["shared-d3d12-texture", "cultcache-page"],
+    acceptedKinds: ["video"],
+    canImportGpuHandles: true,
+    maxInFlightFrames: 2,
+  });
+
+  assert.deepEqual(negotiation, {
+    streamId: "mimir:kiyo-pro",
+    producerPeerId: "starfire",
+    consumerPeerId: "fensalir",
+    transport: "shared-d3d12-texture",
+    access: "read",
+    maxInFlightFrames: 2,
+    copyBudget: "zero-copy-target",
+  });
+
+  streams.publishFrame({
+    streamId: "mimir:kiyo-pro",
+    sequence: 42n,
+    timestampNs: 1_000_000_000n,
+    durationNs: 33_333_334n,
+    transport: "shared-d3d12-texture",
+    nativeHandle: "0xfeed",
+    fenceHandle: "0xbeef",
+    fenceValue: 7n,
+    unavoidableCopyCount: 0,
+  });
+
+  assert.equal(streams.latestFrame("mimir:kiyo-pro")?.sequence, 42n);
+});

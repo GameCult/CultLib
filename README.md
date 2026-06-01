@@ -22,6 +22,7 @@ and pretending the label makes it furniture.
 | Procedural geometry state | `GameCult.Geometry` | CultCache-native domain trees, LOD build requests, selected-cut diagnostics, and chunk artifact payloads | Rust, Unity, or remote workers need to share CSG/LOD geometry and graph metadata as typed state | Transport policy, peer discovery, or gameplay authority |
 | Network transport and database plumbing | `GameCult.Networking` / CultNet | LiteNetLib transport, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
 | Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
+| Realtime media/frame streams | CultMesh streaming mode | Stream identity, authority, clock metadata, body transport negotiation, frame cursors, and backpressure state | Audio/video/tensor frames need to move between runtimes through shared memory, GPU handles, platform buffers, or CultCache page refs | Durable document mutation, mesh consensus facts, or pretending inline bytes are zero-copy |
 
 Quick rule:
 
@@ -32,6 +33,8 @@ Quick rule:
   schema-aware database messages?"
 - Choose CultMesh when the problem is "how does a game join a Verse and share
   realtime state across a mesh?"
+- Choose CultMesh streaming mode when the problem is "how do these runtimes move
+  audio/video frames while the mesh owns identity, clocks, cursors, and pressure?"
 
 CultMesh sits on CultNet, and CultNet distributes CultCache documents. That is
 the stack. If a design needs another peer-to-peer category, first check whether
