@@ -203,6 +203,73 @@ to be enough. The replicator can answer that by fetching a shard-bounded
 snapshot, replacing the local shard view, and advancing its cursor to the
 snapshot's represented log sequence.
 
+## Streaming Mode
+
+CultMesh streaming mode is the low-latency body path for Mimir, Fensalir, Eve,
+and other realtime runtimes. CultCache and CultNet own typed state, discovery,
+stream descriptors, negotiations, and frame handles. The frame bodies stay in
+runtime-native storage: shared D3D12 textures, shared memory rings, platform GPU
+handles, DMA buffers, or paged CultCache fallbacks when a zero-copy transport is
+not available.
+
+```csharp
+using GameCult.Mesh;
+
+var streams = CultMesh.CreateStreamCatalog();
+
+streams.Declare(new CultMeshStreamDescriptor(
+    "mimir:kiyo-pro:rgba",
+    "mimir-live",
+    "starfire",
+    CultMeshStreamKind.Video,
+    new CultMeshStreamClock("mimir:clock", "kiyo-pro", sampleRate: 90_000, confidence: 0.92),
+    new[]
+    {
+        CultMeshStreamBodyTransport.SharedD3D12Texture,
+        CultMeshStreamBodyTransport.SharedMemory,
+        CultMeshStreamBodyTransport.CultCachePage
+    },
+    video: new CultMeshVideoStreamFormat(1920, 1080, "rgba8", framesPerSecond: 60),
+    maxInFlightFrames: 4));
+
+var fensalir = new CultMeshStreamConsumerProfile(
+    "fensalir",
+    "mimir-live",
+    new[] { CultMeshStreamBodyTransport.SharedD3D12Texture },
+    acceptedKinds: new[] { CultMeshStreamKind.Video },
+    canImportGpuHandles: true);
+
+var negotiation = streams.Negotiate("mimir:kiyo-pro:rgba", fensalir);
+```
+
+For CPU-visible data, `CultMeshSharedMemoryFrameRing` preallocates fixed slots
+and hands producers writable leases. Consumers hold read leases so the producer
+does not overwrite a visible frame. `TryPublishCopy` exists for unavoidable
+fallbacks and increments copy telemetry; the normal hot path writes directly
+into a lease and commits a `CultMeshStreamFrameHandle`.
+
+```csharp
+streams.Declare(new CultMeshStreamDescriptor(
+    "mimir:leap:depth",
+    "mimir-live",
+    "starfire",
+    CultMeshStreamKind.Tensor,
+    new CultMeshStreamClock("mimir:clock", "leap"),
+    new[] { CultMeshStreamBodyTransport.SharedMemory }));
+
+using var ring = streams.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 4, slotByteLength: 640 * 480 * 2);
+
+if (ring.TryAcquireWriteSlot(out var write))
+{
+    FillDepthFrame(write.Span);
+    var frame = ring.CommitWriteSlot(write, timestampNs: GetVerseTimeNs(), byteLength: 640 * 480 * 2);
+    streams.PublishFrame(frame);
+}
+```
+
+The invariant is simple: typed mesh state describes and synchronizes streams;
+hot frame bodies remain in the cheapest storage both endpoints can share.
+
 ## Documentation
 
 - [Public API](docs/public-api.md)

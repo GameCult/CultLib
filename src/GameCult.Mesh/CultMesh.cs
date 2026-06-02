@@ -213,6 +213,14 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a local stream catalog for zero-copy-oriented audio, video, tensor, and byte frame streams.
+        /// </summary>
+        public static CultMeshStreamCatalog CreateStreamCatalog()
+        {
+            return new CultMeshStreamCatalog();
+        }
+
+        /// <summary>
         /// Creates a committer for writing quorum simulation facts to a mesh database.
         /// </summary>
         public static CultMeshSimulationFactCommitter CreateSimulationFactCommitter(CultNetDatabase database)

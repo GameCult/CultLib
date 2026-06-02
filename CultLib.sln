@@ -29,6 +29,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GameCult.Geometry", "src\Ga
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GameCult.Geometry.Tests", "tests\GameCult.Geometry.Tests\GameCult.Geometry.Tests.csproj", "{C95A9A21-34FA-4D82-BE5B-88FBDA836D31}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GameCult.Mesh.Tests", "tests\GameCult.Mesh.Tests\GameCult.Mesh.Tests.csproj", "{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -171,6 +173,18 @@ Global
 		{C95A9A21-34FA-4D82-BE5B-88FBDA836D31}.Release|x64.Build.0 = Release|Any CPU
 		{C95A9A21-34FA-4D82-BE5B-88FBDA836D31}.Release|x86.ActiveCfg = Release|Any CPU
 		{C95A9A21-34FA-4D82-BE5B-88FBDA836D31}.Release|x86.Build.0 = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|x64.Build.0 = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Debug|x86.Build.0 = Debug|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|x64.ActiveCfg = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|x64.Build.0 = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|x86.ActiveCfg = Release|Any CPU
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -187,5 +201,6 @@ Global
 		{EB15435B-7147-4BD9-BB9C-B0A14318D3D5} = {39D316AB-ABB5-49A2-8E83-CAF4C75B48F4}
 		{94C086DA-3359-424B-9688-29A198806481} = {E733CBFF-42AE-4B6A-B5B9-0071ECFB45F1}
 		{C95A9A21-34FA-4D82-BE5B-88FBDA836D31} = {39D316AB-ABB5-49A2-8E83-CAF4C75B48F4}
+		{F8A5060A-FB0B-4B8B-AE06-5147BB4CA127} = {39D316AB-ABB5-49A2-8E83-CAF4C75B48F4}
 	EndGlobalSection
 EndGlobal

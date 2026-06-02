@@ -1,9 +1,10 @@
 # CultMesh TS
 
-`cultmesh-ts` is the TypeScript surface for local CultMesh nodes: typed
-CultCache documents, peer catalogs, authority leases, and realtime stream
-contracts for runtimes that need to share media without turning the mesh into a
-base64 soup kitchen.
+`cultmesh-ts` is the TypeScript projection of CultMesh contracts for local
+tools and browser-adjacent runtimes. The C# `GameCult.Mesh` package owns the
+native CultMesh stream implementation used by Mimir and Fensalir; this package
+mirrors the typed declaration and negotiation shapes without owning the hot
+frame body path.
 
 ## Streaming Mode
 
@@ -21,7 +22,7 @@ The split is deliberate:
 - Producers report `unavoidableCopyCount`; zero-copy is a target and a measured
   property, not a vibe in a lab coat.
 
-The first public API is `CultMeshStreamCatalog`:
+The mirrored API shape is `CultMeshStreamCatalog`:
 
 ```ts
 import { CultMesh } from "cultmesh-ts";
@@ -68,8 +69,7 @@ streams.publishFrame({
 });
 ```
 
-Current implementation status: this package owns the typed stream declaration,
-negotiation, and latest-frame cursor surface. Runtime-specific transports still
-need platform adapters: named shared memory on local processes, D3D/Metal/Vulkan
-handle import for GPU frames, and CultCache page append/readback for durable
-recording or nonlocal fallbacks.
+Current implementation status: this package mirrors typed stream declaration,
+negotiation, and latest-frame cursor contracts for non-C# clients. The native
+C# path owns shared-memory rings and GPU-handle integration points. CultCache
+page append/readback remains the durable recording or nonlocal fallback.
