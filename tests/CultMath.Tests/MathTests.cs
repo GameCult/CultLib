@@ -52,4 +52,20 @@ public sealed class MathTests
         Assert.Equal(1.0f, math.tan(math.PI * 0.25f), precision: 5);
         Assert.Equal(math.HALF_PI, math.atan2(1.0f, 0.0f), precision: 5);
     }
+
+    [Fact]
+    public void VoronoiBatchProducesToneMappedColors()
+    {
+        var xs = new[] { 0.0f, 24.0f, 96.0f };
+        var ys = new[] { 0.0f, 36.0f, 144.0f };
+        var tones = new[] { CultMathTone.Background, CultMathTone.Header, CultMathTone.Body };
+        var spans = new[] { 1920.0f, 8.0f, 8.0f };
+        var colors = new Color32[xs.Length];
+
+        Voronoi.SampleTones(xs, ys, tones, spans, 1080.0f, 12, colors);
+
+        Assert.NotEqual(new Color32(), colors[0]);
+        Assert.True(colors[1].r > colors[1].g);
+        Assert.True(colors[2].r > 120 && colors[2].g > 120 && colors[2].b > 120);
+    }
 }

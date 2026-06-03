@@ -12,6 +12,7 @@
     <RepositoryUrl>https://github.com/GameCult/CultMath</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);CS8981</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
