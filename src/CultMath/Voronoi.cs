@@ -109,15 +109,15 @@ public static class Voronoi
 
         var gain = tone switch
         {
-            CultMathTone.Panel => 0.25f,
-            CultMathTone.Edge => 0.95f,
-            _ => 0.16f,
+            CultMathTone.Panel => 0.42f,
+            CultMathTone.Edge => 1.05f,
+            _ => 0.24f,
         };
         var lift = tone switch
         {
-            CultMathTone.Panel => 6.0f,
-            CultMathTone.Edge => 20.0f,
-            _ => 2.0f,
+            CultMathTone.Panel => 14.0f,
+            CultMathTone.Edge => 24.0f,
+            _ => 4.0f,
         };
         return new Color32(
             (byte)Math.Clamp(lift + sample.x * 255.0f * gain, 0, 255),
@@ -152,10 +152,8 @@ public static class Voronoi
                 var d2 = math.abs(g - f + o);
                 var d = Math.Max(d2.x, d2.y) * weight;
                 var seed = Hash1(math.dot(n + g, new float2(7.0f, 113.0f)));
-                var candidate = 0.5f + 0.5f * new float3(
-                    math.sin(seed * 2.5f + 3.5f + 2.0f),
-                    math.sin(seed * 2.5f + 3.5f + 3.0f),
-                    math.sin(seed * 2.5f + 3.5f + 2.0f));
+                var hue = math.frac((n.x + g.x) * 0.173f + (n.y + g.y) * 0.379f + seed * 0.431f);
+                var candidate = PastelSpectrum(hue);
                 var h = math.smoothstep(0.0f, 1.0f, 0.5f + 0.5f * (distance - d) / smoothness);
                 var correction = h * (1.0f - h) * smoothness / (1.0f + 3.0f * smoothness);
                 distance = math.lerp(distance, d, h) - correction;
@@ -167,6 +165,46 @@ public static class Voronoi
     }
 
     private static float Hash1(float value) => math.frac(math.sin(value) * 43758.5453f);
+
+    private static float3 PastelSpectrum(float hue)
+    {
+        return HsvToRgb(hue, 0.52f, 0.98f);
+    }
+
+    private static float3 HsvToRgb(float hue, float saturation, float value)
+    {
+        var h = math.frac(hue) * 6.0f;
+        var c = value * saturation;
+        var x = c * (1.0f - Math.Abs(h % 2.0f - 1.0f));
+        var m = value - c;
+        float3 rgb;
+        if (h < 1.0f)
+        {
+            rgb = new float3(c, x, 0.0f);
+        }
+        else if (h < 2.0f)
+        {
+            rgb = new float3(x, c, 0.0f);
+        }
+        else if (h < 3.0f)
+        {
+            rgb = new float3(0.0f, c, x);
+        }
+        else if (h < 4.0f)
+        {
+            rgb = new float3(0.0f, x, c);
+        }
+        else if (h < 5.0f)
+        {
+            rgb = new float3(x, 0.0f, c);
+        }
+        else
+        {
+            rgb = new float3(c, 0.0f, x);
+        }
+
+        return rgb + m;
+    }
 
     private static float2 Hash2(float2 value)
     {

@@ -55,9 +55,9 @@ fn tone_color(px: f32, py: f32, resolution_y: f32, frame_index: i32, tone: u8, s
         }
         _ => {
             let (gain, lift) = match tone {
-                1 => (0.25, 6.0),
-                2 => (0.95, 20.0),
-                _ => (0.16, 2.0),
+                1 => (0.42, 14.0),
+                2 => (1.05, 24.0),
+                _ => (0.24, 4.0),
             };
             color(
                 lift + sample.0 * 255.0 * gain,
@@ -102,9 +102,8 @@ fn voronoi(px: f32, py: f32, resolution_y: f32, frame_index: i32) -> (f32, f32, 
             let dy = (gy - fy + oy).abs();
             let d = dx.max(dy) * weight;
             let seed = hash1((nx + gx) * 7.0 + (ny + gy) * 113.0);
-            let candidate_red = 0.5 + 0.5 * (seed * 2.5 + 3.5 + 2.0).sin();
-            let candidate_green = 0.5 + 0.5 * (seed * 2.5 + 3.5 + 3.0).sin();
-            let candidate_blue = 0.5 + 0.5 * (seed * 2.5 + 3.5 + 2.0).sin();
+            let hue = frac((nx + gx) * 0.173 + (ny + gy) * 0.379 + seed * 0.431);
+            let (candidate_red, candidate_green, candidate_blue) = pastel_spectrum(hue);
             let h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (distance - d) / smoothness);
             let correction = h * (1.0 - h) * smoothness / (1.0 + 3.0 * smoothness);
             distance = lerp(distance, d, h) - correction;
@@ -148,6 +147,32 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 fn lerp(start: f32, end: f32, amount: f32) -> f32 {
     start + (end - start) * amount
+}
+
+fn pastel_spectrum(hue: f32) -> (f32, f32, f32) {
+    hsv_to_rgb(hue, 0.52, 0.98)
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
+    let h = frac(hue) * 6.0;
+    let c = value * saturation;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let m = value - c;
+    let (r, g, b) = if h < 1.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 {
+        (0.0, c, x)
+    } else if h < 4.0 {
+        (0.0, x, c)
+    } else if h < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    (r + m, g + m, b + m)
 }
 
 fn color(r: f32, g: f32, b: f32) -> CultMathColor32 {
