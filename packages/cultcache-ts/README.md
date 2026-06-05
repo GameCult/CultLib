@@ -32,53 +32,17 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
-## Huginn Inspector
+## `.cc` Inspection
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical
 `cultcache.store.v1` MessagePack snapshot; the extension is the human handle, not
 a second format.
 
-Run the local inspector during development:
-
-```sh
-npm run dev:inspector
-```
-
-Build the Vite inspector bundle:
-
-```sh
-npm run build:inspector
-```
-
-Build the desktop package:
-
-```sh
-npm run dist:inspector
-```
-
-Release builds must carry a new semantic version before any deployable artifact
-is produced. While the package is pre-1.0, breaking public behavior increments
-the minor version, compatible fixes increment the patch version, and the
-generated Huginn executable must use that package version in its filename.
-
-Huginn is read-only. Drop a `.cc`, `.msgpack`, or `.mpack` file onto the window to
-inspect the snapshot header, schema catalog, records, decoded MessagePack
-payload previews, and an Norn graph cloud of the file's structured payload data
-without registering application schemas.
-
-Huginn's background field uses the graph node AABB as its single world-space
-authority. The WebGPU particle pass keeps a million particle slots available,
-intersects the current screen bounds with the artwork bounds, and assigns only
-visible quadtree cells to those slots. Each visible cell is seeded with the
-Aetheria Stardust `RandomFirst` hash and xorshift follow-up sequence, then each
-particle pair trades opacity with sine/cosine phase while tracing a short
-segment through the packed flow texture. The packed map uses `RG` for flow, `B`
-for structure/curvature/detail pressure, and `A` for emission/field strength;
-particle color comes from the source Huginn albedo at the starting UV so the
-flow carries brushstrokes instead of repainting them at the final sample.
-Zooming raises the live quadtree level; coarse cells fade down while finer cells
-seeded from the same spatial lattice fade in around them, so detail density
-rises without changing the field's identity.
+`inspectCultCacheBytes(...)` reads `.cc`, `.msgpack`, or `.mpack` bytes and
+returns the snapshot header, schema catalog, records, and decoded MessagePack
+payload previews without registering application schemas. Presentation runtimes
+such as Huginn consume that inspection result; they do not own the storage
+format.
 
 ## Example
 
