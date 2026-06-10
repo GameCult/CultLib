@@ -72,6 +72,22 @@ cargo test --manifest-path native/cultmath-core/Cargo.toml
 cargo build --release --manifest-path native/cultmath-core/Cargo.toml
 ```
 
+## Shader Tooling
+
+CultMath keeps portable DXC outside git under `.tools/`:
+
+```powershell
+.\tools\get-dxc.ps1
+.\tools\compile-hlsl-spirv.ps1 `
+  -ShaderPath E:\Projects\Odin\crates\muninn-move-tracker\shaders\MoveSphereCandidate.comp.hlsl `
+  -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
+  -IncludePath E:\Projects\CultMath\shaders
+```
+
+DXC emits Vulkan SPIR-V with `-spirv`. `-TargetEnv vulkan1.2` is exposed by the
+script, but the current Windows DXC release compiled this shader successfully
+with DXC's default Vulkan target while rejecting the dotted target-env value.
+
 ## Doctrine
 
 The goal is mechanical sympathy between CPU-side authoring, native kernels, and

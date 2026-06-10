@@ -4,3 +4,4 @@ obj/
 **/obj/
 target/
 **/target/
+.tools/
