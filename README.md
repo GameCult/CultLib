@@ -17,7 +17,13 @@ shader semantics.
 - conversions to and from `System.Numerics`
 - `math` intrinsics: `radians`, `degrees`, `abs`, `floor`, `ceil`, `frac`,
   `min`, `max`, `clamp`, `saturate`, `lerp`, `step`, `smoothstep`, `dot`,
-  `cross`, `length`, `distance`, `normalize`, and `reflect`
+  `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, exponential
+  `decay`/`damp`, intercept/segment helpers, Catmull-Rom, Bezier curves, and
+  deterministic value-noise primitives
+- `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
+  parity. HLSL already owns `float2`, `float3`, and `float4`; the include
+  exposes `cultmath_*` functions for shared semantics, including CultMath's
+  safe `normalize` contract.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
@@ -38,7 +44,24 @@ using CultMath;
 float3 normal = math.normalize(new float3(0.25f, 1.0f, -0.1f));
 float rim = math.saturate(1.0f - math.dot(normal, new float3(0.0f, 0.0f, -1.0f)));
 float glow = math.smoothstep(0.2f, 1.0f, rim);
+float grain = math.value_noise_bicubic(math.float2(12.0f, 3.5f));
 ```
+
+```hlsl
+#include "CultMath.hlsl"
+
+float3 normal = cultmath_normalize(float3(0.25, 1.0, -0.1));
+float rim = cultmath_saturate(1.0 - dot(normal, float3(0.0, 0.0, -1.0)));
+float glow = cultmath_smoothstep(0.2, 1.0, rim);
+float grain = cultmath_value_noise_bicubic(float2(12.0, 3.5));
+```
+
+## Provenance
+
+The small spline, damping, and pursuit helpers were promoted from Aetheria's
+local `AetheriaMath` surface. The value-noise family follows public shader
+literature from Inigo Quilez's noise and mini-spline articles, expressed in
+CultMath names with tests instead of copied project-local helper drift.
 
 ## Build
 
@@ -55,3 +78,8 @@ The goal is mechanical sympathy between CPU-side authoring, native kernels, and
 GPU-side shader math. If an intrinsic exists here, it should behave like the
 shader concept unless a runtime's numeric rules make that impossible. Weird
 deviations get tests and documentation, not folklore.
+
+CultMath is still not a shader generator. Projects should include
+`shaders/CultMath.hlsl` directly or add that directory to their shader include
+path. If a shared operation needs CPU/GPU parity, put the primitive here and
+test it here before copying local math helpers into a renderer or daemon.

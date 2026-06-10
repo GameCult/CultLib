@@ -23,6 +23,9 @@ public sealed class MathTests
     [Fact]
     public void VectorConstructorsAcceptLowerDimensionVectors()
     {
+        Assert.Equal(new float2(1.0f, 2.0f), math.float2(1.0f, 2.0f));
+        Assert.Equal(new float3(1.0f, 1.0f, 1.0f), math.float3(1.0f));
+        Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), math.float4(new float3(1.0f, 2.0f, 3.0f), 4.0f));
         Assert.Equal(new float3(1.0f, 2.0f, 3.0f), new float3(new float2(1.0f, 2.0f), 3.0f));
         Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), new float4(new float2(1.0f, 2.0f), 3.0f, 4.0f));
         Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), new float4(new float3(1.0f, 2.0f, 3.0f), 4.0f));
@@ -42,6 +45,7 @@ public sealed class MathTests
         Assert.Equal(0.0f, math.smoothstep(0.0f, 1.0f, -1.0f));
         Assert.Equal(0.5f, math.smoothstep(0.0f, 1.0f, 0.5f), precision: 5);
         Assert.Equal(1.0f, math.smoothstep(0.0f, 1.0f, 2.0f));
+        Assert.Equal(0.5f, math.smootherstep(0.5f), precision: 5);
     }
 
     [Fact]
@@ -51,6 +55,50 @@ public sealed class MathTests
         Assert.Equal(-1.0f, math.cos(math.PI), precision: 5);
         Assert.Equal(1.0f, math.tan(math.PI * 0.25f), precision: 5);
         Assert.Equal(math.HALF_PI, math.atan2(1.0f, 0.0f), precision: 5);
+    }
+
+    [Fact]
+    public void AetheriaPrimitivesRemainSmallAndDeterministic()
+    {
+        Assert.Equal(6.0f, math.csum(new float3(1.0f, 2.0f, 3.0f)));
+        Assert.Equal(MathF.Exp(-2.0f), math.decay(1.0f, 2.0f, 1.0f), precision: 5);
+        Assert.Equal(1.0f - MathF.Exp(-2.0f), math.damp(0.0f, 1.0f, 2.0f, 1.0f), precision: 5);
+
+        Assert.Equal(15.0f, math.catmullrom(0.0f, 10.0f, 20.0f, 30.0f, 0.5f), precision: 5);
+        Assert.Equal(0.25f, math.quadratic_bezier(0.0f, 0.0f, 1.0f, 0.5f), precision: 5);
+        Assert.Equal(0.5f, math.cubic_bezier(0.0f, 0.0f, 1.0f, 1.0f, 0.5f), precision: 5);
+    }
+
+    [Fact]
+    public void SegmentDistanceReportsClosestPoint()
+    {
+        var distance = math.distance_to_segment(new float2(2.0f, 3.0f), new float2(0.0f, 0.0f), new float2(4.0f, 0.0f), out var closest);
+
+        Assert.Equal(3.0f, distance, precision: 5);
+        Assert.Equal(new float2(2.0f, 0.0f), closest);
+    }
+
+    [Fact]
+    public void FirstOrderInterceptSolvesSimpleClosingTarget()
+    {
+        var time = math.first_order_intercept_time(
+            2.0f,
+            new float3(10.0f, 0.0f, 0.0f),
+            new float3(-1.0f, 0.0f, 0.0f));
+
+        Assert.Equal(10.0f / 3.0f, time, precision: 5);
+    }
+
+    [Fact]
+    public void ValueNoiseIsDeterministicAndSmoothAtCellCorners()
+    {
+        var position = new float2(12.25f, -4.5f);
+
+        Assert.Equal(math.value_noise(position), math.value_noise(position));
+        Assert.Equal(math.hash(new float2(3.0f, 5.0f)), math.value_noise(new float2(3.0f, 5.0f)), precision: 5);
+
+        var bicubic = math.value_noise_bicubic(position);
+        Assert.True(bicubic > -0.25f && bicubic < 1.25f);
     }
 
     [Fact]

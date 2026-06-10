@@ -6,6 +6,16 @@ public static class math
     public const float TAU = MathF.PI * 2.0f;
     public const float HALF_PI = MathF.PI * 0.5f;
 
+    public static float2 float2(float x, float y) => new(x, y);
+    public static float2 float2(float value) => new(value, value);
+    public static float3 float3(float x, float y, float z) => new(x, y, z);
+    public static float3 float3(float2 xy, float z) => new(xy, z);
+    public static float3 float3(float value) => new(value, value, value);
+    public static float4 float4(float x, float y, float z, float w) => new(x, y, z, w);
+    public static float4 float4(float2 xy, float z, float w) => new(xy, z, w);
+    public static float4 float4(float3 xyz, float w) => new(xyz, w);
+    public static float4 float4(float value) => new(value, value, value, value);
+
     public static float radians(float degrees) => degrees * (PI / 180.0f);
     public static float degrees(float radians) => radians * (180.0f / PI);
     public static float sin(float value) => MathF.Sin(value);
@@ -16,6 +26,10 @@ public static class math
     public static float atan(float value) => MathF.Atan(value);
     public static float atan2(float y, float x) => MathF.Atan2(y, x);
     public static float sqrt(float value) => MathF.Sqrt(value);
+    public static float exp(float value) => MathF.Exp(value);
+    public static float2 exp(float2 value) => new(exp(value.x), exp(value.y));
+    public static float3 exp(float3 value) => new(exp(value.x), exp(value.y), exp(value.z));
+    public static float4 exp(float4 value) => new(exp(value.x), exp(value.y), exp(value.z), exp(value.w));
 
     public static float abs(float value) => MathF.Abs(value);
     public static float2 abs(float2 value) => new(abs(value.x), abs(value.y));
@@ -119,4 +133,192 @@ public static class math
 
     public static float2 reflect(float2 incident, float2 normal) => incident - 2.0f * dot(normal, incident) * normal;
     public static float3 reflect(float3 incident, float3 normal) => incident - 2.0f * dot(normal, incident) * normal;
+
+    public static float csum(float2 value) => value.x + value.y;
+    public static float csum(float3 value) => value.x + value.y + value.z;
+    public static float csum(float4 value) => value.x + value.y + value.z + value.w;
+
+    public static float decay(float source, float lambda, float dt) => source * exp(-lambda * dt);
+    public static float2 decay(float2 source, float lambda, float dt) => source * exp(-lambda * dt);
+    public static float3 decay(float3 source, float lambda, float dt) => source * exp(-lambda * dt);
+    public static float4 decay(float4 source, float lambda, float dt) => source * exp(-lambda * dt);
+    public static float2 decay(float2 source, float2 lambda, float dt) => source * exp(-lambda * dt);
+    public static float3 decay(float3 source, float3 lambda, float dt) => source * exp(-lambda * dt);
+    public static float4 decay(float4 source, float4 lambda, float dt) => source * exp(-lambda * dt);
+
+    public static float damp(float start, float end, float lambda, float dt) => lerp(start, end, 1.0f - exp(-lambda * dt));
+    public static float2 damp(float2 start, float2 end, float lambda, float dt) => lerp(start, end, 1.0f - exp(-lambda * dt));
+    public static float3 damp(float3 start, float3 end, float lambda, float dt) => lerp(start, end, 1.0f - exp(-lambda * dt));
+    public static float4 damp(float4 start, float4 end, float lambda, float dt) => lerp(start, end, 1.0f - exp(-lambda * dt));
+
+    public static float first_order_intercept_time(float shotSpeed, float3 targetRelativePosition, float3 targetRelativeVelocity)
+    {
+        var velocitySquared = lengthsq(targetRelativeVelocity);
+        if (velocitySquared < 0.001f)
+        {
+            return 0.0f;
+        }
+
+        var a = velocitySquared - shotSpeed * shotSpeed;
+        if (abs(a) < 0.001f)
+        {
+            var time = -lengthsq(targetRelativePosition) / (2.0f * dot(targetRelativeVelocity, targetRelativePosition));
+            return max(time, 0.0f);
+        }
+
+        var b = 2.0f * dot(targetRelativeVelocity, targetRelativePosition);
+        var c = lengthsq(targetRelativePosition);
+        var determinant = b * b - 4.0f * a * c;
+
+        if (determinant > 0.0f)
+        {
+            var root = sqrt(determinant);
+            var t1 = (-b + root) / (2.0f * a);
+            var t2 = (-b - root) / (2.0f * a);
+            if (t1 > 0.0f)
+            {
+                return t2 > 0.0f ? min(t1, t2) : t1;
+            }
+
+            return max(t2, 0.0f);
+        }
+
+        if (determinant < 0.0f)
+        {
+            return 0.0f;
+        }
+
+        return max(-b / (2.0f * a), 0.0f);
+    }
+
+    public static float3 first_order_intercept(
+        float3 shooterPosition,
+        float3 shooterVelocity,
+        float shotSpeed,
+        float3 targetPosition,
+        float3 targetVelocity)
+    {
+        var targetRelativePosition = targetPosition - shooterPosition;
+        var targetRelativeVelocity = targetVelocity - shooterVelocity;
+        var time = first_order_intercept_time(shotSpeed, targetRelativePosition, targetRelativeVelocity);
+        return targetPosition + time * targetRelativeVelocity;
+    }
+
+    public static float distance_to_segment(float2 point, float2 start, float2 end, out float2 closest)
+    {
+        var segment = end - start;
+        var segmentLengthSq = lengthsq(segment);
+        if (segmentLengthSq <= 0.0f)
+        {
+            closest = start;
+            return distance(point, start);
+        }
+
+        var t = saturate(dot(point - start, segment) / segmentLengthSq);
+        closest = start + segment * t;
+        return distance(point, closest);
+    }
+
+    public static float catmullrom(float p0, float p1, float p2, float p3, float t)
+    {
+        var t2 = t * t;
+        var t3 = t2 * t;
+        return 0.5f * ((2.0f * p1) + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+    }
+
+    public static float2 catmullrom(float2 p0, float2 p1, float2 p2, float2 p3, float t) =>
+        0.5f * ((2.0f * p1) + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * (t * t) + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * (t * t * t));
+
+    public static float3 catmullrom(float3 p0, float3 p1, float3 p2, float3 p3, float t) =>
+        0.5f * ((2.0f * p1) + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * (t * t) + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * (t * t * t));
+
+    public static float4 catmullrom(float4 p0, float4 p1, float4 p2, float4 p3, float t) =>
+        0.5f * ((2.0f * p1) + (p2 - p0) * t + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * (t * t) + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * (t * t * t));
+
+    public static float quadratic_bezier(float p0, float p1, float p2, float t)
+    {
+        t = saturate(t);
+        var inv = 1.0f - t;
+        return inv * inv * p0 + 2.0f * inv * t * p1 + t * t * p2;
+    }
+
+    public static float3 quadratic_bezier(float3 p0, float3 p1, float3 p2, float t)
+    {
+        t = saturate(t);
+        var inv = 1.0f - t;
+        return inv * inv * p0 + 2.0f * inv * t * p1 + t * t * p2;
+    }
+
+    public static float cubic_bezier(float p0, float p1, float p2, float p3, float t)
+    {
+        t = saturate(t);
+        var inv = 1.0f - t;
+        return inv * inv * inv * p0 + 3.0f * inv * inv * t * p1 + 3.0f * inv * t * t * p2 + t * t * t * p3;
+    }
+
+    public static float3 cubic_bezier(float3 p0, float3 p1, float3 p2, float3 p3, float t)
+    {
+        t = saturate(t);
+        var inv = 1.0f - t;
+        return inv * inv * inv * p0 + 3.0f * inv * inv * t * p1 + 3.0f * inv * t * t * p2 + t * t * t * p3;
+    }
+
+    public static float smoothstep01(float value) => smoothstep(0.0f, 1.0f, value);
+
+    public static float smootherstep(float value)
+    {
+        value = saturate(value);
+        return value * value * value * (value * (value * 6.0f - 15.0f) + 10.0f);
+    }
+
+    public static float hash(float value) => frac(sin(value) * 43758.5453f);
+    public static float hash(float2 value) => hash(dot(value, new float2(127.1f, 311.7f)));
+    public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
+
+    public static float value_noise(float2 position)
+    {
+        var cell = floor(position);
+        var local = frac(position);
+        var u = local * local * (3.0f - 2.0f * local);
+
+        var a = hash(cell);
+        var b = hash(cell + new float2(1.0f, 0.0f));
+        var c = hash(cell + new float2(0.0f, 1.0f));
+        var d = hash(cell + new float2(1.0f, 1.0f));
+
+        return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+    }
+
+    public static float value_noise_bicubic(float2 position)
+    {
+        var cell = floor(position);
+        var local = frac(position);
+
+        var y0 = catmullrom(
+            hash(cell + new float2(-1.0f, -1.0f)),
+            hash(cell + new float2(0.0f, -1.0f)),
+            hash(cell + new float2(1.0f, -1.0f)),
+            hash(cell + new float2(2.0f, -1.0f)),
+            local.x);
+        var y1 = catmullrom(
+            hash(cell + new float2(-1.0f, 0.0f)),
+            hash(cell + new float2(0.0f, 0.0f)),
+            hash(cell + new float2(1.0f, 0.0f)),
+            hash(cell + new float2(2.0f, 0.0f)),
+            local.x);
+        var y2 = catmullrom(
+            hash(cell + new float2(-1.0f, 1.0f)),
+            hash(cell + new float2(0.0f, 1.0f)),
+            hash(cell + new float2(1.0f, 1.0f)),
+            hash(cell + new float2(2.0f, 1.0f)),
+            local.x);
+        var y3 = catmullrom(
+            hash(cell + new float2(-1.0f, 2.0f)),
+            hash(cell + new float2(0.0f, 2.0f)),
+            hash(cell + new float2(1.0f, 2.0f)),
+            hash(cell + new float2(2.0f, 2.0f)),
+            local.x);
+
+        return catmullrom(y0, y1, y2, y3, local.y);
+    }
 }
