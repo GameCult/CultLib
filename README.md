@@ -78,15 +78,24 @@ CultMath keeps portable DXC outside git under `.tools/`:
 
 ```powershell
 .\tools\get-dxc.ps1
+.\tools\get-spirv-cross.ps1
 .\tools\compile-hlsl-spirv.ps1 `
   -ShaderPath E:\Projects\Odin\crates\muninn-move-tracker\shaders\MoveSphereCandidate.comp.hlsl `
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
   -IncludePath E:\Projects\CultMath\shaders
+.\tools\compile-spirv-metal.ps1 `
+  -SpirvPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
+  -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.metal
 ```
 
 DXC emits Vulkan SPIR-V with `-spirv`. `-TargetEnv vulkan1.2` is exposed by the
 script, but the current Windows DXC release compiled this shader successfully
 with DXC's default Vulkan target while rejecting the dotted target-env value.
+The SPIR-V script applies default Vulkan register shifts for cbuffers, textures,
+UAVs, and samplers so cross-compiled Metal buffers do not alias by resource
+class. SPIRV-Cross emits Metal Shading Language from SPIR-V on Windows; building
+an iPad-ready `.metallib` still belongs to Apple's Metal compiler on an Apple
+toolchain.
 
 ## Doctrine
 

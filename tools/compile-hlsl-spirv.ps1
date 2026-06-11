@@ -9,6 +9,10 @@ param(
     [string]$Profile = "cs_6_0",
     [string[]]$IncludePath = @(),
     [string]$TargetEnv = "",
+    [int]$VulkanCBufferShift = 0,
+    [int]$VulkanTextureShift = 10,
+    [int]$VulkanUavShift = 20,
+    [int]$VulkanSamplerShift = 30,
     [string]$DxcPath = ""
 )
 
@@ -43,6 +47,13 @@ $arguments = @(
 if ($TargetEnv) {
     $arguments += "-fspv-target-env=$TargetEnv"
 }
+
+$arguments += @(
+    "-fvk-b-shift", $VulkanCBufferShift.ToString(), "0",
+    "-fvk-t-shift", $VulkanTextureShift.ToString(), "0",
+    "-fvk-u-shift", $VulkanUavShift.ToString(), "0",
+    "-fvk-s-shift", $VulkanSamplerShift.ToString(), "0"
+)
 
 foreach ($include in $resolvedIncludes) {
     $arguments += @("-I", $include)
