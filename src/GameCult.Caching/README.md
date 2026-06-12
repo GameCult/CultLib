@@ -143,6 +143,53 @@ If you want the explicit assembly rite, the lower-level `CultCache` +
 `SingleFileMessagePackBackingStore` path is still there. The helper is just the
 blessed front door.
 
+## CPU-Local SoA Access
+
+Gameplay code can keep authoring normal typed documents and let CultCache build
+hot structure-of-arrays projections when a loop wants contiguous columns.
+
+```csharp
+[CultDocument("game.player_transform", "game.player_transform.v1")]
+public sealed class PlayerTransform
+{
+    [CultName] public string Name = string.Empty;
+    public float PositionX;
+    public float PositionY;
+    public int Health;
+}
+
+var table = cache.ProjectSoa<PlayerTransform>();
+
+Span<float> x = table.Column<float>(nameof(PlayerTransform.PositionX)).Span;
+Span<float> y = table.Column<float>(nameof(PlayerTransform.PositionY)).Span;
+Span<int> health = table.Column<int>(nameof(PlayerTransform.Health)).Span;
+
+for (var row = 0; row < table.Count; row++)
+{
+    x[row] += 0.016f;
+}
+```
+
+`ProjectSoa<T>()` is the friendly CPU path: domain documents stay almost-POCO,
+while unmanaged public fields/properties become contiguous typed arrays for
+DOTS-style scans.
+
+When the locality unit itself needs a durable record key, use
+`CultSoaChunk`. A chunk stores entity ids plus named contiguous columns as one
+CultCache document:
+
+```csharp
+var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 1024);
+var x = chunk.AddColumn<float>("position.x");
+var health = chunk.AddColumn<int>("health");
+
+var row = chunk.AddEntity(entityId);
+x.Span[row] = 10;
+health.Span[row] = 100;
+
+await cache.UpsertSoaChunkAsync(chunk);
+```
+
 ## Persistence discipline
 
 Persistence stays manual by default. Mutations mark the cache and attached

@@ -172,6 +172,35 @@ var committed = await session.SubmitAndCommitAsync(new CultNetSimulationObservat
 });
 ```
 
+## CPU-Local SoA Chunks
+
+Use regular CultCache documents when that is the clean model. When a simulation
+or worker needs a mesh-addressable locality page, `CultSoaChunk` stores entity
+ids plus contiguous typed columns as one CultCache document and commits through
+the normal mesh database path.
+
+```csharp
+using GameCult.Caching;
+using GameCult.Mesh;
+
+var soa = CultMesh.CreateSoaStore(node);
+var key = new CultRecordKey("soa:players:0");
+
+var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 1024);
+var positionX = chunk.AddColumn<float>("position.x");
+var velocityX = chunk.AddColumn<float>("velocity.x");
+
+var row = chunk.AddEntity(entityId);
+positionX.Span[row] = 4;
+velocityX.Span[row] = 0.25f;
+
+await soa.PutChunkAsync(key, chunk);
+```
+
+For pure local hot loops over ordinary typed documents, use
+`node.Cache.ProjectSoa<TDocument>()`; chunk documents are for durable or
+distributed locality pages, not a requirement imposed on every domain model.
+
 ## Witness Consensus
 
 CultMesh nodes can publish observations about simulation facts: shard epoch,

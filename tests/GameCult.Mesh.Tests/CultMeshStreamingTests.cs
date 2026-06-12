@@ -1,11 +1,52 @@
 using System;
+using System.IO;
+using System.Threading.Tasks;
 using FluentAssertions;
+using GameCult.Caching;
 using NUnit.Framework;
 
 namespace GameCult.Mesh.Tests;
 
 public sealed class CultMeshStreamingTests
 {
+    [Test]
+    public async Task SoaStore_Commits_Contiguous_Chunks_Through_MeshDatabase()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"cultmesh-soa-{Guid.NewGuid():N}.ccmp");
+
+        try
+        {
+            using var node = await CultMesh.CreateNodeAsync(
+                filePath,
+                new CultMeshNodeOptions { StartServer = false });
+            var store = CultMesh.CreateSoaStore(node);
+            var key = new CultRecordKey("soa:players:0");
+            var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 2);
+            var positionX = chunk.AddColumn<float>("position.x");
+            var velocityX = chunk.AddColumn<float>("velocity.x");
+
+            var row = chunk.AddEntity(5001);
+            positionX.Span[row] = 4;
+            velocityX.Span[row] = 0.25f;
+
+            await store.PutChunkAsync(key, chunk);
+
+            var loaded = await store.GetChunkAsync(key);
+
+            loaded.Should().NotBeNull();
+            loaded!.ActiveEntityIds.ToArray().Should().Equal(5001UL);
+            loaded.Column<float>("position.x").ActiveSpan.ToArray().Should().Equal(4);
+            loaded.Column<float>("velocity.x").ActiveSpan.ToArray().Should().Equal(0.25f);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
     [Test]
     public void NegotiatesGpuTextureStreamsWithoutForcingCopies()
     {
