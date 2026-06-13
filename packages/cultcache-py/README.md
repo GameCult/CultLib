@@ -227,11 +227,11 @@ Current receipts:
   CultCache v1 parity matrix with TypeScript, Rust, and C#.
 - `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` includes Python in
   the live TS/Rust/C#/Python schema-v0 peer ring: discovery, hello, schema
-  catalog, raw snapshot, raw document put, mutation receipt, fire-command
-  receipt, database subscription changes, shard catalog, shard log catch-up,
-  simulation consensus candidates, and witness artifact bundle round-trips. The
-  same test asks the Python peer for CultMesh Verse catalog and peer exchange
-  responses over the CultNet pipe.
+  catalog, raw snapshot, raw document put/delete, mutation receipt,
+  fire-command receipt, database subscription changes, shard catalog, shard log
+  catch-up, simulation consensus candidates, and witness artifact bundle
+  round-trips. The same test asks the Python peer for CultMesh Verse catalog and
+  peer exchange responses over the CultNet pipe.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, simulation claim hashing, and witness artifact bundle payload

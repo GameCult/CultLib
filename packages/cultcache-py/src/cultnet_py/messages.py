@@ -70,11 +70,20 @@ def document_put_raw(
     return CultNetMessage("cultnet.document_put_raw.v0", {"messageId": message_id, "document": record})
 
 
-def document_delete(*, schema_id: str, record_key: str, deleted_at: str) -> CultNetMessage:
-    return CultNetMessage(
-        "cultnet.document_delete.v0",
-        {"schemaId": schema_id, "recordKey": record_key, "deletedAt": deleted_at},
-    )
+def document_delete(
+    *,
+    message_id: str = "",
+    schema_id: str,
+    record_key: str,
+    shard_id: str | None = None,
+    shard_epoch: int | None = None,
+) -> CultNetMessage:
+    body: dict[str, Any] = {"messageId": message_id, "schemaId": schema_id, "recordKey": record_key}
+    if shard_id is not None:
+        body["shardId"] = shard_id
+    if shard_epoch is not None:
+        body["shardEpoch"] = shard_epoch
+    return CultNetMessage("cultnet.document_delete.v0", body)
 
 
 def snapshot_request(*, message_id: str = "", schema_ids: list[str] | None = None, record_keys: list[str] | None = None) -> CultNetMessage:

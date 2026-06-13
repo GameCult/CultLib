@@ -244,6 +244,8 @@ def handle_server_message(state: PeerState, message: dict[str, Any], subscriptio
         return []
     if schema_version == "cultnet.document_put_raw.v0":
         return handle_raw_put(state, message, subscriptions)
+    if schema_version == "cultnet.document_delete.v0":
+        return handle_document_delete(state, message, subscriptions)
     if schema_version == VERSE_CATALOG_REQUEST:
         return [state.verse_catalog.create_response(message)]
     if schema_version == PEER_EXCHANGE_REQUEST:
@@ -309,6 +311,19 @@ def handle_raw_put(state: PeerState, message: dict[str, Any], subscriptions: dic
         }
         return [*responses, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_RECEIPT_SCHEMA_ID], f"{state.runtime_id}-fire-receipt", receipt["commandId"], receipt, state)]
     return responses
+
+
+def handle_document_delete(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
+    schema_id = str(message.get("schemaId") or "")
+    record_key = str(message.get("recordKey") or "")
+    binding = state.bindings_by_schema_id.get(schema_id)
+    if binding is None or not record_key:
+        return []
+    if state.cache.get(binding.document, record_key) is None:
+        return []
+    state.cache.delete(binding.document, record_key)
+    append_shard_log_delete(state, message)
+    return database_delete_notifications(message, subscriptions)
 
 
 def shard_catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
@@ -394,8 +409,27 @@ def append_shard_log_put(state: PeerState, message: dict[str, Any], document: di
         state.shard_log.append({
             "sequence": sequence,
             "committedAt": now_iso(),
-            "changeKind": "put",
+            "changeKind": "added",
             "put": put_message,
+        })
+
+
+def append_shard_log_delete(state: PeerState, message: dict[str, Any]) -> None:
+    with state.shard_log_lock:
+        sequence = len(state.shard_log) + 1
+        delete_message = {
+            "schemaVersion": "cultnet.document_delete.v0",
+            "messageId": message.get("messageId", ""),
+            "schemaId": message.get("schemaId", ""),
+            "recordKey": message.get("recordKey", ""),
+            "shardId": state.shard_id,
+            "shardEpoch": state.shard_epoch,
+        }
+        state.shard_log.append({
+            "sequence": sequence,
+            "committedAt": now_iso(),
+            "changeKind": "removed",
+            "delete": delete_message,
         })
 
 
@@ -469,8 +503,28 @@ def database_change_notifications(message: dict[str, Any], document: dict[str, A
             "schemaVersion": "cultnet.database_change_raw.v0",
             "messageId": f"{message_id}:{subscription.subscription_id}",
             "subscriptionId": subscription.subscription_id,
-            "changeKind": "put",
+            "changeKind": "added",
             "document": document,
+        })
+    return notifications
+
+
+def database_delete_notifications(message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
+    schema_id = str(message.get("schemaId") or "")
+    record_key = str(message.get("recordKey") or "")
+    notifications = []
+    document = {"schemaId": schema_id, "recordKey": record_key}
+    for subscription in subscriptions.values():
+        if not subscription.matches(document):
+            continue
+        message_id = message.get("messageId") or record_key or "change"
+        notifications.append({
+            "schemaVersion": "cultnet.database_change_raw.v0",
+            "messageId": f"{message_id}:{subscription.subscription_id}",
+            "subscriptionId": subscription.subscription_id,
+            "changeKind": "removed",
+            "schemaId": schema_id,
+            "recordKey": record_key,
         })
     return notifications
 

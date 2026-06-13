@@ -293,7 +293,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   });
   assert.equal(pythonChange.schemaVersion, "cultnet.database_change_raw.v0");
   assert.equal(pythonChange.subscriptionId, "python-sub");
-  assert.equal(pythonChange.changeKind, "put");
+  assert.equal(pythonChange.changeKind, "added");
   assert.equal(pythonChange.document.schemaId, interopNoteSchemaId);
   assert.equal(pythonChange.document.recordKey, "note:ts-python-sub");
 
@@ -338,9 +338,61 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonShard.log.shardEpoch, 1);
   assert.equal(pythonShard.log.resyncRequired, false);
   assert.ok(pythonShard.log.entries.some((entry: any) =>
-    entry.changeKind === "put"
+    entry.changeKind === "added"
     && entry.put?.messageId === "python-shard-put"
     && entry.put?.document?.recordKey === "note:ts-python-log"
+  ));
+
+  const pythonDelete = await requestPythonDatabaseDelete(pythonPort, {
+    schemaVersion: "cultnet.database_subscribe.v0",
+    messageId: "python-delete-subscribe",
+    subscriptionId: "python-delete-sub",
+    schemaIds: [interopNoteSchemaId],
+    recordKeys: ["note:ts-python-delete"],
+    includeSnapshot: false,
+  }, {
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId: "python-delete-put",
+    document: {
+      schemaId: interopNoteSchemaId,
+      recordKey: "note:ts-python-delete",
+      storedAt: "2026-06-13T00:00:01Z",
+      payloadEncoding: "messagepack",
+      payload: encode([
+        INTEROP_SCHEMA_VERSION,
+        "note:ts-python-delete",
+        "ts-python-delete",
+        "Delete note",
+        "Python should remove this through the CultNet delete lane.",
+        ["interop", "delete"],
+      ]),
+      sourceRuntimeId: "ts-python-delete",
+    },
+  }, {
+    schemaVersion: "cultnet.document_delete.v0",
+    messageId: "python-delete",
+    schemaId: interopNoteSchemaId,
+    recordKey: "note:ts-python-delete",
+    shardId: "interop",
+    shardEpoch: 1,
+  }, {
+    schemaVersion: "cultnet.shard_log_request.v0",
+    messageId: "python-delete-log",
+    shardId: "interop",
+    shardEpoch: 1,
+    afterSequence: 0,
+  });
+  assert.equal(pythonDelete.change.schemaVersion, "cultnet.database_change_raw.v0");
+  assert.equal(pythonDelete.change.subscriptionId, "python-delete-sub");
+  assert.equal(pythonDelete.change.changeKind, "removed");
+  assert.equal(pythonDelete.change.schemaId, interopNoteSchemaId);
+  assert.equal(pythonDelete.change.recordKey, "note:ts-python-delete");
+  assert.ok(pythonDelete.log.entries.some((entry: any) =>
+    entry.changeKind === "removed"
+    && entry.delete?.messageId === "python-delete"
+    && entry.delete?.schemaId === interopNoteSchemaId
+    && entry.delete?.recordKey === "note:ts-python-delete"
+    && entry.delete?.shardEpoch === 1
   ));
 
   const claimHash = computeSimulationClaimHash("frame:42", "subject:python-target", "hit");
@@ -642,6 +694,53 @@ async function requestPythonDatabaseChange(port: number, subscribe: Record<strin
           clearTimeout(timeout);
           socket.end();
           resolve(decoded);
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(subscribe)));
+    socket.write(encodeFrame(encode(put)));
+  });
+}
+
+async function requestPythonDatabaseDelete(
+  port: number,
+  subscribe: Record<string, unknown>,
+  put: Record<string, unknown>,
+  remove: Record<string, unknown>,
+  logRequest: Record<string, unknown>,
+): Promise<{ change: any; log: any }> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const result: { change?: any; log?: any } = {};
+    let sawAdded = false;
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python delete change/log responses."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.database_change_raw.v0" && decoded.changeKind === "added") {
+          sawAdded = true;
+          socket.write(encodeFrame(encode(remove)));
+          socket.write(encodeFrame(encode(logRequest)));
+        } else if (decoded?.schemaVersion === "cultnet.database_change_raw.v0" && decoded.changeKind === "removed") {
+          result.change = decoded;
+        } else if (decoded?.schemaVersion === "cultnet.shard_log_response.v0") {
+          result.log = decoded;
+        }
+        if (sawAdded && result.change && result.log) {
+          clearTimeout(timeout);
+          socket.end();
+          resolve({ change: result.change, log: result.log });
         }
       }
     });

@@ -14,7 +14,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, decode_witness_artifact_bundle_payload, document_put_raw, encode_frame, encode_witness_artifact_bundle_payload, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation, witness_artifact_bundle
+from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, decode_witness_artifact_bundle_payload, document_delete, document_put_raw, encode_frame, encode_witness_artifact_bundle_payload, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation, witness_artifact_bundle
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -206,6 +206,21 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(put["messageId"], "put-1")
         self.assertEqual(put["document"]["recordKey"], "record-a")
         self.assertEqual(put["document"]["sourceRuntimeId"], "python-test")
+
+    def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
+        message = document_delete(
+            message_id="delete-1",
+            schema_id="schema-a",
+            record_key="record-a",
+            shard_id="interop",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertEqual(message["schemaVersion"], "cultnet.document_delete.v0")
+        self.assertEqual(message["messageId"], "delete-1")
+        self.assertEqual(message["schemaId"], "schema-a")
+        self.assertEqual(message["recordKey"], "record-a")
+        self.assertEqual(message["shardId"], "interop")
+        self.assertEqual(message["shardEpoch"], 1)
 
     def test_cultnet_shard_helpers_match_schema_v0_shape(self) -> None:
         catalog = shard_catalog_request(
