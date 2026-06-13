@@ -23,6 +23,15 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.documents import DocumentDefinition
+from cultmesh_py import (
+    PEER_EXCHANGE_REQUEST,
+    VERSE_CATALOG_REQUEST,
+    CultMeshPeerCard,
+    CultMeshPeerCatalog,
+    CultMeshVerseCatalog,
+    CultMeshVerseCompatibility,
+    CultMeshVerseDescriptor,
+)
 
 from .framing import read_frame, write_frame
 
@@ -65,6 +74,8 @@ class PeerState:
     note_schema_id: str
     interop_schema: dict[str, Any]
     interop_schema_json: str
+    verse_catalog: CultMeshVerseCatalog
+    peer_catalog: CultMeshPeerCatalog
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,6 +198,10 @@ def handle_server_message(state: PeerState, message: dict[str, Any]) -> list[dic
         return [raw_snapshot_response(state, message)]
     if schema_version == "cultnet.document_put_raw.v0":
         return handle_raw_put(state, message)
+    if schema_version == VERSE_CATALOG_REQUEST:
+        return [state.verse_catalog.create_response(message)]
+    if schema_version == PEER_EXCHANGE_REQUEST:
+        return [state.peer_catalog.create_response(message)]
     return []
 
 
@@ -373,7 +388,45 @@ def build_state(runtime_id: str, runtime_kind: str, display_name: str, agent_id:
         note_schema_id=note_schema_id,
         interop_schema=schema,
         interop_schema_json=schema_json,
+        verse_catalog=default_verse_catalog(runtime_id),
+        peer_catalog=default_peer_catalog(runtime_id),
     )
+
+
+def default_verse_catalog(runtime_id: str) -> CultMeshVerseCatalog:
+    catalog = CultMeshVerseCatalog()
+    catalog.upsert(
+        CultMeshVerseDescriptor(
+            verse_id="python-interop",
+            display_name="Python Interop Verse",
+            authority_model="OperatorCluster",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="python-interop-rules",
+                required_plugin_ids=("core",),
+            ),
+            discovery_endpoints=(f"cultnet://{runtime_id}",),
+            authority_runtime_ids=(runtime_id,),
+            description="Python CultMesh interop surface",
+        )
+    )
+    return catalog
+
+
+def default_peer_catalog(runtime_id: str) -> CultMeshPeerCatalog:
+    catalog = CultMeshPeerCatalog()
+    catalog.upsert(
+        CultMeshPeerCard(
+            peer_id=runtime_id,
+            verse_id="python-interop",
+            endpoints=(f"cultnet://{runtime_id}",),
+            roles=("discovery", "read-replica", "shard-primary"),
+            shard_ids=("interop",),
+            region="local",
+            authority_lease_id=f"lease:{runtime_id}",
+        )
+    )
+    return catalog
 
 
 def define_interop_documents(note_schema_id: str, note_schema_json: str) -> dict[str, Binding]:

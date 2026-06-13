@@ -159,12 +159,13 @@ python -m cultnet_py.interop_peer dial --runtime-id python-client --runtime-kind
 python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-port 4075 --discovery-group 239.77.44.11
 ```
 
-`cultmesh_py` starts with a local cache-backed node and schema-v0 helpers for
-the CultMesh Verse catalog and peer exchange wire messages:
+`cultmesh_py` includes a local cache-backed node, schema-v0 helpers for the
+CultMesh Verse catalog and peer exchange wire messages, local authority lease
+checks, and stream transport negotiation:
 
 ```python
 from cultcache_py import define_database_entry_type
-from cultmesh_py import CultMeshPeerCatalog, create_node, peer_exchange_request
+from cultmesh_py import CultMeshPeerCatalog, CultMeshStreamCatalog, create_node, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = create_node("mesh.cc", runtime_id="python-runtime")
@@ -173,6 +174,8 @@ node.put(note_doc, "note:1", {"body": "hello"})
 
 peers = CultMeshPeerCatalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
+
+streams = CultMeshStreamCatalog()
 ```
 
 ## Wire Parity
@@ -191,6 +194,7 @@ Current receipts:
 - `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` includes Python in
   the live TS/Rust/C#/Python schema-v0 peer ring: discovery, hello, schema
   catalog, raw snapshot, raw document put, mutation receipt, and fire-command
-  receipt.
+  receipt. The same test asks the Python peer for CultMesh Verse catalog and
+  peer exchange responses over the CultNet pipe.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
-  Verse catalog and peer exchange MessagePack wire shapes.
+  Verse catalog, peer exchange, authority lease, and stream negotiation behavior.

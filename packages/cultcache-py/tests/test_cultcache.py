@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cultcache_py import (
@@ -18,6 +19,12 @@ from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
     CultMeshPeerCatalog,
+    CultMeshAuthorityLease,
+    CultMeshAuthorityLeaseCatalog,
+    CultMeshStreamCatalog,
+    CultMeshStreamConsumerProfile,
+    CultMeshStreamDescriptor,
+    CultMeshStreamFrameHandle,
     CultMeshVerseCatalog,
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
@@ -235,6 +242,79 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(decoded["peers"][0]["peerId"], "peer-a")
         self.assertIn("read-replica", decoded["peers"][0]["roles"])
         self.assertEqual(decoded["peers"][0]["authorityLeaseId"], "lease-1")
+
+    def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
+        peer = CultMeshPeerCard(
+            peer_id="voidbot-local",
+            verse_id="local",
+            endpoints=("cultmesh://localhost",),
+            roles=("shard-primary",),
+            authority_lease_id="lease:voidbot-local",
+        )
+        leases = CultMeshAuthorityLeaseCatalog()
+        now = datetime.now(UTC)
+        self.assertFalse(leases.is_authorized(peer, "shard-primary", at=now))
+
+        leases.upsert(
+            CultMeshAuthorityLease(
+                lease_id="lease:voidbot-local",
+                verse_id="local",
+                peer_id="voidbot-local",
+                roles=("shard-primary",),
+                valid_from=now - timedelta(seconds=1),
+                expires_at=now + timedelta(seconds=1),
+            )
+        )
+
+        self.assertTrue(leases.is_authorized(peer, "shard-primary", at=now))
+        self.assertFalse(leases.is_authorized(peer, "read-replica", at=now))
+
+    def test_cultmesh_stream_catalog_negotiates_transport_and_latest_frame(self) -> None:
+        streams = CultMeshStreamCatalog()
+        streams.declare(
+            CultMeshStreamDescriptor(
+                stream_id="mimir:kiyo-pro",
+                verse_id="studio",
+                owner_peer_id="starfire",
+                kind="video",
+                label="Kiyo Pro",
+                clock={"clockDomainId": "starfire-qpc", "confidence": 0.25},
+                video={"width": 1920, "height": 1080, "pixelFormat": "YUY2", "framesPerSecond": 30},
+                preferred_transports=("shared-d3d12-texture", "shared-memory", "cultcache-page"),
+                max_in_flight_frames=3,
+            )
+        )
+
+        negotiation = streams.negotiate(
+            "mimir:kiyo-pro",
+            CultMeshStreamConsumerProfile(
+                peer_id="fensalir",
+                verse_id="studio",
+                supported_transports=("shared-d3d12-texture", "cultcache-page"),
+                accepted_kinds=("video",),
+                can_import_gpu_handles=True,
+                max_in_flight_frames=2,
+            ),
+        )
+
+        self.assertEqual(negotiation.transport, "shared-d3d12-texture")
+        self.assertEqual(negotiation.max_in_flight_frames, 2)
+        self.assertEqual(negotiation.copy_budget, "zero-copy-target")
+
+        streams.publish_frame(
+            CultMeshStreamFrameHandle(
+                stream_id="mimir:kiyo-pro",
+                sequence=42,
+                timestamp_ns=1_000_000_000,
+                duration_ns=33_333_334,
+                transport="shared-d3d12-texture",
+                native_handle="0xfeed",
+                fence_handle="0xbeef",
+                fence_value=7,
+                unavoidable_copy_count=0,
+            )
+        )
+        self.assertEqual(streams.latest_frame("mimir:kiyo-pro").sequence, 42)
 
 
 if __name__ == "__main__":

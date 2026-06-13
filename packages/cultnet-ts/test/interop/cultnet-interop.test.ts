@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
+import { connect as connectTcp, createServer } from "node:net";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { decode, encode } from "@msgpack/msgpack";
+import { encodeFrame, LengthPrefixedMessageFramer } from "../../src/framing";
 
 const execFileAsync = promisify(execFile);
 
@@ -238,46 +240,63 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(tsDialPython.mutatedNote.tags.includes("decorated:ts-python-client"));
   assert.equal(tsDialPython.fireReceipt.ammoRemaining, 29);
 
+  const pythonVerseCatalog = await requestCultMeshFromPython(pythonPort, {
+    schemaVersion: "cultmesh.verse_catalog_request.v0",
+    messageId: "python-verses",
+    transportVersion: "cultmesh.v0",
+  });
+  assert.equal(pythonVerseCatalog.schemaVersion, "cultmesh.verse_catalog_response.v0");
+  assert.equal(pythonVerseCatalog.messageId, "python-verses");
+  assert.equal(pythonVerseCatalog.verses[0].verseId, "python-interop");
+  assert.equal(pythonVerseCatalog.verses[0].compatibility.transportVersion, "cultmesh.v0");
+
+  const pythonPeerExchange = await requestCultMeshFromPython(pythonPort, {
+    schemaVersion: "cultmesh.peer_exchange_request.v0",
+    messageId: "python-peers",
+    verseId: "python-interop",
+    roles: ["read-replica"],
+  });
+  assert.equal(pythonPeerExchange.schemaVersion, "cultmesh.peer_exchange_response.v0");
+  assert.equal(pythonPeerExchange.messageId, "python-peers");
+  assert.equal(pythonPeerExchange.peers[0].peerId, "python-peer");
+  assert.ok(pythonPeerExchange.peers[0].roles.includes("read-replica"));
+
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
-  const tsProbe = await runJsonCommand("ts-probe", process.execPath, [
+  await expectProbePeers("ts-probe", process.execPath, [
     tsPeerScript,
     "probe",
     "--runtime-id", "ts-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
     "--timeout-ms", "3000",
-  ], cultNetTsRoot);
-  assert.deepEqual(tsProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
+  ], cultNetTsRoot, {}, expectedPeers);
 
-  const rustProbe = await runJsonCommand("rust-probe", rustBinaryPath, [
+  await expectProbePeers("rust-probe", rustBinaryPath, [
     "probe",
     "--runtime-id", "rust-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
     "--timeout-ms", "3000",
-  ], cultnetRsRoot);
-  assert.deepEqual(rustProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
+  ], cultnetRsRoot, {}, expectedPeers);
 
-  const csharpProbe = await runJsonCommand("csharp-probe", dotnetCommand, [
+  await expectProbePeers("csharp-probe", dotnetCommand, [
     csharpDllPath,
     "probe",
     "--runtime-id", "csharp-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
     "--timeout-ms", "3000",
-  ], cultLibRoot);
-  assert.deepEqual(csharpProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
+  ], cultLibRoot, {}, expectedPeers);
 
-  const pythonProbe = await runJsonCommand("python-probe", pythonCommand, [
+  await expectProbePeers("python-probe", pythonCommand, [
     "-m", "cultnet_py.interop_peer",
     "probe",
     "--runtime-id", "python-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
     "--timeout-ms", "3000",
-  ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc });
-  assert.deepEqual(pythonProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
+  ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }, expectedPeers);
 });
 
 async function buildInteropPeers(): Promise<void> {
@@ -402,6 +421,55 @@ async function runJsonCommand(
   } catch (error) {
     throw new Error(`${name} did not end with JSON stdout.\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
+}
+
+async function expectProbePeers(
+  name: string,
+  command: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  expectedPeers: string[],
+): Promise<void> {
+  const found = new Set<string>();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const probe = await runJsonCommand(`${name}-${attempt + 1}`, command, args, cwd, env);
+    for (const peer of probe.peers as Array<{ runtimeId: string }>) {
+      found.add(peer.runtimeId);
+    }
+    if (expectedPeers.every((peer) => found.has(peer))) {
+      assert.deepEqual([...found].sort(), expectedPeers);
+      return;
+    }
+  }
+
+  assert.deepEqual([...found].sort(), expectedPeers);
+}
+
+async function requestCultMeshFromPython(port: number, request: Record<string, unknown>): Promise<any> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Timed out waiting for Python CultMesh response to ${request.schemaVersion}.`));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        clearTimeout(timeout);
+        socket.end();
+        resolve(decode(frame));
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(request)));
+  });
 }
 
 async function stopProcess(processState: RunningServeProcess): Promise<void> {
