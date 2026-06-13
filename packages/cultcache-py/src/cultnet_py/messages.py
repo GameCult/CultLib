@@ -57,6 +57,8 @@ def document_put_raw(
     stored_at: str,
     payload: bytes,
     source_runtime_id: str | None = None,
+    shard_id: str | None = None,
+    shard_epoch: int | None = None,
 ) -> CultNetMessage:
     record: dict[str, Any] = {
         "schemaId": schema_id,
@@ -67,7 +69,12 @@ def document_put_raw(
     }
     if source_runtime_id:
         record["sourceRuntimeId"] = source_runtime_id
-    return CultNetMessage("cultnet.document_put_raw.v0", {"messageId": message_id, "document": record})
+    body: dict[str, Any] = {"messageId": message_id, "document": record}
+    if shard_id is not None:
+        body["shardId"] = shard_id
+    if shard_epoch is not None:
+        body["shardEpoch"] = shard_epoch
+    return CultNetMessage("cultnet.document_put_raw.v0", body)
 
 
 def document_delete(
@@ -86,17 +93,37 @@ def document_delete(
     return CultNetMessage("cultnet.document_delete.v0", body)
 
 
-def snapshot_request(*, message_id: str = "", schema_ids: list[str] | None = None, record_keys: list[str] | None = None) -> CultNetMessage:
-    return CultNetMessage(
-        "cultnet.snapshot_request.v0",
-        {"messageId": message_id, "schemaIds": schema_ids or [], "recordKeys": record_keys or []},
-    )
+def snapshot_request(
+    *,
+    message_id: str = "",
+    schema_ids: list[str] | None = None,
+    record_keys: list[str] | None = None,
+    shard_id: str | None = None,
+    shard_epoch: int | None = None,
+) -> CultNetMessage:
+    body: dict[str, Any] = {"messageId": message_id, "schemaIds": schema_ids or [], "recordKeys": record_keys or []}
+    if shard_id is not None:
+        body["shardId"] = shard_id
+    if shard_epoch is not None:
+        body["shardEpoch"] = shard_epoch
+    return CultNetMessage("cultnet.snapshot_request.v0", body)
 
 
-def schema_catalog_request(*, message_id: str = "", include_schema_json: bool = False) -> CultNetMessage:
+def schema_catalog_request(
+    *,
+    message_id: str = "",
+    include_schema_json: bool = False,
+    schema_ids: list[str] | None = None,
+    kinds: list[str] | None = None,
+) -> CultNetMessage:
     return CultNetMessage(
         "cultnet.schema_catalog_request.v0",
-        {"messageId": message_id, "includeSchemaJson": include_schema_json},
+        {
+            "messageId": message_id,
+            "includeSchemaJson": include_schema_json,
+            "schemaIds": schema_ids or [],
+            "kinds": kinds or [],
+        },
     )
 
 

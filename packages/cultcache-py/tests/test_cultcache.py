@@ -17,7 +17,25 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, decode_witness_artifact_bundle_payload, document_delete, document_put_raw, encode_frame, encode_witness_artifact_bundle_payload, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation, witness_artifact_bundle
+from cultnet_py import (
+    compute_simulation_claim_hash,
+    database_subscribe,
+    database_unsubscribe,
+    decode_frame,
+    decode_witness_artifact_bundle_payload,
+    document_delete,
+    document_put_raw,
+    encode_frame,
+    encode_witness_artifact_bundle_payload,
+    hello,
+    parse_message,
+    schema_catalog_request,
+    shard_catalog_request,
+    shard_log_request,
+    simulation_observation,
+    snapshot_request,
+    witness_artifact_bundle,
+)
 from cultnet_py.interop_peer import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
@@ -206,11 +224,42 @@ class CultCacheTests(unittest.TestCase):
             stored_at="2026-06-13T00:00:00Z",
             payload=b"payload",
             source_runtime_id="python-test",
+            shard_id="interop",
+            shard_epoch=1,
         ).to_wire()
         self.assertEqual(put["schemaVersion"], "cultnet.document_put_raw.v0")
         self.assertEqual(put["messageId"], "put-1")
         self.assertEqual(put["document"]["recordKey"], "record-a")
         self.assertEqual(put["document"]["sourceRuntimeId"], "python-test")
+        self.assertEqual(put["shardId"], "interop")
+        self.assertEqual(put["shardEpoch"], 1)
+
+    def test_cultnet_catalog_and_snapshot_helpers_accept_filters(self) -> None:
+        catalog = schema_catalog_request(
+            message_id="catalog-1",
+            include_schema_json=True,
+            schema_ids=["schema-a"],
+            kinds=["wire_message"],
+        ).to_wire()
+        self.assertEqual(catalog["schemaVersion"], "cultnet.schema_catalog_request.v0")
+        self.assertEqual(catalog["messageId"], "catalog-1")
+        self.assertTrue(catalog["includeSchemaJson"])
+        self.assertEqual(catalog["schemaIds"], ["schema-a"])
+        self.assertEqual(catalog["kinds"], ["wire_message"])
+
+        snapshot = snapshot_request(
+            message_id="snapshot-1",
+            schema_ids=["schema-a"],
+            record_keys=["record-a"],
+            shard_id="interop",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertEqual(snapshot["schemaVersion"], "cultnet.snapshot_request.v0")
+        self.assertEqual(snapshot["messageId"], "snapshot-1")
+        self.assertEqual(snapshot["schemaIds"], ["schema-a"])
+        self.assertEqual(snapshot["recordKeys"], ["record-a"])
+        self.assertEqual(snapshot["shardId"], "interop")
+        self.assertEqual(snapshot["shardEpoch"], 1)
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
