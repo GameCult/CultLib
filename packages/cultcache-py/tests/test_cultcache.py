@@ -43,6 +43,7 @@ from cultnet_py import (
 from cultnet_py.interop_peer import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
+    CultMesh,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshAuthorityLease,
@@ -781,6 +782,18 @@ class CultCacheTests(unittest.TestCase):
             reopened.register_document(document)
             reopened.pull()
             self.assertEqual(reopened.get(document, "note:1")["body"], "hello")
+
+    def test_cultmesh_facade_matches_peer_runtime_entrypoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "mesh.cc"
+            node = CultMesh.start_node(store_path, runtime_id="mesh-facade")
+
+            self.assertEqual(node.runtime_id, "mesh-facade")
+            self.assertIsInstance(CultMesh.create_node(), type(node))
+            self.assertIsInstance(CultMesh.create_verse_catalog(), CultMeshVerseCatalog)
+            self.assertIsInstance(CultMesh.create_peer_catalog(), CultMeshPeerCatalog)
+            self.assertIsInstance(CultMesh.create_authority_lease_catalog(), CultMeshAuthorityLeaseCatalog)
+            self.assertIsInstance(CultMesh.create_stream_catalog(), CultMeshStreamCatalog)
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore

@@ -1,4 +1,5 @@
 from .client import CultMeshDiscoveryClient
+from .facade import CultMesh
 from .node import CultMeshNode, create_node
 from .wire import (
     PEER_EXCHANGE_REQUEST,
@@ -25,6 +26,7 @@ from .wire import (
 
 __all__ = [
     "CultMeshNode",
+    "CultMesh",
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
     "CultMeshAuthorityLease",
