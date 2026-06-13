@@ -311,6 +311,11 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCultMeshNodeEmit.note.authorRuntimeId, "python-node-emit");
   assert.equal(pythonCultMeshNodeEmit.note.title, "Python node emitted raw put");
 
+  const pythonSubscription = await runPythonCultNetSubscription(pythonPort);
+  assert.equal(pythonSubscription.changeKind, "added");
+  assert.equal(pythonSubscription.recordKey, "note:python-sub-client");
+  assert.equal(pythonSubscription.subscriptionId, "python-public-sub");
+
   const pythonChange = await requestPythonDatabaseChange(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-subscribe",
@@ -859,6 +864,60 @@ async function runPythonCultMeshNodeEmit(port: number): Promise<any> {
     "print(json.dumps({",
     "  'synced': [{'schemaId': change.schema_id, 'recordKey': change.record_key} for change in changes],",
     "  'note': note,",
+    "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runPythonCultNetSubscription(port: number): Promise<any> {
+  const schemaPathJson = JSON.stringify(interopSchemaPath);
+  const script = [
+    "import json",
+    "from pathlib import Path",
+    "from cultcache_py import define_database_entry_type",
+    "from cultmesh_py import create_node",
+    "from cultnet_py import CultNetRawClient",
+    `schema_json = Path(${schemaPathJson}).read_text(encoding='utf-8')`,
+    "note_doc = define_database_entry_type(",
+    "  'cultnet.interop-note',",
+    "  [('schemaVersion', 0), ('documentId', 1), ('authorRuntimeId', 2), ('title', 3), ('body', 4), ('tags', 5, [])],",
+    `  schema_id='${interopNoteSchemaId}',`,
+    "  schema_version='cultnet.interop_note.v0',",
+    "  canonical_schema_json=schema_json,",
+    ")",
+    "node = create_node(runtime_id='python-sub-client')",
+    "node.register_document(note_doc)",
+    "message = node.put_raw_message(",
+    "  note_doc,",
+    "  'note:python-sub-client',",
+    "  {",
+    "    'schemaVersion': 'cultnet.interop_note.v0',",
+    "    'documentId': 'note:python-sub-client',",
+    "    'authorRuntimeId': 'python-sub-client',",
+    "    'title': 'Python subscription client emitted raw put',",
+    "    'body': 'subscription client saw its own live change',",
+    "    'tags': ['python', 'subscription'],",
+    "  },",
+    "  message_id='python-sub-client-put',",
+    "  shard_id='interop',",
+    "  shard_epoch=1,",
+    ")",
+    `client = CultNetRawClient('127.0.0.1', ${port}, timeout_seconds=4.0)`,
+    `with client.subscribe_database(subscription_id='python-public-sub', schema_ids=['${interopNoteSchemaId}'], record_keys=['note:python-sub-client'], include_snapshot=False) as subscription:`,
+    "  subscription.send(message)",
+    "  change = subscription.read_next()",
+    "print(json.dumps({",
+    "  'subscriptionId': change.get('subscriptionId'),",
+    "  'changeKind': change.get('changeKind'),",
+    "  'recordKey': change.get('document', {}).get('recordKey'),",
     "}))",
   ].join("\n");
   const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {

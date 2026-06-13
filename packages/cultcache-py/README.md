@@ -175,6 +175,8 @@ subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.int
 shard_request = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
 shard_log = client.fetch_shard_log(shard_id="interop", shard_epoch=1, after_sequence=0)
 # log_changes = apply_shard_log_response(cache, [note_doc], shard_log)
+with client.subscribe_database(subscription_id="ui", schema_ids=["cultnet.interop-note"]) as live:
+    initial_snapshot = live.read_next()
 claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
 observation = simulation_observation(
     message_id="obs-1",

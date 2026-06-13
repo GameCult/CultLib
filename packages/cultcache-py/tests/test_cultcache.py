@@ -347,6 +347,94 @@ class CultCacheTests(unittest.TestCase):
             "cultnet.shard_log_request.v0",
         ])
 
+    def test_cultnet_database_subscription_reads_snapshot_and_change(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        document = define_database_entry_type(
+            "sub.item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        schema_id = document.catalog_entry().schema_id
+        ready = threading.Event()
+        server_error: list[BaseException] = []
+        port_holder: list[int] = []
+        received_versions: list[str] = []
+
+        def serve_subscription() -> None:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    server.bind(("127.0.0.1", 0))
+                    port_holder.append(server.getsockname()[1])
+                    server.listen(1)
+                    ready.set()
+                    connection, _ = server.accept()
+                    with connection:
+                        stream = connection.makefile("rwb")
+                        subscribe = msgpack.unpackb(read_frame(stream), raw=False)
+                        received_versions.append(subscribe["schemaVersion"])
+                        self.assertEqual(subscribe["subscriptionId"], "sub-1")
+                        snapshot = {
+                            "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                            "messageId": subscribe["messageId"],
+                            "documents": [],
+                        }
+                        write_frame(stream, msgpack.packb(snapshot, use_bin_type=True))
+                        stream.flush()
+
+                        put = msgpack.unpackb(read_frame(stream), raw=False)
+                        received_versions.append(put["schemaVersion"])
+                        change = {
+                            "schemaVersion": "cultnet.database_change_raw.v0",
+                            "messageId": "change-1",
+                            "subscriptionId": "sub-1",
+                            "changeKind": "added",
+                            "document": put["document"],
+                        }
+                        write_frame(stream, msgpack.packb(change, use_bin_type=True))
+                        stream.flush()
+
+                        unsubscribe = msgpack.unpackb(read_frame(stream), raw=False)
+                        received_versions.append(unsubscribe["schemaVersion"])
+            except BaseException as error:
+                server_error.append(error)
+                ready.set()
+
+        thread = threading.Thread(target=serve_subscription, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+        self.assertFalse(server_error)
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        put = document_put_raw(
+            message_id="put-sub",
+            key="item:sub",
+            schema_id=schema_id,
+            stored_at="2026-06-14T00:00:00Z",
+            payload=document.encode_payload(Item("orb", "gear", 8)),
+        )
+        with client.subscribe_database(subscription_id="sub-1", schema_ids=[schema_id]) as subscription:
+            snapshot = subscription.read_next()
+            subscription.send(put)
+            change = subscription.read_next()
+
+        thread.join(2.0)
+        self.assertFalse(server_error)
+        self.assertEqual(snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(change["schemaVersion"], "cultnet.database_change_raw.v0")
+        self.assertEqual(change["document"]["recordKey"], "item:sub")
+        self.assertEqual(received_versions, [
+            "cultnet.database_subscribe.v0",
+            "cultnet.document_put_raw.v0",
+            "cultnet.database_unsubscribe.v0",
+        ])
+
     def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
         document = define_database_entry_type(
             "replica.item",

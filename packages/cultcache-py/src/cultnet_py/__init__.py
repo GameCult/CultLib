@@ -1,4 +1,4 @@
-from .client import CultNetRawClient
+from .client import CultNetDatabaseSubscription, CultNetRawClient
 from .framing import decode_frame, encode_frame, read_frame, write_frame
 from .messages import (
     CultNetMessage,
@@ -28,6 +28,7 @@ from .replication import (
 
 __all__ = [
     "CultNetMessage",
+    "CultNetDatabaseSubscription",
     "CultNetRawClient",
     "CultNetAppliedRecord",
     "apply_raw_document_record",
