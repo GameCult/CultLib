@@ -8,6 +8,8 @@ from .messages import (
     hello,
     parse_message,
     schema_catalog_request,
+    shard_catalog_request,
+    shard_log_request,
     snapshot_request,
 )
 
@@ -23,6 +25,8 @@ __all__ = [
     "parse_message",
     "read_frame",
     "schema_catalog_request",
+    "shard_catalog_request",
+    "shard_log_request",
     "snapshot_request",
     "write_frame",
 ]

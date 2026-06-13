@@ -76,6 +76,11 @@ class PeerState:
     interop_schema_json: str
     verse_catalog: CultMeshVerseCatalog
     peer_catalog: CultMeshPeerCatalog
+    shard_id: str
+    shard_epoch: int
+    shard_endpoint: str
+    shard_log: list[dict[str, Any]]
+    shard_log_lock: threading.Lock
 
 
 @dataclass
@@ -139,7 +144,14 @@ def add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
-    state = build_state(args.runtime_id, args.runtime_kind, args.display_name, args.agent_id, args.schema_path)
+    state = build_state(
+        args.runtime_id,
+        args.runtime_kind,
+        args.display_name,
+        args.agent_id,
+        args.schema_path,
+        shard_endpoint=f"cultnet://{args.advertise_host}:{args.tcp_port}",
+    )
     state.cache.put(state.bindings["note"].document, f"note:{args.runtime_id}", build_interop_note(args.runtime_id, args.display_name))
 
     stop = threading.Event()
@@ -213,6 +225,10 @@ def handle_server_message(state: PeerState, message: dict[str, Any], subscriptio
         return [catalog_response(state, message)]
     if schema_version == "cultnet.snapshot_request.v0":
         return [raw_snapshot_response(state, message)]
+    if schema_version == "cultnet.shard_catalog_request.v0":
+        return [shard_catalog_response(state, message)]
+    if schema_version == "cultnet.shard_log_request.v0":
+        return [shard_log_response(state, message)]
     if schema_version == "cultnet.database_subscribe.v0":
         return handle_database_subscribe(state, message, subscriptions)
     if schema_version == "cultnet.database_unsubscribe.v0":
@@ -246,6 +262,7 @@ def handle_raw_put(state: PeerState, message: dict[str, Any], subscriptions: dic
     if not isinstance(document, dict):
         return []
     applied = apply_raw_document_put(state, document)
+    append_shard_log_put(state, message, document)
     responses = database_change_notifications(message, document, subscriptions)
     schema_id = document.get("schemaId")
     if schema_id == INTEROP_MUTATION_INTENT_SCHEMA_ID:
@@ -284,6 +301,94 @@ def handle_raw_put(state: PeerState, message: dict[str, Any], subscriptions: dic
         }
         return [*responses, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_RECEIPT_SCHEMA_ID], f"{state.runtime_id}-fire-receipt", receipt["commandId"], receipt, state)]
     return responses
+
+
+def shard_catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
+    schema_ids = {str(value) for value in request.get("schemaIds") or []}
+    record_keys = {str(value) for value in request.get("recordKeys") or []}
+    include_shard = not schema_ids or state.note_schema_id in schema_ids
+    if record_keys and not any(key.startswith("note:") for key in record_keys):
+        include_shard = False
+    return {
+        "schemaVersion": "cultnet.shard_catalog_response.v0",
+        "messageId": request.get("messageId", ""),
+        "shards": [shard_descriptor(state)] if include_shard else [],
+    }
+
+
+def shard_descriptor(state: PeerState) -> dict[str, Any]:
+    return {
+        "shardId": state.shard_id,
+        "ownerRuntimeId": state.runtime_id,
+        "epoch": state.shard_epoch,
+        "isPrimary": True,
+        "schemaIds": [state.note_schema_id],
+        "keyPrefix": "note:",
+        "primaryEndpoints": [state.shard_endpoint],
+        "replicaEndpoints": [],
+        "readReplicaEndpoints": [state.shard_endpoint],
+        "region": "local",
+    }
+
+
+def shard_log_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
+    requested_shard = str(request.get("shardId") or "")
+    message_id = request.get("messageId", "")
+    if requested_shard != state.shard_id:
+        return {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": message_id,
+            "shardId": requested_shard,
+            "shardEpoch": 0,
+            "entries": [],
+            "resyncRequired": True,
+            "reason": "unknown_shard",
+        }
+    requested_epoch = request.get("shardEpoch")
+    if isinstance(requested_epoch, int) and requested_epoch != state.shard_epoch:
+        return {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": message_id,
+            "shardId": state.shard_id,
+            "shardEpoch": state.shard_epoch,
+            "entries": [],
+            "resyncRequired": True,
+            "reason": "stale_epoch",
+        }
+    after_sequence = request.get("afterSequence")
+    if not isinstance(after_sequence, int):
+        after_sequence = 0
+    limit = request.get("limit")
+    with state.shard_log_lock:
+        entries = [entry for entry in state.shard_log if entry["sequence"] > after_sequence]
+        if isinstance(limit, int) and limit >= 0:
+            entries = entries[:limit]
+    return {
+        "schemaVersion": "cultnet.shard_log_response.v0",
+        "messageId": message_id,
+        "shardId": state.shard_id,
+        "shardEpoch": state.shard_epoch,
+        "entries": entries,
+        "resyncRequired": False,
+    }
+
+
+def append_shard_log_put(state: PeerState, message: dict[str, Any], document: dict[str, Any]) -> None:
+    with state.shard_log_lock:
+        sequence = len(state.shard_log) + 1
+        put_message = {
+            "schemaVersion": "cultnet.document_put_raw.v0",
+            "messageId": message.get("messageId", ""),
+            "document": document,
+            "shardId": state.shard_id,
+            "shardEpoch": state.shard_epoch,
+        }
+        state.shard_log.append({
+            "sequence": sequence,
+            "committedAt": now_iso(),
+            "changeKind": "put",
+            "put": put_message,
+        })
 
 
 def database_change_notifications(message: dict[str, Any], document: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
@@ -421,7 +526,15 @@ def dial(args: argparse.Namespace) -> None:
     })
 
 
-def build_state(runtime_id: str, runtime_kind: str, display_name: str, agent_id: str, schema_path: str, store_suffix: str = "") -> PeerState:
+def build_state(
+    runtime_id: str,
+    runtime_kind: str,
+    display_name: str,
+    agent_id: str,
+    schema_path: str,
+    store_suffix: str = "",
+    shard_endpoint: str | None = None,
+) -> PeerState:
     schema_json = Path(schema_path).read_text(encoding="utf-8")
     schema = json.loads(schema_json)
     note_schema_id = schema["$id"]
@@ -444,6 +557,11 @@ def build_state(runtime_id: str, runtime_kind: str, display_name: str, agent_id:
         interop_schema_json=schema_json,
         verse_catalog=default_verse_catalog(runtime_id),
         peer_catalog=default_peer_catalog(runtime_id),
+        shard_id="interop",
+        shard_epoch=1,
+        shard_endpoint=shard_endpoint or f"cultnet://{runtime_id}",
+        shard_log=[],
+        shard_log_lock=threading.Lock(),
     )
 
 
@@ -571,7 +689,13 @@ def raw_snapshot_response(state: PeerState, request: dict[str, Any]) -> dict[str
         if record_keys and envelope.key not in record_keys:
             continue
         documents.append(raw_record_from_envelope(envelope, schema_id))
-    return {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": request.get("messageId", ""), "documents": documents}
+    response: dict[str, Any] = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": request.get("messageId", ""), "documents": documents}
+    if request.get("shardId") == state.shard_id:
+        with state.shard_log_lock:
+            response["shardId"] = state.shard_id
+            response["shardEpoch"] = state.shard_epoch
+            response["shardLogSequence"] = len(state.shard_log)
+    return response
 
 
 def raw_document_put(binding: Binding, message_id: str, key: str, value: dict[str, Any], state: PeerState) -> dict[str, Any]:

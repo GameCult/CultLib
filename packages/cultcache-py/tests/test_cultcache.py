@@ -14,7 +14,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message
+from cultnet_py import database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message, shard_catalog_request, shard_log_request
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -206,6 +206,31 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(put["messageId"], "put-1")
         self.assertEqual(put["document"]["recordKey"], "record-a")
         self.assertEqual(put["document"]["sourceRuntimeId"], "python-test")
+
+    def test_cultnet_shard_helpers_match_schema_v0_shape(self) -> None:
+        catalog = shard_catalog_request(
+            message_id="catalog-1",
+            schema_ids=["schema-a"],
+            record_keys=["record-a"],
+        ).to_wire()
+        self.assertEqual(catalog["schemaVersion"], "cultnet.shard_catalog_request.v0")
+        self.assertEqual(catalog["messageId"], "catalog-1")
+        self.assertEqual(catalog["schemaIds"], ["schema-a"])
+        self.assertEqual(catalog["recordKeys"], ["record-a"])
+
+        log = shard_log_request(
+            message_id="log-1",
+            shard_id="interop",
+            shard_epoch=7,
+            after_sequence=3,
+            limit=2,
+        ).to_wire()
+        self.assertEqual(log["schemaVersion"], "cultnet.shard_log_request.v0")
+        self.assertEqual(log["messageId"], "log-1")
+        self.assertEqual(log["shardId"], "interop")
+        self.assertEqual(log["shardEpoch"], 7)
+        self.assertEqual(log["afterSequence"], 3)
+        self.assertEqual(log["limit"], 2)
 
     def test_cultmesh_node_uses_cultcache_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

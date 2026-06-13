@@ -115,3 +115,35 @@ def database_unsubscribe(*, subscription_id: str, message_id: str = "") -> CultN
         "cultnet.database_unsubscribe.v0",
         {"messageId": message_id, "subscriptionId": subscription_id},
     )
+
+
+def shard_catalog_request(
+    *,
+    message_id: str = "",
+    schema_ids: list[str] | None = None,
+    record_keys: list[str] | None = None,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.shard_catalog_request.v0",
+        {"messageId": message_id, "schemaIds": schema_ids or [], "recordKeys": record_keys or []},
+    )
+
+
+def shard_log_request(
+    *,
+    shard_id: str,
+    message_id: str = "",
+    shard_epoch: int | None = None,
+    after_sequence: int = 0,
+    limit: int | None = None,
+) -> CultNetMessage:
+    body: dict[str, Any] = {
+        "messageId": message_id,
+        "shardId": shard_id,
+        "afterSequence": after_sequence,
+    }
+    if shard_epoch is not None:
+        body["shardEpoch"] = shard_epoch
+    if limit is not None:
+        body["limit"] = limit
+    return CultNetMessage("cultnet.shard_log_request.v0", body)

@@ -295,6 +295,52 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonChange.document.schemaId, interopNoteSchemaId);
   assert.equal(pythonChange.document.recordKey, "note:ts-python-sub");
 
+  const pythonShard = await requestPythonShardCatalogAndLog(pythonPort, {
+    schemaVersion: "cultnet.shard_catalog_request.v0",
+    messageId: "python-shards",
+    schemaIds: [interopNoteSchemaId],
+    recordKeys: ["note:ts-python-log"],
+  }, {
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId: "python-shard-put",
+    document: {
+      schemaId: interopNoteSchemaId,
+      recordKey: "note:ts-python-log",
+      storedAt: "2026-06-13T00:00:01Z",
+      payloadEncoding: "messagepack",
+      payload: encode([
+        INTEROP_SCHEMA_VERSION,
+        "note:ts-python-log",
+        "ts-python-log",
+        "Shard log note",
+        "Python exposes accepted raw puts through the CultNet shard log lane.",
+        ["interop", "shard-log"],
+      ]),
+      sourceRuntimeId: "ts-python-log",
+    },
+  }, {
+    schemaVersion: "cultnet.shard_log_request.v0",
+    messageId: "python-log",
+    shardId: "interop",
+    shardEpoch: 1,
+    afterSequence: 0,
+  });
+  assert.equal(pythonShard.catalog.schemaVersion, "cultnet.shard_catalog_response.v0");
+  assert.equal(pythonShard.catalog.messageId, "python-shards");
+  assert.equal(pythonShard.catalog.shards[0].shardId, "interop");
+  assert.equal(pythonShard.catalog.shards[0].ownerRuntimeId, "python-peer");
+  assert.equal(pythonShard.catalog.shards[0].epoch, 1);
+  assert.equal(pythonShard.log.schemaVersion, "cultnet.shard_log_response.v0");
+  assert.equal(pythonShard.log.messageId, "python-log");
+  assert.equal(pythonShard.log.shardId, "interop");
+  assert.equal(pythonShard.log.shardEpoch, 1);
+  assert.equal(pythonShard.log.resyncRequired, false);
+  assert.ok(pythonShard.log.entries.some((entry: any) =>
+    entry.changeKind === "put"
+    && entry.put?.messageId === "python-shard-put"
+    && entry.put?.document?.recordKey === "note:ts-python-log"
+  ));
+
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
   await expectProbePeers("ts-probe", process.execPath, [
@@ -533,6 +579,48 @@ async function requestPythonDatabaseChange(port: number, subscribe: Record<strin
     });
     socket.write(encodeFrame(encode(subscribe)));
     socket.write(encodeFrame(encode(put)));
+  });
+}
+
+async function requestPythonShardCatalogAndLog(
+  port: number,
+  catalogRequest: Record<string, unknown>,
+  put: Record<string, unknown>,
+  logRequest: Record<string, unknown>,
+): Promise<{ catalog: any; log: any }> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const result: { catalog?: any; log?: any } = {};
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python shard catalog/log responses."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.shard_catalog_response.v0") {
+          result.catalog = decoded;
+          socket.write(encodeFrame(encode(put)));
+          socket.write(encodeFrame(encode(logRequest)));
+        } else if (decoded?.schemaVersion === "cultnet.shard_log_response.v0") {
+          result.log = decoded;
+        }
+        if (result.catalog && result.log) {
+          clearTimeout(timeout);
+          socket.end();
+          resolve({ catalog: result.catalog, log: result.log });
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(catalogRequest)));
   });
 }
 
