@@ -103,6 +103,14 @@ class CultMeshVerseCatalog:
             "verses": verses,
         }
 
+    def apply_response(self, response: dict[str, Any]) -> list[CultMeshVerseDescriptor]:
+        if response.get("schemaVersion") != VERSE_CATALOG_RESPONSE:
+            raise ValueError(f"Expected {VERSE_CATALOG_RESPONSE}, received {response.get('schemaVersion')!r}")
+        applied = [verse_from_wire(verse) for verse in response.get("verses", [])]
+        for verse in applied:
+            self.upsert(verse)
+        return applied
+
 
 @dataclass
 class CultMeshPeerCatalog:
@@ -134,6 +142,14 @@ class CultMeshPeerCatalog:
             "messageId": request.get("messageId", ""),
             "peers": peers,
         }
+
+    def apply_response(self, response: dict[str, Any]) -> list[CultMeshPeerCard]:
+        if response.get("schemaVersion") != PEER_EXCHANGE_RESPONSE:
+            raise ValueError(f"Expected {PEER_EXCHANGE_RESPONSE}, received {response.get('schemaVersion')!r}")
+        applied = [peer_from_wire(peer) for peer in response.get("peers", [])]
+        for peer in applied:
+            self.upsert(peer)
+        return applied
 
     def find(self, verse_id: str, role: str | None = None) -> list[CultMeshPeerCard]:
         require_non_empty(verse_id, "verse_id")
@@ -350,6 +366,40 @@ def peer_exchange_request(
         "knownPeerIds": known_peer_ids,
         "limit": limit,
     }
+
+
+def verse_from_wire(value: dict[str, Any]) -> CultMeshVerseDescriptor:
+    compatibility = value.get("compatibility") or {}
+    return CultMeshVerseDescriptor(
+        verse_id=str(value["verseId"]),
+        display_name=str(value.get("displayName") or value["verseId"]),
+        authority_model=str(value.get("authorityModel") or ""),
+        compatibility=CultMeshVerseCompatibility(
+            transport_version=str(compatibility.get("transportVersion") or ""),
+            rules_hash=str(compatibility.get("rulesHash") or ""),
+            compatible_verse_ids=tuple(compatibility.get("compatibleVerseIds") or ()),
+            required_plugin_ids=tuple(compatibility.get("requiredPluginIds") or ()),
+            optional_plugin_ids=tuple(compatibility.get("optionalPluginIds") or ()),
+        ),
+        discovery_endpoints=tuple(value.get("discoveryEndpoints") or ()),
+        authority_runtime_ids=tuple(value.get("authorityRuntimeIds") or ()),
+        parent_verse_id=value.get("parentVerseId"),
+        description=value.get("description"),
+    )
+
+
+def peer_from_wire(value: dict[str, Any]) -> CultMeshPeerCard:
+    return CultMeshPeerCard(
+        peer_id=str(value["peerId"]),
+        verse_id=str(value["verseId"]),
+        endpoints=tuple(value.get("endpoints") or ()),
+        roles=tuple(value.get("roles") or ()),
+        shard_ids=tuple(value.get("shardIds") or ()),
+        region=value.get("region"),
+        authority_lease_id=value.get("authorityLeaseId"),
+        expires_at=value.get("expiresAt"),
+        signature=value.get("signature"),
+    )
 
 
 def require_non_empty(value: str, name: str) -> None:

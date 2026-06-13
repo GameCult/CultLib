@@ -1,4 +1,4 @@
-from .client import CultMeshDiscoveryClient, peer_from_wire, verse_from_wire
+from .client import CultMeshDiscoveryClient
 from .node import CultMeshNode, create_node
 from .wire import (
     PEER_EXCHANGE_REQUEST,
@@ -17,8 +17,10 @@ from .wire import (
     CultMeshVerseCatalog,
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
+    peer_from_wire,
     peer_exchange_request,
     verse_catalog_request,
+    verse_from_wire,
 )
 
 __all__ = [

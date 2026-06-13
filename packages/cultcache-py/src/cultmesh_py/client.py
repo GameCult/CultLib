@@ -12,10 +12,13 @@ from .wire import (
     PEER_EXCHANGE_RESPONSE,
     VERSE_CATALOG_RESPONSE,
     CultMeshPeerCard,
-    CultMeshVerseCompatibility,
+    CultMeshPeerCatalog,
+    CultMeshVerseCatalog,
     CultMeshVerseDescriptor,
+    peer_from_wire,
     peer_exchange_request,
     verse_catalog_request,
+    verse_from_wire,
 )
 
 
@@ -96,37 +99,29 @@ class CultMeshDiscoveryClient:
         )
         return [peer_from_wire(peer) for peer in response.get("peers", [])]
 
+    def sync_verse_catalog(
+        self,
+        catalog: CultMeshVerseCatalog,
+        *,
+        verse_ids: list[str] | None = None,
+        transport_version: str | None = None,
+    ) -> list[CultMeshVerseDescriptor]:
+        response = self.request_verse_catalog(verse_ids=verse_ids, transport_version=transport_version)
+        return catalog.apply_response(response)
 
-def verse_from_wire(value: dict[str, Any]) -> CultMeshVerseDescriptor:
-    compatibility = value.get("compatibility") or {}
-    return CultMeshVerseDescriptor(
-        verse_id=str(value["verseId"]),
-        display_name=str(value.get("displayName") or value["verseId"]),
-        authority_model=str(value.get("authorityModel") or ""),
-        compatibility=CultMeshVerseCompatibility(
-            transport_version=str(compatibility.get("transportVersion") or ""),
-            rules_hash=str(compatibility.get("rulesHash") or ""),
-            compatible_verse_ids=tuple(compatibility.get("compatibleVerseIds") or ()),
-            required_plugin_ids=tuple(compatibility.get("requiredPluginIds") or ()),
-            optional_plugin_ids=tuple(compatibility.get("optionalPluginIds") or ()),
-        ),
-        discovery_endpoints=tuple(value.get("discoveryEndpoints") or ()),
-        authority_runtime_ids=tuple(value.get("authorityRuntimeIds") or ()),
-        parent_verse_id=value.get("parentVerseId"),
-        description=value.get("description"),
-    )
-
-
-def peer_from_wire(value: dict[str, Any]) -> CultMeshPeerCard:
-    return CultMeshPeerCard(
-        peer_id=str(value["peerId"]),
-        verse_id=str(value["verseId"]),
-        endpoints=tuple(value.get("endpoints") or ()),
-        roles=tuple(value.get("roles") or ()),
-        shard_ids=tuple(value.get("shardIds") or ()),
-        region=value.get("region"),
-        authority_lease_id=value.get("authorityLeaseId"),
-        expires_at=value.get("expiresAt"),
-        signature=value.get("signature"),
-    )
-
+    def sync_peer_catalog(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        known_peer_ids: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CultMeshPeerCard]:
+        response = self.request_peer_exchange(
+            verse_id=verse_id,
+            roles=roles,
+            known_peer_ids=known_peer_ids,
+            limit=limit,
+        )
+        return catalog.apply_response(response)

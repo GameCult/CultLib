@@ -212,6 +212,7 @@ response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"
 client = CultMeshDiscoveryClient("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
 mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
+client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
 
 streams = CultMeshStreamCatalog()
 ```

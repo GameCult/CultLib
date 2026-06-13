@@ -434,7 +434,7 @@ class CultCacheTests(unittest.TestCase):
         ready = threading.Event()
         server_error: list[BaseException] = []
 
-        def serve_two_requests() -> None:
+        def serve_requests() -> None:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -442,7 +442,7 @@ class CultCacheTests(unittest.TestCase):
                     port_holder.append(server.getsockname()[1])
                     server.listen(2)
                     ready.set()
-                    for _ in range(2):
+                    for _ in range(4):
                         connection, _ = server.accept()
                         with connection:
                             stream = connection.makefile("rwb")
@@ -460,7 +460,7 @@ class CultCacheTests(unittest.TestCase):
                 ready.set()
 
         port_holder: list[int] = []
-        thread = threading.Thread(target=serve_two_requests, daemon=True)
+        thread = threading.Thread(target=serve_requests, daemon=True)
         thread.start()
         self.assertTrue(ready.wait(2.0))
         self.assertFalse(server_error)
@@ -468,6 +468,10 @@ class CultCacheTests(unittest.TestCase):
         client = CultMeshDiscoveryClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
         fetched_verses = client.fetch_verses(transport_version="cultmesh.v0")
         fetched_peers = client.fetch_peers(verse_id="aetheria-main", roles=["read-replica"])
+        local_verses = CultMeshVerseCatalog()
+        local_peers = CultMeshPeerCatalog()
+        synced_verses = client.sync_verse_catalog(local_verses, transport_version="cultmesh.v0")
+        synced_peers = client.sync_peer_catalog(local_peers, verse_id="aetheria-main", roles=["read-replica"])
 
         thread.join(2.0)
         self.assertFalse(server_error)
@@ -475,6 +479,9 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(fetched_verses[0].compatibility.required_plugin_ids, ("core",))
         self.assertEqual(fetched_peers[0].peer_id, "peer-a")
         self.assertEqual(fetched_peers[0].shard_ids, ("players",))
+        self.assertEqual(synced_verses[0].verse_id, "aetheria-main")
+        self.assertEqual(local_peers.find("aetheria-main", role="read-replica")[0].peer_id, "peer-a")
+        self.assertEqual(synced_peers[0].roles, ("read-replica",))
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(
