@@ -4,9 +4,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cultcache_py import CultCache, SingleFileMessagePackBackingStore
+from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
 from cultcache_py.documents import DocumentDefinition
-from cultnet_py import CultNetAppliedRecord, CultNetRawClient, apply_raw_snapshot, apply_shard_log_response
+from cultnet_py import (
+    CultNetAppliedRecord,
+    CultNetMessage,
+    CultNetRawClient,
+    apply_raw_snapshot,
+    apply_shard_log_response,
+    document_delete,
+    document_put_raw,
+)
 
 
 @dataclass
@@ -22,6 +30,36 @@ class CultMeshNode:
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
         self.cache.put(document, key, value)
 
+    def put_raw_message(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        value: Any,
+        *,
+        message_id: str = "",
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultNetMessage:
+        catalog_entry = document.catalog_entry()
+        envelope = CultCacheEnvelope.create(
+            key=key,
+            type=document.type,
+            payload=document.encode_payload(value),
+            schema_id=catalog_entry.schema_id,
+            catalog_entry=catalog_entry,
+        )
+        self.cache.put_envelope(document, envelope)
+        return document_put_raw(
+            message_id=message_id,
+            key=key,
+            schema_id=envelope.schema_id or catalog_entry.schema_id,
+            stored_at=envelope.stored_at,
+            payload=envelope.payload,
+            source_runtime_id=self.runtime_id,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
     def get(self, document: DocumentDefinition[Any], key: str) -> Any:
         return self.cache.get(document, key)
 
@@ -30,6 +68,25 @@ class CultMeshNode:
 
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self.cache.delete(document, key)
+
+    def delete_raw_message(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        message_id: str = "",
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultNetMessage:
+        schema_id = document.catalog_entry().schema_id
+        self.delete(document, key)
+        return document_delete(
+            message_id=message_id,
+            schema_id=schema_id,
+            record_key=key,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.cache.snapshot()

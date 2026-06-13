@@ -306,6 +306,11 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCultMeshNodeSync.synced[0].recordKey, "note:python-peer");
   assert.equal(pythonCultMeshNodeSync.note.authorRuntimeId, "python-peer");
 
+  const pythonCultMeshNodeEmit = await runPythonCultMeshNodeEmit(pythonPort);
+  assert.equal(pythonCultMeshNodeEmit.synced[0].recordKey, "note:python-node-emit");
+  assert.equal(pythonCultMeshNodeEmit.note.authorRuntimeId, "python-node-emit");
+  assert.equal(pythonCultMeshNodeEmit.note.title, "Python node emitted raw put");
+
   const pythonChange = await requestPythonDatabaseChange(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-subscribe",
@@ -786,6 +791,71 @@ async function runPythonCultMeshNodeSync(port: number): Promise<any> {
     `client = CultNetRawClient('127.0.0.1', ${port}, timeout_seconds=4.0)`,
     `changes = node.sync_snapshot(client, schema_ids=['${interopNoteSchemaId}'], record_keys=['note:python-peer'])`,
     "note = node.get_required(note_doc, 'note:python-peer')",
+    "print(json.dumps({",
+    "  'synced': [{'schemaId': change.schema_id, 'recordKey': change.record_key} for change in changes],",
+    "  'note': note,",
+    "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runPythonCultMeshNodeEmit(port: number): Promise<any> {
+  const schemaPathJson = JSON.stringify(interopSchemaPath);
+  const script = [
+    "import json",
+    "import socket",
+    "import time",
+    "from pathlib import Path",
+    "from cultcache_py import define_database_entry_type",
+    "from cultmesh_py import create_node",
+    "from cultnet_py import CultNetRawClient, write_frame",
+    `schema_json = Path(${schemaPathJson}).read_text(encoding='utf-8')`,
+    "note_doc = define_database_entry_type(",
+    "  'cultnet.interop-note',",
+    "  [('schemaVersion', 0), ('documentId', 1), ('authorRuntimeId', 2), ('title', 3), ('body', 4), ('tags', 5, [])],",
+    `  schema_id='${interopNoteSchemaId}',`,
+    "  schema_version='cultnet.interop_note.v0',",
+    "  canonical_schema_json=schema_json,",
+    ")",
+    "writer = create_node(runtime_id='python-node-emit')",
+    "writer.register_document(note_doc)",
+    "message = writer.put_raw_message(",
+    "  note_doc,",
+    "  'note:python-node-emit',",
+    "  {",
+    "    'schemaVersion': 'cultnet.interop_note.v0',",
+    "    'documentId': 'note:python-node-emit',",
+    "    'authorRuntimeId': 'python-node-emit',",
+    "    'title': 'Python node emitted raw put',",
+    "    'body': 'node-level Python emit reached the peer',",
+    "    'tags': ['python', 'node', 'emit'],",
+    "  },",
+    "  message_id='python-node-emit-put',",
+    "  shard_id='interop',",
+    "  shard_epoch=1,",
+    ")",
+    `with socket.create_connection(('127.0.0.1', ${port}), timeout=4.0) as connection:`,
+    "  stream = connection.makefile('rwb')",
+    "  write_frame(stream, message.to_bytes())",
+    "  stream.flush()",
+    "reader = create_node(runtime_id='python-node-emit-reader')",
+    "reader.register_document(note_doc)",
+    `client = CultNetRawClient('127.0.0.1', ${port}, timeout_seconds=4.0)`,
+    "changes = []",
+    "for _ in range(20):",
+    `  changes = reader.sync_snapshot(client, schema_ids=['${interopNoteSchemaId}'], record_keys=['note:python-node-emit'])`,
+    "  if changes:",
+    "    break",
+    "  time.sleep(0.1)",
+    "note = reader.get_required(note_doc, 'note:python-node-emit')",
     "print(json.dumps({",
     "  'synced': [{'schemaId': change.schema_id, 'recordKey': change.record_key} for change in changes],",
     "  'note': note,",

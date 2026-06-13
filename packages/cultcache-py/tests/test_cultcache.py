@@ -517,6 +517,51 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(log_changes[0].change_kind, "updated")
         self.assertEqual(node.get_required(document, "item:node").value, 9)
 
+    def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.emit_item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+
+        put = node.put_raw_message(
+            document,
+            "item:emit",
+            Item("wand", "gear", 4),
+            message_id="put-emit",
+            shard_id="mesh",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertEqual(node.get_required(document, "item:emit").name, "wand")
+        self.assertEqual(put["schemaVersion"], "cultnet.document_put_raw.v0")
+        self.assertEqual(put["messageId"], "put-emit")
+        self.assertEqual(put["document"]["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(put["document"]["recordKey"], "item:emit")
+        self.assertEqual(put["document"]["sourceRuntimeId"], "python-node")
+        self.assertEqual(put["shardId"], "mesh")
+        self.assertEqual(put["shardEpoch"], 1)
+
+        delete = node.delete_raw_message(
+            document,
+            "item:emit",
+            message_id="delete-emit",
+            shard_id="mesh",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertIsNone(node.get(document, "item:emit"))
+        self.assertEqual(delete["schemaVersion"], "cultnet.document_delete.v0")
+        self.assertEqual(delete["messageId"], "delete-emit")
+        self.assertEqual(delete["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(delete["recordKey"], "item:emit")
+        self.assertEqual(delete["shardId"], "mesh")
+        self.assertEqual(delete["shardEpoch"], 1)
+
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
             message_id="delete-1",
