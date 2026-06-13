@@ -30,6 +30,7 @@ const tsPeerScript = resolve(cultNetTsRoot, "dist-test", "test", "interop", "cul
 const interopSchemaPath = resolve(cultNetTsRoot, "integration", "contracts", "cultnet.interop-note.schema.json");
 const interopNoteSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json";
 const witnessArtifactBundleSchemaId = "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json";
+const simulationFactSchemaId = "gamecult.mesh.simulation_fact";
 const csharpProjectPath = resolve(
   cultLibRoot,
   "tests",
@@ -476,6 +477,24 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCandidate.totalWeight, 1);
   assert.equal(pythonCandidate.hasQuorum, true);
   assert.equal(pythonCandidate.confidence, 1);
+  const simulationFactKey = createSimulationFactKey(pythonCandidate);
+  const pythonFactSnapshot = await requestPythonSnapshot(pythonPort, {
+    schemaVersion: "cultnet.snapshot_request.v0",
+    messageId: "python-simulation-fact-snapshot",
+    schemaIds: [simulationFactSchemaId],
+    recordKeys: [simulationFactKey],
+  });
+  assert.equal(pythonFactSnapshot.schemaVersion, "cultnet.snapshot_response_raw.v0");
+  assert.equal(pythonFactSnapshot.documents[0].schemaId, simulationFactSchemaId);
+  assert.equal(pythonFactSnapshot.documents[0].recordKey, simulationFactKey);
+  const simulationFactSlots = decode(pythonFactSnapshot.documents[0].payload) as any[];
+  assert.equal(simulationFactSlots[0], simulationFactKey.slice("simulation:".length));
+  assert.equal(simulationFactSlots[1], "interop");
+  assert.equal(simulationFactSlots[3], 42);
+  assert.equal(simulationFactSlots[4], "python-target");
+  assert.equal(simulationFactSlots[5], "hit");
+  assert.equal(simulationFactSlots[6], claimHash);
+  assert.equal(simulationFactSlots[8], 1);
 
   const pythonWitness = await putAndSnapshotPythonWitnessBundle(pythonPort, {
     schemaVersion: "cultnet.document_put_raw.v0",
@@ -1081,6 +1100,48 @@ async function requestPythonSimulationCandidate(port: number, observation: Recor
 
 function computeSimulationClaimHash(...parts: string[]): string {
   return createHash("sha256").update(parts.join("\x1f"), "utf8").digest("hex");
+}
+
+function createSimulationFactKey(candidate: any): string {
+  const factId = createHash("sha256")
+    .update([
+      candidate.shardId,
+      String(candidate.shardEpoch),
+      String(candidate.frame),
+      candidate.subjectId,
+      candidate.claimKind,
+    ].join("\x1f"), "utf8")
+    .digest("hex");
+  return `simulation:${factId}`;
+}
+
+async function requestPythonSnapshot(port: number, request: Record<string, unknown>): Promise<any> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python snapshot response."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.snapshot_response_raw.v0") {
+          clearTimeout(timeout);
+          socket.end();
+          resolve(decoded);
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(request)));
+  });
 }
 
 async function putAndSnapshotPythonWitnessBundle(port: number, put: Record<string, unknown>): Promise<{ catalog: any; snapshot: any }> {

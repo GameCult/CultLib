@@ -286,12 +286,12 @@ Current receipts:
   catalog, wire-message catalog discovery, raw snapshot, raw document
   put/delete, mutation receipt, fire-command receipt, database subscription
   changes, shard catalog, shard log catch-up, simulation consensus candidates,
-  and witness artifact bundle round-trips. The same test asks the Python peer
-  for CultMesh Verse catalog and peer exchange responses over the CultNet pipe,
-  then verifies the public `CultMeshDiscoveryClient` can fetch typed Python
-  Verse and peer descriptors from that live endpoint. It also verifies
-  `CultNetRawClient` can fetch the live Python peer's schema catalog, raw
-  snapshot, and shard catalog.
+  committed simulation fact snapshots, and witness artifact bundle round-trips.
+  The same test asks the Python peer for CultMesh Verse catalog and peer
+  exchange responses over the CultNet pipe, then verifies the public
+  `CultMeshDiscoveryClient` can fetch typed Python Verse and peer descriptors
+  from that live endpoint. It also verifies `CultNetRawClient` can fetch the
+  live Python peer's schema catalog, raw snapshot, and shard catalog.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, raw snapshot/shard-log application, simulation claim hashing,

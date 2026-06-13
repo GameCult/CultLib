@@ -27,12 +27,15 @@ from cultcache_py import (
 from cultcache_py.documents import DocumentDefinition
 from cultmesh_py import (
     PEER_EXCHANGE_REQUEST,
+    SIMULATION_FACT_DOCUMENT_TYPE,
     VERSE_CATALOG_REQUEST,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
+    CultMeshSimulationFact,
     CultMeshVerseCatalog,
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
+    simulation_fact_document,
 )
 
 from .framing import read_frame, write_frame
@@ -54,6 +57,7 @@ INTEROP_FIRE_RECEIPT_SCHEMA_VERSION = "cultnet.interop_fire_weapon_receipt.v0"
 WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE = "cultnet.witness_artifact_bundle"
 WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID = "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json"
 WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION = "cultnet.witness_artifact_bundle.v0"
+SIMULATION_FACT_SCHEMA_ID = simulation_fact_document.catalog_entry().schema_id
 INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
 DISCOVERY_PROBE_SCHEMA_VERSION = "cultnet.discovery_probe.v0"
 DISCOVERY_ANNOUNCE_SCHEMA_VERSION = "cultnet.discovery_announce.v0"
@@ -475,7 +479,19 @@ def simulation_candidate_responses(state: PeerState, message: dict[str, Any]) ->
         witnesses = state.observations.setdefault(group, {})
         witnesses[witness_id] = observation
         candidates = build_simulation_candidates(message.get("messageId", ""), list(witnesses.values()))
+    commit_simulation_facts(state, candidates)
     return candidates
+
+
+def commit_simulation_facts(state: PeerState, candidates: list[dict[str, Any]]) -> None:
+    binding = state.bindings_by_schema_id[SIMULATION_FACT_SCHEMA_ID]
+    for candidate in candidates:
+        if not candidate.get("hasQuorum"):
+            continue
+        key = CultMeshSimulationFact.create_record_key(candidate)
+        if state.cache.get(binding.document, key) is not None:
+            continue
+        state.cache.put(binding.document, key, CultMeshSimulationFact.from_candidate(candidate))
 
 
 def build_simulation_candidates(message_id: str, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -751,6 +767,7 @@ def default_peer_catalog(runtime_id: str) -> CultMeshPeerCatalog:
 
 
 def define_interop_documents(note_schema_id: str, note_schema_json: str) -> dict[str, Binding]:
+    simulation_entry = simulation_fact_document.catalog_entry()
     return {
         "note": binding(INTEROP_DOCUMENT_TYPE, note_schema_id, INTEROP_SCHEMA_VERSION, note_schema_json, note_slots, note_from_slots),
         "mutationIntent": binding(INTEROP_MUTATION_INTENT_DOCUMENT_TYPE, INTEROP_MUTATION_INTENT_SCHEMA_ID, INTEROP_MUTATION_INTENT_SCHEMA_VERSION, "{}", mutation_intent_slots, mutation_intent_from_slots),
@@ -764,6 +781,11 @@ def define_interop_documents(note_schema_id: str, note_schema_json: str) -> dict
             witness_artifact_bundle_schema_json(),
             witness_artifact_bundle_slots,
             witness_artifact_bundle_from_slots,
+        ),
+        "simulationFact": Binding(
+            document=simulation_fact_document,
+            schema_id=simulation_entry.schema_id,
+            payload_schema_version=simulation_entry.schema_version,
         ),
     }
 
@@ -799,7 +821,7 @@ def hello_message(state: PeerState) -> dict[str, Any]:
         "runtimeKind": state.runtime_kind,
         "agentId": state.agent_id,
         "displayName": state.display_name,
-        "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE, WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE],
+        "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE, WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE, SIMULATION_FACT_DOCUMENT_TYPE],
         "supportedMutationContracts": [{
             "documentType": INTEROP_DOCUMENT_TYPE,
             "payloadSchemaVersion": INTEROP_SCHEMA_VERSION,
@@ -845,6 +867,18 @@ def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any
             "wireContracts": [INTEROP_WIRE_CONTRACT],
             "contentHash": WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID,
             "schemaJson": witness_artifact_bundle_schema_json() if include_schema_json else None,
+        })
+    if (not schema_ids or SIMULATION_FACT_SCHEMA_ID in schema_ids) and (not kinds or "document_payload" in kinds):
+        entry = simulation_fact_document.catalog_entry()
+        schemas.append({
+            "schemaId": entry.schema_id,
+            "kind": "document_payload",
+            "schemaVersion": entry.schema_version,
+            "documentType": SIMULATION_FACT_DOCUMENT_TYPE,
+            "title": "CultMesh Simulation Fact",
+            "wireContracts": [INTEROP_WIRE_CONTRACT],
+            "contentHash": entry.content_hash,
+            "schemaJson": entry.canonical_schema_json if include_schema_json else None,
         })
     return {"schemaVersion": "cultnet.schema_catalog_response.v0", "messageId": request.get("messageId", ""), "schemas": schemas}
 
