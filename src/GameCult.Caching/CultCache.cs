@@ -1159,6 +1159,8 @@ namespace GameCult.Caching
         private readonly ConcurrentDictionary<(Type Type, string Alias), ConcurrentDictionary<string, string>> _indexMaps = new();
         private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
         private readonly ConditionalWeakTable<object, DocumentHandleBox> _documentHandles = new();
+        private readonly Subject<object> _changes = new();
+        private readonly CultCacheSoaStore _soa = new();
         private ILogger _logger = new NullLogger();
         private bool _hasUnflushedMutations;
 
@@ -1221,6 +1223,46 @@ namespace GameCult.Caching
         /// Gets the document registry used by this cache.
         /// </summary>
         public CultDocumentRegistry Registry => _registry;
+
+        /// <summary>
+        /// Opens a reactive POCO presentation for one cache-managed document.
+        /// </summary>
+        public CultManagedDocument<T> Document<T>(CultRecordKey key) where T : class
+        {
+            return new CultManagedDocument<T>(
+                key,
+                () => Get<T>(key),
+                async value => { await UpsertAsync(value, new CultRecordHandle<T>(key)).ConfigureAwait(false); },
+                WatchRecord<T>(key)
+                    .Where(change => change.Document != null)
+                    .Select(change => change.Document!));
+        }
+
+        /// <summary>
+        /// Watches all local cache changes assignable to the requested document type.
+        /// </summary>
+        public Observable<CultCacheDocumentChange<T>> Watch<T>() where T : class
+        {
+            return _changes
+                .Where(change => change is CultCacheDocumentChange<T>)
+                .Select(change => (CultCacheDocumentChange<T>)change);
+        }
+
+        /// <summary>
+        /// Watches one local cache record.
+        /// </summary>
+        public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
+        {
+            return Watch<T>().Where(change => change.Key.Equals(key));
+        }
+
+        /// <summary>
+        /// Gets the cache-owned structure-of-arrays table for a document type.
+        /// </summary>
+        public CultSoaTable<T> Soa<T>() where T : class
+        {
+            return _soa.Snapshot<T>();
+        }
 
         /// <summary>
         /// Attaches a backing store to this cache.
@@ -1522,6 +1564,8 @@ namespace GameCult.Caching
             {
                 store.Dispose();
             }
+
+            _changes.Dispose();
         }
 
         internal CultStoredDocument CreateStoredDocument(Type documentType, object document, CultRecordKey? key = null, string? storedAt = null)
@@ -1550,6 +1594,7 @@ namespace GameCult.Caching
             _entries[stored.Key.Value] = stored;
             _documentHandles.Remove(stored.Document);
             _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
+            _soa.Upsert(stored);
             AddIndexes(stored);
 
             foreach (var store in _backingStores)
@@ -1568,6 +1613,8 @@ namespace GameCult.Caching
             {
                 RecomputeDirtyState();
             }
+
+            PublishChange(stored, existing?.Document);
 
             if (raiseUpdate)
             {
@@ -1590,6 +1637,7 @@ namespace GameCult.Caching
 
             RemoveIndexes(existing);
             _documentHandles.Remove(existing.Document);
+            _soa.Remove(existing);
 
             foreach (var store in _backingStores)
             {
@@ -1607,6 +1655,8 @@ namespace GameCult.Caching
             {
                 RecomputeDirtyState();
             }
+
+            PublishChange(existing, existing.Document, removed: true);
 
             if (raiseUpdate)
             {
@@ -1728,6 +1778,23 @@ namespace GameCult.Caching
             _hasUnflushedMutations = _backingStores.Count == 0
                 ? _hasUnflushedMutations
                 : _backingStores.Any(store => store.IsDirty);
+        }
+
+        private void PublishChange(CultStoredDocument stored, object? previousDocument, bool removed = false)
+        {
+            var changeType = typeof(CultCacheDocumentChange<>).MakeGenericType(stored.Descriptor.DocumentType);
+            var change = Activator.CreateInstance(
+                changeType,
+                removed ? CultCacheDocumentChangeKind.Removed :
+                previousDocument == null ? CultCacheDocumentChangeKind.Added :
+                CultCacheDocumentChangeKind.Updated,
+                stored.Key,
+                removed ? null : stored.Document,
+                previousDocument);
+            if (change != null)
+            {
+                _changes.OnNext(change);
+            }
         }
     }
 

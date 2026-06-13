@@ -143,10 +143,11 @@ If you want the explicit assembly rite, the lower-level `CultCache` +
 `SingleFileMessagePackBackingStore` path is still there. The helper is just the
 blessed front door.
 
-## CPU-Local SoA Access
+## Managed Documents And SoA Storage
 
-Gameplay code can keep authoring normal typed documents and let CultCache build
-hot structure-of-arrays projections when a loop wants contiguous columns.
+Gameplay code keeps authoring normal typed documents. CultCache owns the record
+identity, reactive presentation, and CPU-local structure-of-arrays table behind
+that POCO surface.
 
 ```csharp
 [CultDocument("game.player_transform", "game.player_transform.v1")]
@@ -158,7 +159,22 @@ public sealed class PlayerTransform
     public int Health;
 }
 
-var table = cache.ProjectSoa<PlayerTransform>();
+var player = cache.Document<PlayerTransform>(new CultRecordKey("player:alice"));
+
+await player.ReplaceAsync(new PlayerTransform
+{
+    Name = "Alice",
+    PositionX = 4,
+    PositionY = 8,
+    Health = 100
+});
+
+using var subscription = player.Watch().Subscribe(current => Render(current));
+
+player.Value!.Health = 90;
+await player.CommitAsync();
+
+var table = cache.Soa<PlayerTransform>();
 
 Span<float> x = table.Column<float>(nameof(PlayerTransform.PositionX)).Span;
 Span<float> y = table.Column<float>(nameof(PlayerTransform.PositionY)).Span;
@@ -170,25 +186,9 @@ for (var row = 0; row < table.Count; row++)
 }
 ```
 
-`ProjectSoa<T>()` is the friendly CPU path: domain documents stay almost-POCO,
-while unmanaged public fields/properties become contiguous typed arrays for
-DOTS-style scans.
-
-When the locality unit itself needs a durable record key, use
-`CultSoaChunk`. A chunk stores entity ids plus named contiguous columns as one
-CultCache document:
-
-```csharp
-var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 1024);
-var x = chunk.AddColumn<float>("position.x");
-var health = chunk.AddColumn<int>("health");
-
-var row = chunk.AddEntity(entityId);
-x.Span[row] = 10;
-health.Span[row] = 100;
-
-await cache.UpsertSoaChunkAsync(chunk);
-```
+`Document<T>()` is the standard presentation. `Soa<T>()` exposes the
+cache-owned physical table for hot loops and diagnostics; it is not a second
+domain model callers have to maintain.
 
 ## Persistence discipline
 
@@ -201,6 +201,8 @@ Useful surfaces:
 - `CultCacheMessagePack.OpenAsync(path)`
 - `cache.IsDirty`
 - `store.IsDirty`
+- `cache.Document<T>(key)`
+- `cache.Soa<T>()`
 - `cache.UpsertAsync(document)`
 - `cache.FlushAllBackingStores()`
 - `cache.FlushAsync()`

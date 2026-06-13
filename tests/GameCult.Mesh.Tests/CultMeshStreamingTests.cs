@@ -4,39 +4,47 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
 using NUnit.Framework;
+using R3;
 
 namespace GameCult.Mesh.Tests;
 
 public sealed class CultMeshStreamingTests
 {
     [Test]
-    public async Task SoaStore_Commits_Contiguous_Chunks_Through_MeshDatabase()
+    public async Task ManagedDocument_Commits_Through_MeshDatabase_And_Watches_Networked_Updates()
     {
-        var filePath = Path.Combine(Path.GetTempPath(), $"cultmesh-soa-{Guid.NewGuid():N}.ccmp");
+        var filePath = Path.Combine(Path.GetTempPath(), $"cultmesh-managed-{Guid.NewGuid():N}.ccmp");
 
         try
         {
             using var node = await CultMesh.CreateNodeAsync(
                 filePath,
                 new CultMeshNodeOptions { StartServer = false });
-            var store = CultMesh.CreateSoaStore(node);
-            var key = new CultRecordKey("soa:players:0");
-            var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 2);
-            var positionX = chunk.AddColumn<float>("position.x");
-            var velocityX = chunk.AddColumn<float>("velocity.x");
+            var key = new CultRecordKey("player:alice");
+            var document = node.Database.Document<MeshManagedPlayer>(key);
+            MeshManagedPlayer observed = null!;
+            using var subscription = document.Watch().Subscribe(value => observed = value);
 
-            var row = chunk.AddEntity(5001);
-            positionX.Span[row] = 4;
-            velocityX.Span[row] = 0.25f;
+            await document.ReplaceAsync(new MeshManagedPlayer
+            {
+                Name = "alice",
+                PositionX = 4,
+                Health = 100
+            });
+            await node.Database.PutAsync(key, new MeshManagedPlayer
+            {
+                Name = "alice",
+                PositionX = 8,
+                Health = 75
+            });
 
-            await store.PutChunkAsync(key, chunk);
-
-            var loaded = await store.GetChunkAsync(key);
-
-            loaded.Should().NotBeNull();
-            loaded!.ActiveEntityIds.ToArray().Should().Equal(5001UL);
-            loaded.Column<float>("position.x").ActiveSpan.ToArray().Should().Equal(4);
-            loaded.Column<float>("velocity.x").ActiveSpan.ToArray().Should().Equal(0.25f);
+            document.Value.Should().NotBeNull();
+            document.Value!.Health.Should().Be(75);
+            observed.Should().NotBeNull();
+            observed!.PositionX.Should().Be(8);
+            node.Cache.Soa<MeshManagedPlayer>().Column<int>(nameof(MeshManagedPlayer.Health)).Span.ToArray()
+                .Should()
+                .Equal(75);
         }
         finally
         {
@@ -199,5 +207,18 @@ public sealed class CultMeshStreamingTests
             new CultMeshStreamClock("mimir:clock", "leap", confidence: 0.8d),
             new[] { CultMeshStreamBodyTransport.SharedMemory, CultMeshStreamBodyTransport.CultCachePage }));
         return catalog;
+    }
+
+    [CultDocument("tests.mesh_managed_player", "tests.mesh_managed_player.v1")]
+    private sealed class MeshManagedPlayer
+    {
+        [MessagePack.Key(0)]
+        public string Name = string.Empty;
+
+        [MessagePack.Key(1)]
+        public float PositionX;
+
+        [MessagePack.Key(2)]
+        public int Health;
     }
 }

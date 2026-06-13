@@ -239,15 +239,6 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
-        /// Creates a SoA chunk store over a CultMesh node database.
-        /// </summary>
-        public static CultMeshSoaStore CreateSoaStore(CultMeshNode node)
-        {
-            if (node == null) throw new ArgumentNullException(nameof(node));
-            return new CultMeshSoaStore(node.Database);
-        }
-
-        /// <summary>
         /// Attaches Verse discovery responses to a CultMesh node.
         /// </summary>
         public static CultMeshVerseDiscoveryServer ServeVerseCatalog(

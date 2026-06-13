@@ -7,6 +7,7 @@ using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
 using NUnit.Framework;
+using R3;
 
 namespace GameCult.Caching.Tests
 {
@@ -123,62 +124,21 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task CultCacheSoaChunk_Preserves_Contiguous_Typed_Columns()
-        {
-            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
-
-            try
-            {
-                var cache = await CultCacheMessagePack.OpenAsync(filePath);
-                var chunk = CultSoaChunk.Create("players:0", "player.transform.v1", capacity: 4);
-                var positionX = chunk.AddColumn<float>("position.x");
-                var positionY = chunk.AddColumn<float>("position.y");
-                var health = chunk.AddColumn<int>("health");
-
-                var alice = chunk.AddEntity(101);
-                var bob = chunk.AddEntity(102);
-                positionX.Span[alice] = 10.5f;
-                positionY.Span[alice] = 20.25f;
-                health.Span[alice] = 90;
-                positionX.Span[bob] = 11.5f;
-                positionY.Span[bob] = 21.25f;
-                health.Span[bob] = 75;
-
-                var handle = await cache.UpsertSoaChunkAsync(chunk);
-                await cache.FlushAsync();
-                cache.Dispose();
-
-                var reopened = await CultCacheMessagePack.OpenAsync(filePath);
-                var loaded = reopened.GetSoaChunk(handle.Key);
-
-                Assert.That(loaded, Is.Not.Null);
-                Assert.That(loaded!.Count, Is.EqualTo(2));
-                Assert.That(loaded.Capacity, Is.EqualTo(4));
-                Assert.That(loaded.ActiveEntityIds.ToArray(), Is.EqualTo(new ulong[] { 101, 102 }));
-                Assert.That(loaded.Column<float>("position.x").ActiveSpan.ToArray(), Is.EqualTo(new[] { 10.5f, 11.5f }));
-                Assert.That(loaded.Column<float>("position.y").ActiveSpan.ToArray(), Is.EqualTo(new[] { 20.25f, 21.25f }));
-                Assert.That(loaded.Column<int>("health").ActiveSpan.ToArray(), Is.EqualTo(new[] { 90, 75 }));
-            }
-            finally
-            {
-                if (File.Exists(filePath))
-                {
-                    File.Delete(filePath);
-                }
-            }
-        }
-
-        [Test]
-        public async Task CultCacheSoaProjection_Keeps_Documents_Poco_And_Projects_Hot_Columns()
+        public async Task CultCacheManagedDocument_Keeps_Poco_Surface_And_Updates_Soa_Storage()
         {
             var cache = new CultCache();
-            await cache.UpsertAsync(new TransformEntry
+            var aliceKey = new CultRecordKey("entity:alice");
+            var managed = cache.Document<TransformEntry>(aliceKey);
+            TransformEntry? observed = null;
+            using var subscription = managed.Watch().Subscribe(value => observed = value);
+
+            await managed.ReplaceAsync(new TransformEntry
             {
                 Name = "alice",
                 PositionX = 1.5f,
                 PositionY = 2.5f,
                 Health = 90
-            }, new CultRecordHandle<TransformEntry>(new CultRecordKey("entity:alice")));
+            });
             await cache.UpsertAsync(new TransformEntry
             {
                 Name = "bob",
@@ -187,13 +147,18 @@ namespace GameCult.Caching.Tests
                 Health = 80
             }, new CultRecordHandle<TransformEntry>(new CultRecordKey("entity:bob")));
 
-            var table = cache.ProjectSoa<TransformEntry>();
+            managed.Value!.Health = 70;
+            await managed.CommitAsync();
+
+            var table = cache.Soa<TransformEntry>();
 
             Assert.That(table.Count, Is.EqualTo(2));
             Assert.That(table.Keys.Select(key => key.Value).ToArray(), Is.EqualTo(new[] { "entity:alice", "entity:bob" }));
             Assert.That(table.Column<float>(nameof(TransformEntry.PositionX)).Span.ToArray(), Is.EqualTo(new[] { 1.5f, 3.5f }));
             Assert.That(table.Column<float>(nameof(TransformEntry.PositionY)).Span.ToArray(), Is.EqualTo(new[] { 2.5f, 4.5f }));
-            Assert.That(table.Column<int>(nameof(TransformEntry.Health)).Span.ToArray(), Is.EqualTo(new[] { 90, 80 }));
+            Assert.That(table.Column<int>(nameof(TransformEntry.Health)).Span.ToArray(), Is.EqualTo(new[] { 70, 80 }));
+            Assert.That(observed, Is.Not.Null);
+            Assert.That(observed!.Health, Is.EqualTo(70));
         }
 
         [Test]

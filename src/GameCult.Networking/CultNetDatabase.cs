@@ -687,6 +687,21 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Opens a reactive POCO presentation for one distributed CultCache document.
+        /// </summary>
+        public CultManagedDocument<T> Document<T>(CultRecordKey key) where T : class
+        {
+            ThrowIfDisposed();
+            return new CultManagedDocument<T>(
+                key,
+                () => _cache.Get<T>(key),
+                async value => { await PutAsync(key, value).ConfigureAwait(false); },
+                WatchRecord<T>(key)
+                    .Where(change => change.Document != null)
+                    .Select(change => change.Document!));
+        }
+
+        /// <summary>
         /// Adds or replaces a document at a specific key.
         /// </summary>
         public async Task<CultRecordHandle<T>> PutAsync<T>(CultRecordKey key, T document) where T : class
