@@ -14,7 +14,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message, shard_catalog_request, shard_log_request
+from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -231,6 +231,27 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(log["shardEpoch"], 7)
         self.assertEqual(log["afterSequence"], 3)
         self.assertEqual(log["limit"], 2)
+
+    def test_cultnet_simulation_observation_helper_matches_schema_v0_shape(self) -> None:
+        claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
+        self.assertEqual(len(claim_hash), 64)
+        message = simulation_observation(
+            message_id="obs-1",
+            witness_runtime_id="python-test",
+            shard_id="interop",
+            shard_epoch=1,
+            frame=42,
+            subject_id="player-1",
+            claim_kind="hit",
+            claim_hash=claim_hash,
+            claim_summary="player-1 hit target-a",
+            observed_at="2026-06-13T00:00:02Z",
+        ).to_wire()
+        self.assertEqual(message["schemaVersion"], "cultnet.simulation_observation.v0")
+        self.assertEqual(message["messageId"], "obs-1")
+        self.assertEqual(message["observation"]["witnessRuntimeId"], "python-test")
+        self.assertEqual(message["observation"]["claimHash"], claim_hash)
+        self.assertEqual(message["observation"]["weight"], 1.0)
 
     def test_cultmesh_node_uses_cultcache_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

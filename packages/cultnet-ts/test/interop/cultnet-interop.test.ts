@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer } from "node:net";
@@ -341,6 +342,37 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     && entry.put?.document?.recordKey === "note:ts-python-log"
   ));
 
+  const claimHash = computeSimulationClaimHash("frame:42", "subject:python-target", "hit");
+  const pythonCandidate = await requestPythonSimulationCandidate(pythonPort, {
+    schemaVersion: "cultnet.simulation_observation.v0",
+    messageId: "python-observation",
+    observation: {
+      witnessRuntimeId: "ts-witness",
+      shardId: "interop",
+      shardEpoch: 1,
+      frame: 42,
+      subjectId: "python-target",
+      claimKind: "hit",
+      claimHash,
+      claimSummary: "python-target was hit by the TypeScript witness",
+      weight: 1,
+      observedAt: "2026-06-13T00:00:02Z",
+    },
+  });
+  assert.equal(pythonCandidate.schemaVersion, "cultnet.simulation_consensus_candidate.v0");
+  assert.equal(pythonCandidate.messageId, "python-observation");
+  assert.equal(pythonCandidate.shardId, "interop");
+  assert.equal(pythonCandidate.shardEpoch, 1);
+  assert.equal(pythonCandidate.frame, 42);
+  assert.equal(pythonCandidate.subjectId, "python-target");
+  assert.equal(pythonCandidate.claimKind, "hit");
+  assert.equal(pythonCandidate.claimHash, claimHash);
+  assert.equal(pythonCandidate.witnessCount, 1);
+  assert.equal(pythonCandidate.supportWeight, 1);
+  assert.equal(pythonCandidate.totalWeight, 1);
+  assert.equal(pythonCandidate.hasQuorum, true);
+  assert.equal(pythonCandidate.confidence, 1);
+
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
   await expectProbePeers("ts-probe", process.execPath, [
@@ -622,6 +654,39 @@ async function requestPythonShardCatalogAndLog(
     });
     socket.write(encodeFrame(encode(catalogRequest)));
   });
+}
+
+async function requestPythonSimulationCandidate(port: number, observation: Record<string, unknown>): Promise<any> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python simulation consensus candidate."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.simulation_consensus_candidate.v0") {
+          clearTimeout(timeout);
+          socket.end();
+          resolve(decoded);
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(observation)));
+  });
+}
+
+function computeSimulationClaimHash(...parts: string[]): string {
+  return createHash("sha256").update(parts.join("\x1f"), "utf8").digest("hex");
 }
 
 async function stopProcess(processState: RunningServeProcess): Promise<void> {

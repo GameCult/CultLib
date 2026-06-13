@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -147,3 +148,41 @@ def shard_log_request(
     if limit is not None:
         body["limit"] = limit
     return CultNetMessage("cultnet.shard_log_request.v0", body)
+
+
+def compute_simulation_claim_hash(*parts: str) -> str:
+    canonical = "\x1f".join(part or "" for part in parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def simulation_observation(
+    *,
+    message_id: str,
+    witness_runtime_id: str,
+    shard_id: str,
+    shard_epoch: int,
+    frame: int,
+    subject_id: str,
+    claim_kind: str,
+    claim_hash: str,
+    claim_summary: str | None = None,
+    weight: float = 1.0,
+    observed_at: str = "",
+) -> CultNetMessage:
+    observation: dict[str, Any] = {
+        "witnessRuntimeId": witness_runtime_id,
+        "shardId": shard_id,
+        "shardEpoch": shard_epoch,
+        "frame": frame,
+        "subjectId": subject_id,
+        "claimKind": claim_kind,
+        "claimHash": claim_hash,
+        "weight": weight,
+        "observedAt": observed_at,
+    }
+    if claim_summary is not None:
+        observation["claimSummary"] = claim_summary
+    return CultNetMessage(
+        "cultnet.simulation_observation.v0",
+        {"messageId": message_id, "observation": observation},
+    )

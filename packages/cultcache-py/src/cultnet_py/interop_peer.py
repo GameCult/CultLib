@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import selectors
 import signal
@@ -81,6 +82,8 @@ class PeerState:
     shard_endpoint: str
     shard_log: list[dict[str, Any]]
     shard_log_lock: threading.Lock
+    observations: dict[tuple[str, int, str, str], dict[str, dict[str, Any]]]
+    observations_lock: threading.Lock
 
 
 @dataclass
@@ -229,6 +232,8 @@ def handle_server_message(state: PeerState, message: dict[str, Any], subscriptio
         return [shard_catalog_response(state, message)]
     if schema_version == "cultnet.shard_log_request.v0":
         return [shard_log_response(state, message)]
+    if schema_version == "cultnet.simulation_observation.v0":
+        return simulation_candidate_responses(state, message)
     if schema_version == "cultnet.database_subscribe.v0":
         return handle_database_subscribe(state, message, subscriptions)
     if schema_version == "cultnet.database_unsubscribe.v0":
@@ -389,6 +394,66 @@ def append_shard_log_put(state: PeerState, message: dict[str, Any], document: di
             "changeKind": "put",
             "put": put_message,
         })
+
+
+def simulation_candidate_responses(state: PeerState, message: dict[str, Any]) -> list[dict[str, Any]]:
+    observation = message.get("observation")
+    if not isinstance(observation, dict):
+        return []
+    group = (
+        str(observation.get("shardId") or ""),
+        int(observation.get("frame") or 0),
+        str(observation.get("subjectId") or ""),
+        str(observation.get("claimKind") or ""),
+    )
+    witness_id = str(observation.get("witnessRuntimeId") or "")
+    if not all(group) or not witness_id:
+        return []
+    with state.observations_lock:
+        witnesses = state.observations.setdefault(group, {})
+        witnesses[witness_id] = observation
+        candidates = build_simulation_candidates(message.get("messageId", ""), list(witnesses.values()))
+    return candidates
+
+
+def build_simulation_candidates(message_id: str, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_claim: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    total_weight = sum(observation_weight(observation) for observation in observations)
+    for observation in observations:
+        by_claim[str(observation.get("claimHash") or "")].append(observation)
+
+    candidates = []
+    for claim_hash in sorted(by_claim):
+        claim_observations = by_claim[claim_hash]
+        sample = claim_observations[0]
+        support_weight = sum(observation_weight(observation) for observation in claim_observations)
+        witness_count = len({str(observation.get("witnessRuntimeId") or "") for observation in claim_observations})
+        confidence = support_weight / total_weight if total_weight > 0 else 0.0
+        candidates.append({
+            "schemaVersion": "cultnet.simulation_consensus_candidate.v0",
+            "messageId": message_id,
+            "shardId": str(sample.get("shardId") or ""),
+            "shardEpoch": int(sample.get("shardEpoch") or 0),
+            "frame": int(sample.get("frame") or 0),
+            "subjectId": str(sample.get("subjectId") or ""),
+            "claimKind": str(sample.get("claimKind") or ""),
+            "claimHash": claim_hash,
+            "claimSummary": sample.get("claimSummary"),
+            "witnessCount": witness_count,
+            "supportWeight": support_weight,
+            "totalWeight": total_weight,
+            "hasQuorum": witness_count >= 1 and support_weight >= 1.0 and confidence >= 0.5,
+            "confidence": confidence,
+        })
+    candidates.sort(key=lambda candidate: (-candidate["supportWeight"], candidate["claimHash"]))
+    return candidates
+
+
+def observation_weight(observation: dict[str, Any]) -> float:
+    weight = observation.get("weight")
+    if isinstance(weight, (int, float)):
+        return float(weight)
+    return 1.0
 
 
 def database_change_notifications(message: dict[str, Any], document: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
@@ -562,6 +627,8 @@ def build_state(
         shard_endpoint=shard_endpoint or f"cultnet://{runtime_id}",
         shard_log=[],
         shard_log_lock=threading.Lock(),
+        observations={},
+        observations_lock=threading.Lock(),
     )
 
 
