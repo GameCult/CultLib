@@ -67,6 +67,7 @@ The solution includes:
 - `packages/cultcache-ts`: TypeScript CultCache with MessagePack persistence and inspector tooling
 - `packages/cultnet-ts`: TypeScript CultNet schema-v0 contracts, framing, discovery, raw document replication, and interop tests
 - `packages/cultmesh-ts`: TypeScript CultMesh local node and mesh catalog surface for local runtimes such as VoidBot
+- `packages/cultcache-py`: Python CultCache/CultNet/CultMesh package with CultCache v1 wire parity
 - `packages/cultcache-rs`: Rust CultCache and derive macro
 - `packages/cultnet-rs`: Rust CultNet contracts, framing, discovery, and interop peer
 
@@ -93,6 +94,7 @@ packages/
   cultcache-ts/
   cultnet-ts/
   cultmesh-ts/
+  cultcache-py/
   cultcache-rs/
   cultnet-rs/
 ```

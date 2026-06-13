@@ -20,8 +20,11 @@ const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
 const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
 const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
+const pythonCommand = process.env.PYTHON ?? "python";
 const cultCacheTsRoot = resolve(__dirname, "../..");
 const cultLibRoot = findAncestor(cultCacheTsRoot, "CultLib.sln") ?? resolve(cultCacheTsRoot, "..", "CultLib");
+const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
+const cultcachePySrc = resolve(cultcachePyRoot, "src");
 const cultcacheRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultcache-rs"))
   ? resolve(cultLibRoot, "packages", "cultcache-rs")
   : resolve(cultCacheTsRoot, "..", "cultcache-rs");
@@ -476,7 +479,7 @@ test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was
   assert.ok(records[0]?.[3] instanceof Uint8Array);
 });
 
-test("CultCache v1 MessagePack stores are readable across TS, Rust, and C#", async () => {
+test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Python", async () => {
   await buildInteropPeers();
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
   const writers = [
@@ -501,6 +504,15 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, and C#", asy
         "--runtime-id", "csharp-writer",
       ], cultLibRoot),
     },
+    {
+      name: "python",
+      write: async (file: string) => runJsonCommand("python-write", pythonCommand, [
+        "-m", "cultcache_py.interop",
+        "write",
+        "--file", file,
+        "--runtime-id", "python-writer",
+      ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
+    },
   ];
   const readers = [
     {
@@ -521,6 +533,14 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, and C#", asy
         "read",
         "--file", file,
       ], cultLibRoot),
+    },
+    {
+      name: "python",
+      read: async (file: string) => runJsonCommand("python-read", pythonCommand, [
+        "-m", "cultcache_py.interop",
+        "read",
+        "--file", file,
+      ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
     },
   ];
 
@@ -732,8 +752,13 @@ async function runJsonCommand(
   command: string,
   args: string[],
   cwd: string,
+  env: NodeJS.ProcessEnv = {},
 ): Promise<any> {
-  const { stdout, stderr } = await execFileAsync(command, args, { cwd, timeout: 30_000 });
+  const { stdout, stderr } = await execFileAsync(command, args, {
+    cwd,
+    env: { ...process.env, ...env },
+    timeout: 30_000,
+  });
   const trimmed = stdout.trim();
   if (!trimmed) {
     throw new Error(`${name} produced no stdout.\n${stderr}`);

@@ -1,0 +1,28 @@
+﻿[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cultcache-py"
+version = "0.1.0"
+description = "Python CultCache, CultNet, and CultMesh runtime package for GameCult typed state."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Private GameCult infrastructure" }
+authors = [{ name = "GameCult" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = ["msgpack>=1.0"]
+
+[project.optional-dependencies]
+msgpack = ["msgpack>=1.0"]
+
+[project.scripts]
+cultcache-py-interop = "cultcache_py.interop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
