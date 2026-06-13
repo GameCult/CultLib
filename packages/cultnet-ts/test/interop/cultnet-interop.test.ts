@@ -29,6 +29,7 @@ const cultnetRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultnet-rs"))
 const tsPeerScript = resolve(cultNetTsRoot, "dist-test", "test", "interop", "cultnet-interop-peer.js");
 const interopSchemaPath = resolve(cultNetTsRoot, "integration", "contracts", "cultnet.interop-note.schema.json");
 const interopNoteSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json";
+const witnessArtifactBundleSchemaId = "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json";
 const csharpProjectPath = resolve(
   cultLibRoot,
   "tests",
@@ -373,6 +374,45 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCandidate.hasQuorum, true);
   assert.equal(pythonCandidate.confidence, 1);
 
+  const pythonWitness = await putAndSnapshotPythonWitnessBundle(pythonPort, {
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId: "python-witness-put",
+    document: {
+      schemaId: witnessArtifactBundleSchemaId,
+      recordKey: "bundle:ts-python-witness",
+      storedAt: "2026-06-13T00:00:03Z",
+      payloadEncoding: "messagepack",
+      payload: encode([
+        "bundle:ts-python-witness",
+        "interop-proof",
+        "2026-06-13T00:00:03Z",
+        {
+          documentType: "cultnet.interop-note",
+          subjectId: "note:python-peer",
+          schemaVersion: INTEROP_SCHEMA_VERSION,
+          schemaId: interopNoteSchemaId,
+        },
+        [{ role: "payload", schemaId: interopNoteSchemaId, schemaVersion: INTEROP_SCHEMA_VERSION }],
+        [{ role: "log", uri: "cultcache://bundle:ts-python-witness/log", mediaType: "text/plain" }],
+        [{ stage: "roundtrip", startedAt: "2026-06-13T00:00:03Z", completedAt: "2026-06-13T00:00:04Z", latencyMs: 1 }],
+        { pipelineId: "interop", runId: "ts-python-witness", runtimeId: "ts-witness", agentId: "ts-agent" },
+      ]),
+      sourceRuntimeId: "ts-witness",
+    },
+  });
+  assert.equal(pythonWitness.catalog.schemaVersion, "cultnet.schema_catalog_response.v0");
+  assert.equal(pythonWitness.catalog.schemas[0].schemaId, witnessArtifactBundleSchemaId);
+  assert.equal(pythonWitness.catalog.schemas[0].documentType, "cultnet.witness_artifact_bundle");
+  assert.ok(String(pythonWitness.catalog.schemas[0].schemaJson).includes("CultNet Witness Artifact Bundle"));
+  assert.equal(pythonWitness.snapshot.schemaVersion, "cultnet.snapshot_response_raw.v0");
+  assert.equal(pythonWitness.snapshot.documents[0].schemaId, witnessArtifactBundleSchemaId);
+  assert.equal(pythonWitness.snapshot.documents[0].recordKey, "bundle:ts-python-witness");
+  const witnessSlots = decode(pythonWitness.snapshot.documents[0].payload) as any[];
+  assert.equal(witnessSlots[0], "bundle:ts-python-witness");
+  assert.equal(witnessSlots[1], "interop-proof");
+  assert.equal(witnessSlots[3].subjectId, "note:python-peer");
+  assert.equal(witnessSlots[7].runtimeId, "ts-witness");
+
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
   await expectProbePeers("ts-probe", process.execPath, [
@@ -687,6 +727,53 @@ async function requestPythonSimulationCandidate(port: number, observation: Recor
 
 function computeSimulationClaimHash(...parts: string[]): string {
   return createHash("sha256").update(parts.join("\x1f"), "utf8").digest("hex");
+}
+
+async function putAndSnapshotPythonWitnessBundle(port: number, put: Record<string, unknown>): Promise<{ catalog: any; snapshot: any }> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const result: { catalog?: any; snapshot?: any } = {};
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python witness artifact bundle roundtrip."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.schema_catalog_response.v0") {
+          result.catalog = decoded;
+          socket.write(encodeFrame(encode(put)));
+          socket.write(encodeFrame(encode({
+            schemaVersion: "cultnet.snapshot_request.v0",
+            messageId: "python-witness-snapshot",
+            schemaIds: [witnessArtifactBundleSchemaId],
+            recordKeys: ["bundle:ts-python-witness"],
+          })));
+        } else if (decoded?.schemaVersion === "cultnet.snapshot_response_raw.v0") {
+          result.snapshot = decoded;
+        }
+        if (result.catalog && result.snapshot) {
+          clearTimeout(timeout);
+          socket.end();
+          resolve({ catalog: result.catalog, snapshot: result.snapshot });
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode({
+      schemaVersion: "cultnet.schema_catalog_request.v0",
+      messageId: "python-witness-catalog",
+      includeSchemaJson: true,
+      schemaIds: [witnessArtifactBundleSchemaId],
+    })));
+  });
 }
 
 async function stopProcess(processState: RunningServeProcess): Promise<void> {

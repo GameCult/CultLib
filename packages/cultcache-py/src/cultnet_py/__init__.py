@@ -4,8 +4,10 @@ from .messages import (
     compute_simulation_claim_hash,
     database_subscribe,
     database_unsubscribe,
+    decode_witness_artifact_bundle_payload,
     document_delete,
     document_put_raw,
+    encode_witness_artifact_bundle_payload,
     hello,
     parse_message,
     schema_catalog_request,
@@ -13,6 +15,7 @@ from .messages import (
     shard_log_request,
     simulation_observation,
     snapshot_request,
+    witness_artifact_bundle,
 )
 
 __all__ = [
@@ -20,9 +23,11 @@ __all__ = [
     "compute_simulation_claim_hash",
     "database_subscribe",
     "database_unsubscribe",
+    "decode_witness_artifact_bundle_payload",
     "decode_frame",
     "document_delete",
     "document_put_raw",
+    "encode_witness_artifact_bundle_payload",
     "encode_frame",
     "hello",
     "parse_message",
@@ -32,5 +37,6 @@ __all__ = [
     "shard_log_request",
     "simulation_observation",
     "snapshot_request",
+    "witness_artifact_bundle",
     "write_frame",
 ]

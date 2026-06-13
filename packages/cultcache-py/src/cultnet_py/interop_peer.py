@@ -50,6 +50,9 @@ INTEROP_FIRE_COMMAND_SCHEMA_VERSION = "cultnet.interop_fire_weapon_command.v0"
 INTEROP_FIRE_RECEIPT_DOCUMENT_TYPE = "cultnet.interop-fire-weapon-receipt"
 INTEROP_FIRE_RECEIPT_SCHEMA_ID = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-receipt.schema.json"
 INTEROP_FIRE_RECEIPT_SCHEMA_VERSION = "cultnet.interop_fire_weapon_receipt.v0"
+WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE = "cultnet.witness_artifact_bundle"
+WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID = "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json"
+WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION = "cultnet.witness_artifact_bundle.v0"
 INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
 DISCOVERY_PROBE_SCHEMA_VERSION = "cultnet.discovery_probe.v0"
 DISCOVERY_ANNOUNCE_SCHEMA_VERSION = "cultnet.discovery_announce.v0"
@@ -675,6 +678,14 @@ def define_interop_documents(note_schema_id: str, note_schema_json: str) -> dict
         "mutationReceipt": binding(INTEROP_MUTATION_RECEIPT_DOCUMENT_TYPE, INTEROP_MUTATION_RECEIPT_SCHEMA_ID, INTEROP_MUTATION_RECEIPT_SCHEMA_VERSION, "{}", mutation_receipt_slots, mutation_receipt_from_slots),
         "fireCommand": binding(INTEROP_FIRE_COMMAND_DOCUMENT_TYPE, INTEROP_FIRE_COMMAND_SCHEMA_ID, INTEROP_FIRE_COMMAND_SCHEMA_VERSION, "{}", fire_command_slots, fire_command_from_slots),
         "fireReceipt": binding(INTEROP_FIRE_RECEIPT_DOCUMENT_TYPE, INTEROP_FIRE_RECEIPT_SCHEMA_ID, INTEROP_FIRE_RECEIPT_SCHEMA_VERSION, "{}", fire_receipt_slots, fire_receipt_from_slots),
+        "witnessArtifactBundle": binding(
+            WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE,
+            WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID,
+            WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+            witness_artifact_bundle_schema_json(),
+            witness_artifact_bundle_slots,
+            witness_artifact_bundle_from_slots,
+        ),
     }
 
 
@@ -709,7 +720,7 @@ def hello_message(state: PeerState) -> dict[str, Any]:
         "runtimeKind": state.runtime_kind,
         "agentId": state.agent_id,
         "displayName": state.display_name,
-        "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE],
+        "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE, WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE],
         "supportedMutationContracts": [{
             "documentType": INTEROP_DOCUMENT_TYPE,
             "payloadSchemaVersion": INTEROP_SCHEMA_VERSION,
@@ -738,6 +749,17 @@ def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any
             "wireContracts": [INTEROP_WIRE_CONTRACT],
             "contentHash": state.note_schema_id,
             "schemaJson": state.interop_schema_json if include_schema_json else None,
+        })
+    if (not schema_ids or WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID in schema_ids) and (not kinds or "document_payload" in kinds):
+        schemas.append({
+            "schemaId": WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID,
+            "kind": "document_payload",
+            "schemaVersion": WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+            "documentType": WITNESS_ARTIFACT_BUNDLE_DOCUMENT_TYPE,
+            "title": "CultNet Witness Artifact Bundle",
+            "wireContracts": [INTEROP_WIRE_CONTRACT],
+            "contentHash": WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID,
+            "schemaJson": witness_artifact_bundle_schema_json() if include_schema_json else None,
         })
     return {"schemaVersion": "cultnet.schema_catalog_response.v0", "messageId": request.get("messageId", ""), "schemas": schemas}
 
@@ -894,6 +916,116 @@ def fire_receipt_from_slots(slots: list[Any]) -> dict[str, Any]:
     if len(slots) > 7 and isinstance(slots[7], str):
         result["error"] = slots[7]
     return result
+
+
+def witness_artifact_bundle_slots(value: dict[str, Any]) -> list[Any]:
+    return [
+        value["bundleId"],
+        value["witnessKind"],
+        value["capturedAt"],
+        value["subject"],
+        value["contracts"],
+        value["artifacts"],
+        value.get("timingWitnesses", []),
+        value["provenance"],
+    ]
+
+
+def witness_artifact_bundle_from_slots(slots: list[Any]) -> dict[str, Any]:
+    return {
+        "bundleId": slots[0],
+        "witnessKind": slots[1],
+        "capturedAt": slots[2],
+        "subject": slots[3],
+        "contracts": slots[4] if len(slots) > 4 and isinstance(slots[4], list) else [],
+        "artifacts": slots[5] if len(slots) > 5 and isinstance(slots[5], list) else [],
+        "timingWitnesses": slots[6] if len(slots) > 6 and isinstance(slots[6], list) else [],
+        "provenance": slots[7] if len(slots) > 7 and isinstance(slots[7], dict) else {},
+    }
+
+
+def witness_artifact_bundle_schema_json() -> str:
+    return json.dumps({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": WITNESS_ARTIFACT_BUNDLE_SCHEMA_ID,
+        "title": "CultNet Witness Artifact Bundle",
+        "type": "object",
+        "required": ["bundleId", "witnessKind", "capturedAt", "subject", "contracts", "artifacts", "timingWitnesses", "provenance"],
+        "additionalProperties": False,
+        "properties": {
+            "bundleId": {"type": "string", "minLength": 1},
+            "witnessKind": {"type": "string", "minLength": 1},
+            "capturedAt": {"type": "string", "minLength": 1},
+            "subject": {"$ref": "#/$defs/subject_pin"},
+            "contracts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/contract_pin"}},
+            "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_entry"}},
+            "timingWitnesses": {"type": "array", "items": {"$ref": "#/$defs/timing_entry"}},
+            "provenance": {"$ref": "#/$defs/provenance"},
+        },
+        "$defs": {
+            "subject_pin": {
+                "type": "object",
+                "required": ["documentType", "subjectId"],
+                "additionalProperties": False,
+                "properties": {
+                    "documentType": {"type": "string", "minLength": 1},
+                    "subjectId": {"type": "string", "minLength": 1},
+                    "schemaVersion": {"type": "string", "minLength": 1},
+                    "schemaId": {"type": "string", "minLength": 1},
+                    "contentHash": {"type": "string", "minLength": 1},
+                },
+            },
+            "contract_pin": {
+                "type": "object",
+                "required": ["role", "schemaId"],
+                "additionalProperties": False,
+                "properties": {
+                    "role": {"type": "string", "minLength": 1},
+                    "schemaId": {"type": "string", "minLength": 1},
+                    "schemaVersion": {"type": "string", "minLength": 1},
+                    "contentHash": {"type": "string", "minLength": 1},
+                },
+            },
+            "artifact_entry": {
+                "type": "object",
+                "required": ["role", "uri", "mediaType"],
+                "additionalProperties": False,
+                "properties": {
+                    "role": {"type": "string", "minLength": 1},
+                    "uri": {"type": "string", "minLength": 1},
+                    "mediaType": {"type": "string", "minLength": 1},
+                    "contentHash": {"type": "string", "minLength": 1},
+                    "byteLength": {"type": "integer", "minimum": 0},
+                    "producedAt": {"type": "string", "minLength": 1},
+                },
+            },
+            "timing_entry": {
+                "type": "object",
+                "required": ["stage", "startedAt", "completedAt", "latencyMs"],
+                "additionalProperties": False,
+                "properties": {
+                    "stage": {"type": "string", "minLength": 1},
+                    "startedAt": {"type": "string", "minLength": 1},
+                    "completedAt": {"type": "string", "minLength": 1},
+                    "latencyMs": {"type": "number", "minimum": 0},
+                    "witnessArtifactUri": {"type": "string", "minLength": 1},
+                },
+            },
+            "provenance": {
+                "type": "object",
+                "required": ["pipelineId", "runId", "runtimeId"],
+                "additionalProperties": False,
+                "properties": {
+                    "pipelineId": {"type": "string", "minLength": 1},
+                    "runId": {"type": "string", "minLength": 1},
+                    "runtimeId": {"type": "string", "minLength": 1},
+                    "agentId": {"type": "string", "minLength": 1},
+                    "agentRole": {"type": "string", "minLength": 1},
+                    "toolVersion": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    }, separators=(",", ":"))
 
 
 def runtime_store_path(runtime_id: str) -> str:

@@ -186,3 +186,55 @@ def simulation_observation(
         "cultnet.simulation_observation.v0",
         {"messageId": message_id, "observation": observation},
     )
+
+
+def witness_artifact_bundle(
+    *,
+    bundle_id: str,
+    witness_kind: str,
+    captured_at: str,
+    subject: dict[str, Any],
+    contracts: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    provenance: dict[str, Any],
+    timing_witnesses: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "bundleId": bundle_id,
+        "witnessKind": witness_kind,
+        "capturedAt": captured_at,
+        "subject": subject,
+        "contracts": contracts,
+        "artifacts": artifacts,
+        "timingWitnesses": timing_witnesses or [],
+        "provenance": provenance,
+    }
+
+
+def encode_witness_artifact_bundle_payload(bundle: dict[str, Any]) -> bytes:
+    return msgpack.packb([
+        bundle["bundleId"],
+        bundle["witnessKind"],
+        bundle["capturedAt"],
+        bundle["subject"],
+        bundle["contracts"],
+        bundle["artifacts"],
+        bundle.get("timingWitnesses", []),
+        bundle["provenance"],
+    ], use_bin_type=True)
+
+
+def decode_witness_artifact_bundle_payload(payload: bytes) -> dict[str, Any]:
+    slots = msgpack.unpackb(payload, raw=False)
+    if not isinstance(slots, list) or len(slots) < 8:
+        raise ValueError("CultNet witness artifact bundle payload must be an 8-slot MessagePack array")
+    return {
+        "bundleId": slots[0],
+        "witnessKind": slots[1],
+        "capturedAt": slots[2],
+        "subject": slots[3],
+        "contracts": slots[4],
+        "artifacts": slots[5],
+        "timingWitnesses": slots[6],
+        "provenance": slots[7],
+    }

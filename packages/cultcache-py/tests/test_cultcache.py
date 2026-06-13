@@ -14,7 +14,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation
+from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, decode_witness_artifact_bundle_payload, document_put_raw, encode_frame, encode_witness_artifact_bundle_payload, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation, witness_artifact_bundle
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -252,6 +252,26 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(message["observation"]["witnessRuntimeId"], "python-test")
         self.assertEqual(message["observation"]["claimHash"], claim_hash)
         self.assertEqual(message["observation"]["weight"], 1.0)
+
+    def test_cultnet_witness_artifact_bundle_uses_csharp_slot_order(self) -> None:
+        bundle = witness_artifact_bundle(
+            bundle_id="bundle-1",
+            witness_kind="interop-proof",
+            captured_at="2026-06-13T00:00:03Z",
+            subject={"documentType": "cultnet.interop-note", "subjectId": "note:python"},
+            contracts=[{"role": "payload", "schemaId": "schema-a"}],
+            artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
+            timing_witnesses=[{"stage": "roundtrip", "startedAt": "2026-06-13T00:00:03Z", "completedAt": "2026-06-13T00:00:04Z", "latencyMs": 1.0}],
+            provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-test"},
+        )
+        payload = encode_witness_artifact_bundle_payload(bundle)
+        decoded = decode_witness_artifact_bundle_payload(payload)
+        self.assertEqual(decoded["bundleId"], "bundle-1")
+        self.assertEqual(decoded["witnessKind"], "interop-proof")
+        self.assertEqual(decoded["subject"]["subjectId"], "note:python")
+        self.assertEqual(decoded["contracts"][0]["schemaId"], "schema-a")
+        self.assertEqual(decoded["artifacts"][0]["mediaType"], "text/plain")
+        self.assertEqual(decoded["provenance"]["runtimeId"], "python-test")
 
     def test_cultmesh_node_uses_cultcache_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
