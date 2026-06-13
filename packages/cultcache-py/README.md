@@ -21,7 +21,8 @@ It is intentionally small. It is not an ORM, a database, or distributed consensu
 - `define_database_entry_type(...)` emits Rust/C#-style slot-indexed
   MessagePack array payloads for cross-runtime `DatabaseEntry` contracts
 - `cultnet_py` exposes schema-v0 MessagePack helpers and 4-byte big-endian
-  frame helpers
+  frame helpers for raw document state, subscriptions, shard catch-up,
+  simulation observations, and witness artifact bundles
 - `cultmesh_py` exposes a cache-backed local node surface for Python tools
 
 ## Example
@@ -144,10 +145,43 @@ member order.
 `cultnet_py` provides the Python schema-v0 wire helpers and an interop peer:
 
 ```python
-from cultnet_py import decode_frame, encode_frame, hello, parse_message
+from cultnet_py import (
+    compute_simulation_claim_hash,
+    database_subscribe,
+    decode_frame,
+    encode_frame,
+    hello,
+    parse_message,
+    shard_catalog_request,
+    simulation_observation,
+    witness_artifact_bundle,
+)
 
 payload = hello(runtime_id="python-runtime").to_bytes()
 message = parse_message(decode_frame(encode_frame(payload)))
+
+subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.interop-note"])
+shards = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
+claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
+observation = simulation_observation(
+    message_id="obs-1",
+    witness_runtime_id="python-runtime",
+    shard_id="interop",
+    shard_epoch=1,
+    frame=42,
+    subject_id="player-1",
+    claim_kind="hit",
+    claim_hash=claim_hash,
+)
+witness = witness_artifact_bundle(
+    bundle_id="bundle-1",
+    witness_kind="interop-proof",
+    captured_at="2026-06-13T00:00:00Z",
+    subject={"documentType": "cultnet.interop-note", "subjectId": "note:python"},
+    contracts=[{"role": "payload", "schemaId": "cultnet.interop-note"}],
+    artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
+    provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-runtime"},
+)
 ```
 
 The peer can serve, dial, and probe the same raw-state interop lane used by the
@@ -193,8 +227,15 @@ Current receipts:
   CultCache v1 parity matrix with TypeScript, Rust, and C#.
 - `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` includes Python in
   the live TS/Rust/C#/Python schema-v0 peer ring: discovery, hello, schema
-  catalog, raw snapshot, raw document put, mutation receipt, and fire-command
-  receipt. The same test asks the Python peer for CultMesh Verse catalog and
-  peer exchange responses over the CultNet pipe.
+  catalog, raw snapshot, raw document put, mutation receipt, fire-command
+  receipt, database subscription changes, shard catalog, shard log catch-up,
+  simulation consensus candidates, and witness artifact bundle round-trips. The
+  same test asks the Python peer for CultMesh Verse catalog and peer exchange
+  responses over the CultNet pipe.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
-  Verse catalog, peer exchange, authority lease, and stream negotiation behavior.
+  Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
+  helper shapes, simulation claim hashing, and witness artifact bundle payload
+  slots.
+- `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
+  downstream type checkers can inspect the package surface instead of treating
+  the runtime as an untyped xenos swamp.

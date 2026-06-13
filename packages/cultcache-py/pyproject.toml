@@ -1,4 +1,4 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
@@ -27,3 +27,8 @@ cultnet-py-interop = "cultnet_py.interop_peer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cultcache_py = ["py.typed"]
+cultnet_py = ["py.typed"]
+cultmesh_py = ["py.typed"]
