@@ -25,12 +25,20 @@ from .replication import (
     apply_shard_log_response,
     schema_document_map,
 )
+from .simulation import (
+    CultNetSimulationConsensus,
+    CultNetSimulationConsensusOptions,
+    CultNetSimulationObservationHub,
+)
 
 __all__ = [
     "CultNetMessage",
     "CultNetDatabaseSubscription",
     "CultNetRawClient",
     "CultNetAppliedRecord",
+    "CultNetSimulationConsensus",
+    "CultNetSimulationConsensusOptions",
+    "CultNetSimulationObservationHub",
     "apply_raw_document_record",
     "apply_raw_snapshot",
     "apply_shard_log_response",

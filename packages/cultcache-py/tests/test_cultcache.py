@@ -21,6 +21,7 @@ from cultcache_py.interop import read_note, write_note
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetRawClient,
+    CultNetSimulationConsensusOptions,
     apply_raw_snapshot,
     apply_shard_log_response,
     database_subscribe,
@@ -44,6 +45,7 @@ from cultnet_py.interop_peer import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
+    CultMeshGameSessionOptions,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshSimulationFact,
@@ -865,6 +867,99 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(stored.claim_hash, candidate["claimHash"])
             self.assertEqual(stored.committed_at, "2026-06-13T00:00:00Z")
             self.assertEqual(committed.fact.fact_id, stored.fact_id)
+
+    def test_cultnet_simulation_consensus_dedupes_witnesses_and_requires_quorum(self) -> None:
+        from cultnet_py import CultNetSimulationConsensus
+
+        consensus = CultNetSimulationConsensus(
+            CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
+        )
+        claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+        observations = [
+            {
+                "witnessRuntimeId": "watcher-1",
+                "shardId": "arena",
+                "shardEpoch": 4,
+                "frame": 100,
+                "subjectId": "bob",
+                "claimKind": "hit",
+                "claimHash": claim_hash,
+                "claimSummary": "alice shot bob first",
+                "weight": 1.0,
+            },
+            {
+                "witnessRuntimeId": "watcher-1",
+                "shardId": "arena",
+                "shardEpoch": 4,
+                "frame": 100,
+                "subjectId": "bob",
+                "claimKind": "hit",
+                "claimHash": "stale-duplicate",
+                "weight": 0.5,
+            },
+            {
+                "witnessRuntimeId": "watcher-2",
+                "shardId": "arena",
+                "shardEpoch": 4,
+                "frame": 100,
+                "subjectId": "bob",
+                "claimKind": "hit",
+                "claimHash": claim_hash,
+                "weight": 1.0,
+            },
+        ]
+
+        candidates = consensus.build_candidates(observations)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["claimHash"], claim_hash)
+        self.assertEqual(candidates[0]["witnessCount"], 2)
+        self.assertEqual(candidates[0]["supportWeight"], 2.0)
+        self.assertTrue(candidates[0]["hasQuorum"])
+
+    def test_cultmesh_game_session_submits_observations_and_commits_quorum_once(self) -> None:
+        claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+        first = simulation_observation(
+            message_id="obs-1",
+            witness_runtime_id="watcher-1",
+            shard_id="arena",
+            shard_epoch=4,
+            frame=100,
+            subject_id="bob",
+            claim_kind="hit",
+            claim_hash=claim_hash,
+            claim_summary="alice shot bob first",
+        ).to_wire()
+        second = simulation_observation(
+            message_id="obs-2",
+            witness_runtime_id="watcher-2",
+            shard_id="arena",
+            shard_epoch=4,
+            frame=100,
+            subject_id="bob",
+            claim_kind="hit",
+            claim_hash=claim_hash,
+            claim_summary="alice shot bob first",
+        ).to_wire()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "session.cc", runtime_id="mesh-session")
+            session = CultMesh.create_game_session(
+                node,
+                CultMeshGameSessionOptions(
+                    consensus_options=CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
+                ),
+            )
+
+            self.assertEqual(session.submit_and_commit(first), [])
+            commits = session.submit_and_commit(second)
+            replay = session.commit_quorum_candidates(session.submit_observation(second))
+
+            self.assertEqual(len(commits), 1)
+            self.assertEqual(replay, [])
+            stored = node.get_required(simulation_fact_document, commits[0].key)
+            self.assertEqual(stored.claim_hash, claim_hash)
+            self.assertEqual(stored.witness_count, 2)
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore

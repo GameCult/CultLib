@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .node import CultMeshNode, create_node
+from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
 from .wire import (
     CultMeshAuthorityLeaseCatalog,
@@ -40,3 +41,10 @@ class CultMesh:
     @staticmethod
     def create_simulation_fact_committer(node: CultMeshNode) -> CultMeshSimulationFactCommitter:
         return CultMeshSimulationFactCommitter(node)
+
+    @staticmethod
+    def create_game_session(
+        node: CultMeshNode,
+        options: CultMeshGameSessionOptions | None = None,
+    ) -> CultMeshGameSession:
+        return CultMeshGameSession(node, options)

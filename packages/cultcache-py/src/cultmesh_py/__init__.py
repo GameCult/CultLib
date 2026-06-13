@@ -1,6 +1,11 @@
 from .client import CultMeshDiscoveryClient
 from .facade import CultMesh
 from .node import CultMeshNode, create_node
+from .session import (
+    CultMeshGameSession,
+    CultMeshGameSessionOptions,
+    CultMeshPrediction,
+)
 from .simulation import (
     SIMULATION_FACT_DOCUMENT_TYPE,
     SIMULATION_FACT_SCHEMA_VERSION,
@@ -35,8 +40,11 @@ from .wire import (
 __all__ = [
     "CultMeshNode",
     "CultMesh",
+    "CultMeshGameSession",
+    "CultMeshGameSessionOptions",
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
+    "CultMeshPrediction",
     "CultMeshSimulationFact",
     "CultMeshSimulationFactCommit",
     "CultMeshSimulationFactCommitter",

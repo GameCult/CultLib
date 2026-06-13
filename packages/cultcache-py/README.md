@@ -254,6 +254,9 @@ committed = facts.commit({
     "confidence": 1.0,
     "hasQuorum": True,
 })
+
+session = CultMesh.create_game_session(node)
+session_commits = session.submit_and_commit(observation.to_wire())
 ```
 
 ## Wire Parity
@@ -283,8 +286,8 @@ Current receipts:
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, raw snapshot/shard-log application, simulation claim hashing,
-  committed simulation fact payload slots, and witness artifact bundle payload
-  slots.
+  consensus aggregation, game-session fact commits, committed simulation fact
+  payload slots, and witness artifact bundle payload slots.
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.
