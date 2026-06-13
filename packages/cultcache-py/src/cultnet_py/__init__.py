@@ -1,3 +1,4 @@
+from .client import CultNetRawClient
 from .framing import decode_frame, encode_frame, read_frame, write_frame
 from .messages import (
     CultNetMessage,
@@ -20,6 +21,7 @@ from .messages import (
 
 __all__ = [
     "CultNetMessage",
+    "CultNetRawClient",
     "compute_simulation_claim_hash",
     "database_subscribe",
     "database_unsubscribe",

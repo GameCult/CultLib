@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import socket
 from dataclasses import dataclass
 from typing import Any
 
-import msgpack
-
-from cultnet_py.framing import read_frame, write_frame
+from cultnet_py import CultNetRawClient
 
 from .wire import (
     PEER_EXCHANGE_RESPONSE,
@@ -29,18 +26,10 @@ class CultMeshDiscoveryClient:
     timeout_seconds: float = 4.0
 
     def request(self, message: dict[str, Any], *, expected_schema_version: str) -> dict[str, Any]:
-        with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
-            connection.settimeout(self.timeout_seconds)
-            stream = connection.makefile("rwb")
-            write_frame(stream, msgpack.packb(message, use_bin_type=True))
-            stream.flush()
-            response = msgpack.unpackb(read_frame(stream), raw=False)
-        if not isinstance(response, dict):
-            raise ValueError("CultMesh discovery response must be a MessagePack map")
-        schema_version = response.get("schemaVersion")
-        if schema_version != expected_schema_version:
-            raise ValueError(f"Expected {expected_schema_version}, received {schema_version!r}")
-        return response
+        return CultNetRawClient(self.host, self.port, self.timeout_seconds).request(
+            message,
+            expected_schema_version=expected_schema_version,
+        )
 
     def request_verse_catalog(
         self,

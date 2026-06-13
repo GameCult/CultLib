@@ -146,6 +146,7 @@ member order.
 
 ```python
 from cultnet_py import (
+    CultNetRawClient,
     compute_simulation_claim_hash,
     database_subscribe,
     decode_frame,
@@ -160,8 +161,13 @@ from cultnet_py import (
 payload = hello(runtime_id="python-runtime").to_bytes()
 message = parse_message(decode_frame(encode_frame(payload)))
 
+client = CultNetRawClient("127.0.0.1", 3075)
+catalog = client.fetch_schema_catalog(kinds=["wire_message"])
+snapshot = client.fetch_snapshot(schema_ids=["cultnet.interop-note"])
+shard_catalog = client.fetch_shard_catalog(schema_ids=["cultnet.interop-note"])
+
 subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.interop-note"])
-shards = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
+shard_request = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
 claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
 observation = simulation_observation(
     message_id="obs-1",
@@ -238,7 +244,9 @@ Current receipts:
   and witness artifact bundle round-trips. The same test asks the Python peer
   for CultMesh Verse catalog and peer exchange responses over the CultNet pipe,
   then verifies the public `CultMeshDiscoveryClient` can fetch typed Python
-  Verse and peer descriptors from that live endpoint.
+  Verse and peer descriptors from that live endpoint. It also verifies
+  `CultNetRawClient` can fetch the live Python peer's schema catalog, raw
+  snapshot, and shard catalog.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, simulation claim hashing, and witness artifact bundle payload

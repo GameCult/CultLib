@@ -19,6 +19,7 @@ from cultcache_py import (
 from cultcache_py.interop import read_note, write_note
 from cultnet_py import (
     compute_simulation_claim_hash,
+    CultNetRawClient,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
@@ -260,6 +261,75 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(snapshot["recordKeys"], ["record-a"])
         self.assertEqual(snapshot["shardId"], "interop")
         self.assertEqual(snapshot["shardEpoch"], 1)
+
+    def test_cultnet_raw_client_fetches_schema_snapshot_and_shard_reads(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        received_versions: list[str] = []
+        ready = threading.Event()
+        server_error: list[BaseException] = []
+        port_holder: list[int] = []
+
+        def serve_requests() -> None:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    server.bind(("127.0.0.1", 0))
+                    port_holder.append(server.getsockname()[1])
+                    server.listen(4)
+                    ready.set()
+                    for _ in range(4):
+                        connection, _ = server.accept()
+                        with connection:
+                            stream = connection.makefile("rwb")
+                            request = msgpack.unpackb(read_frame(stream), raw=False)
+                            received_versions.append(request["schemaVersion"])
+                            if request["schemaVersion"] == "cultnet.schema_catalog_request.v0":
+                                self.assertEqual(request["kinds"], ["wire_message"])
+                                response = {"schemaVersion": "cultnet.schema_catalog_response.v0", "messageId": request["messageId"], "schemas": []}
+                            elif request["schemaVersion"] == "cultnet.snapshot_request.v0":
+                                self.assertEqual(request["shardId"], "interop")
+                                response = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": request["messageId"], "documents": []}
+                            elif request["schemaVersion"] == "cultnet.shard_catalog_request.v0":
+                                response = {"schemaVersion": "cultnet.shard_catalog_response.v0", "messageId": request["messageId"], "shards": []}
+                            elif request["schemaVersion"] == "cultnet.shard_log_request.v0":
+                                self.assertEqual(request["afterSequence"], 7)
+                                response = {
+                                    "schemaVersion": "cultnet.shard_log_response.v0",
+                                    "messageId": request["messageId"],
+                                    "shardId": request["shardId"],
+                                    "shardEpoch": request["shardEpoch"],
+                                    "entries": [],
+                                    "resyncRequired": False,
+                                }
+                            else:
+                                raise AssertionError(f"unexpected request {request['schemaVersion']}")
+                            write_frame(stream, msgpack.packb(response, use_bin_type=True))
+                            stream.flush()
+            except BaseException as error:
+                server_error.append(error)
+                ready.set()
+
+        thread = threading.Thread(target=serve_requests, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+        self.assertFalse(server_error)
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        self.assertEqual(client.fetch_schema_catalog(kinds=["wire_message"])["schemaVersion"], "cultnet.schema_catalog_response.v0")
+        self.assertEqual(client.fetch_snapshot(shard_id="interop", shard_epoch=1)["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(client.fetch_shard_catalog(schema_ids=["schema-a"])["schemaVersion"], "cultnet.shard_catalog_response.v0")
+        self.assertEqual(client.fetch_shard_log(shard_id="interop", shard_epoch=1, after_sequence=7)["schemaVersion"], "cultnet.shard_log_response.v0")
+
+        thread.join(2.0)
+        self.assertFalse(server_error)
+        self.assertEqual(received_versions, [
+            "cultnet.schema_catalog_request.v0",
+            "cultnet.snapshot_request.v0",
+            "cultnet.shard_catalog_request.v0",
+            "cultnet.shard_log_request.v0",
+        ])
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(

@@ -297,6 +297,11 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCultMeshClient.peers[0].peerId, "python-peer");
   assert.ok(pythonCultMeshClient.peers[0].roles.includes("read-replica"));
 
+  const pythonCultNetClient = await runPythonCultNetRawClient(pythonPort);
+  assert.ok(pythonCultNetClient.wireSchemaCount >= 1);
+  assert.ok(pythonCultNetClient.snapshotRecordKeys.includes("note:python-peer"));
+  assert.equal(pythonCultNetClient.shards[0].shardId, "interop");
+
   const pythonChange = await requestPythonDatabaseChange(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-subscribe",
@@ -718,6 +723,31 @@ async function runPythonCultMeshClient(port: number): Promise<any> {
     "print(json.dumps({",
     "  'verses': [{'verseId': verse.verse_id, 'transportVersion': verse.compatibility.transport_version} for verse in verses],",
     "  'peers': [{'peerId': peer.peer_id, 'roles': list(peer.roles)} for peer in peers],",
+    "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runPythonCultNetRawClient(port: number): Promise<any> {
+  const script = [
+    "import json",
+    "from cultnet_py import CultNetRawClient",
+    `client = CultNetRawClient("127.0.0.1", ${port}, timeout_seconds=4.0)`,
+    "catalog = client.fetch_schema_catalog(kinds=['wire_message'])",
+    `snapshot = client.fetch_snapshot(schema_ids=['${interopNoteSchemaId}'])`,
+    `shards = client.fetch_shard_catalog(schema_ids=['${interopNoteSchemaId}'])`,
+    "print(json.dumps({",
+    "  'wireSchemaCount': len(catalog.get('schemas', [])),",
+    "  'snapshotRecordKeys': [document.get('recordKey') for document in snapshot.get('documents', [])],",
+    "  'shards': [{'shardId': shard.get('shardId'), 'epoch': shard.get('epoch')} for shard in shards.get('shards', [])],",
     "}))",
   ].join("\n");
   const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
