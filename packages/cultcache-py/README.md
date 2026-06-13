@@ -141,7 +141,7 @@ member order.
 
 ## CultNet And CultMesh
 
-`cultnet_py` provides the Python schema-v0 wire helpers:
+`cultnet_py` provides the Python schema-v0 wire helpers and an interop peer:
 
 ```python
 from cultnet_py import decode_frame, encode_frame, hello, parse_message
@@ -150,16 +150,29 @@ payload = hello(runtime_id="python-runtime").to_bytes()
 message = parse_message(decode_frame(encode_frame(payload)))
 ```
 
-`cultmesh_py` starts with a local cache-backed node:
+The peer can serve, dial, and probe the same raw-state interop lane used by the
+TypeScript, Rust, and C# test peers:
+
+```powershell
+python -m cultnet_py.interop_peer serve --runtime-id python-peer --runtime-kind python --display-name "Python Peer" --agent-id python-agent --advertise-host 127.0.0.1 --tcp-port 3075 --discovery-port 4075 --discovery-group 239.77.44.11 --schema-path ..\cultnet-ts\integration\contracts\cultnet.interop-note.schema.json
+python -m cultnet_py.interop_peer dial --runtime-id python-client --runtime-kind python --display-name "Python Client" --agent-id python-client --target-host 127.0.0.1 --target-port 3075 --schema-path ..\cultnet-ts\integration\contracts\cultnet.interop-note.schema.json
+python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-port 4075 --discovery-group 239.77.44.11
+```
+
+`cultmesh_py` starts with a local cache-backed node and schema-v0 helpers for
+the CultMesh Verse catalog and peer exchange wire messages:
 
 ```python
 from cultcache_py import define_database_entry_type
-from cultmesh_py import create_node
+from cultmesh_py import CultMeshPeerCatalog, create_node, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = create_node("mesh.cc", runtime_id="python-runtime")
 node.register_document(note_doc)
 node.put(note_doc, "note:1", {"body": "hello"})
+
+peers = CultMeshPeerCatalog()
+response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
 ```
 
 ## Wire Parity
@@ -171,5 +184,13 @@ python -m cultcache_py.interop write --file cache.cc --runtime-id python
 python -m cultcache_py.interop read --file cache.cc
 ```
 
-`packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
-CultCache v1 parity matrix with TypeScript, Rust, and C#.
+Current receipts:
+
+- `packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
+  CultCache v1 parity matrix with TypeScript, Rust, and C#.
+- `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` includes Python in
+  the live TS/Rust/C#/Python schema-v0 peer ring: discovery, hello, schema
+  catalog, raw snapshot, raw document put, mutation receipt, and fire-command
+  receipt.
+- `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
+  Verse catalog and peer exchange MessagePack wire shapes.

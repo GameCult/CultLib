@@ -65,7 +65,7 @@ def document_put_raw(
     }
     if source_runtime_id:
         record["sourceRuntimeId"] = source_runtime_id
-    return CultNetMessage("cultnet.document_put_raw.v0", {"record": record})
+    return CultNetMessage("cultnet.document_put_raw.v0", {"document": record})
 
 
 def document_delete(*, schema_id: str, record_key: str, deleted_at: str) -> CultNetMessage:
@@ -75,12 +75,15 @@ def document_delete(*, schema_id: str, record_key: str, deleted_at: str) -> Cult
     )
 
 
-def snapshot_request(*, schema_ids: list[str] | None = None) -> CultNetMessage:
-    return CultNetMessage("cultnet.snapshot_request.v0", {"schemaIds": schema_ids or []})
+def snapshot_request(*, message_id: str = "", schema_ids: list[str] | None = None, record_keys: list[str] | None = None) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.snapshot_request.v0",
+        {"messageId": message_id, "schemaIds": schema_ids or [], "recordKeys": record_keys or []},
+    )
 
 
-def schema_catalog_request(*, include_schema_json: bool = False) -> CultNetMessage:
+def schema_catalog_request(*, message_id: str = "", include_schema_json: bool = False) -> CultNetMessage:
     return CultNetMessage(
         "cultnet.schema_catalog_request.v0",
-        {"includeSchemaJson": include_schema_json},
+        {"messageId": message_id, "includeSchemaJson": include_schema_json},
     )

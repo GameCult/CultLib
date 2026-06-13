@@ -15,6 +15,15 @@ from cultcache_py import (
 from cultcache_py.interop import read_note, write_note
 from cultnet_py import decode_frame, encode_frame, hello, parse_message
 from cultmesh_py import create_node
+from cultmesh_py import (
+    CultMeshPeerCard,
+    CultMeshPeerCatalog,
+    CultMeshVerseCatalog,
+    CultMeshVerseCompatibility,
+    CultMeshVerseDescriptor,
+    peer_exchange_request,
+    verse_catalog_request,
+)
 
 
 @dataclass
@@ -169,6 +178,63 @@ class CultCacheTests(unittest.TestCase):
             reopened.register_document(document)
             reopened.pull()
             self.assertEqual(reopened.get(document, "note:1")["body"], "hello")
+
+    def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
+        import msgpack  # type: ignore
+
+        catalog = CultMeshVerseCatalog()
+        catalog.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="aetheria-main",
+                display_name="Aetheria",
+                authority_model="OperatorCluster",
+                compatibility=CultMeshVerseCompatibility(
+                    transport_version="cultmesh.v0",
+                    rules_hash="rules",
+                    compatible_verse_ids=("aetheria-modded",),
+                    required_plugin_ids=("core",),
+                    optional_plugin_ids=("skylands",),
+                ),
+                discovery_endpoints=("cultmesh://aetheria.example.test:3075",),
+                authority_runtime_ids=("runtime-a",),
+                description="main branch",
+            )
+        )
+
+        response = catalog.create_response(verse_catalog_request("verses-1"))
+        decoded = msgpack.unpackb(msgpack.packb(response, use_bin_type=True), raw=False)
+        self.assertEqual(decoded["schemaVersion"], "cultmesh.verse_catalog_response.v0")
+        self.assertEqual(decoded["messageId"], "verses-1")
+        self.assertEqual(decoded["verses"][0]["verseId"], "aetheria-main")
+        self.assertEqual(decoded["verses"][0]["compatibility"]["requiredPluginIds"], ["core"])
+
+    def test_cultmesh_peer_exchange_response_matches_schema_v0_wire_shape(self) -> None:
+        import msgpack  # type: ignore
+
+        catalog = CultMeshPeerCatalog()
+        catalog.upsert(
+            CultMeshPeerCard(
+                peer_id="peer-a",
+                verse_id="aetheria-main",
+                endpoints=("cultnet://peer-a.example.test:3075",),
+                roles=("discovery", "read-replica"),
+                shard_ids=("players",),
+                region="eu-west",
+                authority_lease_id="lease-1",
+                expires_at="2026-05-20T12:00:00.0000000Z",
+                signature="sig",
+            )
+        )
+
+        response = catalog.create_response(
+            peer_exchange_request("pex-1", verse_id="aetheria-main", roles=["read-replica"])
+        )
+        decoded = msgpack.unpackb(msgpack.packb(response, use_bin_type=True), raw=False)
+        self.assertEqual(decoded["schemaVersion"], "cultmesh.peer_exchange_response.v0")
+        self.assertEqual(decoded["messageId"], "pex-1")
+        self.assertEqual(decoded["peers"][0]["peerId"], "peer-a")
+        self.assertIn("read-replica", decoded["peers"][0]["roles"])
+        self.assertEqual(decoded["peers"][0]["authorityLeaseId"], "lease-1")
 
 
 if __name__ == "__main__":

@@ -13,8 +13,11 @@ const execFileAsync = promisify(execFile);
 
 const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
 const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
+const pythonCommand = process.env.PYTHON ?? "python";
 const cultNetTsRoot = resolve(__dirname, "../../..");
 const cultLibRoot = findAncestor(cultNetTsRoot, "CultLib.sln") ?? resolve(cultNetTsRoot, "..", "CultLib");
+const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
+const cultcachePySrc = resolve(cultcachePyRoot, "src");
 const cultnetRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultnet-rs"))
   ? resolve(cultLibRoot, "packages", "cultnet-rs")
   : resolve(cultNetTsRoot, "..", "cultnet-rs");
@@ -45,7 +48,7 @@ const rustBinaryPath = resolve(
 
 const discoveryGroup = "239.77.44.11";
 
-test("CultNet TS/Rust/C# peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
+test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   await buildInteropPeers();
   cleanInteropStores([
     "rust-peer",
@@ -54,12 +57,15 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
     "ts-client-dial",
     "ts-rust-dial",
     "ts-csharp-dial",
+    "python-peer",
+    "python-client-dial",
   ]);
 
   const discoveryPort = await getFreePort();
   const tsPort = await getFreePort();
   const rustPort = await getFreePort();
   const csharpPort = await getFreePort();
+  const pythonPort = await getFreePort();
   const advertiseHost = findAdvertiseHost();
 
   const servers: RunningServeProcess[] = [];
@@ -122,6 +128,27 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
   }));
   await servers[servers.length - 1].ready;
 
+  servers.push(await spawnServeProcess("python", {
+    command: pythonCommand,
+    args: [
+      "-m", "cultnet_py.interop_peer",
+      "serve",
+      "--runtime-id", "python-peer",
+      "--runtime-kind", "python",
+      "--display-name", "Python Peer",
+      "--agent-id", "python-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(pythonPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultcachePyRoot,
+    env: { PYTHONPATH: cultcachePySrc },
+  }));
+  await servers[servers.length - 1].ready;
+
   t.after(async () => {
     await Promise.all(servers.map(stopProcess));
   });
@@ -177,7 +204,41 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
   assert.ok(csharpDial.mutatedNote.tags.includes("decorated:csharp-client"));
   assert.equal(csharpDial.fireReceipt.accepted, true);
 
-  const expectedPeers = ["csharp-peer", "rust-peer", "ts-peer"];
+  const pythonDial = await runJsonCommand("python-dial", pythonCommand, [
+    "-m", "cultnet_py.interop_peer",
+    "dial",
+    "--runtime-id", "python-client",
+    "--runtime-kind", "python",
+    "--display-name", "Python Dialer",
+    "--agent-id", "python-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(rustPort),
+    "--schema-path", interopSchemaPath,
+  ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc });
+  assert.equal(pythonDial.remoteHello.runtimeId, "rust-peer");
+  assert.equal(pythonDial.hasInteropSchema, true);
+  assert.equal(pythonDial.retrievedNote.authorRuntimeId, "rust-peer");
+  assert.ok(pythonDial.mutatedNote.tags.includes("decorated:python-client"));
+  assert.equal(pythonDial.fireReceipt.accepted, true);
+
+  const tsDialPython = await runJsonCommand("ts-dial-python", process.execPath, [
+    tsPeerScript,
+    "dial",
+    "--runtime-id", "ts-python-client",
+    "--runtime-kind", "node",
+    "--display-name", "TS Python Dialer",
+    "--agent-id", "ts-python-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(pythonPort),
+    "--schema-path", interopSchemaPath,
+  ], cultNetTsRoot);
+  assert.equal(tsDialPython.remoteHello.runtimeId, "python-peer");
+  assert.equal(tsDialPython.hasInteropSchema, true);
+  assert.equal(tsDialPython.retrievedNote.authorRuntimeId, "python-peer");
+  assert.ok(tsDialPython.mutatedNote.tags.includes("decorated:ts-python-client"));
+  assert.equal(tsDialPython.fireReceipt.ammoRemaining, 29);
+
+  const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
   const tsProbe = await runJsonCommand("ts-probe", process.execPath, [
     tsPeerScript,
@@ -185,7 +246,7 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
     "--runtime-id", "ts-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
-    "--timeout-ms", "1500",
+    "--timeout-ms", "3000",
   ], cultNetTsRoot);
   assert.deepEqual(tsProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
 
@@ -194,7 +255,7 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
     "--runtime-id", "rust-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
-    "--timeout-ms", "1500",
+    "--timeout-ms", "3000",
   ], cultnetRsRoot);
   assert.deepEqual(rustProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
 
@@ -204,9 +265,19 @@ test("CultNet TS/Rust/C# peers discover each other and exchange raw state over t
     "--runtime-id", "csharp-prober",
     "--discovery-port", String(discoveryPort),
     "--discovery-group", discoveryGroup,
-    "--timeout-ms", "1500",
+    "--timeout-ms", "3000",
   ], cultLibRoot);
   assert.deepEqual(csharpProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
+
+  const pythonProbe = await runJsonCommand("python-probe", pythonCommand, [
+    "-m", "cultnet_py.interop_peer",
+    "probe",
+    "--runtime-id", "python-prober",
+    "--discovery-port", String(discoveryPort),
+    "--discovery-group", discoveryGroup,
+    "--timeout-ms", "3000",
+  ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc });
+  assert.deepEqual(pythonProbe.peers.map((peer: { runtimeId: string }) => peer.runtimeId).sort(), expectedPeers);
 });
 
 async function buildInteropPeers(): Promise<void> {
@@ -222,6 +293,7 @@ function cleanInteropStores(runtimeIds: readonly string[]): void {
   for (const runtimeId of runtimeIds) {
     rmSync(join(tmpdir(), `cultnet-rs-interop-${runtimeId}.msgpack`), { force: true });
     rmSync(join(tmpdir(), `cultnet-ts-interop-${runtimeId}.msgpack`), { force: true });
+    rmSync(join(tmpdir(), `cultnet-py-interop-${runtimeId}.msgpack`), { force: true });
   }
 }
 
@@ -245,6 +317,7 @@ interface ServeCommand {
   command: string;
   args: string[];
   cwd: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 interface RunningServeProcess {
@@ -257,6 +330,7 @@ interface RunningServeProcess {
 async function spawnServeProcess(name: string, command: ServeCommand): Promise<RunningServeProcess> {
   const child = spawn(command.command, command.args, {
     cwd: command.cwd,
+    env: { ...process.env, ...command.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];
@@ -310,8 +384,13 @@ async function runJsonCommand(
   command: string,
   args: string[],
   cwd: string,
+  env: NodeJS.ProcessEnv = {},
 ): Promise<any> {
-  const { stdout, stderr } = await execFileAsync(command, args, { cwd, timeout: 90_000 });
+  const { stdout, stderr } = await execFileAsync(command, args, {
+    cwd,
+    env: { ...process.env, ...env },
+    timeout: 90_000,
+  });
   const trimmed = stdout.trim();
   if (!trimmed) {
     throw new Error(`${name} produced no stdout.\n${stderr}`);

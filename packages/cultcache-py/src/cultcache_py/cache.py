@@ -232,6 +232,9 @@ class CultCache:
             out.setdefault(type, {})[key] = value
         return out
 
+    def snapshot_envelopes(self) -> list[CultCacheEnvelope]:
+        return list(self._state.envelopes.values())
+
     def _stores_for_type(self, type: str) -> list[BackingStore]:
         specific = self._state.stores_by_type.get(type)
         return specific if specific else self._state.generic_stores
