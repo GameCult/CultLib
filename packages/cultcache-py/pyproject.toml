@@ -24,6 +24,7 @@ msgpack = ["msgpack>=1.0"]
 [project.scripts]
 cultcache-py-interop = "cultcache_py.interop:main"
 cultnet-py-interop = "cultnet_py.interop_peer:main"
+cultcache-py-benchmark = "cultcache_py.benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

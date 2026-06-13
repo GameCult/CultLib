@@ -79,6 +79,7 @@ settings = cache.get_required_global(settings_doc)
 - `get_global(...)`
 - `get_required_global(...)`
 - `put(...)`
+- `put_envelopes(...)`
 - `put_global(...)`
 - `update(...)`
 - `update_global(...)`
@@ -260,3 +261,16 @@ Current receipts:
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.
+
+## Performance Baseline
+
+The package ships a lightweight benchmark for Python-owned hot paths:
+
+```powershell
+python -m cultcache_py.benchmark --records 1000 --json
+```
+
+It reports slot-indexed `DatabaseEntry` encode/decode throughput, framed
+CultNet MessagePack parse throughput, and raw snapshot application into a
+registered cache. Treat it as a local baseline, not a claim that Python matches
+the C# reference in every workload.

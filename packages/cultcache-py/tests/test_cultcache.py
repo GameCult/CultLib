@@ -16,6 +16,7 @@ from cultcache_py import (
     define_database_entry_type,
     define_document_type,
 )
+from cultcache_py.benchmark import run_benchmark
 from cultcache_py.interop import read_note, write_note
 from cultnet_py import (
     compute_simulation_claim_hash,
@@ -192,6 +193,19 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(loaded["documentId"], written["documentId"])
             self.assertEqual(loaded["authorRuntimeId"], "python-test")
             self.assertIn("interop", loaded["tags"])
+
+    def test_benchmark_reports_core_hot_path_metrics(self) -> None:
+        result = run_benchmark(8)
+        metric_names = {metric["name"] for metric in result["metrics"]}
+        self.assertEqual(result["records"], 8)
+        self.assertEqual(result["wireMessageCount"], 8)
+        self.assertEqual(metric_names, {
+            "database_entry_encode",
+            "database_entry_decode",
+            "cultnet_frame_parse",
+            "raw_snapshot_apply",
+        })
+        self.assertTrue(all(metric["opsPerSecond"] > 0 for metric in result["metrics"]))
 
     def test_cultnet_schema_message_frame_round_trip(self) -> None:
         message = hello(runtime_id="python-test", supported_schema_versions=["cultnet.hello.v0"])

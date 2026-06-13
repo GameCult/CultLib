@@ -200,6 +200,27 @@ class CultCache:
         self._rebuild_indexes()
         return value
 
+    def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
+        self._assert_registered(document)
+        values: list[T] = []
+        for envelope in envelopes:
+            if envelope.type != document.type:
+                raise CultCacheError(
+                    f"Envelope type {envelope.type} does not match document type {document.type}"
+                )
+            if document.global_document and envelope.key != GLOBAL_KEY:
+                raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
+            values.append(document.decode_payload(envelope.payload))
+
+        stores = self._stores_for_type(document.type)
+        for store in stores:
+            store.push_all(envelopes)
+        for envelope, value in zip(envelopes, values):
+            self._state.values[(document.type, envelope.key)] = value
+            self._state.envelopes[(document.type, envelope.key)] = envelope
+        self._rebuild_indexes()
+        return values
+
     def put_global(self, document: DocumentDefinition[T], value: T) -> None:
         self._assert_global(document)
         self.put(document, GLOBAL_KEY, value)

@@ -32,20 +32,28 @@ def apply_raw_document_record(
 ) -> CultNetAppliedRecord:
     schema_id = str(record["schemaId"])
     document = documents_by_schema_id[schema_id]
-    envelope = CultCacheEnvelope(
-        key=str(record["recordKey"]),
-        type=document.type,
-        schema_id=schema_id,
-        payload=bytes(record["payload"]),
-        stored_at=str(record.get("storedAt") or ""),
-        catalog_entry=document.catalog_entry(),
-    )
+    envelope = raw_record_to_envelope(document, schema_id, record)
     value = cache.put_envelope(document, envelope)
     return CultNetAppliedRecord(
         schema_id=schema_id,
         record_key=envelope.key,
         change_kind="added",
         value=value,
+    )
+
+
+def raw_record_to_envelope(
+    document: DocumentDefinition[Any],
+    schema_id: str,
+    record: dict[str, Any],
+) -> CultCacheEnvelope:
+    return CultCacheEnvelope(
+        key=str(record["recordKey"]),
+        type=document.type,
+        schema_id=schema_id,
+        payload=bytes(record["payload"]),
+        stored_at=str(record.get("storedAt") or ""),
+        catalog_entry=document.catalog_entry(),
     )
 
 
@@ -57,10 +65,33 @@ def apply_raw_snapshot(
     if response.get("schemaVersion") != "cultnet.snapshot_response_raw.v0":
         raise ValueError(f"Expected cultnet.snapshot_response_raw.v0, received {response.get('schemaVersion')!r}")
     documents_by_schema_id = schema_document_map(documents)
+    batches: dict[str, tuple[DocumentDefinition[Any], list[tuple[str, CultCacheEnvelope]]]] = {}
+    order: list[tuple[DocumentDefinition[Any], str, CultCacheEnvelope]] = []
+    for record in response.get("documents", []):
+        if not isinstance(record, dict):
+            continue
+        schema_id = str(record["schemaId"])
+        document = documents_by_schema_id[schema_id]
+        envelope = raw_record_to_envelope(document, schema_id, record)
+        batch = batches.setdefault(document.type, (document, []))
+        batch[1].append((schema_id, envelope))
+        order.append((document, schema_id, envelope))
+
+    values_by_key: dict[tuple[str, str], Any] = {}
+    for document, entries in batches.values():
+        envelopes = [envelope for _, envelope in entries]
+        values = cache.put_envelopes(document, envelopes)
+        for (_, envelope), value in zip(entries, values):
+            values_by_key[(document.type, envelope.key)] = value
+
     return [
-        apply_raw_document_record(cache, documents_by_schema_id, record)
-        for record in response.get("documents", [])
-        if isinstance(record, dict)
+        CultNetAppliedRecord(
+            schema_id=schema_id,
+            record_key=envelope.key,
+            change_kind="added",
+            value=values_by_key[(document.type, envelope.key)],
+        )
+        for document, schema_id, envelope in order
     ]
 
 
@@ -92,4 +123,3 @@ def apply_shard_log_response(
             cache.delete(document, record_key)
             applied.append(CultNetAppliedRecord(schema_id, record_key, "removed", None))
     return applied
-
