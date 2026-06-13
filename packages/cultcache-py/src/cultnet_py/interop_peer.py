@@ -868,16 +868,250 @@ def wire_message_schema_descriptors(include_schema_json: bool) -> list[dict[str,
 
 
 def wire_message_schema_json(schema_id: str, title: str, schema_version: str) -> str:
+    properties = {
+        "schemaVersion": {"const": schema_version},
+        **wire_message_schema_properties(schema_version),
+    }
     return json.dumps({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": schema_id,
         "title": title,
         "type": "object",
-        "required": ["schemaVersion"],
-        "properties": {
-            "schemaVersion": {"const": schema_version},
-        },
+        "required": wire_message_required_fields(schema_version),
+        "properties": properties,
+        "$defs": wire_message_shared_defs(),
     }, separators=(",", ":"), sort_keys=True)
+
+
+def wire_message_required_fields(schema_version: str) -> list[str]:
+    required = {
+        "cultnet.hello.v0": ["schemaVersion", "runtimeId"],
+        "cultnet.document_delete.v0": ["schemaVersion", "messageId", "schemaId", "recordKey"],
+        "cultnet.document_put_raw.v0": ["schemaVersion", "messageId", "document"],
+        "cultnet.snapshot_request.v0": ["schemaVersion", "messageId"],
+        "cultnet.snapshot_response_raw.v0": ["schemaVersion", "messageId", "documents"],
+        "cultnet.schema_catalog_request.v0": ["schemaVersion", "messageId"],
+        "cultnet.schema_catalog_response.v0": ["schemaVersion", "messageId", "schemas"],
+        "cultnet.database_subscribe.v0": ["schemaVersion", "messageId", "subscriptionId"],
+        "cultnet.database_unsubscribe.v0": ["schemaVersion", "messageId", "subscriptionId"],
+        "cultnet.database_change_raw.v0": ["schemaVersion", "messageId", "subscriptionId", "changeKind"],
+        "cultnet.shard_catalog_request.v0": ["schemaVersion", "messageId"],
+        "cultnet.shard_catalog_response.v0": ["schemaVersion", "messageId", "shards"],
+        "cultnet.shard_log_request.v0": ["schemaVersion", "messageId", "shardId", "afterSequence"],
+        "cultnet.shard_log_response.v0": ["schemaVersion", "messageId", "shardId", "shardEpoch", "entries", "resyncRequired"],
+        "cultnet.simulation_observation.v0": ["schemaVersion", "messageId", "observation"],
+        "cultnet.simulation_consensus_candidate.v0": [
+            "schemaVersion",
+            "messageId",
+            "shardId",
+            "shardEpoch",
+            "frame",
+            "subjectId",
+            "claimKind",
+            "claimHash",
+            "witnessCount",
+            "supportWeight",
+            "totalWeight",
+            "hasQuorum",
+            "confidence",
+        ],
+        VERSE_CATALOG_REQUEST: ["schemaVersion", "messageId"],
+        "cultmesh.verse_catalog_response.v0": ["schemaVersion", "messageId", "verses"],
+        PEER_EXCHANGE_REQUEST: ["schemaVersion", "messageId"],
+        "cultmesh.peer_exchange_response.v0": ["schemaVersion", "messageId", "peers"],
+    }
+    return required.get(schema_version, ["schemaVersion"])
+
+
+def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    common: dict[str, dict[str, Any]] = {
+        "messageId": {"type": "string"},
+        "schemaId": {"type": "string"},
+        "schemaIds": string_array,
+        "recordKey": {"type": "string"},
+        "recordKeys": string_array,
+        "shardId": {"type": "string"},
+        "shardEpoch": {"type": "integer"},
+        "subscriptionId": {"type": "string"},
+    }
+    by_version: dict[str, dict[str, Any]] = {
+        "cultnet.hello.v0": {
+            "runtimeId": {"type": "string"},
+            "runtimeKind": {"type": "string"},
+            "agentId": {"type": "string"},
+            "displayName": {"type": "string"},
+            "supportedDocumentTypes": string_array,
+            "supportedMutationContracts": string_array,
+            "supportedMessageVersions": string_array,
+            "supportsSchemaCatalog": {"type": "boolean"},
+        },
+        "cultnet.document_delete.v0": {
+            **common,
+        },
+        "cultnet.document_put_raw.v0": {
+            "messageId": common["messageId"],
+            "document": {"$ref": "#/$defs/rawDocumentRecord"},
+        },
+        "cultnet.snapshot_request.v0": {
+            **common,
+        },
+        "cultnet.snapshot_response_raw.v0": {
+            **common,
+            "documents": {"type": "array", "items": {"$ref": "#/$defs/rawDocumentRecord"}},
+            "shardLogSequence": {"type": "integer"},
+        },
+        "cultnet.schema_catalog_request.v0": {
+            "messageId": common["messageId"],
+            "includeSchemaJson": {"type": "boolean"},
+            "schemaIds": common["schemaIds"],
+            "kinds": string_array,
+        },
+        "cultnet.schema_catalog_response.v0": {
+            "messageId": common["messageId"],
+            "schemas": {"type": "array", "items": {"$ref": "#/$defs/schemaDescriptor"}},
+        },
+        "cultnet.database_subscribe.v0": {
+            **common,
+            "includeSnapshot": {"type": "boolean"},
+        },
+        "cultnet.database_unsubscribe.v0": {
+            "messageId": common["messageId"],
+            "subscriptionId": common["subscriptionId"],
+        },
+        "cultnet.database_change_raw.v0": {
+            "messageId": common["messageId"],
+            "subscriptionId": common["subscriptionId"],
+            "changeKind": {"enum": ["added", "updated", "removed"]},
+            "document": {"$ref": "#/$defs/rawDocumentRecord"},
+            "schemaId": common["schemaId"],
+            "recordKey": common["recordKey"],
+        },
+        "cultnet.shard_catalog_request.v0": {
+            **common,
+        },
+        "cultnet.shard_catalog_response.v0": {
+            "messageId": common["messageId"],
+            "shards": {"type": "array", "items": {"$ref": "#/$defs/shardDescriptor"}},
+        },
+        "cultnet.shard_log_request.v0": {
+            **common,
+            "afterSequence": {"type": "integer"},
+            "limit": {"type": "integer"},
+        },
+        "cultnet.shard_log_response.v0": {
+            **common,
+            "entries": {"type": "array", "items": {"$ref": "#/$defs/shardLogEntry"}},
+            "resyncRequired": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "compactedThrough": {"type": "integer"},
+        },
+        "cultnet.simulation_observation.v0": {
+            "messageId": common["messageId"],
+            "observation": {"$ref": "#/$defs/simulationObservation"},
+        },
+        "cultnet.simulation_consensus_candidate.v0": {
+            **common,
+            "frame": {"type": "integer"},
+            "subjectId": {"type": "string"},
+            "claimKind": {"type": "string"},
+            "claimHash": {"type": "string"},
+            "claimSummary": {"type": "string"},
+            "witnessCount": {"type": "integer"},
+            "supportWeight": {"type": "number"},
+            "totalWeight": {"type": "number"},
+            "hasQuorum": {"type": "boolean"},
+            "confidence": {"type": "number"},
+        },
+        VERSE_CATALOG_REQUEST: {
+            "messageId": common["messageId"],
+            "transportVersion": {"type": "string"},
+        },
+        "cultmesh.verse_catalog_response.v0": {
+            "messageId": common["messageId"],
+            "verses": {"type": "array", "items": {"$ref": "#/$defs/verseDescriptor"}},
+        },
+        PEER_EXCHANGE_REQUEST: {
+            "messageId": common["messageId"],
+            "verseId": {"type": "string"},
+            "roles": string_array,
+            "shardIds": string_array,
+        },
+        "cultmesh.peer_exchange_response.v0": {
+            "messageId": common["messageId"],
+            "peers": {"type": "array", "items": {"$ref": "#/$defs/peerCard"}},
+        },
+    }
+    return by_version.get(schema_version, {})
+
+
+def wire_message_shared_defs() -> dict[str, Any]:
+    return {
+        "rawDocumentRecord": {
+            "type": "object",
+            "required": ["schemaId", "recordKey", "payload"],
+            "properties": {
+                "schemaId": {"type": "string"},
+                "recordKey": {"type": "string"},
+                "payload": {},
+                "authorRuntimeId": {"type": "string"},
+                "updatedAtUnixMs": {"type": "integer"},
+            },
+        },
+        "schemaDescriptor": {
+            "type": "object",
+            "required": ["schemaId", "kind", "schemaVersion"],
+            "properties": {
+                "schemaId": {"type": "string"},
+                "kind": {"type": "string"},
+                "schemaVersion": {"type": "string"},
+                "documentType": {"type": "string"},
+                "title": {"type": "string"},
+                "wireContracts": {"type": "array", "items": {"type": "string"}},
+                "contentHash": {"type": "string"},
+                "schemaJson": {"type": "string"},
+            },
+        },
+        "shardDescriptor": {
+            "type": "object",
+            "required": ["shardId", "epoch", "ownerRuntimeId"],
+            "properties": {
+                "shardId": {"type": "string"},
+                "epoch": {"type": "integer"},
+                "ownerRuntimeId": {"type": "string"},
+                "endpoint": {"type": "string"},
+                "schemaIds": {"type": "array", "items": {"type": "string"}},
+                "recordKeyRanges": {"type": "array"},
+            },
+        },
+        "shardLogEntry": {
+            "type": "object",
+            "required": ["sequence", "changeKind"],
+            "properties": {
+                "sequence": {"type": "integer"},
+                "changeKind": {"enum": ["added", "updated", "removed"]},
+                "put": {"type": "object"},
+                "delete": {"type": "object"},
+            },
+        },
+        "simulationObservation": {
+            "type": "object",
+            "required": ["shardId", "shardEpoch", "frame", "subjectId", "claimKind", "claimHash", "witnessRuntimeId"],
+            "properties": {
+                "shardId": {"type": "string"},
+                "shardEpoch": {"type": "integer"},
+                "frame": {"type": "integer"},
+                "subjectId": {"type": "string"},
+                "claimKind": {"type": "string"},
+                "claimHash": {"type": "string"},
+                "claimSummary": {"type": "string"},
+                "witnessRuntimeId": {"type": "string"},
+                "supportWeight": {"type": "number"},
+            },
+        },
+        "verseDescriptor": {"type": "object"},
+        "peerCard": {"type": "object"},
+    }
 
 
 def raw_snapshot_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:

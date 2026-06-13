@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import asdict, dataclass
@@ -238,6 +239,28 @@ class CultCacheTests(unittest.TestCase):
             self.assertIn("cultnet.schema.v0", by_version[schema_version]["wireContracts"])
             self.assertIn(schema_version, by_version[schema_version]["schemaJson"])
             self.assertEqual(len(by_version[schema_version]["contentHash"]), 64)
+
+        delete_schema = json.loads(by_version["cultnet.document_delete.v0"]["schemaJson"])
+        self.assertEqual(
+            delete_schema["required"],
+            ["schemaVersion", "messageId", "schemaId", "recordKey"],
+        )
+        self.assertEqual(delete_schema["properties"]["recordKey"]["type"], "string")
+
+        change_schema = json.loads(by_version["cultnet.database_change_raw.v0"]["schemaJson"])
+        self.assertEqual(change_schema["properties"]["changeKind"]["enum"], ["added", "updated", "removed"])
+        self.assertIn("document", change_schema["properties"])
+        self.assertIn("schemaId", change_schema["properties"])
+        self.assertIn("recordKey", change_schema["properties"])
+
+        log_schema = json.loads(by_version["cultnet.shard_log_response.v0"]["schemaJson"])
+        self.assertIn("entries", log_schema["required"])
+        self.assertIn("resyncRequired", log_schema["required"])
+        self.assertIn("compactedThrough", log_schema["properties"])
+
+        consensus_schema = json.loads(by_version["cultnet.simulation_consensus_candidate.v0"]["schemaJson"])
+        for required_field in ["witnessCount", "supportWeight", "totalWeight", "hasQuorum", "confidence"]:
+            self.assertIn(required_field, consensus_schema["required"])
 
     def test_cultnet_shard_helpers_match_schema_v0_shape(self) -> None:
         catalog = shard_catalog_request(

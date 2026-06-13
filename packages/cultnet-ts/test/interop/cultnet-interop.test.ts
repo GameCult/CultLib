@@ -266,6 +266,9 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonDeleteDescriptor.kind, "wire_message");
   assert.ok(pythonDeleteDescriptor.wireContracts.includes("cultnet.schema.v0"));
   assert.ok(String(pythonDeleteDescriptor.schemaJson).includes("cultnet.document_delete.v0"));
+  const pythonDeleteSchema = JSON.parse(String(pythonDeleteDescriptor.schemaJson));
+  assert.deepEqual(pythonDeleteSchema.required, ["schemaVersion", "messageId", "schemaId", "recordKey"]);
+  assert.equal(pythonDeleteSchema.properties.recordKey.type, "string");
 
   const pythonVerseCatalog = await requestCultMeshFromPython(pythonPort, {
     schemaVersion: "cultmesh.verse_catalog_request.v0",
