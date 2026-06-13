@@ -420,6 +420,103 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([change.change_kind for change in applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
 
+    def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        document = define_database_entry_type(
+            "mesh.sync_item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        schema_id = document.catalog_entry().schema_id
+        ready = threading.Event()
+        server_error: list[BaseException] = []
+        port_holder: list[int] = []
+
+        def serve_requests() -> None:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    server.bind(("127.0.0.1", 0))
+                    port_holder.append(server.getsockname()[1])
+                    server.listen(2)
+                    ready.set()
+                    for _ in range(2):
+                        connection, _ = server.accept()
+                        with connection:
+                            stream = connection.makefile("rwb")
+                            request = msgpack.unpackb(read_frame(stream), raw=False)
+                            if request["schemaVersion"] == "cultnet.snapshot_request.v0":
+                                response = {
+                                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                                    "messageId": request["messageId"],
+                                    "documents": [
+                                        {
+                                            "schemaId": schema_id,
+                                            "recordKey": "item:node",
+                                            "storedAt": "2026-06-13T00:00:00Z",
+                                            "payloadEncoding": "messagepack",
+                                            "payload": document.encode_payload(Item("node", "mesh", 1)),
+                                        }
+                                    ],
+                                }
+                            elif request["schemaVersion"] == "cultnet.shard_log_request.v0":
+                                response = {
+                                    "schemaVersion": "cultnet.shard_log_response.v0",
+                                    "messageId": request["messageId"],
+                                    "shardId": request["shardId"],
+                                    "shardEpoch": request["shardEpoch"],
+                                    "resyncRequired": False,
+                                    "entries": [
+                                        {
+                                            "sequence": 1,
+                                            "changeKind": "updated",
+                                            "put": {
+                                                "schemaVersion": "cultnet.document_put_raw.v0",
+                                                "messageId": "put-node",
+                                                "document": {
+                                                    "schemaId": schema_id,
+                                                    "recordKey": "item:node",
+                                                    "storedAt": "2026-06-13T00:00:01Z",
+                                                    "payloadEncoding": "messagepack",
+                                                    "payload": document.encode_payload(Item("node", "mesh", 9)),
+                                                },
+                                                "shardId": request["shardId"],
+                                                "shardEpoch": request["shardEpoch"],
+                                            },
+                                        }
+                                    ],
+                                }
+                            else:
+                                raise AssertionError(f"unexpected request {request['schemaVersion']}")
+                            write_frame(stream, msgpack.packb(response, use_bin_type=True))
+                            stream.flush()
+            except BaseException as error:
+                server_error.append(error)
+                ready.set()
+
+        thread = threading.Thread(target=serve_requests, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+        self.assertFalse(server_error)
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        snapshot_changes = node.sync_snapshot(client, schema_ids=[schema_id])
+        log_changes = node.sync_shard_log(client, shard_id="mesh", shard_epoch=1)
+
+        thread.join(2.0)
+        self.assertFalse(server_error)
+        self.assertEqual(snapshot_changes[0].record_key, "item:node")
+        self.assertEqual(log_changes[0].change_kind, "updated")
+        self.assertEqual(node.get_required(document, "item:node").value, 9)
+
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
             message_id="delete-1",

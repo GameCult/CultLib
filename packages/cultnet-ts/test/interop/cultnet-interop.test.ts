@@ -302,6 +302,10 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(pythonCultNetClient.snapshotRecordKeys.includes("note:python-peer"));
   assert.equal(pythonCultNetClient.shards[0].shardId, "interop");
 
+  const pythonCultMeshNodeSync = await runPythonCultMeshNodeSync(pythonPort);
+  assert.equal(pythonCultMeshNodeSync.synced[0].recordKey, "note:python-peer");
+  assert.equal(pythonCultMeshNodeSync.note.authorRuntimeId, "python-peer");
+
   const pythonChange = await requestPythonDatabaseChange(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-subscribe",
@@ -748,6 +752,43 @@ async function runPythonCultNetRawClient(port: number): Promise<any> {
     "  'wireSchemaCount': len(catalog.get('schemas', [])),",
     "  'snapshotRecordKeys': [document.get('recordKey') for document in snapshot.get('documents', [])],",
     "  'shards': [{'shardId': shard.get('shardId'), 'epoch': shard.get('epoch')} for shard in shards.get('shards', [])],",
+    "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runPythonCultMeshNodeSync(port: number): Promise<any> {
+  const schemaPathJson = JSON.stringify(interopSchemaPath);
+  const script = [
+    "import json",
+    "from pathlib import Path",
+    "from cultcache_py import define_database_entry_type",
+    "from cultmesh_py import create_node",
+    "from cultnet_py import CultNetRawClient",
+    `schema_json = Path(${schemaPathJson}).read_text(encoding='utf-8')`,
+    "note_doc = define_database_entry_type(",
+    "  'cultnet.interop-note',",
+    "  [('schemaVersion', 0), ('documentId', 1), ('authorRuntimeId', 2), ('title', 3), ('body', 4), ('tags', 5, [])],",
+    `  schema_id='${interopNoteSchemaId}',`,
+    "  schema_version='cultnet.interop_note.v0',",
+    "  canonical_schema_json=schema_json,",
+    ")",
+    "node = create_node(runtime_id='python-node-sync')",
+    "node.register_document(note_doc)",
+    `client = CultNetRawClient('127.0.0.1', ${port}, timeout_seconds=4.0)`,
+    `changes = node.sync_snapshot(client, schema_ids=['${interopNoteSchemaId}'], record_keys=['note:python-peer'])`,
+    "note = node.get_required(note_doc, 'note:python-peer')",
+    "print(json.dumps({",
+    "  'synced': [{'schemaId': change.schema_id, 'recordKey': change.record_key} for change in changes],",
+    "  'note': note,",
     "}))",
   ].join("\n");
   const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {

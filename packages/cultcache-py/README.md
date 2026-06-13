@@ -212,12 +212,14 @@ checks, and stream transport negotiation:
 
 ```python
 from cultcache_py import define_database_entry_type
+from cultnet_py import CultNetRawClient
 from cultmesh_py import CultMeshDiscoveryClient, CultMeshPeerCatalog, CultMeshStreamCatalog, create_node, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = create_node("mesh.cc", runtime_id="python-runtime")
 node.register_document(note_doc)
 node.put(note_doc, "note:1", {"body": "hello"})
+live_note = node.get_required(note_doc, "note:1")
 
 peers = CultMeshPeerCatalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
@@ -226,6 +228,10 @@ client = CultMeshDiscoveryClient("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
 mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
 client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
+
+raw_client = CultNetRawClient("127.0.0.1", 3075)
+node.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
+node.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
 
 streams = CultMeshStreamCatalog()
 ```
