@@ -20,6 +20,8 @@ from cultcache_py.interop import read_note, write_note
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetRawClient,
+    apply_raw_snapshot,
+    apply_shard_log_response,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
@@ -330,6 +332,79 @@ class CultCacheTests(unittest.TestCase):
             "cultnet.shard_catalog_request.v0",
             "cultnet.shard_log_request.v0",
         ])
+
+    def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
+        document = define_database_entry_type(
+            "replica.item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        cache = CultCache()
+        cache.register_document_type(document)
+        schema_id = document.catalog_entry().schema_id
+
+        snapshot = {
+            "schemaVersion": "cultnet.snapshot_response_raw.v0",
+            "messageId": "snapshot-1",
+            "documents": [
+                {
+                    "schemaId": schema_id,
+                    "recordKey": "item:1",
+                    "storedAt": "2026-06-13T00:00:00Z",
+                    "payloadEncoding": "messagepack",
+                    "payload": document.encode_payload(Item("sword", "gear", 3)),
+                }
+            ],
+        }
+        applied_snapshot = apply_raw_snapshot(cache, [document], snapshot)
+        self.assertEqual(applied_snapshot[0].record_key, "item:1")
+        self.assertEqual(cache.get_required(document, "item:1").value, 3)
+
+        shard_log = {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "log-1",
+            "shardId": "interop",
+            "shardEpoch": 1,
+            "resyncRequired": False,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "changeKind": "updated",
+                    "put": {
+                        "schemaVersion": "cultnet.document_put_raw.v0",
+                        "messageId": "put-1",
+                        "document": {
+                            "schemaId": schema_id,
+                            "recordKey": "item:1",
+                            "storedAt": "2026-06-13T00:00:01Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(Item("sword", "gear", 12)),
+                        },
+                        "shardId": "interop",
+                        "shardEpoch": 1,
+                    },
+                },
+                {
+                    "sequence": 2,
+                    "changeKind": "removed",
+                    "delete": {
+                        "schemaVersion": "cultnet.document_delete.v0",
+                        "messageId": "delete-1",
+                        "schemaId": schema_id,
+                        "recordKey": "item:1",
+                        "shardId": "interop",
+                        "shardEpoch": 1,
+                    },
+                },
+            ],
+        }
+        applied_log = apply_shard_log_response(cache, [document], shard_log)
+        self.assertEqual([change.change_kind for change in applied_log], ["updated", "removed"])
+        self.assertIsNone(cache.get(document, "item:1"))
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(

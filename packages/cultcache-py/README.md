@@ -147,6 +147,8 @@ member order.
 ```python
 from cultnet_py import (
     CultNetRawClient,
+    apply_raw_snapshot,
+    apply_shard_log_response,
     compute_simulation_claim_hash,
     database_subscribe,
     decode_frame,
@@ -165,9 +167,13 @@ client = CultNetRawClient("127.0.0.1", 3075)
 catalog = client.fetch_schema_catalog(kinds=["wire_message"])
 snapshot = client.fetch_snapshot(schema_ids=["cultnet.interop-note"])
 shard_catalog = client.fetch_shard_catalog(schema_ids=["cultnet.interop-note"])
+# With a local CultCache and the matching registered document definitions:
+# applied = apply_raw_snapshot(cache, [note_doc], snapshot)
 
 subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.interop-note"])
 shard_request = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
+shard_log = client.fetch_shard_log(shard_id="interop", shard_epoch=1, after_sequence=0)
+# log_changes = apply_shard_log_response(cache, [note_doc], shard_log)
 claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
 observation = simulation_observation(
     message_id="obs-1",
@@ -249,8 +255,8 @@ Current receipts:
   snapshot, and shard catalog.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
-  helper shapes, simulation claim hashing, and witness artifact bundle payload
-  slots.
+  helper shapes, raw snapshot/shard-log application, simulation claim hashing,
+  and witness artifact bundle payload slots.
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.

@@ -18,10 +18,21 @@ from .messages import (
     snapshot_request,
     witness_artifact_bundle,
 )
+from .replication import (
+    CultNetAppliedRecord,
+    apply_raw_document_record,
+    apply_raw_snapshot,
+    apply_shard_log_response,
+    schema_document_map,
+)
 
 __all__ = [
     "CultNetMessage",
     "CultNetRawClient",
+    "CultNetAppliedRecord",
+    "apply_raw_document_record",
+    "apply_raw_snapshot",
+    "apply_shard_log_response",
     "compute_simulation_claim_hash",
     "database_subscribe",
     "database_unsubscribe",
@@ -35,6 +46,7 @@ __all__ = [
     "parse_message",
     "read_frame",
     "schema_catalog_request",
+    "schema_document_map",
     "shard_catalog_request",
     "shard_log_request",
     "simulation_observation",
