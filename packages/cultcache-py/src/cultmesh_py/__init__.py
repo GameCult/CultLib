@@ -5,6 +5,7 @@ from .session import (
     CultMeshGameSession,
     CultMeshGameSessionOptions,
     CultMeshPrediction,
+    CultMeshSessionChange,
 )
 from .simulation import (
     SIMULATION_FACT_DOCUMENT_TYPE,
@@ -45,6 +46,7 @@ __all__ = [
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
     "CultMeshPrediction",
+    "CultMeshSessionChange",
     "CultMeshSimulationFact",
     "CultMeshSimulationFactCommit",
     "CultMeshSimulationFactCommitter",

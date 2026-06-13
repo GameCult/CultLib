@@ -210,12 +210,13 @@ python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-p
 
 `cultmesh_py` includes a local cache-backed node, schema-v0 helpers for the
 CultMesh Verse catalog and peer exchange wire messages, local authority lease
-checks, stream transport negotiation, and committed simulation fact documents:
+checks, stream transport negotiation, committed simulation fact documents, and
+local prediction reconciliation:
 
 ```python
 from cultcache_py import define_database_entry_type
-from cultnet_py import CultNetRawClient
-from cultmesh_py import CultMesh, CultMeshDiscoveryClient, peer_exchange_request
+from cultnet_py import CultNetClientAuthorityScope, CultNetRawClient
+from cultmesh_py import CultMesh, CultMeshDiscoveryClient, CultMeshGameSessionOptions, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
@@ -255,8 +256,16 @@ committed = facts.commit({
     "hasQuorum": True,
 })
 
-session = CultMesh.create_game_session(node)
+session = CultMesh.create_game_session(
+    node,
+    CultMeshGameSessionOptions(
+        client_authority_scopes=(
+            CultNetClientAuthorityScope("python-runtime", schema_ids=(note_doc.catalog_entry().schema_id,), key_prefix="input:python"),
+        ),
+    ),
+)
 session_commits = session.submit_and_commit(observation.to_wire())
+prediction = session.predict(note_doc, "input:python:move", {"body": "predicted input"})
 ```
 
 ## Wire Parity
@@ -286,8 +295,9 @@ Current receipts:
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, raw snapshot/shard-log application, simulation claim hashing,
-  consensus aggregation, game-session fact commits, committed simulation fact
-  payload slots, and witness artifact bundle payload slots.
+  consensus aggregation, game-session fact commits, local prediction
+  reconciliation, committed simulation fact payload slots, and witness artifact
+  bundle payload slots.
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.

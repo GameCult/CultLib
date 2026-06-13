@@ -20,6 +20,7 @@ from cultcache_py.benchmark import run_benchmark
 from cultcache_py.interop import read_note, write_note
 from cultnet_py import (
     compute_simulation_claim_hash,
+    CultNetClientAuthorityScope,
     CultNetRawClient,
     CultNetSimulationConsensusOptions,
     apply_raw_snapshot,
@@ -960,6 +961,60 @@ class CultCacheTests(unittest.TestCase):
             stored = node.get_required(simulation_fact_document, commits[0].key)
             self.assertEqual(stored.claim_hash, claim_hash)
             self.assertEqual(stored.witness_count, 2)
+
+    def test_cultmesh_game_session_prediction_requires_scope_and_reconciles_shard_log(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.input",
+            [("body", 0)],
+            schema_id="mesh.input.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "prediction.cc", runtime_id="client-a")
+            node.register_document(note_doc)
+            session = CultMesh.create_game_session(
+                node,
+                CultMeshGameSessionOptions(
+                    client_authority_scopes=(
+                        CultNetClientAuthorityScope(
+                            "client-a",
+                            schema_ids=("mesh.input.v1",),
+                            key_prefix="input:client-a",
+                        ),
+                    )
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not have client prediction authority"):
+                session.predict(note_doc, "input:other", {"body": "nope"})
+
+            prediction = session.predict(note_doc, "input:client-a:move", {"body": "predicted"})
+            put = document_put_raw(
+                message_id="authoritative",
+                key=prediction.key,
+                schema_id=prediction.schema_id,
+                stored_at="2026-06-13T00:00:00Z",
+                payload=note_doc.encode_payload({"body": "authoritative"}),
+                shard_id="inputs",
+                shard_epoch=1,
+            )
+            changes = session.apply_shard_log_response({
+                "schemaVersion": "cultnet.shard_log_response.v0",
+                "messageId": "inputs-log",
+                "shardId": "inputs",
+                "shardEpoch": 1,
+                "entries": [
+                    {
+                        "sequence": 1,
+                        "committedAt": "2026-06-13T00:00:00Z",
+                        "changeKind": "updated",
+                        "put": put.to_wire(),
+                    }
+                ],
+                "resyncRequired": False,
+            })
+
+            self.assertEqual(changes[0].change_kind, "reconciled")
+            self.assertEqual(node.get_required(note_doc, prediction.key)["body"], "authoritative")
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore

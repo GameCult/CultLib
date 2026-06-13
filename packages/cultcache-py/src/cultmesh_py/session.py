@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from cultcache_py.documents import DocumentDefinition
-from cultnet_py import CultNetSimulationConsensusOptions, CultNetSimulationObservationHub
+from cultnet_py import (
+    CultNetAppliedRecord,
+    CultNetClientAuthorityScope,
+    CultNetRawClient,
+    CultNetSimulationConsensusOptions,
+    CultNetSimulationObservationHub,
+    apply_shard_log_response,
+)
 
 from .node import CultMeshNode
 from .simulation import (
@@ -19,8 +26,17 @@ from .wire import CultMeshAuthorityLeaseCatalog, CultMeshPeerCatalog, CultMeshVe
 @dataclass(frozen=True)
 class CultMeshPrediction:
     key: str
+    schema_id: str
     document: DocumentDefinition[Any]
     value: Any
+
+
+@dataclass(frozen=True)
+class CultMeshSessionChange:
+    schema_id: str
+    record_key: str
+    change_kind: str
+    value: Any | None = None
 
 
 @dataclass
@@ -29,6 +45,7 @@ class CultMeshGameSessionOptions:
     peer_catalog: CultMeshPeerCatalog | None = None
     authority_leases: CultMeshAuthorityLeaseCatalog | None = None
     consensus_options: CultNetSimulationConsensusOptions | None = None
+    client_authority_scopes: tuple[CultNetClientAuthorityScope, ...] = ()
 
 
 @dataclass
@@ -46,10 +63,40 @@ class CultMeshGameSession:
         )
         self.fact_committer = CultMeshSimulationFactCommitter(self.node)
         self._committed_fact_ids: set[str] = set()
+        self._client_authority_scopes = tuple(options.client_authority_scopes)
+        self._predicted_keys: set[tuple[str, str]] = set()
 
     def predict(self, document: DocumentDefinition[Any], key: str, value: Any) -> CultMeshPrediction:
+        schema_id = document.catalog_entry().schema_id
+        if not any(scope.matches(self.node.runtime_id, schema_id, key) for scope in self._client_authority_scopes):
+            raise ValueError(
+                f"Runtime {self.node.runtime_id!r} does not have client prediction authority "
+                f"for schema {schema_id!r} key {key!r}"
+            )
         self.node.put(document, key, value)
-        return CultMeshPrediction(key=key, document=document, value=value)
+        self._predicted_keys.add((schema_id, key))
+        return CultMeshPrediction(key=key, schema_id=schema_id, document=document, value=value)
+
+    def apply_shard_log_response(self, response: dict[str, Any]) -> list[CultMeshSessionChange]:
+        applied = apply_shard_log_response(self.node.cache, self.node.documents, response)
+        return self._reconcile_applied(applied)
+
+    def sync_shard_log(
+        self,
+        client: CultNetRawClient,
+        *,
+        shard_id: str,
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> list[CultMeshSessionChange]:
+        response = client.fetch_shard_log(
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        return self.apply_shard_log_response(response)
 
     def submit_observation(self, observation_or_message: dict[str, Any]) -> list[dict[str, Any]]:
         return self.observation_hub.submit(observation_or_message)
@@ -73,3 +120,19 @@ class CultMeshGameSession:
             self._committed_fact_ids.add(fact_id)
             commits.append(commit)
         return commits
+
+    def _reconcile_applied(self, applied: list[CultNetAppliedRecord]) -> list[CultMeshSessionChange]:
+        changes: list[CultMeshSessionChange] = []
+        for record in applied:
+            key = (record.schema_id, record.record_key)
+            change_kind = record.change_kind
+            if key in self._predicted_keys and record.change_kind in {"added", "updated"}:
+                self._predicted_keys.remove(key)
+                change_kind = "reconciled"
+            changes.append(CultMeshSessionChange(
+                schema_id=record.schema_id,
+                record_key=record.record_key,
+                change_kind=change_kind,
+                value=record.value,
+            ))
+        return changes

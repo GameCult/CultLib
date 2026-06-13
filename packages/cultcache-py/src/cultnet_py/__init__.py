@@ -18,6 +18,7 @@ from .messages import (
     snapshot_request,
     witness_artifact_bundle,
 )
+from .prediction import CultNetClientAuthorityScope
 from .replication import (
     CultNetAppliedRecord,
     apply_raw_document_record,
@@ -36,6 +37,7 @@ __all__ = [
     "CultNetDatabaseSubscription",
     "CultNetRawClient",
     "CultNetAppliedRecord",
+    "CultNetClientAuthorityScope",
     "CultNetSimulationConsensus",
     "CultNetSimulationConsensusOptions",
     "CultNetSimulationObservationHub",
