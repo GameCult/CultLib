@@ -199,7 +199,7 @@ checks, and stream transport negotiation:
 
 ```python
 from cultcache_py import define_database_entry_type
-from cultmesh_py import CultMeshPeerCatalog, CultMeshStreamCatalog, create_node, peer_exchange_request
+from cultmesh_py import CultMeshDiscoveryClient, CultMeshPeerCatalog, CultMeshStreamCatalog, create_node, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = create_node("mesh.cc", runtime_id="python-runtime")
@@ -208,6 +208,10 @@ node.put(note_doc, "note:1", {"body": "hello"})
 
 peers = CultMeshPeerCatalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
+
+client = CultMeshDiscoveryClient("127.0.0.1", 3075)
+verses = client.fetch_verses(transport_version="cultmesh.v0")
+mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
 
 streams = CultMeshStreamCatalog()
 ```
@@ -231,7 +235,9 @@ Current receipts:
   put/delete, mutation receipt, fire-command receipt, database subscription
   changes, shard catalog, shard log catch-up, simulation consensus candidates,
   and witness artifact bundle round-trips. The same test asks the Python peer
-  for CultMesh Verse catalog and peer exchange responses over the CultNet pipe.
+  for CultMesh Verse catalog and peer exchange responses over the CultNet pipe,
+  then verifies the public `CultMeshDiscoveryClient` can fetch typed Python
+  Verse and peer descriptors from that live endpoint.
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, simulation claim hashing, and witness artifact bundle payload

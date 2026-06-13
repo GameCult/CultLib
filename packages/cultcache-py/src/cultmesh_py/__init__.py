@@ -1,3 +1,4 @@
+from .client import CultMeshDiscoveryClient, peer_from_wire, verse_from_wire
 from .node import CultMeshNode, create_node
 from .wire import (
     PEER_EXCHANGE_REQUEST,
@@ -26,6 +27,7 @@ __all__ = [
     "CultMeshPeerCatalog",
     "CultMeshAuthorityLease",
     "CultMeshAuthorityLeaseCatalog",
+    "CultMeshDiscoveryClient",
     "CultMeshStreamCatalog",
     "CultMeshStreamConsumerProfile",
     "CultMeshStreamDescriptor",
@@ -39,6 +41,8 @@ __all__ = [
     "VERSE_CATALOG_REQUEST",
     "VERSE_CATALOG_RESPONSE",
     "create_node",
+    "peer_from_wire",
     "peer_exchange_request",
     "verse_catalog_request",
+    "verse_from_wire",
 ]

@@ -291,6 +291,12 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonPeerExchange.peers[0].peerId, "python-peer");
   assert.ok(pythonPeerExchange.peers[0].roles.includes("read-replica"));
 
+  const pythonCultMeshClient = await runPythonCultMeshClient(pythonPort);
+  assert.equal(pythonCultMeshClient.verses[0].verseId, "python-interop");
+  assert.equal(pythonCultMeshClient.verses[0].transportVersion, "cultmesh.v0");
+  assert.equal(pythonCultMeshClient.peers[0].peerId, "python-peer");
+  assert.ok(pythonCultMeshClient.peers[0].roles.includes("read-replica"));
+
   const pythonChange = await requestPythonDatabaseChange(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-subscribe",
@@ -700,6 +706,29 @@ async function requestCultMeshFromPython(port: number, request: Record<string, u
     });
     socket.write(encodeFrame(encode(request)));
   });
+}
+
+async function runPythonCultMeshClient(port: number): Promise<any> {
+  const script = [
+    "import json",
+    "from cultmesh_py import CultMeshDiscoveryClient",
+    `client = CultMeshDiscoveryClient("127.0.0.1", ${port}, timeout_seconds=4.0)`,
+    "verses = client.fetch_verses(transport_version='cultmesh.v0')",
+    "peers = client.fetch_peers(verse_id='python-interop', roles=['read-replica'])",
+    "print(json.dumps({",
+    "  'verses': [{'verseId': verse.verse_id, 'transportVersion': verse.compatibility.transport_version} for verse in verses],",
+    "  'peers': [{'peerId': peer.peer_id, 'roles': list(peer.roles)} for peer in peers],",
+    "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
 }
 
 async function requestPythonDatabaseChange(port: number, subscribe: Record<string, unknown>, put: Record<string, unknown>): Promise<any> {
