@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .node import CultMeshNode, create_node
+from .simulation import CultMeshSimulationFactCommitter
 from .wire import (
     CultMeshAuthorityLeaseCatalog,
     CultMeshPeerCatalog,
@@ -35,3 +36,7 @@ class CultMesh:
     @staticmethod
     def create_stream_catalog() -> CultMeshStreamCatalog:
         return CultMeshStreamCatalog()
+
+    @staticmethod
+    def create_simulation_fact_committer(node: CultMeshNode) -> CultMeshSimulationFactCommitter:
+        return CultMeshSimulationFactCommitter(node)

@@ -1,6 +1,14 @@
 from .client import CultMeshDiscoveryClient
 from .facade import CultMesh
 from .node import CultMeshNode, create_node
+from .simulation import (
+    SIMULATION_FACT_DOCUMENT_TYPE,
+    SIMULATION_FACT_SCHEMA_VERSION,
+    CultMeshSimulationFact,
+    CultMeshSimulationFactCommit,
+    CultMeshSimulationFactCommitter,
+    simulation_fact_document,
+)
 from .wire import (
     PEER_EXCHANGE_REQUEST,
     PEER_EXCHANGE_RESPONSE,
@@ -29,6 +37,9 @@ __all__ = [
     "CultMesh",
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
+    "CultMeshSimulationFact",
+    "CultMeshSimulationFactCommit",
+    "CultMeshSimulationFactCommitter",
     "CultMeshAuthorityLease",
     "CultMeshAuthorityLeaseCatalog",
     "CultMeshDiscoveryClient",
@@ -42,11 +53,14 @@ __all__ = [
     "CultMeshVerseDescriptor",
     "PEER_EXCHANGE_REQUEST",
     "PEER_EXCHANGE_RESPONSE",
+    "SIMULATION_FACT_DOCUMENT_TYPE",
+    "SIMULATION_FACT_SCHEMA_VERSION",
     "VERSE_CATALOG_REQUEST",
     "VERSE_CATALOG_RESPONSE",
     "create_node",
     "peer_from_wire",
     "peer_exchange_request",
+    "simulation_fact_document",
     "verse_catalog_request",
     "verse_from_wire",
 ]

@@ -210,7 +210,7 @@ python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-p
 
 `cultmesh_py` includes a local cache-backed node, schema-v0 helpers for the
 CultMesh Verse catalog and peer exchange wire messages, local authority lease
-checks, and stream transport negotiation:
+checks, stream transport negotiation, and committed simulation fact documents:
 
 ```python
 from cultcache_py import define_database_entry_type
@@ -238,6 +238,22 @@ node.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
 node.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
 
 streams = CultMesh.create_stream_catalog()
+
+claim_hash = "accepted-claim-hash"
+facts = CultMesh.create_simulation_fact_committer(node)
+committed = facts.commit({
+    "shardId": "arena",
+    "shardEpoch": 4,
+    "frame": 100,
+    "subjectId": "bob",
+    "claimKind": "hit",
+    "claimHash": claim_hash,
+    "witnessCount": 2,
+    "supportWeight": 2.0,
+    "totalWeight": 2.0,
+    "confidence": 1.0,
+    "hasQuorum": True,
+})
 ```
 
 ## Wire Parity
@@ -267,7 +283,8 @@ Current receipts:
 - `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, raw snapshot/shard-log application, simulation claim hashing,
-  and witness artifact bundle payload slots.
+  committed simulation fact payload slots, and witness artifact bundle payload
+  slots.
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.

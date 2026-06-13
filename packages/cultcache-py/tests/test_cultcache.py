@@ -46,6 +46,7 @@ from cultmesh_py import (
     CultMesh,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
+    CultMeshSimulationFact,
     CultMeshAuthorityLease,
     CultMeshAuthorityLeaseCatalog,
     CultMeshDiscoveryClient,
@@ -57,6 +58,7 @@ from cultmesh_py import (
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
     peer_exchange_request,
+    simulation_fact_document,
     verse_catalog_request,
 )
 
@@ -794,6 +796,75 @@ class CultCacheTests(unittest.TestCase):
             self.assertIsInstance(CultMesh.create_peer_catalog(), CultMeshPeerCatalog)
             self.assertIsInstance(CultMesh.create_authority_lease_catalog(), CultMeshAuthorityLeaseCatalog)
             self.assertIsInstance(CultMesh.create_stream_catalog(), CultMeshStreamCatalog)
+
+    def test_cultmesh_simulation_fact_uses_csharp_slot_contract(self) -> None:
+        import msgpack  # type: ignore
+
+        candidate = {
+            "shardId": "arena",
+            "shardEpoch": 4,
+            "frame": 100,
+            "subjectId": "bob",
+            "claimKind": "hit",
+            "claimHash": compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+            "claimSummary": "alice shot bob first",
+            "witnessCount": 2,
+            "supportWeight": 2.0,
+            "totalWeight": 2.0,
+            "confidence": 1.0,
+            "hasQuorum": True,
+        }
+
+        fact = CultMeshSimulationFact.from_candidate(candidate, committed_at="2026-06-13T00:00:00Z")
+        payload = simulation_fact_document.encode_payload(fact)
+        slots = msgpack.unpackb(payload, raw=False)
+
+        self.assertEqual(CultMeshSimulationFact.create_record_key(candidate), f"simulation:{fact.fact_id}")
+        self.assertEqual(slots[0], fact.fact_id)
+        self.assertEqual(slots[1], "arena")
+        self.assertEqual(slots[2], 4)
+        self.assertEqual(slots[3], 100)
+        self.assertEqual(slots[4], "bob")
+        self.assertEqual(slots[5], "hit")
+        self.assertEqual(slots[6], candidate["claimHash"])
+        self.assertEqual(slots[7], "alice shot bob first")
+        self.assertEqual(slots[8], 2)
+        self.assertEqual(slots[9], 2.0)
+        self.assertEqual(slots[10], 2.0)
+        self.assertEqual(slots[11], 1.0)
+        self.assertEqual(slots[12], "2026-06-13T00:00:00Z")
+
+    def test_cultmesh_simulation_fact_committer_rejects_without_quorum_and_stores_fact(self) -> None:
+        candidate = {
+            "shardId": "arena",
+            "shardEpoch": 4,
+            "frame": 100,
+            "subjectId": "bob",
+            "claimKind": "hit",
+            "claimHash": compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+            "claimSummary": "alice shot bob first",
+            "witnessCount": 2,
+            "supportWeight": 2.0,
+            "totalWeight": 2.0,
+            "confidence": 1.0,
+            "hasQuorum": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "facts.cc", runtime_id="mesh-facts")
+            committer = CultMesh.create_simulation_fact_committer(node)
+
+            rejected = dict(candidate)
+            rejected["hasQuorum"] = False
+            with self.assertRaisesRegex(ValueError, "before quorum"):
+                committer.commit(rejected)
+
+            committed = committer.commit(candidate, committed_at="2026-06-13T00:00:00Z")
+            stored = node.get_required(simulation_fact_document, committed.key)
+
+            self.assertEqual(stored.claim_hash, candidate["claimHash"])
+            self.assertEqual(stored.committed_at, "2026-06-13T00:00:00Z")
+            self.assertEqual(committed.fact.fact_id, stored.fact_id)
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore
