@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import { decode, encode } from "@msgpack/msgpack";
 import { encodeFrame, LengthPrefixedMessageFramer } from "../../src/framing";
+import { INTEROP_SCHEMA_VERSION } from "./cultnet-interop-shared";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +27,7 @@ const cultnetRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultnet-rs"))
 
 const tsPeerScript = resolve(cultNetTsRoot, "dist-test", "test", "interop", "cultnet-interop-peer.js");
 const interopSchemaPath = resolve(cultNetTsRoot, "integration", "contracts", "cultnet.interop-note.schema.json");
+const interopNoteSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json";
 const csharpProjectPath = resolve(
   cultLibRoot,
   "tests",
@@ -261,6 +263,38 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonPeerExchange.peers[0].peerId, "python-peer");
   assert.ok(pythonPeerExchange.peers[0].roles.includes("read-replica"));
 
+  const pythonChange = await requestPythonDatabaseChange(pythonPort, {
+    schemaVersion: "cultnet.database_subscribe.v0",
+    messageId: "python-subscribe",
+    subscriptionId: "python-sub",
+    schemaIds: [interopNoteSchemaId],
+    recordKeys: ["note:ts-python-sub"],
+    includeSnapshot: false,
+  }, {
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId: "python-sub-put",
+    document: {
+      schemaId: interopNoteSchemaId,
+      recordKey: "note:ts-python-sub",
+      storedAt: "2026-06-13T00:00:00Z",
+      payloadEncoding: "messagepack",
+      payload: encode([
+        INTEROP_SCHEMA_VERSION,
+        "note:ts-python-sub",
+        "ts-python-sub",
+        "Subscription note",
+        "Python streamed this raw change through the CultNet database lane.",
+        ["interop", "subscription"],
+      ]),
+      sourceRuntimeId: "ts-python-sub",
+    },
+  });
+  assert.equal(pythonChange.schemaVersion, "cultnet.database_change_raw.v0");
+  assert.equal(pythonChange.subscriptionId, "python-sub");
+  assert.equal(pythonChange.changeKind, "put");
+  assert.equal(pythonChange.document.schemaId, interopNoteSchemaId);
+  assert.equal(pythonChange.document.recordKey, "note:ts-python-sub");
+
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
   await expectProbePeers("ts-probe", process.execPath, [
@@ -469,6 +503,36 @@ async function requestCultMeshFromPython(port: number, request: Record<string, u
       reject(error);
     });
     socket.write(encodeFrame(encode(request)));
+  });
+}
+
+async function requestPythonDatabaseChange(port: number, subscribe: Record<string, unknown>, put: Record<string, unknown>): Promise<any> {
+  const socket = connectTcp(port, "127.0.0.1");
+  const framer = new LengthPrefixedMessageFramer();
+  await once(socket, "connect");
+
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for Python database change response."));
+    }, 5000);
+
+    socket.on("data", (chunk) => {
+      for (const frame of framer.push(chunk)) {
+        const decoded = decode(frame) as any;
+        if (decoded?.schemaVersion === "cultnet.database_change_raw.v0") {
+          clearTimeout(timeout);
+          socket.end();
+          resolve(decoded);
+        }
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.write(encodeFrame(encode(subscribe)));
+    socket.write(encodeFrame(encode(put)));
   });
 }
 

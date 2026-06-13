@@ -50,6 +50,7 @@ def hello(
 
 def document_put_raw(
     *,
+    message_id: str = "",
     key: str,
     schema_id: str,
     stored_at: str,
@@ -65,7 +66,7 @@ def document_put_raw(
     }
     if source_runtime_id:
         record["sourceRuntimeId"] = source_runtime_id
-    return CultNetMessage("cultnet.document_put_raw.v0", {"document": record})
+    return CultNetMessage("cultnet.document_put_raw.v0", {"messageId": message_id, "document": record})
 
 
 def document_delete(*, schema_id: str, record_key: str, deleted_at: str) -> CultNetMessage:
@@ -86,4 +87,31 @@ def schema_catalog_request(*, message_id: str = "", include_schema_json: bool = 
     return CultNetMessage(
         "cultnet.schema_catalog_request.v0",
         {"messageId": message_id, "includeSchemaJson": include_schema_json},
+    )
+
+
+def database_subscribe(
+    *,
+    subscription_id: str,
+    message_id: str = "",
+    schema_ids: list[str] | None = None,
+    record_keys: list[str] | None = None,
+    include_snapshot: bool = True,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.database_subscribe.v0",
+        {
+            "messageId": message_id,
+            "subscriptionId": subscription_id,
+            "schemaIds": schema_ids or [],
+            "recordKeys": record_keys or [],
+            "includeSnapshot": include_snapshot,
+        },
+    )
+
+
+def database_unsubscribe(*, subscription_id: str, message_id: str = "") -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.database_unsubscribe.v0",
+        {"messageId": message_id, "subscriptionId": subscription_id},
     )

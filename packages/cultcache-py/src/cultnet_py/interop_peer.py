@@ -78,6 +78,22 @@ class PeerState:
     peer_catalog: CultMeshPeerCatalog
 
 
+@dataclass
+class DatabaseSubscription:
+    subscription_id: str
+    schema_ids: set[str]
+    record_keys: set[str]
+
+    def matches(self, document: dict[str, Any]) -> bool:
+        schema_id = document.get("schemaId")
+        record_key = document.get("recordKey")
+        if self.schema_ids and schema_id not in self.schema_ids:
+            return False
+        if self.record_keys and record_key not in self.record_keys:
+            return False
+        return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultnet-py-interop")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -175,6 +191,7 @@ def accept_loop(server: socket.socket, state: PeerState, stop: threading.Event) 
 def handle_connection(client: socket.socket, state: PeerState) -> None:
     with client:
         stream = client.makefile("rwb", buffering=0)
+        subscriptions: dict[str, DatabaseSubscription] = {}
         while True:
             try:
                 payload = read_frame(stream)
@@ -183,12 +200,12 @@ def handle_connection(client: socket.socket, state: PeerState) -> None:
             message = msgpack.unpackb(payload, raw=False)
             if not isinstance(message, dict):
                 continue
-            response_messages = handle_server_message(state, message)
+            response_messages = handle_server_message(state, message, subscriptions)
             for response in response_messages:
                 write_message(stream, response)
 
 
-def handle_server_message(state: PeerState, message: dict[str, Any]) -> list[dict[str, Any]]:
+def handle_server_message(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
     schema_version = message.get("schemaVersion")
     if schema_version == "cultnet.hello.v0":
         return [hello_message(state)]
@@ -196,8 +213,13 @@ def handle_server_message(state: PeerState, message: dict[str, Any]) -> list[dic
         return [catalog_response(state, message)]
     if schema_version == "cultnet.snapshot_request.v0":
         return [raw_snapshot_response(state, message)]
+    if schema_version == "cultnet.database_subscribe.v0":
+        return handle_database_subscribe(state, message, subscriptions)
+    if schema_version == "cultnet.database_unsubscribe.v0":
+        subscriptions.pop(str(message.get("subscriptionId") or ""), None)
+        return []
     if schema_version == "cultnet.document_put_raw.v0":
-        return handle_raw_put(state, message)
+        return handle_raw_put(state, message, subscriptions)
     if schema_version == VERSE_CATALOG_REQUEST:
         return [state.verse_catalog.create_response(message)]
     if schema_version == PEER_EXCHANGE_REQUEST:
@@ -205,11 +227,26 @@ def handle_server_message(state: PeerState, message: dict[str, Any]) -> list[dic
     return []
 
 
-def handle_raw_put(state: PeerState, message: dict[str, Any]) -> list[dict[str, Any]]:
+def handle_database_subscribe(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
+    subscription_id = str(message.get("subscriptionId") or message.get("messageId") or "")
+    if not subscription_id:
+        return []
+    subscriptions[subscription_id] = DatabaseSubscription(
+        subscription_id=subscription_id,
+        schema_ids={str(value) for value in message.get("schemaIds") or []},
+        record_keys={str(value) for value in message.get("recordKeys") or []},
+    )
+    if message.get("includeSnapshot", True) is False:
+        return []
+    return [raw_snapshot_response(state, message)]
+
+
+def handle_raw_put(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
     document = message.get("document")
     if not isinstance(document, dict):
         return []
     applied = apply_raw_document_put(state, document)
+    responses = database_change_notifications(message, document, subscriptions)
     schema_id = document.get("schemaId")
     if schema_id == INTEROP_MUTATION_INTENT_SCHEMA_ID:
         note_binding = state.bindings_by_schema_id[state.note_schema_id]
@@ -230,6 +267,7 @@ def handle_raw_put(state: PeerState, message: dict[str, Any]) -> list[dict[str, 
             "tags": mutated["tags"],
         }
         return [
+            *responses,
             raw_document_put(state.bindings_by_schema_id[INTEROP_MUTATION_RECEIPT_SCHEMA_ID], f"{state.runtime_id}-mutation-receipt", receipt["intentId"], receipt, state),
             raw_document_put(note_binding, f"{state.runtime_id}-mutated-note", mutated["documentId"], mutated, state),
         ]
@@ -244,8 +282,24 @@ def handle_raw_put(state: PeerState, message: dict[str, Any]) -> list[dict[str, 
             "shotsFired": 1,
             "ammoRemaining": 29,
         }
-        return [raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_RECEIPT_SCHEMA_ID], f"{state.runtime_id}-fire-receipt", receipt["commandId"], receipt, state)]
-    return []
+        return [*responses, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_RECEIPT_SCHEMA_ID], f"{state.runtime_id}-fire-receipt", receipt["commandId"], receipt, state)]
+    return responses
+
+
+def database_change_notifications(message: dict[str, Any], document: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
+    notifications = []
+    for subscription in subscriptions.values():
+        if not subscription.matches(document):
+            continue
+        message_id = message.get("messageId") or document.get("recordKey") or "change"
+        notifications.append({
+            "schemaVersion": "cultnet.database_change_raw.v0",
+            "messageId": f"{message_id}:{subscription.subscription_id}",
+            "subscriptionId": subscription.subscription_id,
+            "changeKind": "put",
+            "document": document,
+        })
+    return notifications
 
 
 def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, state: PeerState, stop: threading.Event) -> None:

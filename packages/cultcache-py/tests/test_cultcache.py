@@ -14,7 +14,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.interop import read_note, write_note
-from cultnet_py import decode_frame, encode_frame, hello, parse_message
+from cultnet_py import database_subscribe, database_unsubscribe, decode_frame, document_put_raw, encode_frame, hello, parse_message
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -172,6 +172,40 @@ class CultCacheTests(unittest.TestCase):
         parsed = parse_message(decode_frame(encode_frame(message.to_bytes())))
         self.assertEqual(parsed.schema_version, "cultnet.hello.v0")
         self.assertEqual(parsed.body["runtimeId"], "python-test")
+
+    def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
+        subscribe = database_subscribe(
+            message_id="sub-message",
+            subscription_id="sub-1",
+            schema_ids=["schema-a"],
+            record_keys=["record-a"],
+            include_snapshot=False,
+        ).to_wire()
+        self.assertEqual(subscribe["schemaVersion"], "cultnet.database_subscribe.v0")
+        self.assertEqual(subscribe["messageId"], "sub-message")
+        self.assertEqual(subscribe["subscriptionId"], "sub-1")
+        self.assertEqual(subscribe["schemaIds"], ["schema-a"])
+        self.assertEqual(subscribe["recordKeys"], ["record-a"])
+        self.assertFalse(subscribe["includeSnapshot"])
+
+        unsubscribe = database_unsubscribe(message_id="unsub-message", subscription_id="sub-1").to_wire()
+        self.assertEqual(unsubscribe["schemaVersion"], "cultnet.database_unsubscribe.v0")
+        self.assertEqual(unsubscribe["messageId"], "unsub-message")
+        self.assertEqual(unsubscribe["subscriptionId"], "sub-1")
+
+    def test_cultnet_raw_put_helper_carries_message_id(self) -> None:
+        put = document_put_raw(
+            message_id="put-1",
+            key="record-a",
+            schema_id="schema-a",
+            stored_at="2026-06-13T00:00:00Z",
+            payload=b"payload",
+            source_runtime_id="python-test",
+        ).to_wire()
+        self.assertEqual(put["schemaVersion"], "cultnet.document_put_raw.v0")
+        self.assertEqual(put["messageId"], "put-1")
+        self.assertEqual(put["document"]["recordKey"], "record-a")
+        self.assertEqual(put["document"]["sourceRuntimeId"], "python-test")
 
     def test_cultmesh_node_uses_cultcache_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
