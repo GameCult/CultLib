@@ -244,6 +244,29 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(tsDialPython.mutatedNote.tags.includes("decorated:ts-python-client"));
   assert.equal(tsDialPython.fireReceipt.ammoRemaining, 29);
 
+  const pythonWireCatalog = await requestCultMeshFromPython(pythonPort, {
+    schemaVersion: "cultnet.schema_catalog_request.v0",
+    messageId: "python-wire-catalog",
+    includeSchemaJson: true,
+    kinds: ["wire_message"],
+  });
+  assert.equal(pythonWireCatalog.schemaVersion, "cultnet.schema_catalog_response.v0");
+  assert.equal(pythonWireCatalog.messageId, "python-wire-catalog");
+  const pythonWireVersions = new Set(pythonWireCatalog.schemas.map((schema: any) => schema.schemaVersion));
+  for (const schemaVersion of [
+    "cultnet.document_delete.v0",
+    "cultnet.database_change_raw.v0",
+    "cultnet.shard_log_response.v0",
+    "cultnet.simulation_consensus_candidate.v0",
+    "cultmesh.peer_exchange_response.v0",
+  ]) {
+    assert.ok(pythonWireVersions.has(schemaVersion), `Python wire catalog should include ${schemaVersion}`);
+  }
+  const pythonDeleteDescriptor = pythonWireCatalog.schemas.find((schema: any) => schema.schemaVersion === "cultnet.document_delete.v0");
+  assert.equal(pythonDeleteDescriptor.kind, "wire_message");
+  assert.ok(pythonDeleteDescriptor.wireContracts.includes("cultnet.schema.v0"));
+  assert.ok(String(pythonDeleteDescriptor.schemaJson).includes("cultnet.document_delete.v0"));
+
   const pythonVerseCatalog = await requestCultMeshFromPython(pythonPort, {
     schemaVersion: "cultmesh.verse_catalog_request.v0",
     messageId: "python-verses",

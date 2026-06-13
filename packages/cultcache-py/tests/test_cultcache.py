@@ -15,6 +15,7 @@ from cultcache_py import (
 )
 from cultcache_py.interop import read_note, write_note
 from cultnet_py import compute_simulation_claim_hash, database_subscribe, database_unsubscribe, decode_frame, decode_witness_artifact_bundle_payload, document_delete, document_put_raw, encode_frame, encode_witness_artifact_bundle_payload, hello, parse_message, shard_catalog_request, shard_log_request, simulation_observation, witness_artifact_bundle
+from cultnet_py.interop_peer import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMeshPeerCard,
@@ -221,6 +222,22 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(message["recordKey"], "record-a")
         self.assertEqual(message["shardId"], "interop")
         self.assertEqual(message["shardEpoch"], 1)
+
+    def test_cultnet_wire_catalog_describes_python_handled_messages(self) -> None:
+        descriptors = wire_message_schema_descriptors(include_schema_json=True)
+        by_version = {descriptor["schemaVersion"]: descriptor for descriptor in descriptors}
+        for schema_version in [
+            "cultnet.document_delete.v0",
+            "cultnet.database_change_raw.v0",
+            "cultnet.shard_log_response.v0",
+            "cultnet.simulation_consensus_candidate.v0",
+            "cultmesh.peer_exchange_response.v0",
+        ]:
+            self.assertIn(schema_version, by_version)
+            self.assertEqual(by_version[schema_version]["kind"], "wire_message")
+            self.assertIn("cultnet.schema.v0", by_version[schema_version]["wireContracts"])
+            self.assertIn(schema_version, by_version[schema_version]["schemaJson"])
+            self.assertEqual(len(by_version[schema_version]["contentHash"]), 64)
 
     def test_cultnet_shard_helpers_match_schema_v0_shape(self) -> None:
         catalog = shard_catalog_request(

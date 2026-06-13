@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import json
 import selectors
 import signal
@@ -56,6 +57,30 @@ WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION = "cultnet.witness_artifact_bundle.v0"
 INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
 DISCOVERY_PROBE_SCHEMA_VERSION = "cultnet.discovery_probe.v0"
 DISCOVERY_ANNOUNCE_SCHEMA_VERSION = "cultnet.discovery_announce.v0"
+CULTNET_SCHEMA_BASE = "https://github.com/GameCult/cultnet-ts/contracts"
+
+WIRE_MESSAGE_SCHEMA_VERSIONS = (
+    ("cultnet.hello.v0", "CultNet Hello Message", f"{CULTNET_SCHEMA_BASE}/cultnet.hello.schema.json"),
+    ("cultnet.document_delete.v0", "CultNet Document Delete Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-delete.schema.json"),
+    ("cultnet.document_put_raw.v0", "CultNet Raw Document Put Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-put-raw.schema.json"),
+    ("cultnet.snapshot_request.v0", "CultNet Snapshot Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.snapshot-request.schema.json"),
+    ("cultnet.snapshot_response_raw.v0", "CultNet Raw Snapshot Response Message", f"{CULTNET_SCHEMA_BASE}/cultnet.snapshot-response-raw.schema.json"),
+    ("cultnet.schema_catalog_request.v0", "CultNet Schema Catalog Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.schema-catalog-request.schema.json"),
+    ("cultnet.schema_catalog_response.v0", "CultNet Schema Catalog Response Message", f"{CULTNET_SCHEMA_BASE}/cultnet.schema-catalog-response.schema.json"),
+    ("cultnet.database_subscribe.v0", "CultNet Database Subscribe Message", f"{CULTNET_SCHEMA_BASE}/cultnet.database-subscribe.schema.json"),
+    ("cultnet.database_unsubscribe.v0", "CultNet Database Unsubscribe Message", f"{CULTNET_SCHEMA_BASE}/cultnet.database-unsubscribe.schema.json"),
+    ("cultnet.database_change_raw.v0", "CultNet Raw Database Change Message", f"{CULTNET_SCHEMA_BASE}/cultnet.database-change-raw.schema.json"),
+    ("cultnet.shard_catalog_request.v0", "CultNet Shard Catalog Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.shard-catalog-request.schema.json"),
+    ("cultnet.shard_catalog_response.v0", "CultNet Shard Catalog Response Message", f"{CULTNET_SCHEMA_BASE}/cultnet.shard-catalog-response.schema.json"),
+    ("cultnet.shard_log_request.v0", "CultNet Shard Log Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.shard-log-request.schema.json"),
+    ("cultnet.shard_log_response.v0", "CultNet Shard Log Response Message", f"{CULTNET_SCHEMA_BASE}/cultnet.shard-log-response.schema.json"),
+    ("cultnet.simulation_observation.v0", "CultNet Simulation Observation Message", f"{CULTNET_SCHEMA_BASE}/cultnet.simulation-observation.schema.json"),
+    ("cultnet.simulation_consensus_candidate.v0", "CultNet Simulation Consensus Candidate Message", f"{CULTNET_SCHEMA_BASE}/cultnet.simulation-consensus-candidate.schema.json"),
+    (VERSE_CATALOG_REQUEST, "CultMesh Verse Catalog Request Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.verse-catalog-request.schema.json"),
+    ("cultmesh.verse_catalog_response.v0", "CultMesh Verse Catalog Response Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.verse-catalog-response.schema.json"),
+    (PEER_EXCHANGE_REQUEST, "CultMesh Peer Exchange Request Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.peer-exchange-request.schema.json"),
+    ("cultmesh.peer_exchange_response.v0", "CultMesh Peer Exchange Response Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.peer-exchange-response.schema.json"),
+)
 
 
 @dataclass(frozen=True)
@@ -793,6 +818,12 @@ def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any
     kinds = set(request.get("kinds") or [])
     include_schema_json = request.get("includeSchemaJson") is True
     schemas = []
+    for descriptor in wire_message_schema_descriptors(include_schema_json):
+        if schema_ids and descriptor["schemaId"] not in schema_ids:
+            continue
+        if kinds and descriptor["kind"] not in kinds:
+            continue
+        schemas.append(descriptor)
     if (not schema_ids or state.note_schema_id in schema_ids) and (not kinds or "document_payload" in kinds):
         schemas.append({
             "schemaId": state.note_schema_id,
@@ -816,6 +847,37 @@ def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any
             "schemaJson": witness_artifact_bundle_schema_json() if include_schema_json else None,
         })
     return {"schemaVersion": "cultnet.schema_catalog_response.v0", "messageId": request.get("messageId", ""), "schemas": schemas}
+
+
+def wire_message_schema_descriptors(include_schema_json: bool) -> list[dict[str, Any]]:
+    descriptors = []
+    for schema_version, title, schema_id in WIRE_MESSAGE_SCHEMA_VERSIONS:
+        schema_json = wire_message_schema_json(schema_id, title, schema_version)
+        descriptor: dict[str, Any] = {
+            "schemaId": schema_id,
+            "kind": "wire_message",
+            "schemaVersion": schema_version,
+            "title": title,
+            "wireContracts": [INTEROP_WIRE_CONTRACT],
+            "contentHash": hashlib.sha256(schema_json.encode("utf-8")).hexdigest(),
+        }
+        if include_schema_json:
+            descriptor["schemaJson"] = schema_json
+        descriptors.append(descriptor)
+    return descriptors
+
+
+def wire_message_schema_json(schema_id: str, title: str, schema_version: str) -> str:
+    return json.dumps({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_id,
+        "title": title,
+        "type": "object",
+        "required": ["schemaVersion"],
+        "properties": {
+            "schemaVersion": {"const": schema_version},
+        },
+    }, separators=(",", ":"), sort_keys=True)
 
 
 def raw_snapshot_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
