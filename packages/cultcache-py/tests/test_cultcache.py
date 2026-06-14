@@ -3321,6 +3321,116 @@ class CultCacheTests(unittest.TestCase):
             finally:
                 self._terminate_process(process)
 
+    def test_cultmesh_daemon_serves_compacted_shard_log_resync_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache_path = root / "mesh.cc"
+            shard_log_path = root / "shard-log"
+            store = CultNetFileShardMutationLogStore(shard_log_path)
+            node = CultMesh.create_node(
+                cache_path,
+                runtime_id="compacted-daemon-peer",
+                enable_durable_shard_logs=True,
+                shard_log_path=shard_log_path,
+            )
+            node.database.register_document(interop_note_document)
+            node.database.put_raw_message(
+                interop_note_document,
+                "note:compacted-one",
+                {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:compacted-one",
+                    "authorRuntimeId": "compacted-daemon-peer",
+                    "title": "compacted daemon note one",
+                    "body": "first retained cache value",
+                    "tags": ["daemon", "compaction"],
+                },
+                message_id="compacted-put-1",
+                shard_id="compacted-interop",
+                shard_epoch=7,
+            )
+            node.database.put_raw_message(
+                interop_note_document,
+                "note:compacted-two",
+                {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:compacted-two",
+                    "authorRuntimeId": "compacted-daemon-peer",
+                    "title": "compacted daemon note two",
+                    "body": "second retained cache value",
+                    "tags": ["daemon", "compaction"],
+                },
+                message_id="compacted-put-2",
+                shard_id="compacted-interop",
+                shard_epoch=7,
+            )
+            store.compact_through("compacted-interop", 1)
+
+            ready_path = root / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "compacted-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--register-interop-note",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(
+                    {document.record_key for document in snapshot_response.documents},
+                    {"note:compacted-one", "note:compacted-two"},
+                )
+
+                compacted = client.fetch_shard_log_response(
+                    shard_id="compacted-interop",
+                    shard_epoch=7,
+                    after_sequence=0,
+                )
+                retained = client.fetch_shard_log_response(
+                    shard_id="compacted-interop",
+                    shard_epoch=7,
+                    after_sequence=1,
+                )
+
+                self.assertTrue(compacted.resync_required)
+                self.assertEqual(compacted.reason, "compacted_history")
+                self.assertEqual(compacted.compacted_through, 1)
+                self.assertEqual(compacted.entries, ())
+                self.assertFalse(retained.resync_required)
+                self.assertEqual([entry.sequence for entry in retained.entries], [2])
+                self.assertIsNotNone(retained.entries[0].raw_document)
+                assert retained.entries[0].raw_document is not None
+                self.assertEqual(retained.entries[0].raw_document.record_key, "note:compacted-two")
+            finally:
+                self._terminate_process(process)
+
     def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
         deadline = time.monotonic() + 5.0
         while not ready_path.exists() and time.monotonic() < deadline:

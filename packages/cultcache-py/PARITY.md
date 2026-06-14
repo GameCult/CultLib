@@ -111,7 +111,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   persisted interop-note snapshot and shard-log entry without reseeding. The
   launched daemon also accepts raw puts over a live database subscription stream,
   emits the matching change notification, and records the mutation in the served
-  shard log.
+  shard log. If its durable shard log has been compacted, stale shard-log
+  requests return the same explicit `compacted_history` resync boundary over
+  the daemon wire endpoint instead of silently looking empty.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and
