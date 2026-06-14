@@ -138,6 +138,34 @@ class CultCacheTests(unittest.TestCase):
             cache.delete(document, "item:potion")
             self.assertIsNone(cache.get(document, "item:potion"))
 
+    def test_incremental_lookup_updates_replace_stale_name_and_index_entries(self) -> None:
+        document = item_doc()
+        cache = CultCache()
+        cache.register_document_type(document)
+
+        cache.put(document, "item:potion", Item(name="Potion", category="Consumable", value=50))
+        cache.put(document, "item:potion", Item(name="Elixir", category="Rare", value=80))
+
+        self.assertIsNone(cache.get_key_by_name(document, "Potion"))
+        self.assertIsNone(cache.get_key_by_index(document, "category", "Consumable"))
+        self.assertEqual(cache.get_key_by_name(document, "Elixir"), "item:potion")
+        self.assertEqual(cache.get_by_index(document, "category", "Rare").name, "Elixir")
+
+    def test_incremental_lookup_delete_restores_duplicate_owner(self) -> None:
+        document = item_doc()
+        cache = CultCache()
+        cache.register_document_type(document)
+
+        cache.put(document, "item:first", Item(name="Potion", category="Consumable", value=50))
+        cache.put(document, "item:second", Item(name="Potion", category="Consumable", value=60))
+        self.assertEqual(cache.get_key_by_name(document, "Potion"), "item:second")
+        self.assertEqual(cache.get_key_by_index(document, "category", "Consumable"), "item:second")
+
+        cache.delete(document, "item:second")
+
+        self.assertEqual(cache.get_key_by_name(document, "Potion"), "item:first")
+        self.assertEqual(cache.get_key_by_index(document, "category", "Consumable"), "item:first")
+
     def test_database_entry_formatter_uses_slot_indexed_messagepack_array(self) -> None:
         try:
             import msgpack  # type: ignore
