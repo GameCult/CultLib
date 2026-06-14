@@ -2207,6 +2207,51 @@ class CultCacheTests(unittest.TestCase):
         self.assertTrue(second["hasQuorum"])
         self.assertEqual(second["witnessCount"], 2)
 
+    def test_cultmesh_game_session_can_disable_served_simulation_observations(self) -> None:
+        verse_catalog = CultMeshVerseCatalog()
+        verse_catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="session-quiet",
+            display_name="Quiet Session",
+            authority_model="local",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "quiet-rules"),
+        ))
+        session = CultMesh.create_game_session(
+            CultMesh.create_node(runtime_id="quiet-session-peer"),
+            CultMeshGameSessionOptions(
+                verse_catalog=verse_catalog,
+                serve_simulation_observations=False,
+            ),
+        )
+        server = session.serve(display_name="Quiet Session Peer")
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(
+                hello(runtime_id="quiet-session-prober"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            with self.assertRaisesRegex(CultNetPeerError, "Simulation observations are not enabled") as raised:
+                raw_client.request(
+                    simulation_observation(
+                        message_id="quiet-session-sim",
+                        witness_runtime_id="watcher-1",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+        finally:
+            server.stop()
+
+        self.assertNotIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(verses[0].verse_id, "session-quiet")
+        self.assertEqual(raised.exception.response["code"], "simulation_observations_disabled")
+
     def test_cultmesh_game_session_prediction_requires_scope_and_reconciles_shard_log(self) -> None:
         note_doc = define_database_entry_type(
             "mesh.input",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from cultcache_py.documents import DocumentDefinition
 from cultnet_py import (
@@ -24,6 +24,9 @@ from .simulation import (
     simulation_fact_document,
 )
 from .wire import CultMeshAuthorityLeaseCatalog, CultMeshPeerCatalog, CultMeshVerseCatalog
+
+if TYPE_CHECKING:
+    from .server import CultMeshLocalServer
 
 
 @dataclass(frozen=True)
@@ -85,7 +88,7 @@ class CultMeshGameSession:
         display_name: str | None = None,
         max_snapshot_documents: int | None = None,
         max_snapshot_bytes: int | None = None,
-    ) -> Any:
+    ) -> CultMeshLocalServer:
         from .server import CultMeshLocalServer
 
         return CultMeshLocalServer(
