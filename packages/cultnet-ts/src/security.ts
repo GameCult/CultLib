@@ -96,6 +96,7 @@ export class CultNetServerSecurityOptions extends CultNetClientSecurityOptions {
 export interface ValidatedCultNetSessionToken {
   userId: string;
   expiresAtUtc: Date;
+  sessionVersion: number;
 }
 
 export const CultNetSecret = {
@@ -166,8 +167,11 @@ export const CultNetSecret = {
     userId: string,
     expiresAtUtc: Date,
     options: CultNetServerSecurityOptions,
+    sessionVersion?: number,
   ): string {
-    const payload = `${userId}|${Math.floor(expiresAtUtc.getTime() / 1000)}`;
+    const payload = sessionVersion === undefined
+      ? `${userId}|${Math.floor(expiresAtUtc.getTime() / 1000)}`
+      : `${normalizeSessionUserId(userId)}|${Math.floor(expiresAtUtc.getTime() / 1000)}|${Math.trunc(sessionVersion)}`;
     const payloadBytes = Buffer.from(payload, "utf8");
     const signatureBytes = hmacSha256(options.getSessionSigningKey(), payloadBytes);
     return `${toBase64Url(payloadBytes)}.${toBase64Url(signatureBytes)}`;
@@ -197,13 +201,17 @@ export const CultNetSecret = {
 
       const payload = payloadBytes.toString("utf8");
       const payloadParts = payload.split("|");
-      if (payloadParts.length !== 2) {
+      if (payloadParts.length !== 2 && payloadParts.length !== 3) {
         return null;
       }
 
       const [userId, expiresAtUnix] = payloadParts;
       const expiresAtSeconds = Number.parseInt(expiresAtUnix, 10);
       if (!Number.isFinite(expiresAtSeconds)) {
+        return null;
+      }
+      const sessionVersion = payloadParts.length === 3 ? Number.parseInt(payloadParts[2]!, 10) : 0;
+      if (!Number.isFinite(sessionVersion)) {
         return null;
       }
 
@@ -215,6 +223,7 @@ export const CultNetSecret = {
       return {
         userId,
         expiresAtUtc,
+        sessionVersion,
       };
     } catch {
       return null;
@@ -245,6 +254,15 @@ function sha256(input: Uint8Array): Buffer {
 
 function hmacSha256(key: Uint8Array, input: Uint8Array): Buffer {
   return createHmac("sha256", key).update(input).digest();
+}
+
+function normalizeSessionUserId(userId: string): string {
+  const normalized = userId.replace(/-/g, "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/u.test(normalized)) {
+    throw new Error("Versioned session tokens require a Guid-compatible user id.");
+  }
+
+  return normalized;
 }
 
 function toBase64Url(input: Uint8Array): string {

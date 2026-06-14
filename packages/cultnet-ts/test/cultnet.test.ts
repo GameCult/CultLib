@@ -84,6 +84,44 @@ test("CultNet secret helpers round-trip encrypted strings and validate sessions"
   const validated = CultNetSecret.tryValidateSessionToken(token, serverSecurity);
   assert.ok(validated);
   assert.equal(validated?.userId, "runtime-face");
+  assert.equal(validated?.sessionVersion, 0);
+});
+
+test("CultNet secret helpers validate C# and Python compatible versioned sessions", () => {
+  const serverSecurity = CultNetServerSecurityOptions.development();
+  const expires = new Date(Date.now() + 60_000);
+  const token = CultNetSecret.createSessionToken(
+    "318fb4b6-ff5e-4c4f-b911-d81807de53a8",
+    expires,
+    serverSecurity,
+    42,
+  );
+  const [payload] = token.split(".");
+  assert.equal(
+    new TextDecoder().decode(CultNetSecret.fromBase64Url(payload!)),
+    `318fb4b6ff5e4c4fb911d81807de53a8|${Math.floor(expires.getTime() / 1000)}|42`,
+  );
+
+  const validated = CultNetSecret.tryValidateSessionToken(token, serverSecurity);
+  assert.ok(validated);
+  assert.equal(validated?.userId, "318fb4b6ff5e4c4fb911d81807de53a8");
+  assert.equal(validated?.sessionVersion, 42);
+  assert.throws(
+    () => CultNetSecret.createSessionToken("runtime-face", expires, serverSecurity, 1),
+    /Guid-compatible/,
+  );
+});
+
+test("CultNet secret helpers validate Python-created versioned sessions", () => {
+  const token = [
+    "MzE4ZmI0YjZmZjVlNGM0ZmI5MTFkODE4MDdkZTUzYTh8MjA1MTIyMjQwMHw3Nw",
+    "jRrUiE5Om7NQVKMJP4PkBkLFVLXqNb8Uu9jg4VG13pU",
+  ].join(".");
+
+  const validated = CultNetSecret.tryValidateSessionToken(token, CultNetServerSecurityOptions.development());
+  assert.ok(validated);
+  assert.equal(validated?.userId, "318fb4b6ff5e4c4fb911d81807de53a8");
+  assert.equal(validated?.sessionVersion, 77);
 });
 
 test("CultNet peer frames and decodes typed messages over a direct pipe", async () => {

@@ -209,6 +209,9 @@ The security helpers intentionally mirror CultLib's shape:
 - 12-byte nonce
 - authentication tag prefixed onto ciphertext
 - session token format: `base64url(payload).base64url(signature)`
+- versioned C#/Python-compatible session token payloads:
+  `userGuidN|expiresUnix|sessionVersion`, while legacy two-field tokens still
+  validate with session version `0`
 
 That means a TypeScript runtime can follow the same cryptographic and session
 story as the C# version instead of inventing one more house religion around
