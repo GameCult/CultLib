@@ -119,6 +119,14 @@ def item_doc():
 
 
 class CultCacheTests(unittest.TestCase):
+    def _wait_until(self, predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("Timed out waiting for condition")
+
     def test_round_trips_registered_documents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             document = item_doc()
@@ -1592,6 +1600,72 @@ class CultCacheTests(unittest.TestCase):
 
         self.assertEqual(resync_sequence, 2)
         self.assertEqual(resync_target.get_required(document, "note:1")["body"], "one")
+
+    def test_cultnet_shard_replicator_background_loop_polls_non_primary_shards(self) -> None:
+        document = define_database_entry_type(
+            "mesh.background_replica_note",
+            [("body", 0)],
+            schema_id="mesh.background_replica_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="background-primary")
+        source.database.register_document(document)
+        target = CultMesh.create_node(runtime_id="background-replica")
+        target.database.register_document(document)
+        cursor_store = CultNetInMemoryShardReplicaCursorStore()
+        errors: list[Exception] = []
+
+        class FlakySourceFetcher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fetch(self, shard: CultNetShardDescriptor, *, after_sequence: int, limit: int | None = None) -> CultNetShardLogResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient fetch failure")
+                return source.database.build_shard_log_response(
+                    shard_id=shard.shard_id,
+                    shard_epoch=shard.epoch,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+
+        fetcher = FlakySourceFetcher()
+        shard = CultNetShardDescriptor(
+            shard_id="background",
+            owner_runtime_id="background-primary",
+            epoch=7,
+            is_primary=False,
+            schema_ids=("mesh.background_replica_note.v1",),
+            primary_endpoints=("cultnet://127.0.0.1:3075",),
+        )
+        replicator = CultNetShardReplicator(
+            target.database,
+            CultNetShardReplicatorOptions(
+                fetcher=fetcher,
+                cursor_store=cursor_store,
+                batch_size=1,
+                poll_interval_seconds=0.01,
+                on_error=errors.append,
+            ),
+        )
+        try:
+            source.database.put_raw_message(document, "note:1", {"body": "one"}, shard_id="background", shard_epoch=7)
+            replicator.start([shard])
+            self._wait_until(lambda: target.database.get(document, "note:1") is not None)
+            source.database.put_raw_message(document, "note:2", {"body": "two"}, shard_id="background", shard_epoch=7)
+            self._wait_until(lambda: target.database.get(document, "note:2") is not None)
+        finally:
+            replicator.stop()
+
+        cursor = cursor_store.read("background")
+        self.assertEqual(target.get_required(document, "note:1")["body"], "one")
+        self.assertEqual(target.get_required(document, "note:2")["body"], "two")
+        self.assertIsNotNone(cursor)
+        assert cursor is not None
+        self.assertEqual(cursor.last_applied_sequence, 2)
+        self.assertEqual(cursor.shard_epoch, 7)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), "transient fetch failure")
 
     def test_cultnet_schema_write_forwarder_sends_raw_writes_to_primary(self) -> None:
         document = define_database_entry_type(

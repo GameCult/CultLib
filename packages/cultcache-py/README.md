@@ -281,15 +281,20 @@ replicator = CultNetShardReplicator(
         fetcher=CultNetSchemaShardLogFetcher(),
         snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(),
         cursor_store=CultNetFileShardReplicaCursorStore("mesh.replica-cursors.msgpack"),
+        poll_interval_seconds=1.0,
+        on_error=lambda error: print(error),
     ),
 )
-replicator.pull_once(CultNetShardDescriptor(
+replica_shard = CultNetShardDescriptor(
     shard_id="interop",
     owner_runtime_id="primary-runtime",
     epoch=1,
     schema_ids=(note_doc.catalog_entry().schema_id,),
     primary_endpoints=("cultnet://127.0.0.1:3075",),
-))
+)
+replicator.pull_once(replica_shard)
+replicator.start([replica_shard])
+replicator.stop()
 server.stop()
 
 streams = CultMesh.create_stream_catalog()

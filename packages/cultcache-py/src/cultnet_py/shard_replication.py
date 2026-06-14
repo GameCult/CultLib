@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
-from typing import Any, Protocol
+import threading
+from typing import Any, Callable, Iterable, Protocol
 from urllib.parse import urlparse
 
 import msgpack
@@ -306,6 +307,8 @@ class CultNetShardReplicatorOptions:
     snapshot_fetcher: CultNetShardSnapshotFetcher | None = None
     cursor_store: CultNetShardReplicaCursorStore | None = None
     batch_size: int | None = 256
+    poll_interval_seconds: float = 1.0
+    on_error: Callable[[Exception], None] | None = None
 
 
 @dataclass
@@ -313,8 +316,57 @@ class CultNetShardReplicator:
     database: Any
     options: CultNetShardReplicatorOptions = field(default_factory=CultNetShardReplicatorOptions)
     _applied_sequences: dict[str, int] = field(default_factory=dict)
+    _stop_event: threading.Event = field(default_factory=threading.Event)
+    _threads: list[threading.Thread] = field(default_factory=list)
+    _pulls_in_flight: set[str] = field(default_factory=set)
+    _gate: threading.Lock = field(default_factory=threading.Lock)
+    _disposed: bool = False
+
+    def start(self, shards: Iterable[CultNetShardDescriptor]) -> None:
+        self._throw_if_disposed()
+        if self.options.fetcher is None:
+            raise ValueError("A shard log fetcher is required before starting replication")
+        if self.options.poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be positive")
+        if self._threads:
+            return
+        self._stop_event = threading.Event()
+        for shard in shards:
+            if shard.is_primary or not shard.primary_endpoints:
+                continue
+            thread = threading.Thread(
+                target=self._pull_loop,
+                args=(shard,),
+                name=f"cultnet-shard-replicator-{shard.shard_id}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+
+    def stop(self, *, timeout_seconds: float | None = 2.0) -> None:
+        self._stop_event.set()
+        for thread in list(self._threads):
+            thread.join(timeout=timeout_seconds)
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
+        with self._gate:
+            if not self._threads:
+                self._pulls_in_flight.clear()
+
+    def close(self) -> None:
+        if self._disposed:
+            return
+        self.stop()
+        self._disposed = True
+
+    def __enter__(self) -> "CultNetShardReplicator":
+        self._throw_if_disposed()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
 
     def pull_once(self, shard: CultNetShardDescriptor) -> int:
+        self._throw_if_disposed()
         if self.options.fetcher is None:
             raise ValueError("A shard log fetcher is required before pulling replication")
         if shard.is_primary:
@@ -360,6 +412,29 @@ class CultNetShardReplicator:
             last_applied_sequence=sequence,
             updated_at=datetime.now(UTC).isoformat(),
         ))
+
+    def _pull_loop(self, shard: CultNetShardDescriptor) -> None:
+        while not self._stop_event.is_set():
+            self._pull_if_idle(shard)
+            self._stop_event.wait(self.options.poll_interval_seconds)
+
+    def _pull_if_idle(self, shard: CultNetShardDescriptor) -> None:
+        with self._gate:
+            if shard.shard_id in self._pulls_in_flight:
+                return
+            self._pulls_in_flight.add(shard.shard_id)
+        try:
+            self.pull_once(shard)
+        except Exception as error:
+            if self.options.on_error is not None:
+                self.options.on_error(error)
+        finally:
+            with self._gate:
+                self._pulls_in_flight.discard(shard.shard_id)
+
+    def _throw_if_disposed(self) -> None:
+        if self._disposed:
+            raise RuntimeError("CultNetShardReplicator is closed")
 
 
 def _resolve_primary_endpoint(shard: CultNetShardDescriptor) -> str:
