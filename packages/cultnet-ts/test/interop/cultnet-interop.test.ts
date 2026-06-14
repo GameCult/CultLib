@@ -312,6 +312,11 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCultMeshNodeEmit.note.authorRuntimeId, "python-node-emit");
   assert.equal(pythonCultMeshNodeEmit.note.title, "Python node emitted raw put");
 
+  const pythonPrediction = await runPythonCultMeshPredictionReconcile(pythonPort);
+  assert.ok(pythonPrediction.reconciledKeys.includes("note:python-node-emit"));
+  assert.equal(pythonPrediction.note.title, "Python node emitted raw put");
+  assert.equal(pythonPrediction.note.authorRuntimeId, "python-node-emit");
+
   const pythonSubscription = await runPythonCultNetSubscription(pythonPort);
   assert.equal(pythonSubscription.changeKind, "added");
   assert.equal(pythonSubscription.recordKey, "note:python-sub-client");
@@ -938,6 +943,60 @@ async function runPythonCultNetSubscription(port: number): Promise<any> {
     "  'changeKind': change.get('changeKind'),",
     "  'recordKey': change.get('document', {}).get('recordKey'),",
     "}))",
+  ].join("\n");
+  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+    cwd: cultcachePyRoot,
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+    },
+    timeout: 8000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runPythonCultMeshPredictionReconcile(port: number): Promise<any> {
+  const schemaPathJson = JSON.stringify(interopSchemaPath);
+  const script = [
+    "import json",
+    "import tempfile",
+    "from pathlib import Path",
+    "from cultcache_py import define_database_entry_type",
+    "from cultmesh_py import CultMesh, CultMeshGameSessionOptions",
+    "from cultnet_py import CultNetClientAuthorityScope, CultNetRawClient",
+    `schema_json = Path(${schemaPathJson}).read_text(encoding='utf-8')`,
+    "note_doc = define_database_entry_type(",
+    "  'cultnet.interop-note',",
+    "  [('schemaVersion', 0), ('documentId', 1), ('authorRuntimeId', 2), ('title', 3), ('body', 4), ('tags', 5, [])],",
+    `  schema_id='${interopNoteSchemaId}',`,
+    "  schema_version='cultnet.interop_note.v0',",
+    "  canonical_schema_json=schema_json,",
+    ")",
+    "with tempfile.TemporaryDirectory() as tmp:",
+    "  node = CultMesh.create_node(Path(tmp) / 'prediction.cc', runtime_id='python-predict-client')",
+    "  node.register_document(note_doc)",
+    "  session = CultMesh.create_game_session(",
+    "    node,",
+    "    CultMeshGameSessionOptions(client_authority_scopes=(",
+    `      CultNetClientAuthorityScope('python-predict-client', schema_ids=('${interopNoteSchemaId}',), key_prefix='note:python-node-emit'),`,
+    "    )),",
+    "  )",
+    "  session.predict(note_doc, 'note:python-node-emit', {",
+    "    'schemaVersion': 'cultnet.interop_note.v0',",
+    "    'documentId': 'note:python-node-emit',",
+    "    'authorRuntimeId': 'python-predict-client',",
+    "    'title': 'Predicted Python node emit',",
+    "    'body': 'local predicted body',",
+    "    'tags': ['python', 'prediction'],",
+    "  })",
+    `  client = CultNetRawClient('127.0.0.1', ${port}, timeout_seconds=4.0)`,
+    "  changes = session.sync_shard_log(client, shard_id='interop', shard_epoch=1, after_sequence=0)",
+    "  note = node.get_required(note_doc, 'note:python-node-emit')",
+    "  print(json.dumps({",
+    "    'reconciledKeys': [change.record_key for change in changes if change.change_kind == 'reconciled'],",
+    "    'changes': [{'kind': change.change_kind, 'key': change.record_key} for change in changes],",
+    "    'note': note,",
+    "  }))",
   ].join("\n");
   const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
     cwd: cultcachePyRoot,

@@ -113,12 +113,17 @@ def apply_shard_log_response(
         change_kind = entry.get("changeKind")
         if change_kind in ("added", "updated") and isinstance(entry.get("put"), dict):
             put = entry["put"]
+            schema_id = str(put["document"]["schemaId"])
+            if schema_id not in documents_by_schema_id:
+                continue
             result = apply_raw_document_record(cache, documents_by_schema_id, put["document"])
             applied.append(CultNetAppliedRecord(result.schema_id, result.record_key, str(change_kind), result.value))
         elif change_kind == "removed" and isinstance(entry.get("delete"), dict):
             delete = entry["delete"]
             schema_id = str(delete["schemaId"])
             record_key = str(delete["recordKey"])
+            if schema_id not in documents_by_schema_id:
+                continue
             document = documents_by_schema_id[schema_id]
             cache.delete(document, record_key)
             applied.append(CultNetAppliedRecord(schema_id, record_key, "removed", None))

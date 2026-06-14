@@ -487,6 +487,23 @@ class CultCacheTests(unittest.TestCase):
             "resyncRequired": False,
             "entries": [
                 {
+                    "sequence": 0,
+                    "changeKind": "updated",
+                    "put": {
+                        "schemaVersion": "cultnet.document_put_raw.v0",
+                        "messageId": "put-unknown",
+                        "document": {
+                            "schemaId": "replica.unknown.v1",
+                            "recordKey": "unknown:1",
+                            "storedAt": "2026-06-13T00:00:01Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(Item("ignored", "unknown", 0)),
+                        },
+                        "shardId": "interop",
+                        "shardEpoch": 1,
+                    },
+                },
+                {
                     "sequence": 1,
                     "changeKind": "updated",
                     "put": {
