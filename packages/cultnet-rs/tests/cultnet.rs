@@ -15,6 +15,12 @@ use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
 use cultnet_rs::CultNetServerSecurityOptions;
+use cultnet_rs::CultNetTransportChannel;
+use cultnet_rs::CultNetTransportDelivery;
+use cultnet_rs::CultNetTransportDescriptor;
+use cultnet_rs::CultNetTransportOrdering;
+use cultnet_rs::CultNetTransportProfile;
+use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::LengthPrefixedMessageFramer;
 use cultnet_rs::builtin_schema_registry;
@@ -89,6 +95,26 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
             ]),
         }]),
         supported_message_versions: None,
+        transport_profiles: Some(vec![CultNetTransportProfile {
+            schema_version: "cultnet.transport_profile.v0".to_string(),
+            runtime_id: "voidbot-main".to_string(),
+            transports: vec![CultNetTransportDescriptor {
+                transport_id: "direct-pipe".to_string(),
+                protocol: CultNetTransportProtocol::TcpFramed,
+                host: None,
+                port: None,
+                path: None,
+                discovery_group: None,
+                wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+                channels: vec![CultNetTransportChannel {
+                    channel_id: "schema".to_string(),
+                    delivery: CultNetTransportDelivery::Reliable,
+                    ordering: CultNetTransportOrdering::Ordered,
+                    max_payload_bytes: None,
+                    max_fragment_bytes: None,
+                }],
+            }],
+        }]),
         supports_schema_catalog: Some(true),
     };
     let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
@@ -146,6 +172,7 @@ fn rust_decodes_typescript_generated_cultnet_frames() -> Result<()> {
             supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
             supported_mutation_contracts: None,
             supported_message_versions: None,
+            transport_profiles: None,
             supports_schema_catalog: None,
         }
     );

@@ -232,6 +232,27 @@ export const discoveryProbeSchema = z.object({
 
 export type DiscoveryProbe = z.infer<typeof discoveryProbeSchema>;
 
+export const discoveryTransportProfileSchema = z.object({
+  schemaVersion: z.literal("cultnet.transport_profile.v0"),
+  runtimeId: z.string().min(1),
+  transports: z.array(z.object({
+    transportId: z.string().min(1),
+    protocol: z.enum(["tcp_framed", "litenetlib", "websocket", "rudp"]),
+    host: z.string().min(1).nullable().optional(),
+    port: z.number().int().min(1).max(65535).nullable().optional(),
+    path: z.string().min(1).nullable().optional(),
+    discoveryGroup: z.string().min(1).nullable().optional(),
+    wireContracts: z.array(z.string().min(1)).nullable().optional(),
+    channels: z.array(z.object({
+      channelId: z.string().min(1),
+      delivery: z.enum(["reliable", "unreliable"]),
+      ordering: z.enum(["ordered", "unordered", "sequenced"]),
+      maxPayloadBytes: z.number().int().min(1).nullable().optional(),
+      maxFragmentBytes: z.number().int().min(1).nullable().optional(),
+    })),
+  })),
+});
+
 export const discoveryAnnounceSchema = z.object({
   schemaVersion: z.literal(DISCOVERY_ANNOUNCE_SCHEMA_VERSION),
   messageId: z.string().min(1),
@@ -243,6 +264,7 @@ export const discoveryAnnounceSchema = z.object({
   tcpPort: z.number().int().positive().max(65535),
   wireContract: z.literal(INTEROP_WIRE_CONTRACT),
   supportedDocumentTypes: z.array(z.string().min(1)),
+  transportProfiles: z.array(discoveryTransportProfileSchema).optional(),
   supportsSchemaCatalog: z.boolean(),
 });
 

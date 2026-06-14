@@ -161,6 +161,7 @@ def daemon_ready_document(server: CultMeshLocalServer) -> dict[str, Any]:
         "supportedDocumentTypes": [document.type for document in server.node.documents],
         "supportedMessageVersions": list(hello_response.get("supportedMessageVersions") or ()),
         "supportedMutationContracts": list(hello_response.get("supportedMutationContracts") or ()),
+        "transportProfiles": list(hello_response.get("transportProfiles") or ()),
         "snapshotLimits": {
             "maxSnapshotDocuments": server.max_snapshot_documents,
             "maxSnapshotBytes": server.max_snapshot_bytes,

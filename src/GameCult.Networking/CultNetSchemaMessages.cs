@@ -254,9 +254,101 @@ namespace GameCult.Networking
         /// </summary>
         [Key("supportedMessageVersions")] public string[]? SupportedMessageVersions { get; set; }
         /// <summary>
+        /// Gets or sets the transport profiles advertised by this peer.
+        /// </summary>
+        [Key("transportProfiles")] public CultNetTransportProfile[]? TransportProfiles { get; set; }
+        /// <summary>
         /// Gets or sets the supports schema catalog.
         /// </summary>
         [Key("supportsSchemaCatalog")] public bool SupportsSchemaCatalog { get; set; }
+    }
+
+    /// <summary>
+    /// Describes the transports a runtime can speak.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetTransportProfile
+    {
+        /// <summary>
+        /// Gets or sets the schema version.
+        /// </summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = "cultnet.transport_profile.v0";
+        /// <summary>
+        /// Gets or sets the runtime id.
+        /// </summary>
+        [Key("runtimeId")] public string RuntimeId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the transport descriptors.
+        /// </summary>
+        [Key("transports")] public CultNetTransportDescriptor[] Transports { get; set; } = Array.Empty<CultNetTransportDescriptor>();
+    }
+
+    /// <summary>
+    /// Describes one transport endpoint.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetTransportDescriptor
+    {
+        /// <summary>
+        /// Gets or sets the transport id.
+        /// </summary>
+        [Key("transportId")] public string TransportId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the protocol name.
+        /// </summary>
+        [Key("protocol")] public string Protocol { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the host.
+        /// </summary>
+        [Key("host")] public string? Host { get; set; }
+        /// <summary>
+        /// Gets or sets the port.
+        /// </summary>
+        [Key("port")] public int? Port { get; set; }
+        /// <summary>
+        /// Gets or sets the path.
+        /// </summary>
+        [Key("path")] public string? Path { get; set; }
+        /// <summary>
+        /// Gets or sets the discovery group.
+        /// </summary>
+        [Key("discoveryGroup")] public string? DiscoveryGroup { get; set; }
+        /// <summary>
+        /// Gets or sets the wire contracts.
+        /// </summary>
+        [Key("wireContracts")] public string[]? WireContracts { get; set; }
+        /// <summary>
+        /// Gets or sets the channels.
+        /// </summary>
+        [Key("channels")] public CultNetTransportChannel[] Channels { get; set; } = Array.Empty<CultNetTransportChannel>();
+    }
+
+    /// <summary>
+    /// Describes one transport channel.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetTransportChannel
+    {
+        /// <summary>
+        /// Gets or sets the channel id.
+        /// </summary>
+        [Key("channelId")] public string ChannelId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the delivery semantics.
+        /// </summary>
+        [Key("delivery")] public string Delivery { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the ordering semantics.
+        /// </summary>
+        [Key("ordering")] public string Ordering { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the maximum payload bytes.
+        /// </summary>
+        [Key("maxPayloadBytes")] public int? MaxPayloadBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum fragment bytes.
+        /// </summary>
+        [Key("maxFragmentBytes")] public int? MaxFragmentBytes { get; set; }
     }
 
     /// <summary>

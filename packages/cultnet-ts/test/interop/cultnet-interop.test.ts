@@ -711,18 +711,34 @@ async function expectProbePeers(
   expectedPeers: string[],
 ): Promise<void> {
   const found = new Set<string>();
+  const profiles = new Map<string, unknown>();
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const probe = await runJsonCommand(`${name}-${attempt + 1}`, command, args, cwd, env);
-    for (const peer of probe.peers as Array<{ runtimeId: string }>) {
+    for (const peer of probe.peers as Array<{ runtimeId: string; transportProfiles?: unknown }>) {
       found.add(peer.runtimeId);
+      profiles.set(peer.runtimeId, peer.transportProfiles);
     }
     if (expectedPeers.every((peer) => found.has(peer))) {
       assert.deepEqual([...found].sort(), expectedPeers);
+      for (const peerId of expectedPeers) {
+        assertTcpFramedTransportProfile(peerId, profiles.get(peerId));
+      }
       return;
     }
   }
 
   assert.deepEqual([...found].sort(), expectedPeers);
+}
+
+function assertTcpFramedTransportProfile(peerId: string, value: unknown): void {
+  assert.ok(Array.isArray(value), `${peerId} did not advertise transport profiles`);
+  const firstProfile = value[0] as any;
+  assert.equal(firstProfile?.schemaVersion, "cultnet.transport_profile.v0");
+  assert.equal(firstProfile?.runtimeId, peerId);
+  const transport = firstProfile?.transports?.[0];
+  assert.equal(transport?.protocol, "tcp_framed");
+  assert.equal(transport?.channels?.[0]?.delivery, "reliable");
+  assert.equal(transport?.channels?.[0]?.ordering, "ordered");
 }
 
 async function requestCultMeshFromPython(port: number, request: Record<string, unknown>): Promise<any> {

@@ -102,6 +102,7 @@ export interface CultNetHelloMessage {
   supportedDocumentTypes?: string[];
   supportedMutationContracts?: CultNetDocumentMutationContract[];
   supportedMessageVersions?: string[];
+  transportProfiles?: CultNetTransportProfile[];
   supportsSchemaCatalog?: boolean;
 }
 
@@ -955,6 +956,7 @@ function normalizeCultNetOptionalNulls(
         "supportedDocumentTypes",
         "supportedMutationContracts",
         "supportedMessageVersions",
+        "transportProfiles",
       ]);
       return;
     case "cultnet.snapshot_request.v0":

@@ -531,10 +531,27 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(CultNetSecret.decrypt_string(encrypted, nonce, security), "hello")
 
     def test_cultnet_schema_message_frame_round_trip(self) -> None:
-        message = hello(runtime_id="python-test", supported_schema_versions=["cultnet.hello.v0"])
+        message = hello(
+            runtime_id="python-test",
+            supported_schema_versions=["cultnet.hello.v0"],
+            transport_profiles=[
+                {
+                    "schemaVersion": "cultnet.transport_profile.v0",
+                    "runtimeId": "python-test",
+                    "transports": [
+                        {
+                            "transportId": "test",
+                            "protocol": "tcp_framed",
+                            "channels": [{"channelId": "schema", "delivery": "reliable", "ordering": "ordered"}],
+                        }
+                    ],
+                }
+            ],
+        )
         parsed = parse_message(decode_frame(encode_frame(message.to_bytes())))
         self.assertEqual(parsed.schema_version, "cultnet.hello.v0")
         self.assertEqual(parsed.body["runtimeId"], "python-test")
+        self.assertEqual(parsed.body["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
 
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
         subscribe = database_subscribe(
@@ -1293,6 +1310,10 @@ class CultCacheTests(unittest.TestCase):
         mutation_contract = hello_schema["properties"]["supportedMutationContracts"]["items"]
         self.assertEqual(mutation_contract["type"], "object")
         self.assertIn("operations", mutation_contract["properties"])
+        self.assertEqual(
+            hello_schema["properties"]["transportProfiles"]["items"]["$ref"],
+            "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+        )
 
         consensus_schema = json.loads(by_version["cultnet.simulation_consensus_candidate.v0"]["schemaJson"])
         for required_field in ["witnessCount", "supportWeight", "totalWeight", "hasQuorum", "confidence"]:
@@ -3428,8 +3449,11 @@ class CultCacheTests(unittest.TestCase):
                 self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
                 self.assertNotIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
                 self.assertEqual(hello_response["supportedDocumentTypes"], ["cultcache.interop-note"])
+                self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
+                self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["port"], int(ready["port"]))
                 self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
                 self.assertEqual(ready["supportedMutationContracts"], hello_response["supportedMutationContracts"])
+                self.assertEqual(ready["transportProfiles"], hello_response["transportProfiles"])
 
                 schema_response = client.fetch_schema_catalog(schema_ids=["cultcache.interop-note"], include_schema_json=True)
                 self.assertEqual(schema_response["schemas"][0]["schemaVersion"], INTEROP_SCHEMA_VERSION)
@@ -4074,6 +4098,8 @@ class CultCacheTests(unittest.TestCase):
             synced_shards = raw_client.sync_shard_catalog(synced_shard_catalog, schema_ids=["mesh.server_note.v1"])
             shard_log = raw_client.fetch_shard_log(shard_id="notes", shard_epoch=1)
             typed_shard_log = raw_client.fetch_shard_log_response(shard_id="notes", shard_epoch=1)
+            self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
+            self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["port"], server.port)
             stale_shard_log = raw_client.fetch_shard_log(shard_id="notes", shard_epoch=0)
             discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")

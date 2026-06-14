@@ -14,6 +14,12 @@ use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
+use cultnet_rs::CultNetTransportChannel;
+use cultnet_rs::CultNetTransportDelivery;
+use cultnet_rs::CultNetTransportDescriptor;
+use cultnet_rs::CultNetTransportOrdering;
+use cultnet_rs::CultNetTransportProfile;
+use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::builtin_schema_registry;
 use cultnet_rs::decode_cultnet_message_from_slice;
@@ -168,6 +174,8 @@ enum DiscoveryMessage {
         tcp_port: u16,
         wire_contract: String,
         supported_document_types: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_profiles: Option<Vec<CultNetTransportProfile>>,
         supports_schema_catalog: bool,
     },
 }
@@ -290,6 +298,7 @@ fn probe(options: &BTreeMap<String, String>) -> Result<()> {
                     tcp_port,
                     wire_contract,
                     supported_document_types,
+                    transport_profiles,
                     supports_schema_catalog,
                 }) = rmp_serde::from_slice::<DiscoveryMessage>(&buffer[..len])
                 {
@@ -307,6 +316,7 @@ fn probe(options: &BTreeMap<String, String>) -> Result<()> {
                                 "tcpPort": tcp_port,
                                 "wireContract": wire_contract,
                                 "supportedDocumentTypes": supported_document_types,
+                                "transportProfiles": transport_profiles,
                                 "supportsSchemaCatalog": supports_schema_catalog,
                             }),
                         );
@@ -364,6 +374,7 @@ fn dial(config: DialConfig) -> Result<()> {
             supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
             supported_mutation_contracts: Some(interaction_contracts()),
             supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+            transport_profiles: None,
             supports_schema_catalog: Some(true),
         },
     )?;
@@ -533,6 +544,11 @@ fn start_udp_discovery_server(config: Arc<PeerConfig>) -> Result<()> {
                             tcp_port: config.tcp_port,
                             wire_contract: "cultnet.schema.v0".to_string(),
                             supported_document_types: vec![INTEROP_DOCUMENT_TYPE.to_string()],
+                            transport_profiles: Some(tcp_transport_profiles(
+                                &config.runtime_id,
+                                &config.advertise_host,
+                                config.tcp_port,
+                            )),
                             supports_schema_catalog: true,
                         };
                         if let Ok(payload) = rmp_serde::to_vec_named(&announce) {
@@ -612,11 +628,16 @@ fn handle_connection(
                         agent_id: Some(config.agent_id.clone()),
                         role: None,
                         display_name: Some(config.display_name.clone()),
-                        supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
-                        supported_mutation_contracts: Some(interaction_contracts()),
-                        supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
-                        supports_schema_catalog: Some(true),
-                    },
+                    supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
+                    supported_mutation_contracts: Some(interaction_contracts()),
+                    supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+                    transport_profiles: Some(tcp_transport_profiles(
+                        &config.runtime_id,
+                        &config.advertise_host,
+                        config.tcp_port,
+                    )),
+                    supports_schema_catalog: Some(true),
+                },
                 )?;
             }
             request @ CultNetMessage::SchemaCatalogRequest { .. } => {
@@ -811,6 +832,29 @@ fn interaction_contracts() -> Vec<CultNetDocumentMutationContract> {
             FIRE_RECEIPT_TYPE.to_string(),
         ]),
         notes: None,
+    }]
+}
+
+fn tcp_transport_profiles(runtime_id: &str, host: &str, port: u16) -> Vec<CultNetTransportProfile> {
+    vec![CultNetTransportProfile {
+        schema_version: "cultnet.transport_profile.v0".to_string(),
+        runtime_id: runtime_id.to_string(),
+        transports: vec![CultNetTransportDescriptor {
+            transport_id: "interop-tcp".to_string(),
+            protocol: CultNetTransportProtocol::TcpFramed,
+            host: Some(host.to_string()),
+            port: Some(port),
+            path: None,
+            discovery_group: None,
+            wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+            channels: vec![CultNetTransportChannel {
+                channel_id: "schema".to_string(),
+                delivery: CultNetTransportDelivery::Reliable,
+                ordering: CultNetTransportOrdering::Ordered,
+                max_payload_bytes: None,
+                max_fragment_bytes: None,
+            }],
+        }],
     }]
 }
 

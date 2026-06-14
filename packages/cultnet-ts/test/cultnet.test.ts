@@ -139,6 +139,20 @@ test("CultNet peer frames and decodes typed messages over a direct pipe", async 
       agentId: "void",
       displayName: "Void",
       supportedDocumentTypes: ["ghostlight.agent-state"],
+      transportProfiles: [
+        {
+          schemaVersion: "cultnet.transport_profile.v0",
+          runtimeId: "voidbot-main",
+          transports: [
+            {
+              transportId: "direct-pipe",
+              protocol: "tcp_framed",
+              wireContracts: ["cultnet.schema.v0"],
+              channels: [{ channelId: "schema", delivery: "reliable", ordering: "ordered" }],
+            },
+          ],
+        },
+      ],
     });
   });
 
@@ -146,6 +160,7 @@ test("CultNet peer frames and decodes typed messages over a direct pipe", async 
   if (message.schemaVersion === "cultnet.hello.v0") {
     assert.equal(message.runtimeId, "voidbot-main");
     assert.equal(message.agentId, "void");
+    assert.equal(message.transportProfiles?.[0]?.transports[0]?.protocol, "tcp_framed");
   }
 
   sender.close();

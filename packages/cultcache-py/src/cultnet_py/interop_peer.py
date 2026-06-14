@@ -569,6 +569,28 @@ def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, stat
             "tcpHost": advertise_host,
             "tcpPort": tcp_port,
             "wireContract": INTEROP_WIRE_CONTRACT,
+            "transportProfiles": [
+                {
+                    "schemaVersion": "cultnet.transport_profile.v0",
+                    "runtimeId": state.runtime_id,
+                    "transports": [
+                        {
+                            "transportId": "interop-tcp",
+                            "protocol": "tcp_framed",
+                            "host": advertise_host,
+                            "port": tcp_port,
+                            "wireContracts": [INTEROP_WIRE_CONTRACT],
+                            "channels": [
+                                {
+                                    "channelId": "schema",
+                                    "delivery": "reliable",
+                                    "ordering": "ordered",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
             "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE],
             "supportsSchemaCatalog": True,
         }

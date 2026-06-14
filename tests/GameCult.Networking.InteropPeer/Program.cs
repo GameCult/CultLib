@@ -162,6 +162,7 @@ static async Task ProbeAsync(Dictionary<string, string> options)
                 tcpPort = peer.TcpPort,
                 wireContract = peer.WireContract,
                 supportedDocumentTypes = peer.SupportedDocumentTypes,
+                transportProfiles = peer.TransportProfiles,
                 supportsSchemaCatalog = peer.SupportsSchemaCatalog
             })
             .ToArray()
@@ -241,6 +242,7 @@ static async Task DialAsync(DialConfig config)
             displayName = remoteHello.DisplayName,
             supportedDocumentTypes = remoteHello.SupportedDocumentTypes,
             supportedMessageVersions = remoteHello.SupportedMessageVersions,
+            transportProfiles = remoteHello.TransportProfiles,
             supportsSchemaCatalog = remoteHello.SupportsSchemaCatalog
         },
         hasInteropSchema,
@@ -362,6 +364,33 @@ static async Task RunDiscoveryServerAsync(Socket socket, ServeConfig config, Can
                 TcpPort = config.TcpPort,
                 WireContract = CultNetWireContracts.SchemaV0,
                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
+                TransportProfiles =
+                [
+                    new CultNetTransportProfile
+                    {
+                        RuntimeId = config.RuntimeId,
+                        Transports =
+                        [
+                            new CultNetTransportDescriptor
+                            {
+                                TransportId = "interop-tcp",
+                                Protocol = "tcp_framed",
+                                Host = config.AdvertiseHost,
+                                Port = config.TcpPort,
+                                WireContracts = [CultNetWireContracts.SchemaV0],
+                                Channels =
+                                [
+                                    new CultNetTransportChannel
+                                    {
+                                        ChannelId = "schema",
+                                        Delivery = "reliable",
+                                        Ordering = "ordered"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
                 SupportsSchemaCatalog = true
             };
             var announceBytes = MessagePackSerializer.Serialize(announce, CultNetSchemaMessageSerialization.Options);
@@ -433,6 +462,33 @@ static async Task RunTcpServerAsync(
                                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
                                 SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
                                 SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
+                                TransportProfiles =
+                                [
+                                    new CultNetTransportProfile
+                                    {
+                                        RuntimeId = config.RuntimeId,
+                                        Transports =
+                                        [
+                                            new CultNetTransportDescriptor
+                                            {
+                                                TransportId = "interop-tcp",
+                                                Protocol = "tcp_framed",
+                                                Host = config.AdvertiseHost,
+                                                Port = config.TcpPort,
+                                                WireContracts = [CultNetWireContracts.SchemaV0],
+                                                Channels =
+                                                [
+                                                    new CultNetTransportChannel
+                                                    {
+                                                        ChannelId = "schema",
+                                                        Delivery = "reliable",
+                                                        Ordering = "ordered"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ],
                                 SupportsSchemaCatalog = true
                             }, cancellationToken);
                             break;
@@ -955,5 +1011,6 @@ public sealed class DiscoveryAnnounceMessage
     [Key("tcpPort")] public int TcpPort { get; set; }
     [Key("wireContract")] public string WireContract { get; set; } = CultNetWireContracts.SchemaV0;
     [Key("supportedDocumentTypes")] public string[] SupportedDocumentTypes { get; set; } = Array.Empty<string>();
+    [Key("transportProfiles")] public CultNetTransportProfile[]? TransportProfiles { get; set; }
     [Key("supportsSchemaCatalog")] public bool SupportsSchemaCatalog { get; set; }
 }

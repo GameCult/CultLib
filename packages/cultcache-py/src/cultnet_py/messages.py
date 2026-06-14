@@ -37,6 +37,7 @@ def hello(
     supported_wire_contracts: list[str] | None = None,
     supported_schema_versions: list[str] | None = None,
     supported_mutation_contracts: list[dict[str, Any]] | None = None,
+    transport_profiles: list[dict[str, Any]] | None = None,
 ) -> CultNetMessage:
     return CultNetMessage(
         "cultnet.hello.v0",
@@ -45,6 +46,7 @@ def hello(
             "supportedWireContracts": supported_wire_contracts or ["cultnet.schema.v0"],
             "supportedSchemaVersions": supported_schema_versions or [],
             "supportedMutationContracts": supported_mutation_contracts or [],
+            "transportProfiles": transport_profiles or [],
         },
     )
 

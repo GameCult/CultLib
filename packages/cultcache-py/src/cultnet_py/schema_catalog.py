@@ -332,6 +332,12 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
                 },
             },
             "supportedMessageVersions": string_array,
+            "transportProfiles": {
+                "type": "array",
+                "items": {
+                    "$ref": TRANSPORT_PROFILE_SCHEMA_ID,
+                },
+            },
             "supportsSchemaCatalog": {"type": "boolean"},
         },
         "cultnet.error.v0": {

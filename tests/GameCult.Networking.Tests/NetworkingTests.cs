@@ -182,6 +182,48 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_HelloTransportProfile()
+        {
+            var message = new CultNetHelloMessage
+            {
+                RuntimeId = "csharp-test",
+                RuntimeKind = "dotnet",
+                TransportProfiles =
+                [
+                    new CultNetTransportProfile
+                    {
+                        RuntimeId = "csharp-test",
+                        Transports =
+                        [
+                            new CultNetTransportDescriptor
+                            {
+                                TransportId = "test-pipe",
+                                Protocol = "tcp_framed",
+                                WireContracts = [CultNetWireContracts.SchemaV0],
+                                Channels =
+                                [
+                                    new CultNetTransportChannel
+                                    {
+                                        ChannelId = "schema",
+                                        Delivery = "reliable",
+                                        Ordering = "ordered"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(message);
+            var roundTrip = (CultNetHelloMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.TransportProfiles, Is.Not.Null);
+            Assert.That(roundTrip.TransportProfiles![0].Transports[0].Protocol, Is.EqualTo("tcp_framed"));
+            Assert.That(roundTrip.TransportProfiles[0].Transports[0].Channels[0].Ordering, Is.EqualTo("ordered"));
+        }
+
+        [Test]
         public void CultNetSchemaMessageSerialization_RoundTrips_RawSnapshotResponse()
         {
             var message = new CultNetSnapshotResponseRawMessage

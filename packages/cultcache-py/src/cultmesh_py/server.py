@@ -308,6 +308,28 @@ class CultMeshLocalServer:
                 if self.observation_hub is not None
                 else []
             ),
+            "transportProfiles": [
+                {
+                    "schemaVersion": "cultnet.transport_profile.v0",
+                    "runtimeId": self.node.runtime_id,
+                    "transports": [
+                        {
+                            "transportId": "cultmesh-local-tcp",
+                            "protocol": "tcp_framed",
+                            "host": self.host,
+                            "port": self.port,
+                            "wireContracts": ["cultnet.schema.v0"],
+                            "channels": [
+                                {
+                                    "channelId": "schema",
+                                    "delivery": "reliable",
+                                    "ordering": "ordered",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
             "supportsSchemaCatalog": True,
         }
 
