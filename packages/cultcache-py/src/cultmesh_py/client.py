@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -349,6 +350,79 @@ class CultMeshPeerExchangeClient(CultMeshDiscoveryClient):
         limit: int | None = None,
     ) -> int:
         return self.fanout_peer_catalog(catalog, verse_id=verse_id, roles=roles, limit=limit)
+
+
+@dataclass
+class CultMeshSimulationObservationFanout:
+    client: CultMeshDiscoveryClient
+    peer_catalog: CultMeshPeerCatalog
+    verse_id: str
+    roles: list[str] | None = None
+    interval_seconds: float = 1.0
+    on_candidate: Callable[[dict[str, Any]], None] | None = None
+    on_error: Callable[[str, Exception], None] | None = None
+    _pending: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def enqueue(self, message: dict[str, Any]) -> None:
+        with self._lock:
+            self._pending.append(dict(message))
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def flush(self) -> list[dict[str, Any]]:
+        with self._lock:
+            messages = list(self._pending)
+            self._pending.clear()
+        candidates = []
+        failed_messages: list[dict[str, Any]] = []
+        for message in messages:
+            try:
+                candidates.extend(self.client.fanout_simulation_observation(
+                    self.peer_catalog,
+                    message,
+                    verse_id=self.verse_id,
+                    roles=self.roles,
+                    on_error=self.on_error,
+                ))
+            except Exception:
+                failed_messages.append(message)
+                continue
+        if failed_messages:
+            with self._lock:
+                self._pending = [*failed_messages, *self._pending]
+        for candidate in candidates:
+            if self.on_candidate is not None:
+                self.on_candidate(candidate)
+        return candidates
+
+    def start(self) -> "CultMeshSimulationObservationFanout":
+        if self._thread is not None:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.interval_seconds * 2.0))
+            self._thread = None
+
+    def __enter__(self) -> "CultMeshSimulationObservationFanout":
+        return self.start()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.stop()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.flush()
 
 
 def _parse_endpoint(endpoint: str) -> tuple[str, int]:

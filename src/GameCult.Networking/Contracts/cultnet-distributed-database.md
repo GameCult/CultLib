@@ -95,7 +95,8 @@ Not implemented yet:
 - membership/failure detection
 - leader election or automatic shard failover
 - scheduled peer-to-peer snapshot fanout beyond Python's one-shot client helper
-- scheduled peer-to-peer fanout for observation gossip and candidate propagation
+- cross-runtime scheduled peer-to-peer fanout for observation gossip and
+  candidate propagation beyond Python's local fanout loop
 - cross-runtime rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
@@ -150,8 +151,8 @@ Add discovery fanout and operational polish:
   Python's local pending-prediction rollback surface
 - add scheduled peer-to-peer snapshot fanout beyond Python's one-shot client
   helper
-- add scheduled peer-to-peer fanout for observation gossip and candidate
-  propagation beyond Python's one-shot client helper
+- standardize cross-runtime scheduled peer-to-peer fanout for observation gossip
+  and candidate propagation beyond Python's local fanout loop
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive

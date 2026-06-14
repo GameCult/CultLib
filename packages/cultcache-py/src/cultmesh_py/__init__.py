@@ -1,4 +1,9 @@
-from .client import CultMeshDiscoveryClient, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
+from .client import (
+    CultMeshDiscoveryClient,
+    CultMeshPeerExchangeClient,
+    CultMeshSimulationObservationFanout,
+    CultMeshVerseDiscoveryClient,
+)
 from .facade import CultMesh
 from .node import CultMeshDatabase, CultMeshDatabaseChange, CultMeshNode, CultMeshNodeOptions, create_node
 from .server import CultMeshLocalServer
@@ -63,6 +68,7 @@ __all__ = [
     "AuthorityLeaseVerifier",
     "CultMeshDiscoveryClient",
     "CultMeshPeerExchangeClient",
+    "CultMeshSimulationObservationFanout",
     "CultMeshVerseDiscoveryClient",
     "CultMeshStreamCatalog",
     "CultMeshStreamConsumerProfile",

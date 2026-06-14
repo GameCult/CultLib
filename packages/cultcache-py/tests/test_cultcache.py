@@ -90,6 +90,7 @@ from cultmesh_py import (
     CultMeshHmacAuthorityLeaseVerifier,
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
+    CultMeshSimulationObservationFanout,
     CultMeshStreamCatalog,
     CultMeshStreamConsumerProfile,
     CultMeshStreamDescriptor,
@@ -2553,6 +2554,95 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual({candidate["claimHash"] for candidate in candidates}, {claim_hash})
         self.assertEqual({candidate["messageId"] for candidate in candidates}, {"fanout-observation"})
         self.assertEqual({candidate["hasQuorum"] for candidate in candidates}, {True})
+
+    def test_cultmesh_simulation_observation_fanout_flushes_queued_messages(self) -> None:
+        hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="sim-flush-peer"), observation_hub=hub)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-flush-peer",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:210")
+            seen_candidates: list[dict[str, object]] = []
+            fanout = CultMeshSimulationObservationFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                peers,
+                verse_id="arena",
+                roles=["simulation-witness"],
+                on_candidate=seen_candidates.append,
+            )
+            fanout.enqueue(simulation_observation(
+                message_id="queued-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=210,
+                subject_id="bob",
+                claim_kind="hit",
+                claim_hash=claim_hash,
+                claim_summary="alice hit bob",
+            ).to_wire())
+
+            candidates = fanout.flush()
+        finally:
+            server.stop()
+
+        self.assertEqual(fanout.pending_count(), 0)
+        self.assertEqual([candidate["claimHash"] for candidate in candidates], [claim_hash])
+        self.assertEqual(seen_candidates[0]["messageId"], "queued-observation")
+
+    def test_cultmesh_simulation_observation_fanout_runs_background_loop(self) -> None:
+        hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="sim-loop-peer"), observation_hub=hub)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-loop-peer",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("block", "dana", "eve", "frame:211")
+            seen_candidates: list[dict[str, object]] = []
+            fanout = CultMeshSimulationObservationFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                peers,
+                verse_id="arena",
+                roles=["simulation-witness"],
+                interval_seconds=0.05,
+                on_candidate=seen_candidates.append,
+            )
+            fanout.start()
+            fanout.enqueue(simulation_observation(
+                message_id="loop-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=211,
+                subject_id="eve",
+                claim_kind="block",
+                claim_hash=claim_hash,
+                claim_summary="dana blocked eve",
+            ).to_wire())
+            deadline = time.monotonic() + 2.0
+            while not seen_candidates and time.monotonic() < deadline:
+                time.sleep(0.01)
+            fanout.stop()
+        finally:
+            server.stop()
+
+        self.assertEqual(fanout.pending_count(), 0)
+        self.assertTrue(seen_candidates)
+        self.assertEqual(seen_candidates[0]["claimHash"], claim_hash)
+        self.assertEqual(seen_candidates[0]["messageId"], "loop-observation")
 
     def test_cultmesh_discovery_client_fans_out_snapshots_to_peers(self) -> None:
         document = define_database_entry_type(
