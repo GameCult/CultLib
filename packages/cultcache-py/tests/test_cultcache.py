@@ -384,6 +384,25 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(_parity_status([by_name["cache_upsert"]], "ok"), "meets-threshold")
         self.assertEqual(_parity_status(comparison, "failed"), "unknown")
 
+    def test_compare_csharp_marks_meets_threshold_when_all_common_metrics_pass(self) -> None:
+        comparison = _compare_common_metrics(
+            {
+                "metrics": [
+                    {"name": "cache_get", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 95.0},
+                    {"name": "cache_upsert", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 120.0},
+                ],
+            },
+            {
+                "metrics": [
+                    {"name": "cache_get", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 100.0},
+                    {"name": "cache_upsert", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 100.0},
+                ],
+            },
+            parity_threshold=0.90,
+        )
+
+        self.assertEqual(_parity_status(comparison, "ok"), "meets-threshold")
+
     def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
         document = define_database_entry_type(
             "bench.memory_item",

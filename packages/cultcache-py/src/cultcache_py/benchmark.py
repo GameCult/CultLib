@@ -46,6 +46,7 @@ def run_benchmark(records: int) -> dict[str, Any]:
         cls=BenchItem,
     )
     values = [BenchItem(f"item-{index}", f"cat-{index % 8}", index) for index in range(records)]
+    keys = [f"item:{index}" for index in range(records)]
 
     encoded_payloads, encode_metric = measure("database_entry_encode", records, lambda: [
         document.encode_payload(value)
@@ -58,7 +59,7 @@ def run_benchmark(records: int) -> dict[str, Any]:
     wire_messages, frame_metric = measure("cultnet_frame_parse", records, lambda: [
         parse_message(decode_frame(encode_frame(document_put_raw(
             message_id=f"put-{index}",
-            key=f"item:{index}",
+            key=keys[index],
             schema_id=document.catalog_entry().schema_id,
             stored_at="2026-06-13T00:00:00Z",
             payload=encoded_payloads[index],
@@ -75,7 +76,7 @@ def run_benchmark(records: int) -> dict[str, Any]:
         "documents": [
             {
                 "schemaId": document.catalog_entry().schema_id,
-                "recordKey": f"item:{index}",
+                "recordKey": keys[index],
                 "storedAt": "2026-06-13T00:00:00Z",
                 "payloadEncoding": "messagepack",
                 "payload": encoded_payloads[index],
@@ -91,11 +92,11 @@ def run_benchmark(records: int) -> dict[str, Any]:
     upsert_cache = CultCache()
     upsert_cache.register_document_type(document)
     _, upsert_metric = measure("cache_upsert", records, lambda: [
-        upsert_cache.put(document, f"item:{index}", values[index])
+        upsert_cache.put(document, keys[index], values[index])
         for index in range(records)
     ])
     _, get_metric = measure("cache_get", records, lambda: [
-        upsert_cache.get(document, f"item:{index}")
+        upsert_cache.get(document, keys[index])
         for index in range(records)
     ])
 

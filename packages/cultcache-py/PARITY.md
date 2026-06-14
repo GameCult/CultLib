@@ -233,6 +233,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   benchmarks with the same operation names and reports median Python-to-C# ratios
   from three samples by default. It also emits per-metric threshold checks and an
   overall parity status so performance claims have an explicit evidence gate.
+  Both benchmark lanes precompute record keys before measuring public cache
+  reads and writes, matching the C# reference benchmark shape instead of
+  charging one runtime for key construction inside the hot path.
   The Python in-memory record owner is type-partitioned so public `get(...)`
   reads avoid per-call composite-key allocation on the hot path.
 
