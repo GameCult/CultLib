@@ -5,6 +5,7 @@ import { decode, encode } from "@msgpack/msgpack";
 
 import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetDocumentDeleteMessage, type CultNetDocumentPutMessage, type CultNetErrorMessage, type CultNetHelloMessage, type CultNetLoginMessage, type CultNetLoginSuccessMessage, type CultNetMessage, type CultNetRegisterMessage, type CultNetSampleChangeNameMessage, type CultNetSampleChatMessage, type CultNetSchemaCatalogRequestMessage, type CultNetSchemaCatalogResponseMessage, type CultNetSnapshotRequestMessage, type CultNetSnapshotResponseMessage, type CultNetVerifyMessage, type CultNetWireContract } from "./contracts";
 import { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
+import type { CultNetTransportConnection } from "./transport";
 
 export interface CultNetPeerEvents {
   message: (message: CultNetMessage) => void;
@@ -18,36 +19,45 @@ export interface CultNetPeerOptions {
 }
 
 export class CultNetPeer extends EventEmitter {
-  readonly #stream: Duplex;
-  readonly #framer = new LengthPrefixedMessageFramer();
+  readonly #stream?: Duplex;
+  readonly #transport?: CultNetTransportConnection;
+  readonly #framer?: LengthPrefixedMessageFramer;
   readonly #wireContract: CultNetWireContract;
 
-  constructor(stream: Duplex, options: CultNetPeerOptions) {
+  constructor(stream: Duplex | CultNetTransportConnection, options: CultNetPeerOptions) {
     super();
     if (!options?.wireContract) {
       throw new Error("CultNetPeer requires an explicit wireContract.");
     }
 
-    this.#stream = stream;
     this.#wireContract = options.wireContract;
-    this.#stream.on("data", (chunk: Buffer) => {
-      for (const frame of this.#framer.push(chunk)) {
-        try {
-          const decoded = decode(frame);
-          const message = parseCultNetMessage(decoded, this.#wireContract);
-          this.emit("message", message);
-        } catch (error) {
-          this.emit("invalidMessage", error instanceof Error ? error : new Error(String(error)));
+    if (isCultNetTransportConnection(stream)) {
+      this.#transport = stream;
+      this.#transport.on("frame", (frame) => this.#handlePayload(frame.payload));
+      this.#transport.on("close", () => this.emit("close"));
+      this.#transport.on("error", (error) => this.emit("error", error));
+    } else {
+      this.#stream = stream;
+      this.#framer = new LengthPrefixedMessageFramer();
+      this.#stream.on("data", (chunk: Buffer) => {
+        for (const frame of this.#framer?.push(chunk) ?? []) {
+          this.#handlePayload(frame);
         }
-      }
-    });
-    this.#stream.on("close", () => this.emit("close"));
-    this.#stream.on("error", (error) => this.emit("error", error instanceof Error ? error : new Error(String(error))));
+      });
+      this.#stream.on("close", () => this.emit("close"));
+      this.#stream.on("error", (error) => this.emit("error", error instanceof Error ? error : new Error(String(error))));
+    }
   }
 
   send(message: CultNetMessage): void {
     const wireValue = encodeCultNetMessageForWire(message, this.#wireContract);
-    this.#stream.write(encodeFrame(encode(wireValue)));
+    const payload = encode(wireValue);
+    if (this.#transport) {
+      this.#transport.send("schema", payload);
+      return;
+    }
+
+    this.#stream?.write(encodeFrame(payload));
   }
 
   sendHello(message: CultNetHelloMessage): void {
@@ -107,6 +117,23 @@ export class CultNetPeer extends EventEmitter {
   }
 
   close(): void {
-    this.#stream.end();
+    this.#transport?.close();
+    this.#stream?.end();
   }
+
+  #handlePayload(payload: Uint8Array): void {
+    try {
+      const decoded = decode(payload);
+      const message = parseCultNetMessage(decoded, this.#wireContract);
+      this.emit("message", message);
+    } catch (error) {
+      this.emit("invalidMessage", error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+}
+
+function isCultNetTransportConnection(value: Duplex | CultNetTransportConnection): value is CultNetTransportConnection {
+  return typeof (value as CultNetTransportConnection).send === "function"
+    && typeof (value as CultNetTransportConnection).close === "function"
+    && "profile" in value;
 }

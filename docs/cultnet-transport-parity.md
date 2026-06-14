@@ -134,6 +134,18 @@ lets the runtimes stop guessing what kind of pipe a peer is offering.
    with C#/TS/Rust/Python ping, loss, reordering, fragmentation, reconnect, and
    schema-message tests.
 
+Current progress:
+
+- Steps 1-3 are live in C#, TypeScript, Rust, and Python.
+- TypeScript has the first narrow transport connection port:
+  `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
+  frame/close/error events, `send(channel, payload)`, `close`, and transfer
+  stats, and `CultNetPeer` can now run over either the legacy `Duplex` stream
+  path or the transport connection path.
+- The remaining parity work is to add equivalent ports to C#, Rust, Python, and
+  Kotlin, then move each runtime's existing TCP/LiteNetLib/WebSocket bodies
+  behind those ports before implementing `rudp`.
+
 ## Reliable UDP Semantics To Lift From LiteNetLib
 
 The portable RUDP contract must cover at least:

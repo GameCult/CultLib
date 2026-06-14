@@ -12,6 +12,7 @@ import {
   CultNetPeer,
   CultNetSchemaRegistry,
   cultNetBuiltinSchemaRegistry,
+  createTcpFramedTransportProfile,
   defineCultNetDocumentBinding,
   type CultNetDocumentBinding,
   type CultNetDocumentPutRawMessage,
@@ -259,28 +260,11 @@ async function handleServerMessage(input: {
           receiptDocumentTypes: [INTEROP_MUTATION_RECEIPT_DOCUMENT_TYPE, INTEROP_FIRE_RECEIPT_DOCUMENT_TYPE],
         }],
         supportedMessageVersions: [INTEROP_SCHEMA_VERSION],
-        transportProfiles: [
-          {
-            schemaVersion: "cultnet.transport_profile.v0",
-            runtimeId,
-            transports: [
-              {
-                transportId: "interop-tcp",
-                protocol: "tcp_framed",
-                host: advertiseHost,
-                port: tcpPort,
-                wireContracts: [INTEROP_WIRE_CONTRACT],
-                channels: [
-                  {
-                    channelId: "schema",
-                    delivery: "reliable",
-                    ordering: "ordered",
-                  },
-                ],
-              },
-            ],
-          },
-        ],
+        transportProfiles: [createTcpFramedTransportProfile(runtimeId, {
+          transportId: "interop-tcp",
+          host: advertiseHost,
+          port: tcpPort,
+        })],
         supportsSchemaCatalog: true,
       });
       break;
@@ -437,28 +421,11 @@ async function respondToProbe(input: {
     tcpPort,
     wireContract: INTEROP_WIRE_CONTRACT,
     supportedDocumentTypes: [INTEROP_DOCUMENT_TYPE],
-    transportProfiles: [
-      {
-        schemaVersion: "cultnet.transport_profile.v0",
-        runtimeId,
-        transports: [
-          {
-            transportId: "interop-tcp",
-            protocol: "tcp_framed",
-            host: advertiseHost,
-            port: tcpPort,
-            wireContracts: [INTEROP_WIRE_CONTRACT],
-            channels: [
-              {
-                channelId: "schema",
-                delivery: "reliable",
-                ordering: "ordered",
-              },
-            ],
-          },
-        ],
-      },
-    ],
+    transportProfiles: [createTcpFramedTransportProfile(runtimeId, {
+      transportId: "interop-tcp",
+      host: advertiseHost,
+      port: tcpPort,
+    })],
     supportsSchemaCatalog: true,
   };
 

@@ -19,8 +19,10 @@ import {
   CultNetSchemaRegistry,
   CultNetSecret,
   CultNetServerSecurityOptions,
+  TcpFramedTransportConnection,
   cultNetSchemas,
   cultNetBuiltinSchemaRegistry,
+  createTcpFramedTransportProfile,
   defineCultNetDocumentBinding,
   encodeCultNetMessageForWire,
   ghostlightAgentStateGeneratedContract,
@@ -162,6 +164,55 @@ test("CultNet peer frames and decodes typed messages over a direct pipe", async 
     assert.equal(message.agentId, "void");
     assert.equal(message.transportProfiles?.[0]?.transports[0]?.protocol, "tcp_framed");
   }
+
+  sender.close();
+  receiver.close();
+});
+
+test("tcp_framed transport carries raw schema channel payloads with stats", async () => {
+  const { a, b } = createDuplexPair();
+  const left = new TcpFramedTransportConnection(a, createTcpFramedTransportProfile("left"));
+  const right = new TcpFramedTransportConnection(b, createTcpFramedTransportProfile("right"));
+
+  const frame = await new Promise<{ channelId: string; payload: Uint8Array }>((resolve, reject) => {
+    right.once("frame", resolve);
+    right.once("error", reject);
+    left.send("schema", Buffer.from("payload", "utf8"));
+  });
+
+  assert.equal(frame.channelId, "schema");
+  assert.equal(Buffer.from(frame.payload).toString("utf8"), "payload");
+  assert.equal(left.stats.framesSent, 1);
+  assert.equal(right.stats.framesReceived, 1);
+  assert.throws(() => left.send("unreliable", Buffer.alloc(0)), /only supports the schema channel/);
+
+  left.close();
+  right.close();
+});
+
+test("CultNet peer can speak through a transport connection", async () => {
+  const { a, b } = createDuplexPair();
+  const leftTransport = new TcpFramedTransportConnection(a, createTcpFramedTransportProfile("left"));
+  const rightTransport = new TcpFramedTransportConnection(b, createTcpFramedTransportProfile("right"));
+  const sender = new CultNetPeer(leftTransport, { wireContract: "cultnet.schema.v0" });
+  const receiver = new CultNetPeer(rightTransport, { wireContract: "cultnet.schema.v0" });
+
+  const message = await new Promise<ReturnType<typeof parseCultNetMessage>>((resolve, reject) => {
+    receiver.once("message", resolve);
+    receiver.once("invalidMessage", reject);
+    sender.sendHello({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "transport-sender",
+      runtimeKind: "node-worker",
+    });
+  });
+
+  assert.equal(message.schemaVersion, "cultnet.hello.v0");
+  if (message.schemaVersion === "cultnet.hello.v0") {
+    assert.equal(message.runtimeId, "transport-sender");
+  }
+  assert.equal(leftTransport.stats.framesSent, 1);
+  assert.equal(rightTransport.stats.framesReceived, 1);
 
   sender.close();
   receiver.close();
