@@ -5,7 +5,7 @@ from pathlib import Path
 from cultnet_py import CultNetRawClient
 
 from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
-from .node import CultMeshNode, create_node
+from .node import CultMeshNode, CultMeshNodeOptions, create_node
 from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
@@ -19,12 +19,38 @@ from .wire import (
 
 class CultMesh:
     @staticmethod
-    def create_node(cache_path: str | Path | None = None, *, runtime_id: str = "python-runtime") -> CultMeshNode:
-        return create_node(cache_path, runtime_id=runtime_id)
+    def create_node(
+        cache_path: str | Path | None = None,
+        *,
+        runtime_id: str = "python-runtime",
+        options: CultMeshNodeOptions | None = None,
+        enable_durable_shard_logs: bool | None = None,
+        shard_log_path: str | Path | None = None,
+    ) -> CultMeshNode:
+        return create_node(
+            cache_path,
+            runtime_id=runtime_id,
+            options=options,
+            enable_durable_shard_logs=enable_durable_shard_logs,
+            shard_log_path=shard_log_path,
+        )
 
     @staticmethod
-    def start_node(cache_path: str | Path | None = None, *, runtime_id: str = "python-runtime") -> CultMeshNode:
-        return create_node(cache_path, runtime_id=runtime_id)
+    def start_node(
+        cache_path: str | Path | None = None,
+        *,
+        runtime_id: str = "python-runtime",
+        options: CultMeshNodeOptions | None = None,
+        enable_durable_shard_logs: bool | None = None,
+        shard_log_path: str | Path | None = None,
+    ) -> CultMeshNode:
+        return create_node(
+            cache_path,
+            runtime_id=runtime_id,
+            options=options,
+            enable_durable_shard_logs=enable_durable_shard_logs,
+            shard_log_path=shard_log_path,
+        )
 
     @staticmethod
     def create_verse_catalog() -> CultMeshVerseCatalog:

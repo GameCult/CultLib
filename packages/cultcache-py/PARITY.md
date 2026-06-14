@@ -83,7 +83,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
-  authority leases, local TCP node serving, and simulation fact commits.
+  authority leases, local TCP node serving, simulation fact commits, and the
+  durable shard-log node option that attaches a file-backed authoritative log
+  store beside the cache file by default.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, and authorization delegation, matching
@@ -186,5 +188,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   catch-up with snapshot recovery, a file-backed replica cursor store, and
   schema-v0 write forwarding. It also has an explicit package-level background
   pull loop for caller-provided shard descriptors. Its authoritative shard-log
-  store is file-backed and supports compaction watermarks, but it is still
+  store is file-backed, supports compaction watermarks, and can be attached by
+  `CultMeshNodeOptions(enable_durable_shard_logs=True)`, but it is still
   package-local rather than the full C# daemon/server stack.

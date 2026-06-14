@@ -80,6 +80,7 @@ from cultmesh_py import (
     CultMeshDatabase,
     CultMeshDatabaseChange,
     CultMeshGameSessionOptions,
+    CultMeshNodeOptions,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshSimulationFact,
@@ -1205,6 +1206,37 @@ class CultCacheTests(unittest.TestCase):
             reopened.database.register_document(document)
             reopened.database.pull()
             self.assertEqual(reopened.database.get(document, "note:1")["body"], "hello")
+
+    def test_cultmesh_node_options_attach_default_durable_shard_log_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = define_database_entry_type(
+                "mesh.durable_option_note",
+                [("body", 0)],
+                schema_id="mesh.durable_option_note.v1",
+            )
+            cache_path = Path(tmp) / "world.cc"
+            node = CultMesh.create_node(
+                cache_path,
+                runtime_id="durable-option-primary",
+                options=CultMeshNodeOptions(enable_durable_shard_logs=True),
+            )
+            node.database.register_document(document)
+            node.database.put_raw_message(document, "note:1", {"body": "stored"}, shard_id="notes", shard_epoch=5)
+
+            log_path = Path(tmp) / "world.cultmesh" / "shard-logs"
+            self.assertTrue(log_path.exists())
+
+            reopened = CultMesh.start_node(
+                cache_path,
+                runtime_id="durable-option-primary",
+                enable_durable_shard_logs=True,
+            )
+            reopened.database.register_document(document)
+            response = reopened.database.build_shard_log_response(shard_id="notes", shard_epoch=5)
+
+            self.assertEqual(reopened.database.shard_ids(), ["notes"])
+            self.assertEqual([entry.sequence for entry in response.entries], [1])
+            self.assertEqual(response.entries[0].raw_document.record_key, "note:1")
 
     def test_cultmesh_database_watchers_observe_local_changes_and_unsubscribe(self) -> None:
         document = define_database_entry_type("mesh.watch", [("body", 0)])

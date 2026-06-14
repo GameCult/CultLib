@@ -9,6 +9,7 @@ from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBack
 from cultcache_py.documents import DocumentDefinition, extract_value
 from cultnet_py import (
     CultNetAppliedRecord,
+    CultNetFileShardMutationLogStore,
     CultNetMessage,
     CultNetRawClient,
     CultNetRawDocumentRecord,
@@ -218,6 +219,12 @@ class CultMeshNode:
             after_sequence=after_sequence,
             limit=limit,
         )
+
+
+@dataclass(frozen=True)
+class CultMeshNodeOptions:
+    enable_durable_shard_logs: bool = False
+    shard_log_path: str | Path | None = None
 
 
 class CultMeshDatabase:
@@ -886,8 +893,54 @@ class CultMeshDatabase:
         return previous
 
 
-def create_node(cache_path: str | Path | None = None, *, runtime_id: str = "python-runtime") -> CultMeshNode:
+def create_node(
+    cache_path: str | Path | None = None,
+    *,
+    runtime_id: str = "python-runtime",
+    options: CultMeshNodeOptions | None = None,
+    enable_durable_shard_logs: bool | None = None,
+    shard_log_path: str | Path | None = None,
+) -> CultMeshNode:
+    resolved_options = _resolve_node_options(
+        options,
+        enable_durable_shard_logs=enable_durable_shard_logs,
+        shard_log_path=shard_log_path,
+    )
     cache = CultCache()
     if cache_path is not None:
         cache.add_generic_store(SingleFileMessagePackBackingStore(cache_path))
-    return CultMeshNode(cache=cache, runtime_id=runtime_id)
+    node = CultMeshNode(cache=cache, runtime_id=runtime_id)
+    if resolved_options.enable_durable_shard_logs:
+        node.database.use_shard_mutation_log_store(CultNetFileShardMutationLogStore(
+            _resolve_shard_log_path(cache_path, resolved_options.shard_log_path)
+        ))
+    return node
+
+
+def _resolve_node_options(
+    options: CultMeshNodeOptions | None,
+    *,
+    enable_durable_shard_logs: bool | None,
+    shard_log_path: str | Path | None,
+) -> CultMeshNodeOptions:
+    if options is None:
+        return CultMeshNodeOptions(
+            enable_durable_shard_logs=enable_durable_shard_logs is True,
+            shard_log_path=shard_log_path,
+        )
+    return CultMeshNodeOptions(
+        enable_durable_shard_logs=options.enable_durable_shard_logs
+        if enable_durable_shard_logs is None
+        else enable_durable_shard_logs,
+        shard_log_path=shard_log_path if shard_log_path is not None else options.shard_log_path,
+    )
+
+
+def _resolve_shard_log_path(cache_path: str | Path | None, shard_log_path: str | Path | None) -> Path:
+    if shard_log_path is not None:
+        return Path(shard_log_path)
+    if cache_path is None:
+        raise ValueError("cache_path or shard_log_path is required when durable shard logs are enabled")
+    path = Path(cache_path)
+    directory = path.parent if path.parent != Path("") else Path.cwd()
+    return directory / f"{path.stem}.cultmesh" / "shard-logs"

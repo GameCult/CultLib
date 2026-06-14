@@ -226,7 +226,6 @@ from cultcache_py import define_database_entry_type
 from cultnet_py import (
     CultNetClientAuthorityScope,
     CultNetFileShardReplicaCursorStore,
-    CultNetFileShardMutationLogStore,
     CultNetRawClient,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
@@ -234,7 +233,7 @@ from cultnet_py import (
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
 )
-from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_request
+from cultmesh_py import CultMesh, CultMeshGameSessionOptions, CultMeshNodeOptions, peer_exchange_request
 
 note_doc = define_database_entry_type(
     "mesh.note",
@@ -242,9 +241,12 @@ note_doc = define_database_entry_type(
     name="name",
     indexes={"kind": "kind"},
 )
-node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
+node = CultMesh.start_node(
+    "mesh.cc",
+    runtime_id="python-runtime",
+    options=CultMeshNodeOptions(enable_durable_shard_logs=True),
+)
 node.database.register_document(note_doc)
-node.database.use_shard_mutation_log_store(CultNetFileShardMutationLogStore("mesh.shard-logs"))
 unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
 unsubscribe_named = node.database.watch_by_name(note_doc, "intro", lambda change: print(change.record_key))
 unsubscribe_kind = node.database.watch_by_index(note_doc, "kind", "guide", lambda change: print(change.record_key))
