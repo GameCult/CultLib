@@ -20,7 +20,13 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.benchmark import run_benchmark
-from cultcache_py.compare_csharp import DEFAULT_SAMPLE_COUNT, _median_result
+from cultcache_py.compare_csharp import (
+    DEFAULT_PARITY_THRESHOLD,
+    DEFAULT_SAMPLE_COUNT,
+    _compare_common_metrics,
+    _median_result,
+    _parity_status,
+)
 from cultcache_py.interop import read_note, write_note
 from cultcache_py.verify import verify
 from cultnet_py.interop_peer import append_shard_log_put, build_state, raw_snapshot_response
@@ -309,6 +315,7 @@ class CultCacheTests(unittest.TestCase):
 
     def test_compare_csharp_median_result_summarizes_samples(self) -> None:
         self.assertEqual(DEFAULT_SAMPLE_COUNT, 3)
+        self.assertEqual(DEFAULT_PARITY_THRESHOLD, 0.90)
         samples = [
             {
                 "runtime": "python",
@@ -343,6 +350,29 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(summarized["metrics"][0]["elapsedMs"], 20.0)
         self.assertEqual(summarized["metrics"][0]["opsPerSecond"], 200.0)
         self.assertEqual(summarized["metrics"][1]["opsPerSecond"], 75.0)
+
+    def test_compare_csharp_marks_threshold_status_per_metric(self) -> None:
+        python_result = {
+            "metrics": [
+                {"name": "cache_get", "operations": 3, "elapsedMs": 2.0, "opsPerSecond": 50.0},
+                {"name": "cache_upsert", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 95.0},
+            ],
+        }
+        csharp_result = {
+            "metrics": [
+                {"name": "cache_get", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 100.0},
+                {"name": "cache_upsert", "operations": 3, "elapsedMs": 1.0, "opsPerSecond": 100.0},
+            ],
+        }
+
+        comparison = _compare_common_metrics(python_result, csharp_result, parity_threshold=0.90)
+        by_name = {item["name"]: item for item in comparison}
+
+        self.assertFalse(by_name["cache_get"]["meetsParityThreshold"])
+        self.assertTrue(by_name["cache_upsert"]["meetsParityThreshold"])
+        self.assertEqual(_parity_status(comparison, "ok"), "below-threshold")
+        self.assertEqual(_parity_status([by_name["cache_upsert"]], "ok"), "meets-threshold")
+        self.assertEqual(_parity_status(comparison, "failed"), "unknown")
 
     def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
         document = define_database_entry_type(

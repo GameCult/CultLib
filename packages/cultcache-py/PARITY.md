@@ -169,7 +169,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
   benchmarks with the same operation names and reports median Python-to-C# ratios
-  from three samples by default.
+  from three samples by default. It also emits per-metric threshold checks and an
+  overall parity status so performance claims have an explicit evidence gate.
 
 ## Local Python Gates
 
@@ -194,7 +195,7 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 
 - Python does not claim to match the C# runtime for raw throughput. It has a
   measured local baseline plus a shared public `CultCache` upsert/get comparison
-  harness, not a performance victory certificate.
+  harness with threshold status, not a performance victory certificate.
 - Python does not own LiteNetLib security/session behavior; it speaks the
   schema-v0 interop lane used by the package harness.
 - Python does not implement the full C# daemon/server stack. Its current role is

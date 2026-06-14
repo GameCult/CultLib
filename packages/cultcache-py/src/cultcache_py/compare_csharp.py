@@ -12,12 +12,14 @@ from .benchmark import run_benchmark
 
 
 DEFAULT_SAMPLE_COUNT = 3
+DEFAULT_PARITY_THRESHOLD = 0.90
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultcache-py-compare-csharp")
     parser.add_argument("--records", type=int, default=5000)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLE_COUNT)
+    parser.add_argument("--parity-threshold", type=float, default=DEFAULT_PARITY_THRESHOLD)
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--json", action="store_true", dest="emit_json")
     args = parser.parse_args(argv)
@@ -25,8 +27,15 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--records must be greater than zero")
     if args.samples <= 0:
         raise ValueError("--samples must be greater than zero")
+    if args.parity_threshold <= 0:
+        raise ValueError("--parity-threshold must be greater than zero")
 
-    result = compare_with_csharp(records=args.records, samples=args.samples, repo_root=args.repo_root)
+    result = compare_with_csharp(
+        records=args.records,
+        samples=args.samples,
+        repo_root=args.repo_root,
+        parity_threshold=args.parity_threshold,
+    )
     if args.emit_json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
@@ -39,10 +48,18 @@ def main(argv: list[str] | None = None) -> int:
             print(runtime)
             for metric in benchmark["metrics"]:
                 print(f"- {metric['name']}: {metric['opsPerSecond']:.0f} ops/s ({metric['elapsedMs']:.2f} ms)")
+        print(f"parityThreshold: {result['parityThreshold']:.2f}")
+        print(f"parityStatus: {result['parityStatus']}")
     return 0 if result["csharpStatus"] == "ok" else 1
 
 
-def compare_with_csharp(*, records: int, samples: int = DEFAULT_SAMPLE_COUNT, repo_root: Path | None = None) -> dict[str, Any]:
+def compare_with_csharp(
+    *,
+    records: int,
+    samples: int = DEFAULT_SAMPLE_COUNT,
+    repo_root: Path | None = None,
+    parity_threshold: float = DEFAULT_PARITY_THRESHOLD,
+) -> dict[str, Any]:
     resolved_root = _resolve_repo_root(repo_root)
     python_samples = [run_benchmark(records) for _ in range(samples)]
     python_result = _median_result(python_samples)
@@ -55,7 +72,11 @@ def compare_with_csharp(*, records: int, samples: int = DEFAULT_SAMPLE_COUNT, re
             break
         csharp_samples.append(csharp_result)
     csharp_result = _median_result(csharp_samples) if csharp_samples else None
-    comparison = _compare_common_metrics(python_result, csharp_result) if csharp_result else []
+    comparison = _compare_common_metrics(
+        python_result,
+        csharp_result,
+        parity_threshold=parity_threshold,
+    ) if csharp_result else []
     result: dict[str, Any] = {
         "records": records,
         "samples": samples,
@@ -64,6 +85,8 @@ def compare_with_csharp(*, records: int, samples: int = DEFAULT_SAMPLE_COUNT, re
         "pythonSamples": python_samples,
         "csharpStatus": status,
         "comparison": comparison,
+        "parityThreshold": parity_threshold,
+        "parityStatus": _parity_status(comparison, status),
     }
     if csharp_result is not None:
         result["csharp"] = csharp_result
@@ -107,20 +130,37 @@ def _run_csharp_benchmark(repo_root: Path, records: int) -> tuple[dict[str, Any]
         return None, "invalid-json", "C# benchmark produced no stdout."
 
 
-def _compare_common_metrics(python_result: dict[str, Any], csharp_result: dict[str, Any]) -> list[dict[str, Any]]:
+def _compare_common_metrics(
+    python_result: dict[str, Any],
+    csharp_result: dict[str, Any],
+    *,
+    parity_threshold: float = DEFAULT_PARITY_THRESHOLD,
+) -> list[dict[str, Any]]:
     python_metrics = {metric["name"]: metric for metric in python_result["metrics"]}
     csharp_metrics = {metric["name"]: metric for metric in csharp_result["metrics"]}
     comparison = []
     for name in sorted(set(python_metrics).intersection(csharp_metrics)):
         python_ops = float(python_metrics[name]["opsPerSecond"])
         csharp_ops = float(csharp_metrics[name]["opsPerSecond"])
+        ratio = python_ops / csharp_ops if csharp_ops > 0 else None
         comparison.append({
             "name": name,
             "pythonOpsPerSecond": python_ops,
             "csharpOpsPerSecond": csharp_ops,
-            "pythonToCsharpRatio": python_ops / csharp_ops if csharp_ops > 0 else None,
+            "pythonToCsharpRatio": ratio,
+            "meetsParityThreshold": ratio is not None and ratio >= parity_threshold,
         })
     return comparison
+
+
+def _parity_status(comparison: list[dict[str, Any]], csharp_status: str) -> str:
+    if csharp_status != "ok":
+        return "unknown"
+    if not comparison:
+        return "unknown"
+    if all(item.get("meetsParityThreshold") is True for item in comparison):
+        return "meets-threshold"
+    return "below-threshold"
 
 
 def _median_result(samples: list[dict[str, Any]]) -> dict[str, Any]:
