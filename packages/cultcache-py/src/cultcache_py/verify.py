@@ -158,6 +158,7 @@ def verify(*, records: int = 64) -> dict[str, Any]:
         _check_exports(),
         _check_typed_markers(),
         _check_local_cultmesh_wire_smoke(),
+        _check_cultmesh_capability_truth(),
         _check_benchmark(records),
     ]
     return {
@@ -278,6 +279,98 @@ def _check_local_cultmesh_wire_smoke() -> dict[str, Any]:
     except Exception as exc:
         return {
             "name": "local_cultmesh_wire_smoke",
+            "status": "failed",
+            "error": str(exc),
+        }
+
+
+def _check_cultmesh_capability_truth() -> dict[str, Any]:
+    try:
+        from cultmesh_py import CultMesh
+        from cultnet_py import (
+            CultNetPeerError,
+            CultNetSimulationConsensusOptions,
+            CultNetSimulationObservationHub,
+            compute_simulation_claim_hash,
+            hello,
+            simulation_observation,
+        )
+
+        disabled = CultMesh.serve_node(CultMesh.create_node(runtime_id="verify-no-sim"))
+        try:
+            disabled_client = CultMesh.create_client("127.0.0.1", disabled.port, timeout_seconds=2.0)
+            disabled_hello = disabled_client.request(
+                hello(runtime_id="verify-client"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            disabled_versions = set(disabled_hello.get("supportedMessageVersions") or ())
+            disabled_error_code = ""
+            try:
+                disabled_client.request(
+                    simulation_observation(
+                        message_id="verify-disabled-sim",
+                        witness_runtime_id="watcher-1",
+                        shard_id="arena",
+                        shard_epoch=1,
+                        frame=1,
+                        subject_id="subject",
+                        claim_kind="claim",
+                        claim_hash=compute_simulation_claim_hash("claim", "subject", "frame:1"),
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+            except CultNetPeerError as error:
+                disabled_error_code = str(error.response.get("code") or "")
+        finally:
+            disabled.stop()
+
+        hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        enabled = CultMesh.serve_node(CultMesh.create_node(runtime_id="verify-sim"), observation_hub=hub)
+        try:
+            enabled_client = CultMesh.create_client("127.0.0.1", enabled.port, timeout_seconds=2.0)
+            enabled_hello = enabled_client.request(
+                hello(runtime_id="verify-client"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            enabled_versions = set(enabled_hello.get("supportedMessageVersions") or ())
+            claim_hash = compute_simulation_claim_hash("claim", "subject", "frame:1")
+            candidate = enabled_client.request(
+                simulation_observation(
+                    message_id="verify-enabled-sim",
+                    witness_runtime_id="watcher-1",
+                    shard_id="arena",
+                    shard_epoch=1,
+                    frame=1,
+                    subject_id="subject",
+                    claim_kind="claim",
+                    claim_hash=claim_hash,
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+        finally:
+            enabled.stop()
+
+        failures = []
+        if "cultnet.simulation_observation.v0" in disabled_versions:
+            failures.append("disabled_advertises_simulation_observation")
+        if disabled_error_code != "simulation_observations_disabled":
+            failures.append("disabled_error_code")
+        if "cultnet.simulation_observation.v0" not in enabled_versions:
+            failures.append("enabled_missing_simulation_observation")
+        if "cultnet.simulation_consensus_candidate.v0" not in enabled_versions:
+            failures.append("enabled_missing_simulation_candidate")
+        if candidate.get("claimHash") != claim_hash or candidate.get("hasQuorum") is not True:
+            failures.append("enabled_candidate")
+        return {
+            "name": "cultmesh_capability_truth",
+            "status": "ok" if not failures else "failed",
+            "failures": failures,
+        }
+    except Exception as exc:
+        return {
+            "name": "cultmesh_capability_truth",
             "status": "failed",
             "error": str(exc),
         }

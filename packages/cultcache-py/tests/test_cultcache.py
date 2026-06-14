@@ -401,10 +401,17 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(
             {check["name"] for check in result["checks"]},
-            {"public_exports", "typed_markers", "local_cultmesh_wire_smoke", "benchmark_sanity"},
+            {
+                "public_exports",
+                "typed_markers",
+                "local_cultmesh_wire_smoke",
+                "cultmesh_capability_truth",
+                "benchmark_sanity",
+            },
         )
         by_name = {check["name"]: check for check in result["checks"]}
         self.assertEqual(by_name["public_exports"]["missing"], {})
+        self.assertEqual(by_name["cultmesh_capability_truth"]["failures"], [])
 
     def test_cultnet_schema_message_frame_round_trip(self) -> None:
         message = hello(runtime_id="python-test", supported_schema_versions=["cultnet.hello.v0"])

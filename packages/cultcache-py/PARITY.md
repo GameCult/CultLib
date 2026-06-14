@@ -208,8 +208,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   export surface declared by each package `__all__`, `py.typed` markers, a live
   local CultMesh framed-wire smoke over hello/schema/snapshot/shard
   catalog/shard log, typed peer-error export availability, peer-advertised
-  mutation contracts, payload schema wire contracts, and benchmark sanity for
-  Python-owned hot paths.
+  mutation contracts, payload schema wire contracts, simulation capability
+  truth, and benchmark sanity for Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
   benchmarks with the same operation names and reports median Python-to-C# ratios
