@@ -36,6 +36,8 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
         "CultNetSchemaDescriptor",
         "CultNetShardCatalog",
         "CultNetShardDescriptor",
+        "CultNetShardLogEntry",
+        "CultNetShardLogResponse",
         "CultNetSimulationConsensus",
         "CultNetSimulationConsensusOptions",
         "CultNetSimulationObservationHub",

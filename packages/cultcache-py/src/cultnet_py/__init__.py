@@ -35,6 +35,7 @@ from .schema_catalog import (
     wire_message_schema_json,
 )
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
+from .shard_log import CultNetShardLogEntry, CultNetShardLogResponse
 from .simulation import (
     CultNetSimulationConsensus,
     CultNetSimulationConsensusOptions,
@@ -49,6 +50,8 @@ __all__ = [
     "CultNetSchemaDescriptor",
     "CultNetShardCatalog",
     "CultNetShardDescriptor",
+    "CultNetShardLogEntry",
+    "CultNetShardLogResponse",
     "CultNetAppliedRecord",
     "CultNetClientAuthorityScope",
     "CultNetSimulationConsensus",

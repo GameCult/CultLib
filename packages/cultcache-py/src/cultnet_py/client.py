@@ -18,6 +18,7 @@ from .messages import (
 )
 from .schema_catalog import CultNetSchemaCatalog, CultNetSchemaDescriptor
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
+from .shard_log import CultNetShardLogResponse
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,23 @@ class CultNetRawClient:
             ),
             expected_schema_version="cultnet.shard_log_response.v0",
         )
+
+    def fetch_shard_log_response(
+        self,
+        *,
+        shard_id: str,
+        message_id: str = "cultnet-python-shard-log",
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> CultNetShardLogResponse:
+        return CultNetShardLogResponse.from_wire(self.fetch_shard_log(
+            shard_id=shard_id,
+            message_id=message_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        ))
 
     def subscribe_database(
         self,

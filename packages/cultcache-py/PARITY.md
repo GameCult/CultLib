@@ -26,6 +26,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   ingesting, filtering, and emitting shard topology responses, plus
   `CultNetRawClient.sync_shard_catalog(...)` for peer topology discovery over
   the same framed CultNet pipe.
+- Python CultNet shard log:
+  Provides typed `CultNetShardLogResponse` and `CultNetShardLogEntry` helpers
+  for inspecting mutation-log entries, resync pressure, and sequence cursors,
+  while cache mutation remains owned by the existing replication helpers.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.
