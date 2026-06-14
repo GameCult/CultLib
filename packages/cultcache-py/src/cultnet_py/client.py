@@ -294,10 +294,20 @@ class CultNetDatabaseSubscription:
         message = self.read_next()
         return CultNetDatabaseChange.from_wire(message)
 
+    def read_next_snapshot_response(self) -> CultNetRawSnapshotResponse:
+        message = self.read_next()
+        return CultNetRawSnapshotResponse.from_wire(message)
+
     def iter_messages(self, *, max_messages: int | None = None) -> Any:
         received = 0
         while max_messages is None or received < max_messages:
             yield self.read_next()
+            received += 1
+
+    def iter_snapshot_responses(self, *, max_messages: int | None = None) -> Any:
+        received = 0
+        while max_messages is None or received < max_messages:
+            yield self.read_next_snapshot_response()
             received += 1
 
     def iter_changes(self, *, max_messages: int | None = None) -> Any:

@@ -624,13 +624,15 @@ class CultCacheTests(unittest.TestCase):
             payload=document.encode_payload(Item("orb", "gear", 8)),
         )
         with client.subscribe_database(subscription_id="sub-1", schema_ids=[schema_id]) as subscription:
-            snapshot = subscription.read_next()
+            snapshot = subscription.read_next_snapshot_response()
             subscription.send(put)
             change = subscription.read_next_change()
 
         thread.join(2.0)
         self.assertFalse(server_error)
-        self.assertEqual(snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertIsInstance(snapshot, CultNetRawSnapshotResponse)
+        self.assertEqual(snapshot.message_id, "cultnet-python-subscribe")
+        self.assertEqual(snapshot.to_wire()["schemaVersion"], "cultnet.snapshot_response_raw.v0")
         self.assertEqual(change.change_kind, "added")
         self.assertEqual(change.record_key, "item:sub")
         self.assertEqual(received_versions, [
@@ -1920,7 +1922,7 @@ class CultCacheTests(unittest.TestCase):
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
             fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
             with raw_client.subscribe_database(subscription_id="sub-server", schema_ids=["mesh.server_note.v1"]) as subscription:
-                subscription_snapshot = subscription.read_next()
+                subscription_snapshot = subscription.read_next_snapshot_response()
                 subscription.send(document_put_raw(
                     message_id="server-put",
                     key="note:2",
@@ -1965,7 +1967,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(typed_shard_log.entries[0].put["document"]["recordKey"], "note:1")
         self.assertEqual(fetched_verses[0].verse_id, "server-verse")
         self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
-        self.assertEqual(subscription_snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertIsInstance(subscription_snapshot, CultNetRawSnapshotResponse)
+        self.assertEqual(subscription_snapshot.to_wire()["schemaVersion"], "cultnet.snapshot_response_raw.v0")
         self.assertEqual(subscription_change.change_kind, "added")
         self.assertEqual(subscription_change.record_key, "note:2")
         self.assertEqual(subscription_change.document["recordKey"], "note:2")
