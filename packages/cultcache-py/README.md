@@ -315,11 +315,14 @@ The same local server can be launched as a package daemon when another runtime
 or operator process needs a CultNet endpoint without embedding Python glue:
 
 ```powershell
-python -m cultmesh_py.daemon --runtime-id python-runtime --display-name "Python Runtime" --host 127.0.0.1 --port 3075 --cache-file mesh.cc --enable-durable-shard-logs --ready-file mesh.ready.json
+python -m cultmesh_py.daemon --runtime-id python-runtime --display-name "Python Runtime" --host 127.0.0.1 --port 3075 --cache-file mesh.cc --enable-durable-shard-logs --seed-interop-note --ready-file mesh.ready.json
 ```
 
 The ready file and stdout line are process readiness hints. The served state and
-capability truth still live on the framed CultNet/CultMesh endpoint.
+capability truth still live on the framed CultNet/CultMesh endpoint. Use
+`--register-interop-note` to expose the package interop-note schema without
+seeding a note, or `--seed-interop-note` to register it and publish one local
+record for wire probes.
 
 ```python
 

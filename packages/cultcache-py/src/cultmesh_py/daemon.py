@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
+
 from .facade import CultMesh
 from .server import CultMeshLocalServer
 
@@ -26,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-snapshot-documents", type=int)
     parser.add_argument("--max-snapshot-bytes", type=int)
     parser.add_argument("--ready-file")
+    parser.add_argument("--register-interop-note", action="store_true")
+    parser.add_argument("--seed-interop-note", action="store_true")
     args = parser.parse_args(argv)
 
     stop = threading.Event()
@@ -48,6 +52,23 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
         enable_durable_shard_logs=args.enable_durable_shard_logs,
         shard_log_path=args.shard_log_file,
     )
+    if args.register_interop_note or args.seed_interop_note:
+        node.database.register_document(interop_note_document)
+        if args.cache_file:
+            node.database.pull()
+    if args.seed_interop_note:
+        node.database.put(
+            interop_note_document,
+            f"note:{args.runtime_id}",
+            {
+                "schemaVersion": INTEROP_SCHEMA_VERSION,
+                "documentId": f"note:{args.runtime_id}",
+                "authorRuntimeId": args.runtime_id,
+                "title": f"{args.runtime_id} wrote a CultMesh daemon note",
+                "body": "The Python CultMesh daemon is serving typed state over CultNet.",
+                "tags": [args.runtime_id, "python", "cultmesh", "daemon"],
+            },
+        )
     return CultMesh.serve_node(
         node,
         host=args.host,

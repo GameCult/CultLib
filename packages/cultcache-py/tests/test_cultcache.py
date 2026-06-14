@@ -30,7 +30,7 @@ from cultcache_py.compare_csharp import (
     _median_result,
     _parity_status,
 )
-from cultcache_py.interop import read_note, write_note
+from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document, read_note, write_note
 from cultcache_py.verify import verify
 from cultnet_py.interop_peer import append_shard_log_put, build_state, raw_snapshot_response
 from cultnet_py import (
@@ -3043,6 +3043,7 @@ class CultCacheTests(unittest.TestCase):
                     "0",
                     "--ready-file",
                     str(ready_path),
+                    "--seed-interop-note",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3062,6 +3063,7 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(ready["schemaVersion"], READY_SCHEMA_VERSION)
                 self.assertEqual(ready["runtimeId"], "daemon-test-peer")
                 self.assertEqual(ready["endpoint"], f"cultnet://127.0.0.1:{ready['port']}")
+                self.assertEqual(ready["supportedDocumentTypes"], ["cultcache.interop-note"])
 
                 client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
                 hello_response = client.request(
@@ -3073,6 +3075,17 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(hello_response["displayName"], "Daemon Test Peer")
                 self.assertIn("cultnet.hello.v0", hello_response["supportedMessageVersions"])
                 self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
+                self.assertEqual(hello_response["supportedDocumentTypes"], ["cultcache.interop-note"])
+
+                schema_response = client.fetch_schema_catalog(schema_ids=["cultcache.interop-note"], include_schema_json=True)
+                self.assertEqual(schema_response["schemas"][0]["schemaVersion"], INTEROP_SCHEMA_VERSION)
+                self.assertEqual(schema_response["schemas"][0]["documentType"], "cultcache.interop-note")
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(snapshot_response.documents[0].record_key, "note:daemon-test-peer")
+                note = interop_note_document.decode_payload(snapshot_response.documents[0].payload)
+                self.assertEqual(note["authorRuntimeId"], "daemon-test-peer")
+                self.assertIn("daemon", note["tags"])
             finally:
                 process.terminate()
                 try:

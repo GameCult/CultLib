@@ -100,7 +100,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   store beside the cache file by default. The `cultmesh-py-daemon` /
   `python -m cultmesh_py.daemon` entrypoint launches that same local TCP server
   body and emits a bounded readiness document for process supervisors while the
-  served CultNet endpoint remains the capability owner.
+  served CultNet endpoint remains the capability owner. The daemon can register
+  and seed the package interop-note document so launched processes advertise a
+  real payload schema and serve a real snapshot over the same CultNet lane.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and
