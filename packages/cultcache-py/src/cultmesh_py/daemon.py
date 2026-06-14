@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
+from cultnet_py import hello
 
 from .facade import CultMesh
 from .server import CultMeshLocalServer
@@ -133,14 +134,23 @@ def advertise_self(
 
 
 def daemon_ready_document(server: CultMeshLocalServer) -> dict[str, Any]:
+    hello_response = server.handle_message(hello(runtime_id="daemon-ready-probe").to_wire()) or {}
     return {
         "schemaVersion": READY_SCHEMA_VERSION,
         "runtimeId": server.node.runtime_id,
         "runtimeKind": server.runtime_kind,
+        "displayName": hello_response.get("displayName") or server.node.runtime_id,
         "host": server.host,
         "port": server.port,
         "endpoint": f"cultnet://{server.host}:{server.port}",
+        "shardIds": server.node.database.shard_ids(),
         "supportedDocumentTypes": [document.type for document in server.node.documents],
+        "supportedMessageVersions": list(hello_response.get("supportedMessageVersions") or ()),
+        "supportedMutationContracts": list(hello_response.get("supportedMutationContracts") or ()),
+        "snapshotLimits": {
+            "maxSnapshotDocuments": server.max_snapshot_documents,
+            "maxSnapshotBytes": server.max_snapshot_bytes,
+        },
     }
 
 

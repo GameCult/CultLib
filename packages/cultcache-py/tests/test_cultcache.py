@@ -3082,8 +3082,16 @@ class CultCacheTests(unittest.TestCase):
                 ready = json.loads(ready_path.read_text(encoding="utf-8"))
                 self.assertEqual(ready["schemaVersion"], READY_SCHEMA_VERSION)
                 self.assertEqual(ready["runtimeId"], "daemon-test-peer")
+                self.assertEqual(ready["runtimeKind"], "python")
+                self.assertEqual(ready["displayName"], "Daemon Test Peer")
                 self.assertEqual(ready["endpoint"], f"cultnet://127.0.0.1:{ready['port']}")
+                self.assertEqual(ready["shardIds"], ["daemon-interop"])
                 self.assertEqual(ready["supportedDocumentTypes"], ["cultcache.interop-note"])
+                self.assertIn("cultnet.hello.v0", ready["supportedMessageVersions"])
+                self.assertIn("cultnet.document_put_raw.v0", ready["supportedMessageVersions"])
+                self.assertEqual(ready["supportedMutationContracts"][0]["documentType"], "cultcache.interop-note")
+                self.assertIn("shardLog", ready["supportedMutationContracts"][0]["operations"])
+                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": None})
 
                 client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
                 hello_response = client.request(
@@ -3096,6 +3104,8 @@ class CultCacheTests(unittest.TestCase):
                 self.assertIn("cultnet.hello.v0", hello_response["supportedMessageVersions"])
                 self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
                 self.assertEqual(hello_response["supportedDocumentTypes"], ["cultcache.interop-note"])
+                self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
+                self.assertEqual(ready["supportedMutationContracts"], hello_response["supportedMutationContracts"])
 
                 schema_response = client.fetch_schema_catalog(schema_ids=["cultcache.interop-note"], include_schema_json=True)
                 self.assertEqual(schema_response["schemas"][0]["schemaVersion"], INTEROP_SCHEMA_VERSION)
@@ -3556,6 +3566,7 @@ class CultCacheTests(unittest.TestCase):
             )
             try:
                 ready = self._wait_for_ready_file(process, ready_path)
+                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": 0})
                 client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
 
                 with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:

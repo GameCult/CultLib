@@ -104,19 +104,22 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   store beside the cache file by default. The `cultmesh-py-daemon` /
   `python -m cultmesh_py.daemon` entrypoint launches that same local TCP server
   body and emits a bounded readiness document for process supervisors while the
-  served CultNet endpoint remains the capability owner. The daemon can register
-  and seed the package interop-note document so launched processes advertise a
-  real payload schema and serve both a real snapshot and a real shard-log entry
-  over the same CultNet lane. When launched with a Verse id, it publishes its
-  actual bound endpoint in the Verse and peer catalogs so discovery clients can
-  find the running Python peer without embedding code-owned catalogs. With a
-  cache file and durable shard-log path, a restarted daemon can rehydrate the
-  persisted interop-note snapshot and shard-log entry without reseeding. The
-  launched daemon also accepts raw puts over a live database subscription stream,
-  emits the matching change notification, and records the mutation in the served
-  shard log. If its durable shard log has been compacted, stale shard-log
-  requests return the same explicit `compacted_history` resync boundary over
-  the daemon wire endpoint instead of silently looking empty.
+  served CultNet endpoint remains the capability owner. Readiness now mirrors
+  the served hello capability metadata, shard ids, and configured snapshot
+  limits so supervisors can inspect startup state without inventing a second
+  protocol truth. The daemon can register and seed the package interop-note
+  document so launched processes advertise a real payload schema and serve both
+  a real snapshot and a real shard-log entry over the same CultNet lane. When
+  launched with a Verse id, it publishes its actual bound endpoint in the Verse
+  and peer catalogs so discovery clients can find the running Python peer
+  without embedding code-owned catalogs. With a cache file and durable shard-log
+  path, a restarted daemon can rehydrate the persisted interop-note snapshot and
+  shard-log entry without reseeding. The launched daemon also accepts raw puts
+  over a live database subscription stream, emits the matching change
+  notification, and records the mutation in the served shard log. If its durable
+  shard log has been compacted, stale shard-log requests return the same
+  explicit `compacted_history` resync boundary over the daemon wire endpoint
+  instead of silently looking empty.
   The daemon CLI snapshot document/byte limits feed the same public server edge;
   oversized daemon snapshot responses are returned as structured
   `cultnet.error.v0` peer errors rather than partial payloads.
