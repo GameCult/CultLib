@@ -34,6 +34,7 @@ from cultnet_py import (
     CultNetShardLogEntry,
     CultNetShardLogResponse,
     CultNetSimulationConsensusOptions,
+    apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
     database_subscribe,
@@ -47,6 +48,7 @@ from cultnet_py import (
     hello,
     parse_message,
     schema_catalog_request,
+    schema_document_map,
     shard_catalog_request,
     shard_log_request,
     simulation_observation,
@@ -676,6 +678,12 @@ class CultCacheTests(unittest.TestCase):
         applied_snapshot = apply_raw_snapshot(cache, [document], snapshot)
         self.assertEqual(applied_snapshot[0].record_key, "item:1")
         self.assertEqual(cache.get_required(document, "item:1").value, 3)
+        typed_snapshot = CultNetRawSnapshotResponse.from_wire(snapshot)
+        direct_applied = apply_raw_document_record(cache, schema_document_map([document]), typed_snapshot.documents[0])
+        self.assertEqual(direct_applied.schema_id, schema_id)
+        self.assertEqual(direct_applied.record_key, "item:1")
+        typed_snapshot_applied = apply_raw_snapshot(cache, [document], typed_snapshot)
+        self.assertEqual(typed_snapshot_applied[0].record_key, "item:1")
 
         shard_log = {
             "schemaVersion": "cultnet.shard_log_response.v0",
@@ -734,6 +742,15 @@ class CultCacheTests(unittest.TestCase):
         }
         applied_log = apply_shard_log_response(cache, [document], shard_log)
         self.assertEqual([change.change_kind for change in applied_log], ["updated", "removed"])
+        self.assertIsNone(cache.get(document, "item:1"))
+
+        cache.put(document, "item:1", Item("sword", "gear", 3))
+        typed_shard_log = CultNetShardLogResponse.from_wire({
+            **shard_log,
+            "entries": shard_log["entries"][1:],
+        })
+        typed_applied_log = apply_shard_log_response(cache, [document], typed_shard_log)
+        self.assertEqual([change.change_kind for change in typed_applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
 
     def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:

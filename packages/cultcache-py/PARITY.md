@@ -18,8 +18,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
   helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting
   peer snapshots before handing them to the existing replication helpers.
-  `CultMeshDatabase.apply_snapshot_response(...)` and sync paths accept the
-  typed response while preserving the existing replication owner.
+  `apply_raw_document_record(...)`, `apply_raw_snapshot(...)`,
+  `CultMeshDatabase.apply_snapshot_response(...)`, and sync paths accept typed
+  records/responses while preserving the existing replication owner.
   `CultMeshDatabase.build_snapshot_response(...)` projects local envelopes into
   the same typed response shape; the older `create_snapshot_response(...)`
   remains the wire-dict compatibility projection.
@@ -39,8 +40,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetShardLogResponse` and `CultNetShardLogEntry` helpers
   for inspecting mutation-log entries, resync pressure, and sequence cursors,
   while cache mutation remains owned by the existing replication helpers.
-  `CultMeshDatabase` and `CultMeshGameSession` can consume typed shard-log
-  responses directly for database sync and prediction reconciliation.
+  `apply_shard_log_response(...)`, `CultMeshDatabase`, and
+  `CultMeshGameSession` can consume typed shard-log responses directly for
+  database sync and prediction reconciliation.
   `CultMeshDatabase.build_shard_log_response(...)` creates the typed response
   from the package-local mutation log; `create_shard_log_response(...)` remains
   the raw wire-dict compatibility projection.

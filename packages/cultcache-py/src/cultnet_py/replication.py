@@ -6,6 +6,9 @@ from typing import Any, Iterable
 from cultcache_py import CultCache, CultCacheEnvelope
 from cultcache_py.documents import DocumentDefinition
 
+from .shard_log import CultNetShardLogResponse
+from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
+
 
 @dataclass(frozen=True)
 class CultNetAppliedRecord:
@@ -28,11 +31,12 @@ def schema_document_map(documents: Iterable[DocumentDefinition[Any]]) -> dict[st
 def apply_raw_document_record(
     cache: CultCache,
     documents_by_schema_id: dict[str, DocumentDefinition[Any]],
-    record: dict[str, Any],
+    record: dict[str, Any] | CultNetRawDocumentRecord,
 ) -> CultNetAppliedRecord:
-    schema_id = str(record["schemaId"])
+    wire = record.to_wire() if isinstance(record, CultNetRawDocumentRecord) else record
+    schema_id = str(wire["schemaId"])
     document = documents_by_schema_id[schema_id]
-    envelope = raw_record_to_envelope(document, schema_id, record)
+    envelope = raw_record_to_envelope(document, schema_id, wire)
     value = cache.put_envelope(document, envelope)
     return CultNetAppliedRecord(
         schema_id=schema_id,
@@ -60,8 +64,9 @@ def raw_record_to_envelope(
 def apply_raw_snapshot(
     cache: CultCache,
     documents: Iterable[DocumentDefinition[Any]],
-    response: dict[str, Any],
+    response: dict[str, Any] | CultNetRawSnapshotResponse,
 ) -> list[CultNetAppliedRecord]:
+    response = response.to_wire() if isinstance(response, CultNetRawSnapshotResponse) else response
     if response.get("schemaVersion") != "cultnet.snapshot_response_raw.v0":
         raise ValueError(f"Expected cultnet.snapshot_response_raw.v0, received {response.get('schemaVersion')!r}")
     documents_by_schema_id = schema_document_map(documents)
@@ -98,8 +103,9 @@ def apply_raw_snapshot(
 def apply_shard_log_response(
     cache: CultCache,
     documents: Iterable[DocumentDefinition[Any]],
-    response: dict[str, Any],
+    response: dict[str, Any] | CultNetShardLogResponse,
 ) -> list[CultNetAppliedRecord]:
+    response = response.to_wire() if isinstance(response, CultNetShardLogResponse) else response
     if response.get("schemaVersion") != "cultnet.shard_log_response.v0":
         raise ValueError(f"Expected cultnet.shard_log_response.v0, received {response.get('schemaVersion')!r}")
     if response.get("resyncRequired") is True:
