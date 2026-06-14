@@ -1053,6 +1053,7 @@ class CultCacheTests(unittest.TestCase):
         descriptors = wire_message_schema_descriptors(include_schema_json=True)
         by_version = {descriptor["schemaVersion"]: descriptor for descriptor in descriptors}
         for schema_version in [
+            "cultnet.error.v0",
             "cultnet.document_delete.v0",
             "cultnet.database_change_raw.v0",
             "cultnet.shard_log_response.v0",
@@ -1071,6 +1072,11 @@ class CultCacheTests(unittest.TestCase):
             ["schemaVersion", "messageId", "schemaId", "recordKey"],
         )
         self.assertEqual(delete_schema["properties"]["recordKey"]["type"], "string")
+
+        error_schema = json.loads(by_version["cultnet.error.v0"]["schemaJson"])
+        self.assertEqual(error_schema["required"], ["schemaVersion", "error"])
+        self.assertEqual(error_schema["properties"]["error"]["type"], "string")
+        self.assertIn("details", error_schema["properties"])
 
         change_schema = json.loads(by_version["cultnet.database_change_raw.v0"]["schemaJson"])
         self.assertEqual(change_schema["properties"]["changeKind"]["enum"], ["added", "updated", "removed"])
@@ -3077,6 +3083,7 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(hello_response["runtimeId"], "mesh-server")
         self.assertEqual(hello_response["displayName"], "Mesh Server")
         self.assertIn("cultnet.database_subscribe.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.error.v0", hello_response["supportedMessageVersions"])
         self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
         self.assertIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
         self.assertEqual(hello_response["supportedMutationContracts"][0]["documentType"], "mesh.server_note")
@@ -3087,9 +3094,11 @@ class CultCacheTests(unittest.TestCase):
         self.assertIn("cultnet.document_delete.v0", schema_response["schemas"][0]["wireContracts"])
         self.assertIn("cultnet.shard_log_response.v0", schema_response["schemas"][0]["wireContracts"])
         wire_descriptors = {schema["schemaVersion"]: schema for schema in wire_schema_response["schemas"]}
+        self.assertEqual(wire_descriptors["cultnet.error.v0"]["kind"], "wire_message")
         self.assertEqual(wire_descriptors["cultnet.document_put_raw.v0"]["kind"], "wire_message")
         self.assertIn("schemaJson", wire_descriptors["cultnet.document_put_raw.v0"])
         self.assertIn("cultmesh.peer_exchange_response.v0", wire_descriptors)
+        self.assertIn("cultnet.error.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
         self.assertIn("cultnet.document_put_raw.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
         self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json"))
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")

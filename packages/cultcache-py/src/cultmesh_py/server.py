@@ -268,6 +268,7 @@ class CultMeshLocalServer:
             ],
             "supportedMessageVersions": [
                 "cultnet.hello.v0",
+                "cultnet.error.v0",
                 "cultnet.schema_catalog_request.v0",
                 "cultnet.snapshot_request.v0",
                 "cultnet.database_subscribe.v0",

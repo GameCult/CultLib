@@ -35,7 +35,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   messages they speak through the same catalog authority. Python callers can
   also ingest and filter remote schema catalog responses through typed
   `CultNetSchemaCatalog` and `CultNetSchemaDescriptor` helpers, including
-  `CultNetRawClient.sync_schema_catalog(...)`.
+  `CultNetRawClient.sync_schema_catalog(...)`. The catalog includes
+  `cultnet.error.v0`, and the local server advertises that version in hello
+  responses because oversized snapshots and other peer failures use that
+  contract on the wire.
 - Python CultNet shard catalog:
   Provides typed `CultNetShardCatalog` and `CultNetShardDescriptor` helpers for
   ingesting, filtering, and emitting shard topology responses, plus

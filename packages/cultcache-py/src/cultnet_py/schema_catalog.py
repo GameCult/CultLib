@@ -12,6 +12,7 @@ PEER_EXCHANGE_REQUEST = "cultmesh.peer_exchange_request.v0"
 
 WIRE_MESSAGE_SCHEMA_VERSIONS = (
     ("cultnet.hello.v0", "CultNet Hello Message", f"{CULTNET_SCHEMA_BASE}/cultnet.hello.schema.json"),
+    ("cultnet.error.v0", "CultNet Error Message", f"{CULTNET_SCHEMA_BASE}/cultnet.error.schema.json"),
     ("cultnet.document_delete.v0", "CultNet Document Delete Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-delete.schema.json"),
     ("cultnet.document_put_raw.v0", "CultNet Raw Document Put Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-put-raw.schema.json"),
     ("cultnet.snapshot_request.v0", "CultNet Snapshot Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.snapshot-request.schema.json"),
@@ -182,6 +183,7 @@ def wire_message_schema_json(schema_id: str, title: str, schema_version: str) ->
 def wire_message_required_fields(schema_version: str) -> list[str]:
     required = {
         "cultnet.hello.v0": ["schemaVersion", "runtimeId"],
+        "cultnet.error.v0": ["schemaVersion", "error"],
         "cultnet.document_delete.v0": ["schemaVersion", "messageId", "schemaId", "recordKey"],
         "cultnet.document_put_raw.v0": ["schemaVersion", "messageId", "document"],
         "cultnet.snapshot_request.v0": ["schemaVersion", "messageId"],
@@ -255,6 +257,12 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
             },
             "supportedMessageVersions": string_array,
             "supportsSchemaCatalog": {"type": "boolean"},
+        },
+        "cultnet.error.v0": {
+            "messageId": common["messageId"],
+            "error": {"type": "string"},
+            "code": {"type": "string"},
+            "details": {"type": "object", "additionalProperties": True},
         },
         "cultnet.document_delete.v0": {
             **common,

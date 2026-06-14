@@ -227,6 +227,7 @@ def _check_local_cultmesh_wire_smoke() -> dict[str, Any]:
             failures.append("hello_runtime")
         supported_versions = set(hello_response.get("supportedMessageVersions") or ())
         for schema_version in (
+            "cultnet.error.v0",
             "cultnet.document_put_raw.v0",
             "cultnet.document_delete.v0",
             "cultnet.shard_log_request.v0",
