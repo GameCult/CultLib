@@ -48,6 +48,7 @@ from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
     CultMeshDatabase,
+    CultMeshDatabaseChange,
     CultMeshGameSessionOptions,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
@@ -878,6 +879,30 @@ class CultCacheTests(unittest.TestCase):
             reopened.database.pull()
             self.assertEqual(reopened.database.get(document, "note:1")["body"], "hello")
 
+    def test_cultmesh_database_watchers_observe_local_changes_and_unsubscribe(self) -> None:
+        document = define_database_entry_type("mesh.watch", [("body", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-watch")
+        node.database.register_document(document)
+        changes: list[CultMeshDatabaseChange] = []
+        all_changes: list[CultMeshDatabaseChange] = []
+
+        unsubscribe_record = node.database.watch_record(document, "note:1", changes.append)
+        unsubscribe_all = node.database.watch(all_changes.append, document=document)
+
+        node.database.put(document, "note:1", {"body": "hello"})
+        node.database.put(document, "note:2", {"body": "skip"})
+        node.database.put(document, "note:1", {"body": "updated"})
+        node.database.delete(document, "note:1")
+        unsubscribe_record()
+        node.database.put(document, "note:1", {"body": "after-unsubscribe"})
+        unsubscribe_all()
+
+        self.assertEqual([change.change_kind for change in changes], ["added", "updated", "removed"])
+        self.assertEqual([change.record_key for change in changes], ["note:1", "note:1", "note:1"])
+        self.assertEqual(changes[1].previous_value, {"body": "hello"})
+        self.assertIsNone(changes[2].value)
+        self.assertEqual([change.record_key for change in all_changes], ["note:1", "note:2", "note:1", "note:1", "note:1"])
+
     def test_cultmesh_facade_matches_peer_runtime_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store_path = Path(tmp) / "mesh.cc"
@@ -1119,6 +1144,59 @@ class CultCacheTests(unittest.TestCase):
 
             self.assertEqual(changes[0].change_kind, "reconciled")
             self.assertEqual(node.get_required(note_doc, prediction.key)["body"], "authoritative")
+
+    def test_cultmesh_database_watchers_observe_authoritative_shard_log_reconciliation(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.watched_input",
+            [("body", 0)],
+            schema_id="mesh.watched_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-watch")
+        node.database.register_document(note_doc)
+        seen: list[CultMeshDatabaseChange] = []
+        node.database.watch_record(note_doc, "input:client-watch:move", seen.append)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-watch",
+                        schema_ids=("mesh.watched_input.v1",),
+                        key_prefix="input:client-watch",
+                    ),
+                )
+            ),
+        )
+
+        prediction = session.predict(note_doc, "input:client-watch:move", {"body": "predicted"})
+        put = document_put_raw(
+            message_id="authoritative-watch",
+            key=prediction.key,
+            schema_id=prediction.schema_id,
+            stored_at="2026-06-13T00:00:00Z",
+            payload=note_doc.encode_payload({"body": "authoritative"}),
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+        session_changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-watch-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "updated",
+                    "put": put.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual([change.change_kind for change in seen], ["added", "updated"])
+        self.assertEqual(seen[1].value, {"body": "authoritative"})
+        self.assertEqual(session_changes[0].change_kind, "reconciled")
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore

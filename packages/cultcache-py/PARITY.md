@@ -24,6 +24,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh database facade:
   `node.database` owns the local typed document read/write/snapshot/sync surface
   so Python callers do not need to reach through the node composition wrapper.
+  It also exposes local `watch(...)` / `watch_record(...)` callbacks for database
+  changes, including authoritative shard-log reconciliation applied through the
+  session facade.
 - Python CultMesh committed simulation facts:
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`

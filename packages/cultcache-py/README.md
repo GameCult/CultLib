@@ -224,6 +224,7 @@ from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_requ
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
 node.database.register_document(note_doc)
+unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
 node.database.put(note_doc, "note:1", {"body": "hello"})
 live_note = node.database.get_required(note_doc, "note:1")
 put_message = node.database.put_raw_message(note_doc, "note:2", {"body": "wire me"}, shard_id="interop", shard_epoch=1)
@@ -269,6 +270,7 @@ session = CultMesh.create_game_session(
 )
 session_commits = session.submit_and_commit(observation.to_wire())
 prediction = session.predict(note_doc, "input:python:move", {"body": "predicted input"})
+unsubscribe()
 ```
 
 ## Wire Parity

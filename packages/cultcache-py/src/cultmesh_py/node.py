@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
 from cultcache_py.documents import DocumentDefinition
@@ -10,11 +10,22 @@ from cultnet_py import (
     CultNetAppliedRecord,
     CultNetMessage,
     CultNetRawClient,
-    apply_raw_snapshot,
-    apply_shard_log_response,
+    apply_raw_snapshot as apply_cultnet_raw_snapshot,
+    apply_shard_log_response as apply_cultnet_shard_log_response,
     document_delete,
     document_put_raw,
+    schema_document_map,
 )
+
+
+@dataclass(frozen=True)
+class CultMeshDatabaseChange:
+    document: DocumentDefinition[Any]
+    schema_id: str
+    record_key: str
+    change_kind: str
+    value: Any | None = None
+    previous_value: Any | None = None
 
 
 @dataclass
@@ -122,6 +133,7 @@ class CultMeshNode:
 class CultMeshDatabase:
     def __init__(self, node: CultMeshNode) -> None:
         self._node = node
+        self._subscribers: list[tuple[DocumentDefinition[Any] | None, str | None, Callable[[CultMeshDatabaseChange], None]]] = []
 
     @property
     def cache(self) -> CultCache:
@@ -135,12 +147,38 @@ class CultMeshDatabase:
     def runtime_id(self) -> str:
         return self._node.runtime_id
 
+    def watch(
+        self,
+        callback: Callable[[CultMeshDatabaseChange], None],
+        *,
+        document: DocumentDefinition[Any] | None = None,
+        key: str | None = None,
+    ) -> Callable[[], None]:
+        subscriber = (document, key, callback)
+        self._subscribers.append(subscriber)
+
+        def unsubscribe() -> None:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
+
+        return unsubscribe
+
+    def watch_record(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        callback: Callable[[CultMeshDatabaseChange], None],
+    ) -> Callable[[], None]:
+        return self.watch(callback, document=document, key=key)
+
     def register_document(self, document: DocumentDefinition[Any]) -> None:
         self.cache.register_document_type(document)
         self.documents.append(document)
 
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
+        previous = self.cache.get(document, key)
         self.cache.put(document, key, value)
+        self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
 
     def put_raw_message(
         self,
@@ -153,6 +191,7 @@ class CultMeshDatabase:
         shard_epoch: int | None = None,
     ) -> CultNetMessage:
         catalog_entry = document.catalog_entry()
+        previous = self.cache.get(document, key)
         envelope = CultCacheEnvelope.create(
             key=key,
             type=document.type,
@@ -160,7 +199,8 @@ class CultMeshDatabase:
             schema_id=catalog_entry.schema_id,
             catalog_entry=catalog_entry,
         )
-        self.cache.put_envelope(document, envelope)
+        value = self.cache.put_envelope(document, envelope)
+        self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
         return document_put_raw(
             message_id=message_id,
             key=key,
@@ -179,7 +219,10 @@ class CultMeshDatabase:
         return self.cache.get_required(document, key)
 
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
+        previous = self.cache.get(document, key)
         self.cache.delete(document, key)
+        if previous is not None:
+            self._publish_local_change(document, key, "removed", None, previous)
 
     def delete_raw_message(
         self,
@@ -221,7 +264,7 @@ class CultMeshDatabase:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
-        return apply_raw_snapshot(self.cache, self.documents, response)
+        return self.apply_snapshot_response(response)
 
     def sync_shard_log(
         self,
@@ -238,7 +281,56 @@ class CultMeshDatabase:
             after_sequence=after_sequence,
             limit=limit,
         )
-        return apply_shard_log_response(self.cache, self.documents, response)
+        return self.apply_shard_log_response(response)
+
+    def apply_snapshot_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
+        applied = apply_cultnet_raw_snapshot(self.cache, self.documents, response)
+        self._publish_applied_records(applied)
+        return applied
+
+    def apply_shard_log_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
+        applied = apply_cultnet_shard_log_response(self.cache, self.documents, response)
+        self._publish_applied_records(applied)
+        return applied
+
+    def _publish_local_change(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        change_kind: str,
+        value: Any | None,
+        previous: Any | None,
+    ) -> None:
+        self._publish(CultMeshDatabaseChange(
+            document=document,
+            schema_id=document.catalog_entry().schema_id,
+            record_key=key,
+            change_kind=change_kind,
+            value=value,
+            previous_value=previous,
+        ))
+
+    def _publish_applied_records(self, applied: list[CultNetAppliedRecord]) -> None:
+        documents_by_schema_id = schema_document_map(self.documents)
+        for record in applied:
+            document = documents_by_schema_id.get(record.schema_id)
+            if document is None:
+                continue
+            self._publish(CultMeshDatabaseChange(
+                document=document,
+                schema_id=record.schema_id,
+                record_key=record.record_key,
+                change_kind=record.change_kind,
+                value=record.value,
+            ))
+
+    def _publish(self, change: CultMeshDatabaseChange) -> None:
+        for document, key, callback in list(self._subscribers):
+            if document is not None and document.type != change.document.type:
+                continue
+            if key is not None and key != change.record_key:
+                continue
+            callback(change)
 
 
 def create_node(cache_path: str | Path | None = None, *, runtime_id: str = "python-runtime") -> CultMeshNode:
