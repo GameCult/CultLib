@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .snapshot import CultNetRawDocumentRecord
+
 
 @dataclass(frozen=True)
 class CultNetDatabaseChange:
@@ -10,6 +12,7 @@ class CultNetDatabaseChange:
     subscription_id: str
     change_kind: str
     document: dict[str, Any] | None = None
+    raw_document: CultNetRawDocumentRecord | None = None
     schema_id: str | None = None
     record_key: str | None = None
 
@@ -22,16 +25,18 @@ class CultNetDatabaseChange:
             raise ValueError(f"unsupported database changeKind {change_kind!r}")
         document = message.get("document")
         document_record = dict(document) if isinstance(document, dict) else None
+        raw_document = CultNetRawDocumentRecord.from_wire(document_record) if document_record is not None else None
         schema_id = _optional_string(message.get("schemaId"))
         record_key = _optional_string(message.get("recordKey"))
-        if document_record is not None:
-            schema_id = schema_id or _optional_string(document_record.get("schemaId"))
-            record_key = record_key or _optional_string(document_record.get("recordKey"))
+        if raw_document is not None:
+            schema_id = schema_id or raw_document.schema_id
+            record_key = record_key or raw_document.record_key
         return cls(
             message_id=str(message.get("messageId") or ""),
             subscription_id=str(message.get("subscriptionId") or ""),
             change_kind=change_kind,
             document=document_record,
+            raw_document=raw_document,
             schema_id=schema_id,
             record_key=record_key,
         )
@@ -43,7 +48,9 @@ class CultNetDatabaseChange:
             "subscriptionId": self.subscription_id,
             "changeKind": self.change_kind,
         }
-        if self.document is not None:
+        if self.raw_document is not None:
+            wire["document"] = self.raw_document.to_wire()
+        elif self.document is not None:
             wire["document"] = self.document
         if self.schema_id is not None:
             wire["schemaId"] = self.schema_id

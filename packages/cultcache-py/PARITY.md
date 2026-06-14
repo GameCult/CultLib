@@ -47,10 +47,13 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for
-  live raw database subscriptions. Initial snapshot frames can be read as typed
-  `CultNetRawSnapshotResponse` values through `read_next_snapshot_response(...)`
-  / `iter_snapshot_responses(...)`, while raw message reads remain available
-  for callers that own their own dispatch loop.
+  live raw database subscriptions. Put/update changes expose their contained
+  raw document as a typed `CultNetRawDocumentRecord` while preserving the legacy
+  dict-shaped `document` projection. Initial snapshot frames can be read as
+  typed `CultNetRawSnapshotResponse` values through
+  `read_next_snapshot_response(...)` / `iter_snapshot_responses(...)`, while
+  raw message reads remain available for callers that own their own dispatch
+  loop.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.

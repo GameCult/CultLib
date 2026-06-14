@@ -372,6 +372,8 @@ class CultCacheTests(unittest.TestCase):
         })
         self.assertEqual(put_change.schema_id, "schema-note")
         self.assertEqual(put_change.record_key, "note:1")
+        self.assertIsInstance(put_change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(put_change.raw_document.payload, b"payload")
         self.assertEqual(put_change.to_wire()["document"]["recordKey"], "note:1")
 
         delete_change = CultNetDatabaseChange.from_wire({
@@ -383,6 +385,7 @@ class CultCacheTests(unittest.TestCase):
             "recordKey": "note:1",
         })
         self.assertIsNone(delete_change.document)
+        self.assertIsNone(delete_change.raw_document)
         self.assertEqual(delete_change.schema_id, "schema-note")
         self.assertEqual(delete_change.to_wire()["recordKey"], "note:1")
 
@@ -635,6 +638,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(snapshot.to_wire()["schemaVersion"], "cultnet.snapshot_response_raw.v0")
         self.assertEqual(change.change_kind, "added")
         self.assertEqual(change.record_key, "item:sub")
+        self.assertIsInstance(change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(change.raw_document.record_key, "item:sub")
         self.assertEqual(received_versions, [
             "cultnet.database_subscribe.v0",
             "cultnet.document_put_raw.v0",
@@ -1972,8 +1977,11 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(subscription_change.change_kind, "added")
         self.assertEqual(subscription_change.record_key, "note:2")
         self.assertEqual(subscription_change.document["recordKey"], "note:2")
+        self.assertIsInstance(subscription_change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(subscription_change.raw_document.schema_id, "mesh.server_note.v1")
         self.assertEqual(subscription_delete.change_kind, "removed")
         self.assertEqual(subscription_delete.record_key, "note:2")
+        self.assertIsNone(subscription_delete.raw_document)
         self.assertIsNone(node.database.get(document, "note:2"))
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
