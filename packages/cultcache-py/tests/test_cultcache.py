@@ -1291,6 +1291,27 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([(record.schema_id, record.record_key) for record in typed_applied], [("mesh.snapshot_note.v1", "note:1")])
         self.assertEqual(typed_target.database.get_required(document, "note:1"), {"body": "include"})
 
+    def test_cultmesh_database_filters_snapshot_by_logged_shard_membership(self) -> None:
+        document = define_database_entry_type(
+            "mesh.sharded_snapshot_note",
+            [("body", 0)],
+            schema_id="mesh.sharded_snapshot_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-sharded-snapshot-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:notes", {"body": "include"}, shard_id="notes", shard_epoch=2)
+        source.database.put_raw_message(document, "note:other", {"body": "skip"}, shard_id="other", shard_epoch=1)
+
+        response = source.database.build_snapshot_response(
+            schema_ids=["mesh.sharded_snapshot_note.v1"],
+            shard_id="notes",
+            shard_epoch=2,
+        )
+
+        self.assertEqual(response.shard_id, "notes")
+        self.assertEqual(response.shard_epoch, 2)
+        self.assertEqual([record.record_key for record in response.documents], ["note:notes"])
+
     def test_cultmesh_database_creates_shard_log_response_from_raw_mutations(self) -> None:
         document = define_database_entry_type(
             "mesh.log_note",

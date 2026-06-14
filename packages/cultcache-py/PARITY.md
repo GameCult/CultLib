@@ -99,6 +99,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   those responses back through the shared CultNet replication path. Typed
   builders own the local response shape and raw dict methods serialize that
   shape for compatibility with older callers and wire handlers.
+  Shard-scoped raw snapshots filter by shard-log membership when the database
+  has an authoritative log for the requested shard.
   Raw shard-scoped writes append a package-local mutation log that can be
   projected into schema-v0 shard-log responses for peer catch-up.
 - Python CultMesh committed simulation facts:

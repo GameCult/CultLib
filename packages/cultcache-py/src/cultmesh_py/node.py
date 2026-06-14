@@ -499,12 +499,19 @@ class CultMeshDatabase:
     ) -> CultNetRawSnapshotResponse:
         requested_schema_ids = set(schema_ids or [])
         requested_record_keys = set(record_keys or [])
+        shard_record_keys = (
+            self._live_shard_record_keys(shard_id)
+            if shard_id is not None and shard_id in self._shard_logs
+            else None
+        )
         documents: list[CultNetRawDocumentRecord] = []
         for envelope in self.cache.snapshot_envelopes():
             schema_id = envelope.schema_id or envelope.type
             if requested_schema_ids and schema_id not in requested_schema_ids:
                 continue
             if requested_record_keys and envelope.key not in requested_record_keys:
+                continue
+            if shard_record_keys is not None and (schema_id, envelope.key) not in shard_record_keys:
                 continue
             documents.append(CultNetRawDocumentRecord(
                 schema_id=schema_id,
@@ -721,6 +728,24 @@ class CultMeshDatabase:
             if isinstance(delete, dict) and isinstance(delete.get("shardEpoch"), int):
                 return delete["shardEpoch"]
         return None
+
+    def _live_shard_record_keys(self, shard_id: str) -> set[tuple[str, str]]:
+        records: set[tuple[str, str]] = set()
+        for entry in self._shard_logs.get(shard_id, []):
+            put = entry.get("put")
+            if isinstance(put, dict) and isinstance(put.get("document"), dict):
+                document = put["document"]
+                schema_id = document.get("schemaId")
+                record_key = document.get("recordKey")
+                if schema_id and record_key:
+                    records.add((str(schema_id), str(record_key)))
+            delete = entry.get("delete")
+            if isinstance(delete, dict):
+                schema_id = delete.get("schemaId")
+                record_key = delete.get("recordKey")
+                if schema_id and record_key:
+                    records.discard((str(schema_id), str(record_key)))
+        return records
 
     def _document_for_schema(self, schema_id: str) -> DocumentDefinition[Any] | None:
         for document in self.documents:
