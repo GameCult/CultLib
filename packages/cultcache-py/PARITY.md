@@ -89,8 +89,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   endpoints, apply peer snapshots through a caller-owned database, run
   lightweight scheduled snapshot and simulation-observation fanout loops, probe
   peer-card endpoints for hello-level reachability, preserve hello capability
-  metadata on health results, and upsert results into local catalogs with the
-  same count-returning ergonomics as the C# discovery clients.
+  metadata on health results, run immediate scheduled health probes on start,
+  and upsert results into local catalogs with the same count-returning
+  ergonomics as the C# discovery clients.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
@@ -173,10 +174,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   committed-fact watch points as the C# session facade.
 - Python package health:
   `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
-  export surface, `py.typed` markers, a live local CultMesh framed-wire smoke
-  over hello/schema/snapshot/shard catalog/shard log, typed peer-error export
-  availability, peer-advertised mutation contracts, payload schema wire
-  contracts, and benchmark sanity for
+  export surface declared by each package `__all__`, `py.typed` markers, a live
+  local CultMesh framed-wire smoke over hello/schema/snapshot/shard
+  catalog/shard log, typed peer-error export availability, peer-advertised
+  mutation contracts, payload schema wire contracts, and benchmark sanity for
   Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get

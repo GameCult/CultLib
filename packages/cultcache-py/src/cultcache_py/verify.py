@@ -168,7 +168,7 @@ def _check_exports() -> dict[str, Any]:
     missing: dict[str, list[str]] = {}
     for module_name, names in EXPECTED_EXPORTS.items():
         module = importlib.import_module(module_name)
-        missing_names = [name for name in names if not hasattr(module, name)]
+        missing_names = [name for name in _expected_module_exports(module, names) if not hasattr(module, name)]
         if missing_names:
             missing[module_name] = missing_names
     return {
@@ -176,6 +176,12 @@ def _check_exports() -> dict[str, Any]:
         "status": "ok" if not missing else "failed",
         "missing": missing,
     }
+
+
+def _expected_module_exports(module: Any, required_names: tuple[str, ...]) -> tuple[str, ...]:
+    exported = getattr(module, "__all__", ())
+    export_names = tuple(str(name) for name in exported)
+    return tuple(sorted({*required_names, *export_names}))
 
 
 def _check_typed_markers() -> dict[str, Any]:

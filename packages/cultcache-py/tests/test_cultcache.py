@@ -3001,7 +3001,10 @@ class CultCacheTests(unittest.TestCase):
             )
             monitor.start(peers, verse_id="mesh", roles=["read-replica"])
             deadline = time.monotonic() + 2.0
-            while not seen and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
+                latest = monitor.latest()
+                if latest and latest[0].is_reachable:
+                    break
                 time.sleep(0.01)
             monitor.stop()
         finally:

@@ -579,6 +579,7 @@ class CultMeshPeerHealthMonitor:
         verse_id: str,
         roles: list[str] | None,
     ) -> None:
+        self.probe_catalog(catalog, verse_id=verse_id, roles=roles)
         while not self._stop.wait(self.interval_seconds):
             self.probe_catalog(catalog, verse_id=verse_id, roles=roles)
 
