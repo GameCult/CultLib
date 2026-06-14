@@ -154,21 +154,23 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
   instead of owning raw TCP frame I/O directly.
-- TypeScript now has the first `cultnet.transport.rudp.v0` packet codec and a
-  deterministic reliable ordered data-packet fixture. This is not the RUDP
-  runtime yet; it is the binary packet language the runtimes must converge on.
+- TypeScript, C#, Rust, and Python now share the first
+  `cultnet.transport.rudp.v0` packet codec fixture: the same reliable ordered
+  fragmented data packet encodes to the same bytes in every runtime. This is not
+  the RUDP runtime yet; it is the binary packet language the runtimes must
+  converge on before resend loops, windows, and timeout behavior are allowed to
+  claim parity.
 - The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
-  TCP/LiteNetLib/WebSocket bodies behind those ports, port the RUDP packet
-  fixture into C#/Rust/Python, then implement `rudp`.
+  TCP/LiteNetLib/WebSocket bodies behind those ports, then implement `rudp`.
 
 ## RUDP Packet Contract V0
 
 `cultnet.transport.rudp.v0` packets start with a fixed binary header, followed
 by a UTF-8 channel id and payload bytes. All integer fields are unsigned
-big-endian. The first deterministic fixture lives in TypeScript and must be
-ported byte-for-byte before runtime-specific resend loops are allowed to claim
-parity.
+big-endian. The first deterministic fixture is live in TypeScript, C#, Rust,
+and Python; every future runtime must port it byte-for-byte before
+runtime-specific resend loops are allowed to claim parity.
 
 | Offset | Size | Field | Notes |
 | --- | ---: | --- | --- |

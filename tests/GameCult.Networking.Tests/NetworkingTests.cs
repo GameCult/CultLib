@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -254,6 +255,70 @@ namespace GameCult.Networking.Tests
             Assert.That(receiver.Stats.FramesReceived, Is.EqualTo(1));
             Assert.That(receiver.Stats.BytesReceived, Is.EqualTo(frame.Payload.Length + 4));
             Assert.That(receiver.Profile.Transports[0].Protocol, Is.EqualTo("tcp_framed"));
+        }
+
+        [Test]
+        public void RudpPacketCodec_UsesDeterministicReliableOrderedFixture()
+        {
+            var encoded = CultNetRudpPacketCodec.Encode(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Data,
+                ConnectionId = 0x01020304,
+                Sequence = 0x0000002a,
+                Ack = 0x00000029,
+                AckMask = 0x80000001,
+                ChannelId = "schema",
+                Reliable = true,
+                Ordered = true,
+                FragmentId = 7,
+                FragmentIndex = 1,
+                FragmentCount = 3,
+                Payload = Encoding.UTF8.GetBytes("hello")
+            });
+
+            Assert.That(
+                Convert.ToHexString(encoded).ToLowerInvariant(),
+                Is.EqualTo("434e523000030b2a010203040000002a0000002980000001000700010003000000050600736368656d6168656c6c6f"));
+
+            var decoded = CultNetRudpPacketCodec.Decode(encoded);
+            Assert.That(decoded.PacketType, Is.EqualTo(CultNetRudpPacketType.Data));
+            Assert.That(decoded.ConnectionId, Is.EqualTo(0x01020304));
+            Assert.That(decoded.Sequence, Is.EqualTo(0x0000002a));
+            Assert.That(decoded.Ack, Is.EqualTo(0x00000029));
+            Assert.That(decoded.AckMask, Is.EqualTo(0x80000001));
+            Assert.That(decoded.ChannelId, Is.EqualTo("schema"));
+            Assert.That(decoded.Reliable, Is.True);
+            Assert.That(decoded.Ordered, Is.True);
+            Assert.That(decoded.Sequenced, Is.False);
+            Assert.That(decoded.FragmentId, Is.EqualTo(7));
+            Assert.That(decoded.FragmentIndex, Is.EqualTo(1));
+            Assert.That(decoded.FragmentCount, Is.EqualTo(3));
+            Assert.That(Encoding.UTF8.GetString(decoded.Payload), Is.EqualTo("hello"));
+        }
+
+        [Test]
+        public void RudpTransportProfile_AdvertisesStateAndRealtimeChannels()
+        {
+            var profile = CultNetTransportProfiles.CreateRudp(
+                "csharp-rudp",
+                new RudpTransportProfileOptions
+                {
+                    TransportId = "public-rudp",
+                    Host = "127.0.0.1",
+                    Port = 7777,
+                    MaxPayloadBytes = 1200,
+                    MaxFragmentBytes = 1000
+                });
+
+            Assert.That(profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(
+                profile.Transports[0].Channels.Select(channel => $"{channel.ChannelId}:{channel.Delivery}:{channel.Ordering}").ToArray(),
+                Is.EqualTo(new[]
+                {
+                    "schema:reliable:ordered",
+                    "latest:unreliable:sequenced",
+                    "realtime:unreliable:unordered"
+                }));
         }
 
         [Test]

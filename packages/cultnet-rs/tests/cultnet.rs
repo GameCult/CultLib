@@ -11,6 +11,8 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetRudpPacket;
+use cultnet_rs::CultNetRudpPacketType;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
@@ -26,11 +28,14 @@ use cultnet_rs::LengthPrefixedMessageFramer;
 use cultnet_rs::TcpFramedTransportConnection;
 use cultnet_rs::TcpFramedTransportProfileOptions;
 use cultnet_rs::builtin_schema_registry;
+use cultnet_rs::create_rudp_transport_profile;
 use cultnet_rs::create_tcp_framed_transport_profile;
 use cultnet_rs::decode_cultnet_message_from_slice;
+use cultnet_rs::decode_rudp_packet;
 use cultnet_rs::encode_cultnet_message_for_wire;
 use cultnet_rs::encode_cultnet_message_to_vec;
 use cultnet_rs::encode_frame;
+use cultnet_rs::encode_rudp_packet;
 use pretty_assertions::assert_eq;
 
 const TS_HELLO_FRAME: &[u8] = include_bytes!("fixtures/cultnet-ts-hello.frame");
@@ -165,6 +170,99 @@ fn tcp_framed_transport_carries_schema_payloads_with_stats() -> Result<()> {
         CultNetTransportProtocol::TcpFramed
     );
     Ok(())
+}
+
+#[test]
+fn rudp_packet_codec_uses_deterministic_reliable_ordered_fixture() -> Result<()> {
+    let encoded = encode_rudp_packet(&CultNetRudpPacket {
+        packet_type: CultNetRudpPacketType::Data,
+        connection_id: 0x01020304,
+        sequence: 0x0000002a,
+        ack: 0x00000029,
+        ack_mask: 0x80000001,
+        channel_id: "schema".to_string(),
+        reliable: true,
+        ordered: true,
+        sequenced: false,
+        fragment_id: 7,
+        fragment_index: 1,
+        fragment_count: 3,
+        payload: b"hello".to_vec(),
+    })?;
+
+    assert_eq!(
+        encoded,
+        vec![
+            67, 78, 82, 48, 0, 3, 11, 42, 1, 2, 3, 4, 0, 0, 0, 42, 0, 0, 0, 41, 128, 0, 0, 1, 0, 7,
+            0, 1, 0, 3, 0, 0, 0, 5, 6, 0, 115, 99, 104, 101, 109, 97, 104, 101, 108, 108, 111,
+        ]
+    );
+
+    let decoded = decode_rudp_packet(&encoded)?;
+    assert_eq!(decoded.packet_type, CultNetRudpPacketType::Data);
+    assert_eq!(decoded.connection_id, 0x01020304);
+    assert_eq!(decoded.sequence, 0x0000002a);
+    assert_eq!(decoded.ack, 0x00000029);
+    assert_eq!(decoded.ack_mask, 0x80000001);
+    assert_eq!(decoded.channel_id, "schema");
+    assert!(decoded.reliable);
+    assert!(decoded.ordered);
+    assert!(!decoded.sequenced);
+    assert_eq!(decoded.fragment_id, 7);
+    assert_eq!(decoded.fragment_index, 1);
+    assert_eq!(decoded.fragment_count, 3);
+    assert_eq!(decoded.payload, b"hello");
+    Ok(())
+}
+
+#[test]
+fn rudp_transport_profile_advertises_state_and_realtime_channels() {
+    let profile = create_rudp_transport_profile(
+        "rust-rudp",
+        cultnet_rs::RudpTransportProfileOptions {
+            transport_id: Some("public-rudp".to_string()),
+            host: Some("127.0.0.1".to_string()),
+            port: Some(7777),
+            max_payload_bytes: Some(1200),
+            max_fragment_bytes: Some(1000),
+        },
+    );
+
+    assert_eq!(
+        profile.transports[0].protocol,
+        CultNetTransportProtocol::Rudp
+    );
+    let channels = profile.transports[0]
+        .channels
+        .iter()
+        .map(|channel| {
+            (
+                channel.channel_id.as_str(),
+                channel.delivery,
+                channel.ordering,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        channels,
+        vec![
+            (
+                "schema",
+                CultNetTransportDelivery::Reliable,
+                CultNetTransportOrdering::Ordered
+            ),
+            (
+                "latest",
+                CultNetTransportDelivery::Unreliable,
+                CultNetTransportOrdering::Sequenced
+            ),
+            (
+                "realtime",
+                CultNetTransportDelivery::Unreliable,
+                CultNetTransportOrdering::Unordered
+            ),
+        ]
+    );
 }
 
 #[test]

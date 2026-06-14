@@ -67,19 +67,24 @@ from cultnet_py import (
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
     CultNetSimulationObservationHub,
+    CultNetRudpPacket,
+    CultNetRudpPacketType,
     TcpFramedTransportConnection,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
+    create_rudp_transport_profile,
     create_tcp_framed_transport_profile,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
+    decode_rudp_packet,
     decode_witness_artifact_bundle_payload,
     document_delete,
     document_put_raw,
     encode_frame,
+    encode_rudp_packet,
     encode_witness_artifact_bundle_payload,
     hello,
     login,
@@ -579,6 +584,67 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(receiver.stats.frames_received, 1)
         self.assertEqual(receiver.stats.bytes_received, len(payload) + 4)
         self.assertEqual(receiver.profile["transports"][0]["protocol"], "tcp_framed")
+
+    def test_cultnet_rudp_packet_codec_uses_deterministic_reliable_ordered_fixture(self) -> None:
+        encoded = encode_rudp_packet(
+            CultNetRudpPacket(
+                packet_type=CultNetRudpPacketType.DATA,
+                connection_id=0x01020304,
+                sequence=0x0000002A,
+                ack=0x00000029,
+                ack_mask=0x80000001,
+                channel_id="schema",
+                reliable=True,
+                ordered=True,
+                fragment_id=7,
+                fragment_index=1,
+                fragment_count=3,
+                payload=b"hello",
+            )
+        )
+
+        self.assertEqual(
+            encoded.hex(),
+            "434e523000030b2a010203040000002a0000002980000001000700010003000000050600736368656d6168656c6c6f",
+        )
+
+        decoded = decode_rudp_packet(encoded)
+        self.assertEqual(decoded.packet_type, CultNetRudpPacketType.DATA)
+        self.assertEqual(decoded.connection_id, 0x01020304)
+        self.assertEqual(decoded.sequence, 0x0000002A)
+        self.assertEqual(decoded.ack, 0x00000029)
+        self.assertEqual(decoded.ack_mask, 0x80000001)
+        self.assertEqual(decoded.channel_id, "schema")
+        self.assertTrue(decoded.reliable)
+        self.assertTrue(decoded.ordered)
+        self.assertFalse(decoded.sequenced)
+        self.assertEqual(decoded.fragment_id, 7)
+        self.assertEqual(decoded.fragment_index, 1)
+        self.assertEqual(decoded.fragment_count, 3)
+        self.assertEqual(decoded.payload, b"hello")
+
+    def test_cultnet_rudp_transport_profile_advertises_state_and_realtime_channels(self) -> None:
+        profile = create_rudp_transport_profile(
+            "python-rudp",
+            transport_id="public-rudp",
+            host="127.0.0.1",
+            port=7777,
+            max_payload_bytes=1200,
+            max_fragment_bytes=1000,
+        )
+
+        self.assertEqual(profile["transports"][0]["protocol"], "rudp")
+        self.assertEqual(
+            [
+                (channel["channelId"], channel["delivery"], channel["ordering"])
+                for channel in profile["transports"][0]["channels"]
+            ],
+            [
+                ("schema", "reliable", "ordered"),
+                ("latest", "unreliable", "sequenced"),
+                ("realtime", "unreliable", "unordered"),
+            ],
+        )
 
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
         subscribe = database_subscribe(

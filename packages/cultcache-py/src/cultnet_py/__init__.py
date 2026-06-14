@@ -66,10 +66,15 @@ from .shard_replication import (
 from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 from .transport import (
+    CultNetRudpPacket,
+    CultNetRudpPacketType,
     CultNetTransportFrame,
     CultNetTransportStats,
     TcpFramedTransportConnection,
+    create_rudp_transport_profile,
     create_tcp_framed_transport_profile,
+    decode_rudp_packet,
+    encode_rudp_packet,
 )
 from .simulation import (
     CultNetSimulationConsensus,
@@ -118,6 +123,8 @@ __all__ = [
     "CultNetSimulationConsensusOptions",
     "CultNetSimulationObservation",
     "CultNetSimulationObservationHub",
+    "CultNetRudpPacket",
+    "CultNetRudpPacketType",
     "CultNetTransportFrame",
     "CultNetTransportStats",
     "TcpFramedTransportConnection",
@@ -126,15 +133,18 @@ __all__ = [
     "apply_raw_snapshot",
     "apply_shard_log_response",
     "compute_simulation_claim_hash",
+    "create_rudp_transport_profile",
     "create_tcp_framed_transport_profile",
     "database_subscribe",
     "database_unsubscribe",
     "decode_witness_artifact_bundle_payload",
     "decode_frame",
+    "decode_rudp_packet",
     "document_delete",
     "document_put_raw",
     "encode_witness_artifact_bundle_payload",
     "encode_frame",
+    "encode_rudp_packet",
     "hello",
     "INTEROP_WIRE_CONTRACT",
     "login",
