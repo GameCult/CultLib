@@ -3220,6 +3220,14 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(ready["supportedMutationContracts"][0]["documentType"], "cultcache.interop-note")
                 self.assertIn("shardLog", ready["supportedMutationContracts"][0]["operations"])
                 self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": None})
+                self.assertEqual(ready["verses"][0]["verseId"], "daemon-verse")
+                self.assertEqual(ready["verses"][0]["displayName"], "Daemon Verse")
+                self.assertEqual(ready["verses"][0]["discoveryEndpoints"], [ready["endpoint"]])
+                self.assertEqual(ready["verses"][0]["authorityRuntimeIds"], ["daemon-test-peer"])
+                self.assertEqual(ready["peers"][0]["peerId"], "daemon-test-peer")
+                self.assertEqual(ready["peers"][0]["endpoints"], [ready["endpoint"]])
+                self.assertEqual(ready["peers"][0]["roles"], ["shard-primary"])
+                self.assertEqual(ready["peers"][0]["shardIds"], ["daemon-interop"])
 
                 client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
                 hello_response = client.request(
@@ -3264,12 +3272,14 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(verses[0].display_name, "Daemon Verse")
                 self.assertEqual(verses[0].discovery_endpoints, (ready["endpoint"],))
                 self.assertEqual(verses[0].authority_runtime_ids, ("daemon-test-peer",))
+                self.assertEqual([verse.to_wire() for verse in verses], ready["verses"])
 
                 peers = discovery_client.fetch_peers(verse_id="daemon-verse", roles=["shard-primary"])
                 self.assertEqual(peers[0].peer_id, "daemon-test-peer")
                 self.assertEqual(peers[0].endpoints, (ready["endpoint"],))
                 self.assertEqual(peers[0].roles, ("shard-primary",))
                 self.assertEqual(peers[0].shard_ids, ("daemon-interop",))
+                self.assertEqual([peer.to_wire() for peer in peers], ready["peers"])
 
                 monitor = CultMeshPeerHealthMonitor(runtime_id="daemon-health-prober", timeout_seconds=2.0)
                 health = monitor.probe_peer(peers[0])[0]

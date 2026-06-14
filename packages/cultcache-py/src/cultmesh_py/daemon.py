@@ -165,6 +165,8 @@ def daemon_ready_document(server: CultMeshLocalServer) -> dict[str, Any]:
             "maxSnapshotDocuments": server.max_snapshot_documents,
             "maxSnapshotBytes": server.max_snapshot_bytes,
         },
+        "verses": [verse.to_wire() for verse in server.verse_catalog.verses],
+        "peers": [peer.to_wire() for peer in server.peer_catalog.peers],
     }
 
 

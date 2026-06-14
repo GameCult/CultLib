@@ -107,7 +107,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   served CultNet endpoint remains the capability owner. Readiness now mirrors
   the served hello capability metadata, shard ids, and configured snapshot
   limits so supervisors can inspect startup state without inventing a second
-  protocol truth. The daemon can register and seed the package interop-note
+  protocol truth. Readiness also includes the same Verse descriptors and peer
+  cards served by the live discovery endpoints, keeping operator and agent
+  inspection tied to the catalogs that own mesh identity. The daemon can
+  register and seed the package interop-note
   document so launched processes advertise a real payload schema and serve both
   a real snapshot and a real shard-log entry over the same CultNet lane. When
   launched with a Verse id, it publishes its actual bound endpoint in the Verse
