@@ -241,6 +241,7 @@ put_message = node.database.put_raw_message(
     shard_id="interop",
     shard_epoch=1,
 )
+snapshot_response = node.database.create_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
 delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
 
 peers = CultMesh.create_peer_catalog()

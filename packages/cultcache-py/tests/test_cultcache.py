@@ -940,6 +940,42 @@ class CultCacheTests(unittest.TestCase):
         with self.assertRaises(Exception):
             node.database.put(document, "settings:wrong", {"theme": "bad"})
 
+    def test_cultmesh_database_creates_raw_snapshot_response_from_envelopes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-snapshot-source")
+        source.database.register_document(document)
+        source.database.put(document, "note:1", {"body": "include"})
+        source.database.put(document, "note:2", {"body": "skip"})
+
+        response = source.database.create_snapshot_response(
+            message_id="snapshot-1",
+            schema_ids=["mesh.snapshot_note.v1"],
+            record_keys=["note:1"],
+            shard_id="notes",
+            shard_epoch=4,
+            shard_log_sequence=7,
+        )
+
+        self.assertEqual(response["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(response["messageId"], "snapshot-1")
+        self.assertEqual(response["shardId"], "notes")
+        self.assertEqual(response["shardEpoch"], 4)
+        self.assertEqual(response["shardLogSequence"], 7)
+        self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:1"])
+        self.assertEqual(response["documents"][0]["schemaId"], "mesh.snapshot_note.v1")
+        self.assertEqual(response["documents"][0]["payloadEncoding"], "messagepack")
+
+        target = CultMesh.create_node(runtime_id="mesh-snapshot-target")
+        target.database.register_document(document)
+        applied = target.database.apply_snapshot_response(response)
+        self.assertEqual([(record.schema_id, record.record_key) for record in applied], [("mesh.snapshot_note.v1", "note:1")])
+        self.assertEqual(target.database.get_required(document, "note:1"), {"body": "include"})
+        self.assertIsNone(target.database.get(document, "note:2"))
+
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(
             "mesh.named_watch",

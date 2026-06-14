@@ -32,6 +32,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   facade.
   Change notifications carry previous values when the database can observe the
   old record before local or replicated application.
+  It can project local envelopes into schema-v0 raw snapshot responses and apply
+  those responses back through the shared CultNet replication path.
 - Python CultMesh committed simulation facts:
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`
@@ -76,3 +78,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, local CultMesh session facade, and typed
   state participant.
+- Python does not claim the full C# shard mutation-log service surface. It can
+  create/apply raw snapshots and consume shard-log responses, while the live
+  interop peer owns its harness mutation log.

@@ -104,6 +104,25 @@ class CultMeshNode:
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.database.snapshot()
 
+    def create_snapshot_response(
+        self,
+        *,
+        message_id: str = "",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        shard_log_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        return self.database.create_snapshot_response(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            shard_log_sequence=shard_log_sequence,
+        )
+
     def pull(self) -> None:
         self.database.pull()
 
@@ -320,6 +339,46 @@ class CultMeshDatabase:
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.cache.snapshot()
+
+    def create_snapshot_response(
+        self,
+        *,
+        message_id: str = "",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        shard_log_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        requested_schema_ids = set(schema_ids or [])
+        requested_record_keys = set(record_keys or [])
+        documents = []
+        for envelope in self.cache.snapshot_envelopes():
+            schema_id = envelope.schema_id or envelope.type
+            if requested_schema_ids and schema_id not in requested_schema_ids:
+                continue
+            if requested_record_keys and envelope.key not in requested_record_keys:
+                continue
+            documents.append({
+                "schemaId": schema_id,
+                "recordKey": envelope.key,
+                "storedAt": envelope.stored_at,
+                "payloadEncoding": "messagepack",
+                "payload": envelope.payload,
+            })
+
+        response: dict[str, Any] = {
+            "schemaVersion": "cultnet.snapshot_response_raw.v0",
+            "messageId": message_id,
+            "documents": documents,
+        }
+        if shard_id is not None:
+            response["shardId"] = shard_id
+        if shard_epoch is not None:
+            response["shardEpoch"] = shard_epoch
+        if shard_log_sequence is not None:
+            response["shardLogSequence"] = shard_log_sequence
+        return response
 
     def pull(self) -> None:
         self.cache.pull_all_backing_stores()
