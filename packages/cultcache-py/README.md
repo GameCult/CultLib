@@ -226,6 +226,7 @@ from cultcache_py import define_database_entry_type
 from cultnet_py import (
     CultNetClientAuthorityScope,
     CultNetFileShardReplicaCursorStore,
+    CultNetFileShardMutationLogStore,
     CultNetRawClient,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
@@ -243,6 +244,7 @@ note_doc = define_database_entry_type(
 )
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
 node.database.register_document(note_doc)
+node.database.use_shard_mutation_log_store(CultNetFileShardMutationLogStore("mesh.shard-logs"))
 unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
 unsubscribe_named = node.database.watch_by_name(note_doc, "intro", lambda change: print(change.record_key))
 unsubscribe_kind = node.database.watch_by_index(note_doc, "kind", "guide", lambda change: print(change.record_key))

@@ -38,12 +38,14 @@ from cultnet_py import (
     CultNetShardLogEntry,
     CultNetShardLogResponse,
     CultNetFileShardReplicaCursorStore,
+    CultNetFileShardMutationLogStore,
     CultNetInMemoryShardReplicaCursorStore,
     CultNetSchemaWriteForwarder,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
+    CultNetShardMutationLogStore,
     CultNetShardWriteForwarder,
     CultNetSimulationConsensusOptions,
     CultNetSimulationConsensusCandidate,
@@ -1460,6 +1462,37 @@ class CultCacheTests(unittest.TestCase):
         typed_applied = typed_target.database.apply_shard_log_response(typed_response)
         self.assertEqual([record.change_kind for record in typed_applied], ["updated", "removed"])
         self.assertIsNone(typed_target.database.get(document, "note:1"))
+
+    def test_cultnet_file_shard_mutation_log_store_persists_authoritative_entries(self) -> None:
+        document = define_database_entry_type(
+            "mesh.durable_log_note",
+            [("body", 0)],
+            schema_id="mesh.durable_log_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store: CultNetShardMutationLogStore = CultNetFileShardMutationLogStore(Path(tmp) / "logs")
+            source = CultMesh.create_node(runtime_id="durable-primary")
+            source.database.register_document(document)
+            source.database.use_shard_mutation_log_store(store)
+            source.database.put_raw_message(document, "note:1", {"body": "first"}, shard_id="durable", shard_epoch=4)
+            source.database.put_raw_message(document, "note:2", {"body": "second"}, shard_id="durable", shard_epoch=4)
+
+            reopened = CultMesh.create_node(runtime_id="durable-primary")
+            reopened.database.register_document(document)
+            reopened.database.use_shard_mutation_log_store(CultNetFileShardMutationLogStore(Path(tmp) / "logs"))
+            response = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4)
+            self.assertEqual(reopened.database.shard_ids(), ["durable"])
+            self.assertEqual(reopened.database.shard_schema_ids("durable"), ["mesh.durable_log_note.v1"])
+            self.assertEqual([entry.sequence for entry in response.entries], [1, 2])
+            self.assertEqual(response.entries[0].raw_document.record_key, "note:1")
+
+            store.compact_through("durable", 1)
+            compacted = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4, after_sequence=0)
+            retained = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4, after_sequence=1)
+            self.assertTrue(compacted.resync_required)
+            self.assertEqual(compacted.reason, "compacted_history")
+            self.assertEqual(compacted.compacted_through, 1)
+            self.assertEqual([entry.sequence for entry in retained.entries], [2])
 
     def test_cultnet_shard_replicator_pulls_logs_and_resyncs_from_snapshot(self) -> None:
         document = define_database_entry_type(

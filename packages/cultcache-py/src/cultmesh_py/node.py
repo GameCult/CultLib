@@ -15,6 +15,7 @@ from cultnet_py import (
     CultNetRawSnapshotResponse,
     CultNetShardLogEntry,
     CultNetShardLogResponse,
+    CultNetShardMutationLogStore,
     apply_raw_snapshot as apply_cultnet_raw_snapshot,
     apply_shard_log_response as apply_cultnet_shard_log_response,
     document_delete,
@@ -224,6 +225,7 @@ class CultMeshDatabase:
         self._node = node
         self._subscribers: list[tuple[DocumentDefinition[Any] | None, str | None, Callable[[CultMeshDatabaseChange], None]]] = []
         self._shard_logs: dict[str, list[dict[str, Any]]] = {}
+        self._shard_log_store: CultNetShardMutationLogStore | None = None
 
     @property
     def cache(self) -> CultCache:
@@ -315,6 +317,9 @@ class CultMeshDatabase:
             raise ValueError(f"Document type {document.type!r} is already registered with a different definition")
         self.cache.register_document_type(document)
         self.documents.append(document)
+
+    def use_shard_mutation_log_store(self, store: CultNetShardMutationLogStore) -> None:
+        self._shard_log_store = store
 
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
         previous = self.cache.get(document, key)
@@ -451,11 +456,13 @@ class CultMeshDatabase:
         return self._latest_shard_epoch(shard_id) or 0
 
     def shard_ids(self) -> list[str]:
+        if self._shard_log_store is not None:
+            return sorted(set(self._shard_logs) | set(self._shard_log_store.shard_ids()))
         return sorted(self._shard_logs)
 
     def shard_schema_ids(self, shard_id: str) -> list[str]:
         schema_ids: set[str] = set()
-        for entry in self._shard_logs.get(shard_id, []):
+        for entry in self._shard_log_entries(shard_id):
             put = entry.get("put")
             if isinstance(put, dict) and isinstance(put.get("document"), dict):
                 schema_id = put["document"].get("schemaId")
@@ -615,15 +622,22 @@ class CultMeshDatabase:
                 resync_required=True,
                 reason="stale_epoch",
             )
+        compacted_through = self._shard_log_compacted_through(shard_id)
+        if after_sequence < compacted_through:
+            return CultNetShardLogResponse(
+                message_id=message_id,
+                shard_id=shard_id,
+                shard_epoch=latest_epoch,
+                entries=(),
+                resync_required=True,
+                reason="compacted_history",
+                compacted_through=compacted_through,
+            )
         entries = [
             CultNetShardLogEntry.from_wire(entry)
-            for entry in self._shard_logs.get(shard_id, [])
+            for entry in self._shard_log_entries(shard_id, after_sequence=after_sequence, limit=limit)
             if int(entry.get("sequence") or 0) > after_sequence
         ]
-        if limit is not None:
-            if limit < 0:
-                raise ValueError("limit must be non-negative")
-            entries = entries[:limit]
         return CultNetShardLogResponse(
             message_id=message_id,
             shard_id=shard_id,
@@ -729,12 +743,20 @@ class CultMeshDatabase:
 
     def _append_shard_log_entry(self, shard_id: str, entry: dict[str, Any]) -> None:
         log = self._shard_logs.setdefault(shard_id, [])
-        entry["sequence"] = len(log) + 1
+        latest_sequence = max(
+            [int(item.get("sequence") or 0) for item in log]
+            + [int(item.get("sequence") or 0) for item in self._stored_shard_log_entries(shard_id)]
+            + [self._shard_log_compacted_through(shard_id)]
+        )
+        entry["sequence"] = latest_sequence + 1
         entry["committedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        log.append(entry)
+        if self._shard_log_store is not None:
+            self._shard_log_store.append(shard_id, entry)
+        else:
+            log.append(entry)
 
     def _latest_shard_epoch(self, shard_id: str) -> int | None:
-        log = self._shard_logs.get(shard_id, [])
+        log = self._shard_log_entries(shard_id)
         for entry in reversed(log):
             put = entry.get("put")
             if isinstance(put, dict) and isinstance(put.get("shardEpoch"), int):
@@ -746,7 +768,7 @@ class CultMeshDatabase:
 
     def _live_shard_record_keys(self, shard_id: str) -> set[tuple[str, str]]:
         records: set[tuple[str, str]] = set()
-        for entry in self._shard_logs.get(shard_id, []):
+        for entry in self._shard_log_entries(shard_id):
             put = entry.get("put")
             if isinstance(put, dict) and isinstance(put.get("document"), dict):
                 document = put["document"]
@@ -761,6 +783,36 @@ class CultMeshDatabase:
                 if schema_id and record_key:
                     records.discard((str(schema_id), str(record_key)))
         return records
+
+    def _shard_log_entries(
+        self,
+        shard_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._shard_log_store is not None:
+            return self._shard_log_store.read(shard_id, after_sequence=after_sequence, limit=limit)
+        entries = [
+            entry
+            for entry in self._shard_logs.get(shard_id, [])
+            if int(entry.get("sequence") or 0) > after_sequence
+        ]
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("limit must be non-negative")
+            entries = entries[:limit]
+        return entries
+
+    def _stored_shard_log_entries(self, shard_id: str) -> list[dict[str, Any]]:
+        if self._shard_log_store is None:
+            return []
+        return self._shard_log_store.read(shard_id, after_sequence=0)
+
+    def _shard_log_compacted_through(self, shard_id: str) -> int:
+        if self._shard_log_store is None:
+            return 0
+        return self._shard_log_store.get_compacted_through(shard_id)
 
     def _document_for_schema(self, schema_id: str) -> DocumentDefinition[Any] | None:
         for document in self.documents:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -19,6 +20,23 @@ class CultNetShardWriteForwarder(Protocol):
         ...
 
     def forward_delete(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        ...
+
+
+class CultNetShardMutationLogStore(Protocol):
+    def shard_ids(self) -> list[str]:
+        ...
+
+    def read(self, shard_id: str, *, after_sequence: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+        ...
+
+    def append(self, shard_id: str, entry: dict[str, Any]) -> None:
+        ...
+
+    def get_compacted_through(self, shard_id: str) -> int:
+        ...
+
+    def compact_through(self, shard_id: str, sequence: int) -> None:
         ...
 
 
@@ -120,6 +138,103 @@ class CultNetFileShardReplicaCursorStore:
             last_applied_sequence=int(value.get("lastAppliedSequence") or 0),
             updated_at=str(value.get("updatedAt") or ""),
         )
+
+
+@dataclass(frozen=True)
+class CultNetFileShardMutationLogStore:
+    root_path: str | Path
+
+    def __post_init__(self) -> None:
+        Path(self.root_path).mkdir(parents=True, exist_ok=True)
+
+    def shard_ids(self) -> list[str]:
+        shards = []
+        for path in Path(self.root_path).glob("*.meta.mpack"):
+            value = msgpack.unpackb(path.read_bytes(), raw=False)
+            if isinstance(value, dict) and value.get("shardId"):
+                shards.append(str(value["shardId"]))
+        return sorted(set(shards))
+
+    def read(self, shard_id: str, *, after_sequence: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+        _require_non_empty(shard_id, "shard_id")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        entries = [
+            entry
+            for entry in self._read_entries(shard_id)
+            if int(entry.get("sequence") or 0) > after_sequence
+        ]
+        entries.sort(key=lambda entry: int(entry.get("sequence") or 0))
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("limit must be non-negative")
+            entries = entries[:limit]
+        return entries
+
+    def append(self, shard_id: str, entry: dict[str, Any]) -> None:
+        _require_non_empty(shard_id, "shard_id")
+        sequence = int(entry.get("sequence") or 0)
+        if sequence <= 0:
+            raise ValueError("shard log entry sequence must be positive")
+        entries = [
+            existing
+            for existing in self._read_entries(shard_id)
+            if int(existing.get("sequence") or 0) != sequence
+        ]
+        entries.append(dict(entry))
+        entries.sort(key=lambda value: int(value.get("sequence") or 0))
+        self._entry_path(shard_id).write_bytes(msgpack.packb(entries, use_bin_type=True))
+        self._write_metadata(shard_id, self._read_metadata(shard_id))
+
+    def get_compacted_through(self, shard_id: str) -> int:
+        _require_non_empty(shard_id, "shard_id")
+        metadata = self._read_metadata(shard_id)
+        return int(metadata.get("compactedThrough") or 0)
+
+    def compact_through(self, shard_id: str, sequence: int) -> None:
+        _require_non_empty(shard_id, "shard_id")
+        if sequence < 0:
+            raise ValueError("sequence must be non-negative")
+        current = self.get_compacted_through(shard_id)
+        if sequence <= current:
+            return
+        retained = [
+            entry
+            for entry in self._read_entries(shard_id)
+            if int(entry.get("sequence") or 0) > sequence
+        ]
+        self._entry_path(shard_id).write_bytes(msgpack.packb(retained, use_bin_type=True))
+        self._write_metadata(shard_id, {"compactedThrough": sequence})
+
+    def _read_entries(self, shard_id: str) -> list[dict[str, Any]]:
+        path = self._entry_path(shard_id)
+        if not path.exists() or path.stat().st_size == 0:
+            return []
+        value = msgpack.unpackb(path.read_bytes(), raw=False)
+        if not isinstance(value, list):
+            raise ValueError("CultNet shard mutation log file must contain a MessagePack array")
+        return [dict(entry) for entry in value if isinstance(entry, dict)]
+
+    def _read_metadata(self, shard_id: str) -> dict[str, Any]:
+        path = self._metadata_path(shard_id)
+        if not path.exists() or path.stat().st_size == 0:
+            return {}
+        value = msgpack.unpackb(path.read_bytes(), raw=False)
+        if not isinstance(value, dict):
+            raise ValueError("CultNet shard mutation log metadata must be a MessagePack map")
+        return dict(value)
+
+    def _write_metadata(self, shard_id: str, metadata: dict[str, Any]) -> None:
+        payload = dict(metadata)
+        payload["shardId"] = shard_id
+        payload.setdefault("compactedThrough", 0)
+        self._metadata_path(shard_id).write_bytes(msgpack.packb(payload, use_bin_type=True))
+
+    def _entry_path(self, shard_id: str) -> Path:
+        return Path(self.root_path) / f"{_hash_shard_id(shard_id)}.mpack"
+
+    def _metadata_path(self, shard_id: str) -> Path:
+        return Path(self.root_path) / f"{_hash_shard_id(shard_id)}.meta.mpack"
 
 
 @dataclass(frozen=True)
@@ -264,3 +379,7 @@ def _parse_endpoint(endpoint: str) -> tuple[str, int]:
 def _require_non_empty(value: str, name: str) -> None:
     if not value or not value.strip():
         raise ValueError(f"{name} must be non-empty")
+
+
+def _hash_shard_id(shard_id: str) -> str:
+    return hashlib.sha256(shard_id.encode("utf-8")).hexdigest()

@@ -183,4 +183,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   responses, consume remote shard-log responses, and run pull-once replica
   catch-up with snapshot recovery, a file-backed replica cursor store, and
   schema-v0 write forwarding. It does not yet claim the full C# background
-  replicator or file-backed authoritative mutation-log store.
+  replicator. Its authoritative shard-log store is file-backed and supports
+  compaction watermarks, but it is still package-local rather than the full C#
+  daemon/server stack.
