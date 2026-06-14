@@ -105,6 +105,54 @@ transport.close()
 raise SystemExit("timed out waiting for RUDP frame")
 `;
 
+const pythonRudpClientScript = String.raw`
+import socket
+import sys
+import time
+
+from cultnet_py import (
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+)
+
+remote_port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(0.02)
+transport = CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptions(
+    runtime_id="python-rudp-client-interop",
+    socket=sock,
+    mode=CultNetRudpSocketMode.CLIENT,
+    remote_addr=("127.0.0.1", remote_port),
+    connection_id=0x66554433,
+    initial_sequence=1,
+    resend_delay_ms=25,
+))
+transport.connect(b"python-join")
+
+sent = False
+deadline = time.time() + 5
+while time.time() < deadline:
+    frame = transport.receive_once()
+    transport.poll_resends()
+    if transport.connected and not sent:
+        transport.send("schema", b"python-client-state")
+        sent = True
+    if frame is None:
+        time.sleep(0.005)
+        continue
+    if frame.channel_id != "schema" or frame.payload != b"ts-server-state":
+        transport.close()
+        raise SystemExit(f"unexpected RUDP frame: {frame.channel_id!r} {frame.payload!r}")
+    print("OK", flush=True)
+    transport.close()
+    raise SystemExit(0)
+
+transport.close()
+raise SystemExit("timed out waiting for TypeScript RUDP frame")
+`;
+
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   await buildInteropPeers();
   cleanInteropStores([
@@ -671,6 +719,37 @@ test("CultNet TypeScript and Python exchange schema frames over the shared RUDP 
   }
 });
 
+test("CultNet Python and TypeScript exchange schema frames when Python dials a TypeScript RUDP server", async () => {
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-rudp-server-interop",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0x66554433,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const pythonClient = spawnPythonRudpClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP client frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("python-client-state"));
+    server.send("schema", Buffer.from("ts-server-state"));
+
+    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 2_000, "Python RUDP client exit");
+    assert.equal(exitCode, 0, pythonClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (pythonClient.child.exitCode === null && !pythonClient.child.killed) {
+      pythonClient.child.kill("SIGTERM");
+      await once(pythonClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
     cwd: cultnetRsRoot,
@@ -849,6 +928,21 @@ function spawnPythonRudpPeer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
+function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
+    cwd: cultcachePyRoot,
+    env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
 async function bindUdpSocket(): Promise<Socket> {
   const socket = dgram.createSocket("udp4");
   await new Promise<void>((resolveBind, rejectBind) => {
@@ -859,6 +953,14 @@ async function bindUdpSocket(): Promise<Socket> {
     });
   });
   return socket;
+}
+
+function udpSocketPort(socket: Socket): number {
+  const address = socket.address();
+  if (typeof address === "string") {
+    throw new Error(`Expected UDP socket address info, got ${address}.`);
+  }
+  return address.port;
 }
 
 async function waitFor(predicate: () => boolean, description: string, timeoutMs = 2_000): Promise<void> {
