@@ -9,6 +9,8 @@ from cultnet_py import (
     CultNetClientAuthorityScope,
     CultNetRawClient,
     CultNetShardLogResponse,
+    CultNetSimulationConsensusCandidate,
+    CultNetSimulationObservation,
     CultNetSimulationConsensusOptions,
     CultNetSimulationObservationHub,
 )
@@ -101,11 +103,23 @@ class CultMeshGameSession:
         )
         return self.apply_shard_log_response(response)
 
-    def submit_observation(self, observation_or_message: dict[str, Any]) -> list[dict[str, Any]]:
+    def submit_observation_candidates(
+        self,
+        observation_or_message: dict[str, Any] | CultNetSimulationObservation,
+    ) -> list[CultNetSimulationConsensusCandidate]:
+        return self.observation_hub.submit_candidate_objects(observation_or_message)
+
+    def submit_observation(self, observation_or_message: dict[str, Any] | CultNetSimulationObservation) -> list[dict[str, Any]]:
         return self.observation_hub.submit(observation_or_message)
 
-    def submit_and_commit(self, observation_or_message: dict[str, Any]) -> list[CultMeshSimulationFactCommit]:
+    def submit_and_commit(self, observation_or_message: dict[str, Any] | CultNetSimulationObservation) -> list[CultMeshSimulationFactCommit]:
         return self.commit_quorum_candidates(self.submit_observation(observation_or_message))
+
+    def commit_quorum_candidate_objects(
+        self,
+        candidates: list[CultNetSimulationConsensusCandidate],
+    ) -> list[CultMeshSimulationFactCommit]:
+        return self.commit_quorum_candidates([candidate.to_wire() for candidate in candidates])
 
     def commit_quorum_candidates(self, candidates: list[dict[str, Any]]) -> list[CultMeshSimulationFactCommit]:
         commits: list[CultMeshSimulationFactCommit] = []

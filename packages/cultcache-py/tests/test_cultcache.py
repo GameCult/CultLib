@@ -34,6 +34,8 @@ from cultnet_py import (
     CultNetShardLogEntry,
     CultNetShardLogResponse,
     CultNetSimulationConsensusOptions,
+    CultNetSimulationConsensusCandidate,
+    CultNetSimulationObservation,
     apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
@@ -1110,6 +1112,10 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(message["observation"]["witnessRuntimeId"], "python-test")
         self.assertEqual(message["observation"]["claimHash"], claim_hash)
         self.assertEqual(message["observation"]["weight"], 1.0)
+        observation = CultNetSimulationObservation.from_wire(message)
+        self.assertEqual(observation.witness_runtime_id, "python-test")
+        self.assertEqual(observation.claim_summary, "player-1 hit target-a")
+        self.assertEqual(observation.to_message_wire(message_id="obs-2")["observation"], message["observation"])
 
     def test_cultnet_witness_artifact_bundle_uses_csharp_slot_order(self) -> None:
         bundle = witness_artifact_bundle(
@@ -1505,12 +1511,21 @@ class CultCacheTests(unittest.TestCase):
         ]
 
         candidates = consensus.build_candidates(observations)
+        typed_candidates = consensus.build_candidate_objects([
+            CultNetSimulationObservation.from_wire(observation)
+            for observation in observations
+        ])
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["claimHash"], claim_hash)
         self.assertEqual(candidates[0]["witnessCount"], 2)
         self.assertEqual(candidates[0]["supportWeight"], 2.0)
         self.assertTrue(candidates[0]["hasQuorum"])
+        self.assertEqual(len(typed_candidates), 1)
+        self.assertIsInstance(typed_candidates[0], CultNetSimulationConsensusCandidate)
+        self.assertEqual(typed_candidates[0].claim_hash, claim_hash)
+        self.assertEqual(typed_candidates[0].to_wire(), candidates[0])
+        self.assertEqual(CultNetSimulationConsensusCandidate.from_wire(candidates[0]), typed_candidates[0])
 
     def test_cultmesh_game_session_submits_observations_and_commits_quorum_once(self) -> None:
         claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
@@ -1546,10 +1561,13 @@ class CultCacheTests(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(session.submit_and_commit(first), [])
-            commits = session.submit_and_commit(second)
+            self.assertEqual(session.submit_and_commit(CultNetSimulationObservation.from_wire(first)), [])
+            typed_candidates = session.submit_observation_candidates(CultNetSimulationObservation.from_wire(second))
+            commits = session.commit_quorum_candidate_objects(typed_candidates)
             replay = session.commit_quorum_candidates(session.submit_observation(second))
 
+            self.assertEqual(len(typed_candidates), 1)
+            self.assertTrue(typed_candidates[0].has_quorum)
             self.assertEqual(len(commits), 1)
             self.assertEqual(replay, [])
             stored = node.get_required(simulation_fact_document, commits[0].key)

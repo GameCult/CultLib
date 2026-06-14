@@ -96,6 +96,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`
   document back over the raw snapshot lane and checks its MessagePack slots.
+  Python exposes typed `CultNetSimulationObservation` and
+  `CultNetSimulationConsensusCandidate` objects for local consensus and
+  game-session commit paths while preserving the schema-v0 dict projections
+  used by the wire harness.
 - Python CultMesh prediction reconciliation:
   The live interop harness runs a Python CultMesh session client, writes a local
   prediction, pulls the live Python peer shard log, applies the authoritative

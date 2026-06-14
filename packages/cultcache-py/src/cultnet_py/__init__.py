@@ -40,7 +40,9 @@ from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 from .simulation import (
     CultNetSimulationConsensus,
+    CultNetSimulationConsensusCandidate,
     CultNetSimulationConsensusOptions,
+    CultNetSimulationObservation,
     CultNetSimulationObservationHub,
 )
 
@@ -60,7 +62,9 @@ __all__ = [
     "CultNetAppliedRecord",
     "CultNetClientAuthorityScope",
     "CultNetSimulationConsensus",
+    "CultNetSimulationConsensusCandidate",
     "CultNetSimulationConsensusOptions",
+    "CultNetSimulationObservation",
     "CultNetSimulationObservationHub",
     "apply_raw_document_record",
     "apply_raw_snapshot",
