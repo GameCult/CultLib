@@ -281,6 +281,7 @@ client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
 mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
 client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
+client.fanout_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
 
 raw_client = CultNetRawClient("127.0.0.1", 3075)
 node.database.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])

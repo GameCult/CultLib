@@ -2299,9 +2299,9 @@ class CultCacheTests(unittest.TestCase):
                     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     server.bind(("127.0.0.1", 0))
                     port_holder.append(server.getsockname()[1])
-                    server.listen(6)
+                    server.listen(8)
                     ready.set()
-                    for _ in range(6):
+                    for _ in range(8):
                         connection, _ = server.accept()
                         with connection:
                             stream = connection.makefile("rwb")
@@ -2347,6 +2347,31 @@ class CultCacheTests(unittest.TestCase):
             endpoints=[endpoint, endpoint, ""],
             roles=["read-replica"],
         )
+        fanout_verses = CultMeshVerseCatalog()
+        fanout_verses.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="aetheria-main",
+                display_name="Known Aetheria",
+                authority_model="federated",
+                compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules-1"),
+                discovery_endpoints=(endpoint, endpoint, ""),
+            )
+        )
+        fanout_peers = CultMeshPeerCatalog()
+        fanout_peers.upsert(
+            CultMeshPeerCard(
+                peer_id="known-peer",
+                verse_id="aetheria-main",
+                endpoints=(endpoint, endpoint, ""),
+                roles=("read-replica",),
+            )
+        )
+        fanout_verse_count = verse_discovery.fanout(fanout_verses, transport_version="cultmesh.v0")
+        fanout_peer_count = peer_discovery.fanout(
+            fanout_peers,
+            verse_id="aetheria-main",
+            roles=["read-replica"],
+        )
 
         thread.join(2.0)
         self.assertFalse(server_error)
@@ -2361,6 +2386,13 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(discovered_peer_count, 1)
         self.assertEqual(discovered_verses.get("aetheria-main").display_name, "Aetheria")
         self.assertEqual(discovered_peers.find("aetheria-main", role="read-replica")[0].peer_id, "peer-a")
+        self.assertEqual(fanout_verse_count, 1)
+        self.assertEqual(fanout_peer_count, 1)
+        self.assertEqual(fanout_verses.get("aetheria-main").display_name, "Aetheria")
+        self.assertIn(
+            "peer-a",
+            {peer.peer_id for peer in fanout_peers.find("aetheria-main", role="read-replica")},
+        )
 
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(

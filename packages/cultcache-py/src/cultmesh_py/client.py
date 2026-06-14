@@ -114,6 +114,23 @@ class CultMeshDiscoveryClient:
             count += client.discover_verse_catalog(catalog, transport_version=transport_version)
         return count
 
+    def fanout_verse_catalog(
+        self,
+        catalog: CultMeshVerseCatalog,
+        *,
+        transport_version: str | None = None,
+    ) -> int:
+        endpoints = [
+            endpoint
+            for verse in catalog.verses
+            for endpoint in verse.discovery_endpoints
+        ]
+        return self.discover_verse_catalog(
+            catalog,
+            endpoints=endpoints,
+            transport_version=transport_version,
+        )
+
     def sync_peer_catalog(
         self,
         catalog: CultMeshPeerCatalog,
@@ -155,6 +172,27 @@ class CultMeshDiscoveryClient:
             count += client.discover_peer_catalog(catalog, verse_id=verse_id, roles=roles, limit=limit)
         return count
 
+    def fanout_peer_catalog(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        limit: int | None = None,
+    ) -> int:
+        endpoints = [
+            endpoint
+            for peer in catalog.find(verse_id)
+            for endpoint in peer.endpoints
+        ]
+        return self.discover_peer_catalog(
+            catalog,
+            verse_id=verse_id,
+            endpoints=endpoints,
+            roles=roles,
+            limit=limit,
+        )
+
     @classmethod
     def from_endpoint(cls, endpoint: str, *, timeout_seconds: float = 4.0) -> "CultMeshDiscoveryClient":
         host, port = _parse_endpoint(endpoint)
@@ -175,6 +213,14 @@ class CultMeshVerseDiscoveryClient(CultMeshDiscoveryClient):
             transport_version=transport_version,
         )
 
+    def fanout(
+        self,
+        catalog: CultMeshVerseCatalog,
+        *,
+        transport_version: str | None = None,
+    ) -> int:
+        return self.fanout_verse_catalog(catalog, transport_version=transport_version)
+
 
 class CultMeshPeerExchangeClient(CultMeshDiscoveryClient):
     def discover(
@@ -193,6 +239,16 @@ class CultMeshPeerExchangeClient(CultMeshDiscoveryClient):
             roles=roles,
             limit=limit,
         )
+
+    def fanout(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        limit: int | None = None,
+    ) -> int:
+        return self.fanout_peer_catalog(catalog, verse_id=verse_id, roles=roles, limit=limit)
 
 
 def _parse_endpoint(endpoint: str) -> tuple[str, int]:
