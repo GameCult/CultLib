@@ -24,4 +24,6 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $sources = Get-ChildItem $src -Recurse -Filter *.kt | Select-Object -ExpandProperty FullName
 & $kotlinc @sources -jvm-target 1.8 -classpath $kotlinStdlib -d $jarPath
 if ($LASTEXITCODE -ne 0) { throw "kotlinc failed with exit code $LASTEXITCODE" }
+& $java -cp "$jarPath;$kotlinStdlib" org.gamecult.cultmesh.CultMeshKt
+if ($LASTEXITCODE -ne 0) { throw "cultmesh-kotlin self-test failed with exit code $LASTEXITCODE" }
 Write-Host "Built $jarPath"

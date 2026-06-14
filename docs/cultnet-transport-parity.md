@@ -29,7 +29,7 @@ CultNet owns cross-runtime transport semantics:
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
 | Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client; single-peer RUDP socket transport exists in the library | Endpoint lists and CultMesh peer/Verse catalogs | UDP socket binding for the shared RUDP reliability owner |
-| Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket | None found in the live package | Thin client surface |
+| Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket; single-peer RUDP socket transport exists in the library | None found in the live package | UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
 
 The live split is therefore: payload language is converging, transport language
 is not.
@@ -165,15 +165,15 @@ Current progress:
   ack/ack-mask accounting, reliable resend scheduling, duplicate suppression,
   and reliable ordered channel delivery. It is in-memory and socket-free so the
   behavior can be tested before any runtime binds it to UDP I/O.
-- C#, TypeScript, Rust, and Python now have socket-backed RUDP transport
+- C#, TypeScript, Rust, Python, and Kotlin now have socket-backed RUDP transport
   connections that bind a single UDP peer to the shared RUDP session. TypeScript
   emits the same `frame` events as the TCP-framed transport and can carry
   `CultNetPeer` schema messages over reliable ordered `schema` frames; C#,
-  Rust, and Python expose the same transport frame/stats shape through
+  Rust, Python, and Kotlin expose the same transport frame/stats shape through
   synchronous socket polling.
-- The remaining parity work is to add the equivalent port to Kotlin, deepen
-  Python's server-side use of its port, and move each runtime's existing
-  TCP/LiteNetLib/WebSocket bodies behind those ports.
+- The remaining parity work is to deepen Python's server-side use of its port
+  and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
+  ports.
 
 ## RUDP Packet Contract V0
 
