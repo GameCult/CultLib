@@ -210,8 +210,35 @@ def _check_local_cultmesh_wire_smoke() -> dict[str, Any]:
         failures = []
         if hello_response.get("runtimeId") != "verify-python":
             failures.append("hello_runtime")
+        supported_versions = set(hello_response.get("supportedMessageVersions") or ())
+        for schema_version in (
+            "cultnet.document_put_raw.v0",
+            "cultnet.document_delete.v0",
+            "cultnet.shard_log_request.v0",
+        ):
+            if schema_version not in supported_versions:
+                failures.append(f"hello_supported_message:{schema_version}")
+        mutation_contracts = hello_response.get("supportedMutationContracts") or []
+        if not any(
+            contract.get("documentType") == "verify.mesh_note"
+            and {"snapshot", "documentPut", "documentDelete", "shardLog"}.issubset(
+                set(contract.get("operations") or ())
+            )
+            for contract in mutation_contracts
+        ):
+            failures.append("hello_mutation_contract")
         if not schema_response.get("schemas"):
             failures.append("schema_catalog")
+        else:
+            wire_contracts = set(schema_response["schemas"][0].get("wireContracts") or ())
+            for schema_version in (
+                "cultnet.snapshot_response_raw.v0",
+                "cultnet.document_put_raw.v0",
+                "cultnet.document_delete.v0",
+                "cultnet.shard_log_response.v0",
+            ):
+                if schema_version not in wire_contracts:
+                    failures.append(f"schema_wire_contract:{schema_version}")
         if not snapshot_response.documents or snapshot_response.documents[0].record_key != "note:verify":
             failures.append("snapshot")
         if not shard_catalog or shard_catalog[0].shard_id != "verify":
