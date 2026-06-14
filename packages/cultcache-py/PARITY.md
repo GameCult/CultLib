@@ -18,6 +18,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
   helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting
   peer snapshots before handing them to the existing replication helpers.
+  `CultMeshDatabase.apply_snapshot_response(...)` and sync paths accept the
+  typed response while preserving the existing replication owner.
 - Python CultNet schema catalog:
   Exposes shared wire-message schema descriptors from the package surface so
   both the interop peer and CultMesh local server describe the CultNet/CultMesh
@@ -34,6 +36,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetShardLogResponse` and `CultNetShardLogEntry` helpers
   for inspecting mutation-log entries, resync pressure, and sequence cursors,
   while cache mutation remains owned by the existing replication helpers.
+  `CultMeshDatabase` and `CultMeshGameSession` can consume typed shard-log
+  responses directly for database sync and prediction reconciliation.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for

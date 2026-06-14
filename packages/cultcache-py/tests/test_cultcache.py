@@ -1219,6 +1219,12 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(target.database.get_required(document, "note:1"), {"body": "include"})
         self.assertIsNone(target.database.get(document, "note:2"))
 
+        typed_target = CultMesh.create_node(runtime_id="mesh-snapshot-typed-target")
+        typed_target.database.register_document(document)
+        typed_applied = typed_target.database.apply_snapshot_response(CultNetRawSnapshotResponse.from_wire(response))
+        self.assertEqual([(record.schema_id, record.record_key) for record in typed_applied], [("mesh.snapshot_note.v1", "note:1")])
+        self.assertEqual(typed_target.database.get_required(document, "note:1"), {"body": "include"})
+
     def test_cultmesh_database_creates_shard_log_response_from_raw_mutations(self) -> None:
         document = define_database_entry_type(
             "mesh.log_note",
@@ -1264,6 +1270,13 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([record.change_kind for record in applied], ["updated", "removed"])
         self.assertIsNone(target.database.get(document, "note:1"))
         self.assertIsNone(target.database.get(document, "note:2"))
+
+        typed_target = CultMesh.create_node(runtime_id="mesh-log-typed-target")
+        typed_target.database.register_document(document)
+        typed_target.database.put(document, "note:1", {"body": "first"})
+        typed_applied = typed_target.database.apply_shard_log_response(CultNetShardLogResponse.from_wire(response))
+        self.assertEqual([record.change_kind for record in typed_applied], ["updated", "removed"])
+        self.assertIsNone(typed_target.database.get(document, "note:1"))
 
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(
@@ -1529,7 +1542,7 @@ class CultCacheTests(unittest.TestCase):
                 shard_id="inputs",
                 shard_epoch=1,
             )
-            changes = session.apply_shard_log_response({
+            authoritative_response = {
                 "schemaVersion": "cultnet.shard_log_response.v0",
                 "messageId": "inputs-log",
                 "shardId": "inputs",
@@ -1543,7 +1556,8 @@ class CultCacheTests(unittest.TestCase):
                     }
                 ],
                 "resyncRequired": False,
-            })
+            }
+            changes = session.apply_shard_log_response(CultNetShardLogResponse.from_wire(authoritative_response))
 
             self.assertEqual(changes[0].change_kind, "reconciled")
             self.assertEqual(node.get_required(note_doc, prediction.key)["body"], "authoritative")

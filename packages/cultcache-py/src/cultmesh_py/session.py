@@ -8,6 +8,7 @@ from cultnet_py import (
     CultNetAppliedRecord,
     CultNetClientAuthorityScope,
     CultNetRawClient,
+    CultNetShardLogResponse,
     CultNetSimulationConsensusOptions,
     CultNetSimulationObservationHub,
 )
@@ -76,7 +77,10 @@ class CultMeshGameSession:
         self._predicted_keys.add((schema_id, key))
         return CultMeshPrediction(key=key, schema_id=schema_id, document=document, value=value)
 
-    def apply_shard_log_response(self, response: dict[str, Any]) -> list[CultMeshSessionChange]:
+    def apply_shard_log_response(
+        self,
+        response: dict[str, Any] | CultNetShardLogResponse,
+    ) -> list[CultMeshSessionChange]:
         applied = self.node.database.apply_shard_log_response(response)
         return self._reconcile_applied(applied)
 
@@ -89,7 +93,7 @@ class CultMeshGameSession:
         after_sequence: int = 0,
         limit: int | None = None,
     ) -> list[CultMeshSessionChange]:
-        response = client.fetch_shard_log(
+        response = client.fetch_shard_log_response(
             shard_id=shard_id,
             shard_epoch=shard_epoch,
             after_sequence=after_sequence,

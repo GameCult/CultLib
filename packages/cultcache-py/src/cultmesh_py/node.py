@@ -11,6 +11,8 @@ from cultnet_py import (
     CultNetAppliedRecord,
     CultNetMessage,
     CultNetRawClient,
+    CultNetRawSnapshotResponse,
+    CultNetShardLogResponse,
     apply_raw_snapshot as apply_cultnet_raw_snapshot,
     apply_shard_log_response as apply_cultnet_shard_log_response,
     document_delete,
@@ -459,7 +461,7 @@ class CultMeshDatabase:
         shard_id: str | None = None,
         shard_epoch: int | None = None,
     ) -> list[CultNetAppliedRecord]:
-        response = client.fetch_snapshot(
+        response = client.fetch_snapshot_response(
             schema_ids=schema_ids,
             record_keys=record_keys,
             shard_id=shard_id,
@@ -476,7 +478,7 @@ class CultMeshDatabase:
         after_sequence: int = 0,
         limit: int | None = None,
     ) -> list[CultNetAppliedRecord]:
-        response = client.fetch_shard_log(
+        response = client.fetch_shard_log_response(
             shard_id=shard_id,
             shard_epoch=shard_epoch,
             after_sequence=after_sequence,
@@ -519,15 +521,23 @@ class CultMeshDatabase:
             response["shardEpoch"] = self._latest_shard_epoch(shard_id) or 0
         return response
 
-    def apply_snapshot_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
-        previous = self._previous_values_for_snapshot_response(response)
-        applied = apply_cultnet_raw_snapshot(self.cache, self.documents, response)
+    def apply_snapshot_response(
+        self,
+        response: dict[str, Any] | CultNetRawSnapshotResponse,
+    ) -> list[CultNetAppliedRecord]:
+        wire = response.to_wire() if isinstance(response, CultNetRawSnapshotResponse) else response
+        previous = self._previous_values_for_snapshot_response(wire)
+        applied = apply_cultnet_raw_snapshot(self.cache, self.documents, wire)
         self._publish_applied_records(applied, previous)
         return applied
 
-    def apply_shard_log_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
-        previous = self._previous_values_for_shard_log_response(response)
-        applied = apply_cultnet_shard_log_response(self.cache, self.documents, response)
+    def apply_shard_log_response(
+        self,
+        response: dict[str, Any] | CultNetShardLogResponse,
+    ) -> list[CultNetAppliedRecord]:
+        wire = response.to_wire() if isinstance(response, CultNetShardLogResponse) else response
+        previous = self._previous_values_for_shard_log_response(wire)
+        applied = apply_cultnet_shard_log_response(self.cache, self.documents, wire)
         self._publish_applied_records(applied, previous)
         return applied
 
