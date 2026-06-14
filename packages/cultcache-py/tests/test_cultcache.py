@@ -3241,6 +3241,86 @@ class CultCacheTests(unittest.TestCase):
             finally:
                 self._terminate_process(second)
 
+    def test_cultmesh_daemon_serves_live_database_subscription_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "live-daemon-peer",
+                    "--port",
+                    "0",
+                    "--seed-interop-note",
+                    "--seed-shard-id",
+                    "live-interop",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                live_note = {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:daemon-live",
+                    "authorRuntimeId": "daemon-live-client",
+                    "title": "daemon live subscription note",
+                    "body": "live subscription put from Python daemon smoke",
+                    "tags": ["daemon", "subscription", "interop"],
+                }
+
+                with client.subscribe_database(
+                    subscription_id="daemon-live-sub",
+                    schema_ids=["cultcache.interop-note"],
+                ) as subscription:
+                    snapshot = subscription.read_next_snapshot_response()
+                    subscription.send(document_put_raw(
+                        message_id="daemon-live-put",
+                        key="note:daemon-live",
+                        schema_id="cultcache.interop-note",
+                        stored_at="2026-06-14T00:00:00Z",
+                        payload=interop_note_document.encode_payload(live_note),
+                        source_runtime_id="daemon-live-client",
+                        shard_id="live-interop",
+                        shard_epoch=1,
+                    ))
+                    change = subscription.read_next_change()
+
+                self.assertEqual(snapshot.documents[0].record_key, "note:live-daemon-peer")
+                self.assertEqual(change.change_kind, "added")
+                self.assertEqual(change.record_key, "note:daemon-live")
+                self.assertIsNotNone(change.raw_document)
+                assert change.raw_document is not None
+                self.assertEqual(
+                    interop_note_document.decode_payload(change.raw_document.payload),
+                    live_note,
+                )
+
+                shard_log = client.fetch_shard_log_response(shard_id="live-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual([entry.sequence for entry in shard_log.entries], [1, 2])
+                self.assertEqual(shard_log.entries[1].change_kind, "added")
+                self.assertIsNotNone(shard_log.entries[1].raw_document)
+                assert shard_log.entries[1].raw_document is not None
+                self.assertEqual(shard_log.entries[1].raw_document.record_key, "note:daemon-live")
+            finally:
+                self._terminate_process(process)
+
     def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
         deadline = time.monotonic() + 5.0
         while not ready_path.exists() and time.monotonic() < deadline:

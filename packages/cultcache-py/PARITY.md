@@ -108,7 +108,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   actual bound endpoint in the Verse and peer catalogs so discovery clients can
   find the running Python peer without embedding code-owned catalogs. With a
   cache file and durable shard-log path, a restarted daemon can rehydrate the
-  persisted interop-note snapshot and shard-log entry without reseeding.
+  persisted interop-note snapshot and shard-log entry without reseeding. The
+  launched daemon also accepts raw puts over a live database subscription stream,
+  emits the matching change notification, and records the mutation in the served
+  shard log.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and
