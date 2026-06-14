@@ -1194,6 +1194,14 @@ class CultCacheTests(unittest.TestCase):
         source.database.put(document, "note:1", {"body": "include"})
         source.database.put(document, "note:2", {"body": "skip"})
 
+        typed_response = source.database.build_snapshot_response(
+            message_id="snapshot-1",
+            schema_ids=["mesh.snapshot_note.v1"],
+            record_keys=["note:1"],
+            shard_id="notes",
+            shard_epoch=4,
+            shard_log_sequence=7,
+        )
         response = source.database.create_snapshot_response(
             message_id="snapshot-1",
             schema_ids=["mesh.snapshot_note.v1"],
@@ -1203,6 +1211,11 @@ class CultCacheTests(unittest.TestCase):
             shard_log_sequence=7,
         )
 
+        self.assertIsInstance(typed_response, CultNetRawSnapshotResponse)
+        self.assertEqual(typed_response.message_id, "snapshot-1")
+        self.assertEqual(typed_response.documents[0].record_key, "note:1")
+        self.assertEqual(typed_response.to_wire(), response)
+        self.assertEqual(source.build_snapshot_response(schema_ids=["mesh.snapshot_note.v1"]).documents[0].record_key, "note:1")
         self.assertEqual(response["schemaVersion"], "cultnet.snapshot_response_raw.v0")
         self.assertEqual(response["messageId"], "snapshot-1")
         self.assertEqual(response["shardId"], "notes")
@@ -1221,7 +1234,7 @@ class CultCacheTests(unittest.TestCase):
 
         typed_target = CultMesh.create_node(runtime_id="mesh-snapshot-typed-target")
         typed_target.database.register_document(document)
-        typed_applied = typed_target.database.apply_snapshot_response(CultNetRawSnapshotResponse.from_wire(response))
+        typed_applied = typed_target.database.apply_snapshot_response(typed_response)
         self.assertEqual([(record.schema_id, record.record_key) for record in typed_applied], [("mesh.snapshot_note.v1", "note:1")])
         self.assertEqual(typed_target.database.get_required(document, "note:1"), {"body": "include"})
 
@@ -1238,6 +1251,13 @@ class CultCacheTests(unittest.TestCase):
         source.database.put_raw_message(document, "note:2", {"body": "other"}, shard_id="other", shard_epoch=1)
         source.database.delete_raw_message(document, "note:1", shard_id="notes", shard_epoch=3)
 
+        typed_response = source.database.build_shard_log_response(
+            message_id="log-1",
+            shard_id="notes",
+            shard_epoch=3,
+            after_sequence=1,
+            limit=2,
+        )
         response = source.database.create_shard_log_response(
             message_id="log-1",
             shard_id="notes",
@@ -1246,6 +1266,11 @@ class CultCacheTests(unittest.TestCase):
             limit=2,
         )
 
+        self.assertIsInstance(typed_response, CultNetShardLogResponse)
+        self.assertEqual(typed_response.message_id, "log-1")
+        self.assertEqual([entry.sequence for entry in typed_response.entries], [2, 3])
+        self.assertEqual(typed_response.to_wire(), response)
+        self.assertEqual([entry.sequence for entry in source.build_shard_log_response(shard_id="notes").entries], [1, 2, 3])
         self.assertEqual(response["schemaVersion"], "cultnet.shard_log_response.v0")
         self.assertEqual(response["messageId"], "log-1")
         self.assertEqual(response["shardId"], "notes")
@@ -1274,7 +1299,7 @@ class CultCacheTests(unittest.TestCase):
         typed_target = CultMesh.create_node(runtime_id="mesh-log-typed-target")
         typed_target.database.register_document(document)
         typed_target.database.put(document, "note:1", {"body": "first"})
-        typed_applied = typed_target.database.apply_shard_log_response(CultNetShardLogResponse.from_wire(response))
+        typed_applied = typed_target.database.apply_shard_log_response(typed_response)
         self.assertEqual([record.change_kind for record in typed_applied], ["updated", "removed"])
         self.assertIsNone(typed_target.database.get(document, "note:1"))
 

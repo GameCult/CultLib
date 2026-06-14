@@ -20,6 +20,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   peer snapshots before handing them to the existing replication helpers.
   `CultMeshDatabase.apply_snapshot_response(...)` and sync paths accept the
   typed response while preserving the existing replication owner.
+  `CultMeshDatabase.build_snapshot_response(...)` projects local envelopes into
+  the same typed response shape; the older `create_snapshot_response(...)`
+  remains the wire-dict compatibility projection.
 - Python CultNet schema catalog:
   Exposes shared wire-message schema descriptors from the package surface so
   both the interop peer and CultMesh local server describe the CultNet/CultMesh
@@ -38,6 +41,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   while cache mutation remains owned by the existing replication helpers.
   `CultMeshDatabase` and `CultMeshGameSession` can consume typed shard-log
   responses directly for database sync and prediction reconciliation.
+  `CultMeshDatabase.build_shard_log_response(...)` creates the typed response
+  from the package-local mutation log; `create_shard_log_response(...)` remains
+  the raw wire-dict compatibility projection.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for
@@ -74,7 +80,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Change notifications carry previous values when the database can observe the
   old record before local or replicated application.
   It can project local envelopes into schema-v0 raw snapshot responses and apply
-  those responses back through the shared CultNet replication path.
+  those responses back through the shared CultNet replication path. Typed
+  builders own the local response shape and raw dict methods serialize that
+  shape for compatibility with older callers and wire handlers.
   Raw shard-scoped writes append a package-local mutation log that can be
   projected into schema-v0 shard-log responses for peer catch-up.
 - Python CultMesh committed simulation facts:

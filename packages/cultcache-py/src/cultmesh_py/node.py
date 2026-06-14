@@ -11,7 +11,9 @@ from cultnet_py import (
     CultNetAppliedRecord,
     CultNetMessage,
     CultNetRawClient,
+    CultNetRawDocumentRecord,
     CultNetRawSnapshotResponse,
+    CultNetShardLogEntry,
     CultNetShardLogResponse,
     apply_raw_snapshot as apply_cultnet_raw_snapshot,
     apply_shard_log_response as apply_cultnet_shard_log_response,
@@ -117,7 +119,26 @@ class CultMeshNode:
         shard_epoch: int | None = None,
         shard_log_sequence: int | None = None,
     ) -> dict[str, Any]:
-        return self.database.create_snapshot_response(
+        return self.build_snapshot_response(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            shard_log_sequence=shard_log_sequence,
+        ).to_wire()
+
+    def build_snapshot_response(
+        self,
+        *,
+        message_id: str = "",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        shard_log_sequence: int | None = None,
+    ) -> CultNetRawSnapshotResponse:
+        return self.database.build_snapshot_response(
             message_id=message_id,
             schema_ids=schema_ids,
             record_keys=record_keys,
@@ -172,7 +193,24 @@ class CultMeshNode:
         after_sequence: int = 0,
         limit: int | None = None,
     ) -> dict[str, Any]:
-        return self.database.create_shard_log_response(
+        return self.build_shard_log_response(
+            shard_id=shard_id,
+            message_id=message_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        ).to_wire()
+
+    def build_shard_log_response(
+        self,
+        *,
+        shard_id: str,
+        message_id: str = "",
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> CultNetShardLogResponse:
+        return self.database.build_shard_log_response(
             shard_id=shard_id,
             message_id=message_id,
             shard_epoch=shard_epoch,
@@ -419,35 +457,49 @@ class CultMeshDatabase:
         shard_epoch: int | None = None,
         shard_log_sequence: int | None = None,
     ) -> dict[str, Any]:
+        return self.build_snapshot_response(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            shard_log_sequence=shard_log_sequence,
+        ).to_wire()
+
+    def build_snapshot_response(
+        self,
+        *,
+        message_id: str = "",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        shard_log_sequence: int | None = None,
+    ) -> CultNetRawSnapshotResponse:
         requested_schema_ids = set(schema_ids or [])
         requested_record_keys = set(record_keys or [])
-        documents = []
+        documents: list[CultNetRawDocumentRecord] = []
         for envelope in self.cache.snapshot_envelopes():
             schema_id = envelope.schema_id or envelope.type
             if requested_schema_ids and schema_id not in requested_schema_ids:
                 continue
             if requested_record_keys and envelope.key not in requested_record_keys:
                 continue
-            documents.append({
-                "schemaId": schema_id,
-                "recordKey": envelope.key,
-                "storedAt": envelope.stored_at,
-                "payloadEncoding": "messagepack",
-                "payload": envelope.payload,
-            })
+            documents.append(CultNetRawDocumentRecord(
+                schema_id=schema_id,
+                record_key=envelope.key,
+                stored_at=envelope.stored_at,
+                payload_encoding="messagepack",
+                payload=envelope.payload,
+            ))
 
-        response: dict[str, Any] = {
-            "schemaVersion": "cultnet.snapshot_response_raw.v0",
-            "messageId": message_id,
-            "documents": documents,
-        }
-        if shard_id is not None:
-            response["shardId"] = shard_id
-        if shard_epoch is not None:
-            response["shardEpoch"] = shard_epoch
-        if shard_log_sequence is not None:
-            response["shardLogSequence"] = shard_log_sequence
-        return response
+        return CultNetRawSnapshotResponse(
+            message_id=message_id,
+            documents=tuple(documents),
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            shard_log_sequence=shard_log_sequence,
+        )
 
     def pull(self) -> None:
         self.cache.pull_all_backing_stores()
@@ -495,12 +547,29 @@ class CultMeshDatabase:
         after_sequence: int = 0,
         limit: int | None = None,
     ) -> dict[str, Any]:
+        return self.build_shard_log_response(
+            shard_id=shard_id,
+            message_id=message_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        ).to_wire()
+
+    def build_shard_log_response(
+        self,
+        *,
+        shard_id: str,
+        message_id: str = "",
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> CultNetShardLogResponse:
         if not shard_id:
             raise ValueError("shard_id must be non-empty")
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
         entries = [
-            dict(entry)
+            CultNetShardLogEntry.from_wire(entry)
             for entry in self._shard_logs.get(shard_id, [])
             if int(entry.get("sequence") or 0) > after_sequence
         ]
@@ -508,18 +577,16 @@ class CultMeshDatabase:
             if limit < 0:
                 raise ValueError("limit must be non-negative")
             entries = entries[:limit]
-        response: dict[str, Any] = {
-            "schemaVersion": "cultnet.shard_log_response.v0",
-            "messageId": message_id,
-            "shardId": shard_id,
-            "entries": entries,
-            "resyncRequired": False,
-        }
         if shard_epoch is not None:
-            response["shardEpoch"] = shard_epoch
+            response_shard_epoch = shard_epoch
         else:
-            response["shardEpoch"] = self._latest_shard_epoch(shard_id) or 0
-        return response
+            response_shard_epoch = self._latest_shard_epoch(shard_id) or 0
+        return CultNetShardLogResponse(
+            message_id=message_id,
+            shard_id=shard_id,
+            shard_epoch=response_shard_epoch,
+            entries=tuple(entries),
+        )
 
     def apply_snapshot_response(
         self,

@@ -169,15 +169,15 @@ message = parse_message(decode_frame(encode_frame(payload)))
 
 client = CultNetRawClient("127.0.0.1", 3075)
 catalog = client.fetch_schema_catalog(kinds=["wire_message"])
-snapshot = client.fetch_snapshot(schema_ids=["cultnet.interop-note"])
+snapshot = client.fetch_snapshot_response(schema_ids=["cultnet.interop-note"])
 shard_catalog = client.fetch_shard_catalog(schema_ids=["cultnet.interop-note"])
 # With a local CultCache and the matching registered document definitions:
-# applied = apply_raw_snapshot(cache, [note_doc], snapshot)
+# applied = apply_raw_snapshot(cache, [note_doc], snapshot.to_wire())
 
 subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.interop-note"])
 shard_request = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
-shard_log = client.fetch_shard_log(shard_id="interop", shard_epoch=1, after_sequence=0)
-# log_changes = apply_shard_log_response(cache, [note_doc], shard_log)
+shard_log = client.fetch_shard_log_response(shard_id="interop", shard_epoch=1, after_sequence=0)
+# log_changes = apply_shard_log_response(cache, [note_doc], shard_log.to_wire())
 with client.subscribe_database(subscription_id="ui", schema_ids=["cultnet.interop-note"]) as live:
     initial_snapshot = live.read_next()
 claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
@@ -241,8 +241,11 @@ put_message = node.database.put_raw_message(
     shard_id="interop",
     shard_epoch=1,
 )
-snapshot_response = node.database.create_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
+snapshot_response = node.database.build_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
+snapshot_wire = node.database.create_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
 delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
+shard_log_response = node.database.build_shard_log_response(shard_id="interop", shard_epoch=1)
+shard_log_wire = node.database.create_shard_log_response(shard_id="interop", shard_epoch=1)
 
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
