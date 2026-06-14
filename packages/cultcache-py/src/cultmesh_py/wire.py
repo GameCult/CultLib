@@ -235,19 +235,56 @@ class CultMeshAuthorityLease:
     valid_from: datetime
     expires_at: datetime
     shard_ids: tuple[str, ...] = ()
+    issuer_runtime_id: str = "local"
+    signature: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roles", _clean_tuple(self.roles))
+        object.__setattr__(self, "shard_ids", _clean_tuple(self.shard_ids))
+
+    def is_valid_at(self, at: datetime) -> bool:
+        return self.valid_from <= at < self.expires_at
+
+    def covers(
+        self,
+        peer: CultMeshPeerCard,
+        role: str,
+        shard_id: str | None = None,
+        at: datetime | None = None,
+    ) -> bool:
+        require_non_empty(role, "role")
+        checked_at = at or datetime.now(self.valid_from.tzinfo)
+        return (
+            self.is_valid_at(checked_at)
+            and self.verse_id == peer.verse_id
+            and self.peer_id == peer.peer_id
+            and self.lease_id == peer.authority_lease_id
+            and role in self.roles
+            and role in peer.roles
+            and (shard_id is None or not self.shard_ids or shard_id in self.shard_ids)
+        )
 
 
 @dataclass
 class CultMeshAuthorityLeaseCatalog:
     _leases: dict[str, CultMeshAuthorityLease] = field(default_factory=dict)
 
+    @property
+    def leases(self) -> tuple[CultMeshAuthorityLease, ...]:
+        return tuple(sorted(self._leases.values(), key=lambda lease: lease.lease_id))
+
     def upsert(self, lease: CultMeshAuthorityLease) -> None:
         require_non_empty(lease.lease_id, "lease.lease_id")
         require_non_empty(lease.verse_id, "lease.verse_id")
         require_non_empty(lease.peer_id, "lease.peer_id")
+        require_non_empty(lease.issuer_runtime_id, "lease.issuer_runtime_id")
         if lease.expires_at <= lease.valid_from:
             raise ValueError("CultMesh authority lease expiry must be after valid_from")
         self._leases[lease.lease_id] = lease
+
+    def get(self, lease_id: str) -> CultMeshAuthorityLease | None:
+        require_non_empty(lease_id, "lease_id")
+        return self._leases.get(lease_id)
 
     def is_authorized(
         self,
@@ -262,15 +299,7 @@ class CultMeshAuthorityLeaseCatalog:
         lease = self._leases.get(peer.authority_lease_id)
         if lease is None:
             return False
-        checked_at = at or datetime.now(lease.valid_from.tzinfo)
-        return (
-            lease.valid_from <= checked_at < lease.expires_at
-            and lease.verse_id == peer.verse_id
-            and lease.peer_id == peer.peer_id
-            and role in lease.roles
-            and role in peer.roles
-            and (shard_id is None or not lease.shard_ids or shard_id in lease.shard_ids)
-        )
+        return lease.covers(peer, role, shard_id, at)
 
 
 ZERO_COPY_TRANSPORTS = {
@@ -471,6 +500,17 @@ def peer_from_wire(value: dict[str, Any]) -> CultMeshPeerCard:
 def require_non_empty(value: str, name: str) -> None:
     if not value or not value.strip():
         raise ValueError(f"{name} must be non-empty")
+
+
+def _clean_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value or not value.strip() or value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+    return tuple(cleaned)
 
 
 def copy_budget_for(transport: str) -> str:

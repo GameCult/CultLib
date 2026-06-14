@@ -72,6 +72,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
   authority leases, local TCP node serving, and simulation fact commits.
+- Python CultMesh authority leases:
+  Lease objects own validity and peer/role/shard coverage checks; the catalog
+  owns sorted listing, lookup, upsert, and authorization delegation, matching
+  the C# reference authority boundary.
 - Python CultMesh local server:
   Serves a `CultMeshNode` plus Verse and peer catalogs over the same framed
   MessagePack request/response lane used by `CultNetRawClient` and

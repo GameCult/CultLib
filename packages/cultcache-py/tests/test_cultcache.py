@@ -2169,14 +2169,29 @@ class CultCacheTests(unittest.TestCase):
                 lease_id="lease:voidbot-local",
                 verse_id="local",
                 peer_id="voidbot-local",
-                roles=("shard-primary",),
+                roles=("shard-primary", "shard-primary", ""),
                 valid_from=now - timedelta(seconds=1),
                 expires_at=now + timedelta(seconds=1),
+                shard_ids=("shard-a",),
+                issuer_runtime_id="odin",
+                signature="signed",
             )
         )
 
-        self.assertTrue(leases.is_authorized(peer, "shard-primary", at=now))
+        lease = leases.get("lease:voidbot-local")
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertEqual(leases.leases, (lease,))
+        self.assertEqual(lease.roles, ("shard-primary",))
+        self.assertEqual(lease.issuer_runtime_id, "odin")
+        self.assertEqual(lease.signature, "signed")
+        self.assertTrue(lease.is_valid_at(now))
+        self.assertTrue(lease.covers(peer, "shard-primary", shard_id="shard-a", at=now))
+        self.assertFalse(lease.covers(peer, "shard-primary", shard_id="shard-b", at=now))
+        self.assertTrue(leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+        self.assertFalse(leases.is_authorized(peer, "shard-primary", shard_id="shard-b", at=now))
         self.assertFalse(leases.is_authorized(peer, "read-replica", at=now))
+        self.assertIsNone(leases.get("missing"))
 
     def test_cultmesh_stream_catalog_negotiates_transport_and_latest_frame(self) -> None:
         streams = CultMeshStreamCatalog()
