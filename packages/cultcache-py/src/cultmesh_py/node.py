@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -160,11 +161,29 @@ class CultMeshNode:
             limit=limit,
         )
 
+    def create_shard_log_response(
+        self,
+        *,
+        shard_id: str,
+        message_id: str = "",
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        return self.database.create_shard_log_response(
+            shard_id=shard_id,
+            message_id=message_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+
 
 class CultMeshDatabase:
     def __init__(self, node: CultMeshNode) -> None:
         self._node = node
         self._subscribers: list[tuple[DocumentDefinition[Any] | None, str | None, Callable[[CultMeshDatabaseChange], None]]] = []
+        self._shard_logs: dict[str, list[dict[str, Any]]] = {}
 
     @property
     def cache(self) -> CultCache:
@@ -286,7 +305,7 @@ class CultMeshDatabase:
         )
         value = self.cache.put_envelope(document, envelope)
         self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
-        return document_put_raw(
+        message = document_put_raw(
             message_id=message_id,
             key=key,
             schema_id=envelope.schema_id or catalog_entry.schema_id,
@@ -296,6 +315,8 @@ class CultMeshDatabase:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+        self._append_shard_log_put(message, "added" if previous is None else "updated")
+        return message
 
     def get(self, document: DocumentDefinition[Any], key: str) -> Any:
         return self.cache.get(document, key)
@@ -329,13 +350,15 @@ class CultMeshDatabase:
     ) -> CultNetMessage:
         schema_id = document.catalog_entry().schema_id
         self.delete(document, key)
-        return document_delete(
+        message = document_delete(
             message_id=message_id,
             schema_id=schema_id,
             record_key=key,
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+        self._append_shard_log_delete(message)
+        return message
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.cache.snapshot()
@@ -417,6 +440,41 @@ class CultMeshDatabase:
         )
         return self.apply_shard_log_response(response)
 
+    def create_shard_log_response(
+        self,
+        *,
+        shard_id: str,
+        message_id: str = "",
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        if not shard_id:
+            raise ValueError("shard_id must be non-empty")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        entries = [
+            dict(entry)
+            for entry in self._shard_logs.get(shard_id, [])
+            if int(entry.get("sequence") or 0) > after_sequence
+        ]
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("limit must be non-negative")
+            entries = entries[:limit]
+        response: dict[str, Any] = {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": message_id,
+            "shardId": shard_id,
+            "entries": entries,
+            "resyncRequired": False,
+        }
+        if shard_epoch is not None:
+            response["shardEpoch"] = shard_epoch
+        else:
+            response["shardEpoch"] = self._latest_shard_epoch(shard_id) or 0
+        return response
+
     def apply_snapshot_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
         previous = self._previous_values_for_snapshot_response(response)
         applied = apply_cultnet_raw_snapshot(self.cache, self.documents, response)
@@ -476,6 +534,49 @@ class CultMeshDatabase:
             if key is not None and key != change.record_key:
                 continue
             callback(change)
+
+    def _append_shard_log_put(self, message: CultNetMessage, change_kind: str) -> None:
+        wire = message.to_wire()
+        shard_id = wire.get("shardId")
+        if not shard_id:
+            return
+        self._append_shard_log_entry(
+            str(shard_id),
+            {
+                "changeKind": change_kind,
+                "put": wire,
+            },
+        )
+
+    def _append_shard_log_delete(self, message: CultNetMessage) -> None:
+        wire = message.to_wire()
+        shard_id = wire.get("shardId")
+        if not shard_id:
+            return
+        self._append_shard_log_entry(
+            str(shard_id),
+            {
+                "changeKind": "removed",
+                "delete": wire,
+            },
+        )
+
+    def _append_shard_log_entry(self, shard_id: str, entry: dict[str, Any]) -> None:
+        log = self._shard_logs.setdefault(shard_id, [])
+        entry["sequence"] = len(log) + 1
+        entry["committedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        log.append(entry)
+
+    def _latest_shard_epoch(self, shard_id: str) -> int | None:
+        log = self._shard_logs.get(shard_id, [])
+        for entry in reversed(log):
+            put = entry.get("put")
+            if isinstance(put, dict) and isinstance(put.get("shardEpoch"), int):
+                return put["shardEpoch"]
+            delete = entry.get("delete")
+            if isinstance(delete, dict) and isinstance(delete.get("shardEpoch"), int):
+                return delete["shardEpoch"]
+        return None
 
     def _change_matches_extractor(
         self,

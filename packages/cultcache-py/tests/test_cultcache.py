@@ -1013,6 +1013,52 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(target.database.get_required(document, "note:1"), {"body": "include"})
         self.assertIsNone(target.database.get(document, "note:2"))
 
+    def test_cultmesh_database_creates_shard_log_response_from_raw_mutations(self) -> None:
+        document = define_database_entry_type(
+            "mesh.log_note",
+            [("body", 0)],
+            schema_id="mesh.log_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-log-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:1", {"body": "first"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:1", {"body": "second"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:2", {"body": "other"}, shard_id="other", shard_epoch=1)
+        source.database.delete_raw_message(document, "note:1", shard_id="notes", shard_epoch=3)
+
+        response = source.database.create_shard_log_response(
+            message_id="log-1",
+            shard_id="notes",
+            shard_epoch=3,
+            after_sequence=1,
+            limit=2,
+        )
+
+        self.assertEqual(response["schemaVersion"], "cultnet.shard_log_response.v0")
+        self.assertEqual(response["messageId"], "log-1")
+        self.assertEqual(response["shardId"], "notes")
+        self.assertEqual(response["shardEpoch"], 3)
+        self.assertFalse(response["resyncRequired"])
+        self.assertEqual([entry["sequence"] for entry in response["entries"]], [2, 3])
+        self.assertEqual([entry["changeKind"] for entry in response["entries"]], ["updated", "removed"])
+        self.assertEqual(response["entries"][0]["put"]["document"]["recordKey"], "note:1")
+        self.assertEqual(response["entries"][1]["delete"]["recordKey"], "note:1")
+        empty = source.database.create_shard_log_response(shard_id="missing")
+        self.assertEqual(empty["shardEpoch"], 0)
+        self.assertEqual(empty["entries"], [])
+        with self.assertRaises(ValueError):
+            source.database.create_shard_log_response(shard_id="notes", after_sequence=-1)
+        with self.assertRaises(ValueError):
+            source.database.create_shard_log_response(shard_id="notes", limit=-1)
+
+        target = CultMesh.create_node(runtime_id="mesh-log-target")
+        target.database.register_document(document)
+        target.database.put(document, "note:1", {"body": "first"})
+        applied = target.database.apply_shard_log_response(response)
+        self.assertEqual([record.change_kind for record in applied], ["updated", "removed"])
+        self.assertIsNone(target.database.get(document, "note:1"))
+        self.assertIsNone(target.database.get(document, "note:2"))
+
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(
             "mesh.named_watch",

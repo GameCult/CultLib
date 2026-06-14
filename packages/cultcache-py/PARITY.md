@@ -39,6 +39,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   old record before local or replicated application.
   It can project local envelopes into schema-v0 raw snapshot responses and apply
   those responses back through the shared CultNet replication path.
+  Raw shard-scoped writes append a package-local mutation log that can be
+  projected into schema-v0 shard-log responses for peer catch-up.
 - Python CultMesh committed simulation facts:
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`
@@ -86,5 +88,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   package runtime, raw interop peer, local CultMesh session facade, and typed
   state participant.
 - Python does not claim the full C# shard mutation-log service surface. It can
-  create/apply raw snapshots and consume shard-log responses, while the live
-  interop peer owns its harness mutation log.
+  create/apply raw snapshots, create/apply package-local raw shard-log
+  responses, and consume remote shard-log responses, while the live interop peer
+  owns its harness mutation log.
