@@ -27,8 +27,11 @@ from .replication import (
     schema_document_map,
 )
 from .schema_catalog import (
+    CultNetSchemaCatalog,
+    CultNetSchemaDescriptor,
     INTEROP_WIRE_CONTRACT,
     wire_message_schema_descriptors,
+    wire_message_schema_catalog,
     wire_message_schema_json,
 )
 from .simulation import (
@@ -41,6 +44,8 @@ __all__ = [
     "CultNetMessage",
     "CultNetDatabaseSubscription",
     "CultNetRawClient",
+    "CultNetSchemaCatalog",
+    "CultNetSchemaDescriptor",
     "CultNetAppliedRecord",
     "CultNetClientAuthorityScope",
     "CultNetSimulationConsensus",
@@ -69,6 +74,7 @@ __all__ = [
     "simulation_observation",
     "snapshot_request",
     "wire_message_schema_descriptors",
+    "wire_message_schema_catalog",
     "wire_message_schema_json",
     "witness_artifact_bundle",
     "write_frame",

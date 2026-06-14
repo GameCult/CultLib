@@ -17,7 +17,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultNet schema catalog:
   Exposes shared wire-message schema descriptors from the package surface so
   both the interop peer and CultMesh local server describe the CultNet/CultMesh
-  messages they speak through the same catalog authority.
+  messages they speak through the same catalog authority. Python callers can
+  also ingest and filter remote schema catalog responses through typed
+  `CultNetSchemaCatalog` and `CultNetSchemaDescriptor` helpers, including
+  `CultNetRawClient.sync_schema_catalog(...)`.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.

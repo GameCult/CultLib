@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
@@ -33,6 +34,110 @@ WIRE_MESSAGE_SCHEMA_VERSIONS = (
 )
 
 
+@dataclass(frozen=True)
+class CultNetSchemaDescriptor:
+    schema_id: str
+    kind: str
+    schema_version: str | None = None
+    document_type: str | None = None
+    title: str | None = None
+    wire_contracts: tuple[str, ...] = ()
+    content_hash: str | None = None
+    schema_json: str | None = None
+
+    @classmethod
+    def from_wire(cls, value: dict[str, Any]) -> "CultNetSchemaDescriptor":
+        schema_id = str(value.get("schemaId") or "")
+        kind = str(value.get("kind") or "")
+        if not schema_id:
+            raise ValueError("schema descriptor schemaId must be non-empty")
+        if not kind:
+            raise ValueError("schema descriptor kind must be non-empty")
+        return cls(
+            schema_id=schema_id,
+            kind=kind,
+            schema_version=_optional_string(value.get("schemaVersion")),
+            document_type=_optional_string(value.get("documentType")),
+            title=_optional_string(value.get("title")),
+            wire_contracts=tuple(str(contract) for contract in value.get("wireContracts") or []),
+            content_hash=_optional_string(value.get("contentHash")),
+            schema_json=_optional_string(value.get("schemaJson")),
+        )
+
+    def to_wire(self, *, include_schema_json: bool | None = None) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "schemaId": self.schema_id,
+            "kind": self.kind,
+            "wireContracts": list(self.wire_contracts),
+        }
+        if self.schema_version is not None:
+            wire["schemaVersion"] = self.schema_version
+        if self.document_type is not None:
+            wire["documentType"] = self.document_type
+        if self.title is not None:
+            wire["title"] = self.title
+        if self.content_hash is not None:
+            wire["contentHash"] = self.content_hash
+        if self.schema_json is not None and include_schema_json is not False:
+            wire["schemaJson"] = self.schema_json
+        return wire
+
+
+@dataclass
+class CultNetSchemaCatalog:
+    _descriptors: dict[str, CultNetSchemaDescriptor] = field(default_factory=dict)
+
+    def upsert(self, descriptor: CultNetSchemaDescriptor | dict[str, Any]) -> CultNetSchemaDescriptor:
+        value = descriptor if isinstance(descriptor, CultNetSchemaDescriptor) else CultNetSchemaDescriptor.from_wire(descriptor)
+        self._descriptors[value.schema_id] = value
+        return value
+
+    def get(self, schema_id: str) -> CultNetSchemaDescriptor | None:
+        return self._descriptors.get(schema_id)
+
+    def list(
+        self,
+        *,
+        schema_ids: list[str] | None = None,
+        kinds: list[str] | None = None,
+    ) -> list[CultNetSchemaDescriptor]:
+        requested_schema_ids = set(schema_ids or [])
+        requested_kinds = set(kinds or [])
+        return [
+            descriptor
+            for descriptor in sorted(self._descriptors.values(), key=lambda item: item.schema_id)
+            if (not requested_schema_ids or descriptor.schema_id in requested_schema_ids)
+            and (not requested_kinds or descriptor.kind in requested_kinds)
+        ]
+
+    def apply_response(self, response: dict[str, Any]) -> list[CultNetSchemaDescriptor]:
+        if response.get("schemaVersion") != "cultnet.schema_catalog_response.v0":
+            raise ValueError(f"Expected cultnet.schema_catalog_response.v0, received {response.get('schemaVersion')!r}")
+        applied = []
+        for descriptor in response.get("schemas") or []:
+            if not isinstance(descriptor, dict):
+                continue
+            applied.append(self.upsert(descriptor))
+        return applied
+
+    def create_response(
+        self,
+        *,
+        message_id: str = "",
+        include_schema_json: bool = False,
+        schema_ids: list[str] | None = None,
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "schemaVersion": "cultnet.schema_catalog_response.v0",
+            "messageId": message_id,
+            "schemas": [
+                descriptor.to_wire(include_schema_json=include_schema_json)
+                for descriptor in self.list(schema_ids=schema_ids, kinds=kinds)
+            ],
+        }
+
+
 def wire_message_schema_descriptors(include_schema_json: bool) -> list[dict[str, Any]]:
     descriptors = []
     for schema_version, title, schema_id in WIRE_MESSAGE_SCHEMA_VERSIONS:
@@ -49,6 +154,13 @@ def wire_message_schema_descriptors(include_schema_json: bool) -> list[dict[str,
             descriptor["schemaJson"] = schema_json
         descriptors.append(descriptor)
     return descriptors
+
+
+def wire_message_schema_catalog(*, include_schema_json: bool = True) -> CultNetSchemaCatalog:
+    catalog = CultNetSchemaCatalog()
+    for descriptor in wire_message_schema_descriptors(include_schema_json):
+        catalog.upsert(descriptor)
+    return catalog
 
 
 def wire_message_schema_json(schema_id: str, title: str, schema_version: str) -> str:
@@ -296,3 +408,10 @@ def wire_message_shared_defs() -> dict[str, Any]:
         "verseDescriptor": {"type": "object"},
         "peerCard": {"type": "object"},
     }
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None

@@ -24,6 +24,8 @@ from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetClientAuthorityScope,
     CultNetRawClient,
+    CultNetSchemaCatalog,
+    CultNetSchemaDescriptor,
     CultNetSimulationConsensusOptions,
     apply_raw_snapshot,
     apply_shard_log_response,
@@ -42,9 +44,10 @@ from cultnet_py import (
     shard_log_request,
     simulation_observation,
     snapshot_request,
+    wire_message_schema_catalog,
+    wire_message_schema_descriptors,
     witness_artifact_bundle,
 )
-from cultnet_py import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
@@ -834,6 +837,45 @@ class CultCacheTests(unittest.TestCase):
         consensus_schema = json.loads(by_version["cultnet.simulation_consensus_candidate.v0"]["schemaJson"])
         for required_field in ["witnessCount", "supportWeight", "totalWeight", "hasQuorum", "confidence"]:
             self.assertIn(required_field, consensus_schema["required"])
+
+    def test_cultnet_schema_catalog_applies_filters_and_responses(self) -> None:
+        catalog = wire_message_schema_catalog(include_schema_json=True)
+        descriptor = catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json")
+        self.assertIsNotNone(descriptor)
+        assert descriptor is not None
+        self.assertEqual(descriptor.kind, "wire_message")
+        self.assertEqual(descriptor.schema_version, "cultnet.document_put_raw.v0")
+        self.assertIsNotNone(descriptor.schema_json)
+
+        filtered = catalog.list(kinds=["wire_message"], schema_ids=[descriptor.schema_id])
+        self.assertEqual(filtered, [descriptor])
+
+        response = catalog.create_response(
+            message_id="catalog-response",
+            include_schema_json=False,
+            schema_ids=[descriptor.schema_id],
+            kinds=["wire_message"],
+        )
+        self.assertEqual(response["schemaVersion"], "cultnet.schema_catalog_response.v0")
+        self.assertNotIn("schemaJson", response["schemas"][0])
+
+        remote = CultNetSchemaCatalog()
+        applied = remote.apply_response({
+            "schemaVersion": "cultnet.schema_catalog_response.v0",
+            "messageId": "remote",
+            "schemas": [
+                CultNetSchemaDescriptor(
+                    schema_id="schema:custom",
+                    kind="shared_contract",
+                    schema_version="custom.v0",
+                    wire_contracts=("cultnet.schema.v0",),
+                    content_hash="hash",
+                    schema_json="{}",
+                ).to_wire()
+            ],
+        })
+        self.assertEqual(applied[0].schema_id, "schema:custom")
+        self.assertEqual(remote.get("schema:custom"), applied[0])
 
     def test_cultnet_shard_helpers_match_schema_v0_shape(self) -> None:
         catalog = shard_catalog_request(
@@ -1658,6 +1700,12 @@ class CultCacheTests(unittest.TestCase):
             hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
             schema_response = raw_client.fetch_schema_catalog(schema_ids=["mesh.server_note.v1"], include_schema_json=True)
             wire_schema_response = raw_client.fetch_schema_catalog(kinds=["wire_message"], include_schema_json=True)
+            synced_schema_catalog = CultNetSchemaCatalog()
+            synced_wire_descriptors = raw_client.sync_schema_catalog(
+                synced_schema_catalog,
+                kinds=["wire_message"],
+                include_schema_json=True,
+            )
             snapshot_response = raw_client.fetch_snapshot(schema_ids=["mesh.server_note.v1"])
             shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
             shard_log = raw_client.fetch_shard_log(shard_id="primary", shard_epoch=1)
@@ -1697,6 +1745,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(wire_descriptors["cultnet.document_put_raw.v0"]["kind"], "wire_message")
         self.assertIn("schemaJson", wire_descriptors["cultnet.document_put_raw.v0"])
         self.assertIn("cultmesh.peer_exchange_response.v0", wire_descriptors)
+        self.assertIn("cultnet.document_put_raw.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
+        self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json"))
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
         self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
