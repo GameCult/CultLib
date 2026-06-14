@@ -311,7 +311,7 @@ class CultMeshLocalServer:
             shards.append({
                 "shardId": "primary",
                 "ownerRuntimeId": self.node.runtime_id,
-                "epoch": 0,
+                "epoch": self.node.database.shard_epoch("primary"),
                 "isPrimary": True,
                 "schemaIds": schema_ids,
                 "keyPrefix": "",

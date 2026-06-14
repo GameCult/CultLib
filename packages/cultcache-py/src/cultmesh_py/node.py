@@ -447,6 +447,9 @@ class CultMeshDatabase:
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.cache.snapshot()
 
+    def shard_epoch(self, shard_id: str) -> int:
+        return self._latest_shard_epoch(shard_id) or 0
+
     def create_snapshot_response(
         self,
         *,
