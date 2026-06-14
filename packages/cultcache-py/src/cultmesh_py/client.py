@@ -383,16 +383,20 @@ class CultMeshSimulationObservationFanout:
         failed_messages: list[dict[str, Any]] = []
         for message in messages:
             try:
-                candidates.extend(self.client.fanout_simulation_observation(
+                message_candidates = self.client.fanout_simulation_observation(
                     self.peer_catalog,
                     message,
                     verse_id=self.verse_id,
                     roles=self.roles,
                     on_error=self.on_error,
-                ))
+                )
             except Exception:
                 failed_messages.append(message)
                 continue
+            if not message_candidates:
+                failed_messages.append(message)
+                continue
+            candidates.extend(message_candidates)
         if failed_messages:
             with self._lock:
                 self._pending = [*failed_messages, *self._pending]

@@ -2709,6 +2709,45 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([candidate["claimHash"] for candidate in candidates], [claim_hash])
         self.assertEqual(seen_candidates[0]["messageId"], "queued-observation")
 
+    def test_cultmesh_simulation_observation_fanout_keeps_failed_messages_pending(self) -> None:
+        closed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed_socket.bind(("127.0.0.1", 0))
+        closed_port = closed_socket.getsockname()[1]
+        closed_socket.close()
+        peers = CultMeshPeerCatalog()
+        peers.upsert(CultMeshPeerCard(
+            peer_id="closed-simulation-peer",
+            verse_id="arena",
+            endpoints=(f"cultnet://127.0.0.1:{closed_port}",),
+            roles=("simulation-witness",),
+        ))
+        errors: list[tuple[str, str]] = []
+        fanout = CultMeshSimulationObservationFanout(
+            CultMeshDiscoveryClient("127.0.0.1", closed_port, timeout_seconds=0.2),
+            peers,
+            verse_id="arena",
+            roles=["simulation-witness"],
+            on_error=lambda endpoint, error: errors.append((endpoint, str(error))),
+        )
+        fanout.enqueue(simulation_observation(
+            message_id="retry-observation",
+            witness_runtime_id="python-fanout",
+            shard_id="arena",
+            shard_epoch=1,
+            frame=212,
+            subject_id="bob",
+            claim_kind="miss",
+            claim_hash=compute_simulation_claim_hash("miss", "alice", "bob", "frame:212"),
+            claim_summary="alice missed bob",
+        ).to_wire())
+
+        candidates = fanout.flush()
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(fanout.pending_count(), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(f"127.0.0.1:{closed_port}", errors[0][0])
+
     def test_cultmesh_simulation_observation_fanout_runs_background_loop(self) -> None:
         hub = CultNetSimulationObservationHub(
             CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)

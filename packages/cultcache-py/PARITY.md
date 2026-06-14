@@ -156,7 +156,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Python exposes typed `CultNetSimulationObservation` and
   `CultNetSimulationConsensusCandidate` objects for local consensus and
   game-session commit paths while preserving the schema-v0 dict projections
-  used by the wire harness.
+  used by the wire harness. Scheduled simulation-observation fanout keeps
+  queued observations pending when no peer produces a candidate, even when
+  endpoint failures are reported through a caller-owned error callback.
 - Python CultMesh prediction reconciliation:
   The live interop harness runs a Python CultMesh session client, writes a local
   prediction, pulls the live Python peer shard log, applies the authoritative
