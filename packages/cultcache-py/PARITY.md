@@ -48,8 +48,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   `CultMeshGameSession` can consume typed shard-log responses directly for
   database sync and prediction reconciliation.
   `CultMeshDatabase.build_shard_log_response(...)` creates the typed response
-  from the package-local mutation log; `create_shard_log_response(...)` remains
-  the raw wire-dict compatibility projection.
+  from the package-local mutation log and reports resync-required responses for
+  unknown shards or stale epoch cursors; `create_shard_log_response(...)`
+  remains the raw wire-dict compatibility projection.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for

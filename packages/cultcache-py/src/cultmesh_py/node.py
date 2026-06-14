@@ -596,6 +596,25 @@ class CultMeshDatabase:
             raise ValueError("shard_id must be non-empty")
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
+        latest_epoch = self._latest_shard_epoch(shard_id)
+        if latest_epoch is None:
+            return CultNetShardLogResponse(
+                message_id=message_id,
+                shard_id=shard_id,
+                shard_epoch=0,
+                entries=(),
+                resync_required=True,
+                reason="unknown_shard",
+            )
+        if shard_epoch is not None and shard_epoch != latest_epoch:
+            return CultNetShardLogResponse(
+                message_id=message_id,
+                shard_id=shard_id,
+                shard_epoch=latest_epoch,
+                entries=(),
+                resync_required=True,
+                reason="stale_epoch",
+            )
         entries = [
             CultNetShardLogEntry.from_wire(entry)
             for entry in self._shard_logs.get(shard_id, [])
@@ -605,14 +624,10 @@ class CultMeshDatabase:
             if limit < 0:
                 raise ValueError("limit must be non-negative")
             entries = entries[:limit]
-        if shard_epoch is not None:
-            response_shard_epoch = shard_epoch
-        else:
-            response_shard_epoch = self._latest_shard_epoch(shard_id) or 0
         return CultNetShardLogResponse(
             message_id=message_id,
             shard_id=shard_id,
-            shard_epoch=response_shard_epoch,
+            shard_epoch=latest_epoch,
             entries=tuple(entries),
         )
 
