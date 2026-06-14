@@ -17,6 +17,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.benchmark import run_benchmark
+from cultcache_py.compare_csharp import _median_result
 from cultcache_py.interop import read_note, write_note
 from cultcache_py.verify import verify
 from cultnet_py import (
@@ -262,6 +263,42 @@ class CultCacheTests(unittest.TestCase):
             "cache_get",
         })
         self.assertTrue(all(metric["opsPerSecond"] > 0 for metric in result["metrics"]))
+
+    def test_compare_csharp_median_result_summarizes_samples(self) -> None:
+        samples = [
+            {
+                "runtime": "python",
+                "records": 3,
+                "metrics": [
+                    {"name": "cache_get", "operations": 3, "elapsedMs": 30.0, "opsPerSecond": 100.0},
+                    {"name": "cache_upsert", "operations": 3, "elapsedMs": 60.0, "opsPerSecond": 50.0},
+                ],
+            },
+            {
+                "runtime": "python",
+                "records": 3,
+                "metrics": [
+                    {"name": "cache_get", "operations": 3, "elapsedMs": 10.0, "opsPerSecond": 300.0},
+                    {"name": "cache_upsert", "operations": 3, "elapsedMs": 20.0, "opsPerSecond": 150.0},
+                ],
+            },
+            {
+                "runtime": "python",
+                "records": 3,
+                "metrics": [
+                    {"name": "cache_get", "operations": 3, "elapsedMs": 20.0, "opsPerSecond": 200.0},
+                    {"name": "cache_upsert", "operations": 3, "elapsedMs": 40.0, "opsPerSecond": 75.0},
+                ],
+            },
+        ]
+
+        summarized = _median_result(samples)
+
+        self.assertEqual(summarized["sampleCount"], 3)
+        self.assertEqual(summarized["metrics"][0]["name"], "cache_get")
+        self.assertEqual(summarized["metrics"][0]["elapsedMs"], 20.0)
+        self.assertEqual(summarized["metrics"][0]["opsPerSecond"], 200.0)
+        self.assertEqual(summarized["metrics"][1]["opsPerSecond"], 75.0)
 
     def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
         document = define_database_entry_type(

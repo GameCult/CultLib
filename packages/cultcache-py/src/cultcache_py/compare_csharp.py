@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -13,13 +14,16 @@ from .benchmark import run_benchmark
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultcache-py-compare-csharp")
     parser.add_argument("--records", type=int, default=5000)
+    parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--json", action="store_true", dest="emit_json")
     args = parser.parse_args(argv)
     if args.records <= 0:
         raise ValueError("--records must be greater than zero")
+    if args.samples <= 0:
+        raise ValueError("--samples must be greater than zero")
 
-    result = compare_with_csharp(records=args.records, repo_root=args.repo_root)
+    result = compare_with_csharp(records=args.records, samples=args.samples, repo_root=args.repo_root)
     if args.emit_json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
@@ -35,20 +39,32 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["csharpStatus"] == "ok" else 1
 
 
-def compare_with_csharp(*, records: int, repo_root: Path | None = None) -> dict[str, Any]:
+def compare_with_csharp(*, records: int, samples: int = 1, repo_root: Path | None = None) -> dict[str, Any]:
     resolved_root = _resolve_repo_root(repo_root)
-    python_result = run_benchmark(records)
-    csharp_result, status, error = _run_csharp_benchmark(resolved_root, records)
+    python_samples = [run_benchmark(records) for _ in range(samples)]
+    python_result = _median_result(python_samples)
+    csharp_samples: list[dict[str, Any]] = []
+    status = "ok"
+    error = None
+    for _ in range(samples):
+        csharp_result, status, error = _run_csharp_benchmark(resolved_root, records)
+        if csharp_result is None:
+            break
+        csharp_samples.append(csharp_result)
+    csharp_result = _median_result(csharp_samples) if csharp_samples else None
     comparison = _compare_common_metrics(python_result, csharp_result) if csharp_result else []
     result: dict[str, Any] = {
         "records": records,
+        "samples": samples,
         "repoRoot": str(resolved_root),
         "python": python_result,
+        "pythonSamples": python_samples,
         "csharpStatus": status,
         "comparison": comparison,
     }
     if csharp_result is not None:
         result["csharp"] = csharp_result
+        result["csharpSamples"] = csharp_samples
     if error:
         result["csharpError"] = error
     return result
@@ -102,6 +118,34 @@ def _compare_common_metrics(python_result: dict[str, Any], csharp_result: dict[s
             "pythonToCsharpRatio": python_ops / csharp_ops if csharp_ops > 0 else None,
         })
     return comparison
+
+
+def _median_result(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("Cannot summarize zero benchmark samples")
+    if len(samples) == 1:
+        return samples[0]
+    metric_names = [metric["name"] for metric in samples[0]["metrics"]]
+    metrics = []
+    for name in metric_names:
+        matching = [_metric_by_name(sample, name) for sample in samples]
+        metrics.append({
+            "name": name,
+            "operations": int(statistics.median(metric["operations"] for metric in matching)),
+            "elapsedMs": statistics.median(float(metric["elapsedMs"]) for metric in matching),
+            "opsPerSecond": statistics.median(float(metric["opsPerSecond"]) for metric in matching),
+        })
+    result = dict(samples[0])
+    result["metrics"] = metrics
+    result["sampleCount"] = len(samples)
+    return result
+
+
+def _metric_by_name(sample: dict[str, Any], name: str) -> dict[str, Any]:
+    for metric in sample["metrics"]:
+        if metric["name"] == name:
+            return metric
+    raise KeyError(f"Benchmark sample is missing metric {name!r}")
 
 
 if __name__ == "__main__":

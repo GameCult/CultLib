@@ -52,7 +52,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   benchmark sanity for Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
-  benchmarks with the same operation names and reports Python-to-C# ratios.
+  benchmarks with the same operation names and reports Python-to-C# ratios. Use
+  `--samples` when a performance claim needs median evidence instead of a single
+  noisy run.
 
 ## Local Python Gates
 
@@ -61,7 +63,7 @@ $env:PYTHONPATH="$PWD\packages\cultcache-py\src"
 python -m unittest discover -s packages\cultcache-py\tests
 python -m cultcache_py.verify --json
 python -m cultcache_py.benchmark --records 1000 --json
-python -m cultcache_py.compare_csharp --records 1000 --json
+python -m cultcache_py.compare_csharp --records 1000 --samples 3 --json
 python -m pip wheel --no-deps -w $env:TEMP packages\cultcache-py
 ```
 
