@@ -224,6 +224,54 @@ def simulation_observation(
     )
 
 
+@dataclass(frozen=True)
+class CultNetWitnessArtifactBundle:
+    bundle_id: str
+    witness_kind: str
+    captured_at: str
+    subject: dict[str, Any]
+    contracts: tuple[dict[str, Any], ...]
+    artifacts: tuple[dict[str, Any], ...]
+    provenance: dict[str, Any]
+    timing_witnesses: tuple[dict[str, Any], ...] = ()
+
+    @classmethod
+    def from_wire(cls, value: dict[str, Any]) -> "CultNetWitnessArtifactBundle":
+        return cls(
+            bundle_id=str(value.get("bundleId") or ""),
+            witness_kind=str(value.get("witnessKind") or ""),
+            captured_at=str(value.get("capturedAt") or ""),
+            subject=dict(value.get("subject") or {}),
+            contracts=tuple(dict(contract) for contract in value.get("contracts") or [] if isinstance(contract, dict)),
+            artifacts=tuple(dict(artifact) for artifact in value.get("artifacts") or [] if isinstance(artifact, dict)),
+            timing_witnesses=tuple(
+                dict(timing_witness)
+                for timing_witness in value.get("timingWitnesses") or []
+                if isinstance(timing_witness, dict)
+            ),
+            provenance=dict(value.get("provenance") or {}),
+        )
+
+    @classmethod
+    def from_payload(cls, payload: bytes) -> "CultNetWitnessArtifactBundle":
+        return cls.from_wire(decode_witness_artifact_bundle_payload(payload))
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "bundleId": self.bundle_id,
+            "witnessKind": self.witness_kind,
+            "capturedAt": self.captured_at,
+            "subject": dict(self.subject),
+            "contracts": [dict(contract) for contract in self.contracts],
+            "artifacts": [dict(artifact) for artifact in self.artifacts],
+            "timingWitnesses": [dict(timing_witness) for timing_witness in self.timing_witnesses],
+            "provenance": dict(self.provenance),
+        }
+
+    def to_payload(self) -> bytes:
+        return encode_witness_artifact_bundle_payload(self)
+
+
 def witness_artifact_bundle(
     *,
     bundle_id: str,
@@ -235,28 +283,29 @@ def witness_artifact_bundle(
     provenance: dict[str, Any],
     timing_witnesses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "bundleId": bundle_id,
-        "witnessKind": witness_kind,
-        "capturedAt": captured_at,
-        "subject": subject,
-        "contracts": contracts,
-        "artifacts": artifacts,
-        "timingWitnesses": timing_witnesses or [],
-        "provenance": provenance,
-    }
+    return CultNetWitnessArtifactBundle(
+        bundle_id=bundle_id,
+        witness_kind=witness_kind,
+        captured_at=captured_at,
+        subject=subject,
+        contracts=tuple(contracts),
+        artifacts=tuple(artifacts),
+        timing_witnesses=tuple(timing_witnesses or []),
+        provenance=provenance,
+    ).to_wire()
 
 
-def encode_witness_artifact_bundle_payload(bundle: dict[str, Any]) -> bytes:
+def encode_witness_artifact_bundle_payload(bundle: dict[str, Any] | CultNetWitnessArtifactBundle) -> bytes:
+    wire = bundle.to_wire() if isinstance(bundle, CultNetWitnessArtifactBundle) else bundle
     return msgpack.packb([
-        bundle["bundleId"],
-        bundle["witnessKind"],
-        bundle["capturedAt"],
-        bundle["subject"],
-        bundle["contracts"],
-        bundle["artifacts"],
-        bundle.get("timingWitnesses", []),
-        bundle["provenance"],
+        wire["bundleId"],
+        wire["witnessKind"],
+        wire["capturedAt"],
+        wire["subject"],
+        wire["contracts"],
+        wire["artifacts"],
+        wire.get("timingWitnesses", []),
+        wire["provenance"],
     ], use_bin_type=True)
 
 

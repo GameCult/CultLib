@@ -56,6 +56,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   `read_next_snapshot_response(...)` / `iter_snapshot_responses(...)`, while
   raw message reads remain available for callers that own their own dispatch
   loop.
+- Python CultNet witness artifacts:
+  Provides typed `CultNetWitnessArtifactBundle` ownership for the C#-compatible
+  8-slot witness artifact payload while preserving dict helpers for existing
+  wire callers.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.

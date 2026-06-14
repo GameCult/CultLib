@@ -152,6 +152,7 @@ member order.
 from cultnet_py import (
     CultNetRawClient,
     CultNetSimulationObservation,
+    CultNetWitnessArtifactBundle,
     apply_raw_snapshot,
     apply_shard_log_response,
     compute_simulation_claim_hash,
@@ -202,6 +203,8 @@ witness = witness_artifact_bundle(
     artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
     provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-runtime"},
 )
+typed_witness = CultNetWitnessArtifactBundle.from_wire(witness)
+witness_payload = typed_witness.to_payload()
 ```
 
 The peer can serve, dial, and probe the same raw-state interop lane used by the

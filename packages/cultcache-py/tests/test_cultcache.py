@@ -36,6 +36,7 @@ from cultnet_py import (
     CultNetSimulationConsensusOptions,
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
+    CultNetWitnessArtifactBundle,
     apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
@@ -1118,6 +1119,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(observation.to_message_wire(message_id="obs-2")["observation"], message["observation"])
 
     def test_cultnet_witness_artifact_bundle_uses_csharp_slot_order(self) -> None:
+        import msgpack  # type: ignore
+
         bundle = witness_artifact_bundle(
             bundle_id="bundle-1",
             witness_kind="interop-proof",
@@ -1130,12 +1133,28 @@ class CultCacheTests(unittest.TestCase):
         )
         payload = encode_witness_artifact_bundle_payload(bundle)
         decoded = decode_witness_artifact_bundle_payload(payload)
+        typed = CultNetWitnessArtifactBundle.from_wire(bundle)
+        typed_payload = typed.to_payload()
+        typed_decoded = CultNetWitnessArtifactBundle.from_payload(typed_payload)
+        slots = msgpack.unpackb(payload, raw=False)
+
+        self.assertEqual(payload, typed_payload)
+        self.assertEqual(slots[0], "bundle-1")
+        self.assertEqual(slots[1], "interop-proof")
+        self.assertEqual(slots[2], "2026-06-13T00:00:03Z")
+        self.assertEqual(slots[3]["subjectId"], "note:python")
+        self.assertEqual(slots[4][0]["schemaId"], "schema-a")
+        self.assertEqual(slots[5][0]["uri"], "cultcache://bundle-1/log")
+        self.assertEqual(slots[6][0]["latencyMs"], 1.0)
+        self.assertEqual(slots[7]["runtimeId"], "python-test")
         self.assertEqual(decoded["bundleId"], "bundle-1")
         self.assertEqual(decoded["witnessKind"], "interop-proof")
         self.assertEqual(decoded["subject"]["subjectId"], "note:python")
         self.assertEqual(decoded["contracts"][0]["schemaId"], "schema-a")
         self.assertEqual(decoded["artifacts"][0]["mediaType"], "text/plain")
         self.assertEqual(decoded["provenance"]["runtimeId"], "python-test")
+        self.assertEqual(typed.bundle_id, "bundle-1")
+        self.assertEqual(typed_decoded.to_wire(), bundle)
 
     def test_cultmesh_node_uses_cultcache_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
