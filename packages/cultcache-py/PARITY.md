@@ -106,7 +106,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   real payload schema and serve both a real snapshot and a real shard-log entry
   over the same CultNet lane. When launched with a Verse id, it publishes its
   actual bound endpoint in the Verse and peer catalogs so discovery clients can
-  find the running Python peer without embedding code-owned catalogs.
+  find the running Python peer without embedding code-owned catalogs. With a
+  cache file and durable shard-log path, a restarted daemon can rehydrate the
+  persisted interop-note snapshot and shard-log entry without reseeding.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and

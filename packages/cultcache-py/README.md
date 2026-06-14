@@ -325,7 +325,10 @@ seeding a note, or `--seed-interop-note` to register it and publish one local
 record for wire probes. Seeded records are committed through the raw mutation
 path, so peers can read them through both snapshot and shard-log catch-up. Add
 `--verse-id` and one or more `--role` values to publish the launched endpoint in
-its own Verse and peer catalogs for discovery clients.
+its own Verse and peer catalogs for discovery clients. When the daemon is
+launched with `--cache-file`, `--enable-durable-shard-logs`, and
+`--shard-log-file`, a later daemon process can rehydrate and serve the persisted
+snapshot and shard log without reseeding.
 
 `CultMeshPeerHealthMonitor` probes peer-card endpoints with `cultnet.hello.v0`
 and preserves the runtime id, display name, document types, message versions,

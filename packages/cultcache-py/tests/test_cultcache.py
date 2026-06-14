@@ -3146,6 +3146,120 @@ class CultCacheTests(unittest.TestCase):
                     process.kill()
                     process.communicate(timeout=5.0)
 
+    def test_cultmesh_daemon_restarts_with_persisted_cache_and_shard_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache_path = root / "mesh.cc"
+            shard_log_path = root / "shard-log"
+            env = dict(os.environ)
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+
+            first_ready = root / "first-ready.json"
+            first = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "durable-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--seed-interop-note",
+                    "--seed-shard-id",
+                    "durable-interop",
+                    "--ready-file",
+                    str(first_ready),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                self._wait_for_ready_file(first, first_ready)
+            finally:
+                self._terminate_process(first)
+
+            second_ready = root / "second-ready.json"
+            second = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "durable-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--register-interop-note",
+                    "--verse-id",
+                    "durable-verse",
+                    "--role",
+                    "shard-primary",
+                    "--ready-file",
+                    str(second_ready),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(second, second_ready)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(snapshot_response.documents[0].record_key, "note:durable-daemon-peer")
+                note = interop_note_document.decode_payload(snapshot_response.documents[0].payload)
+                self.assertEqual(note["authorRuntimeId"], "durable-daemon-peer")
+
+                shard_log = client.fetch_shard_log_response(shard_id="durable-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual(shard_log.entries[0].sequence, 1)
+                self.assertIsNotNone(shard_log.entries[0].raw_document)
+                assert shard_log.entries[0].raw_document is not None
+                self.assertEqual(shard_log.entries[0].raw_document.record_key, "note:durable-daemon-peer")
+
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                peers = discovery_client.fetch_peers(verse_id="durable-verse", roles=["shard-primary"])
+                self.assertEqual(peers[0].shard_ids, ("durable-interop",))
+            finally:
+                self._terminate_process(second)
+
+    def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
+        deadline = time.monotonic() + 5.0
+        while not ready_path.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not ready_path.exists():
+            _, stderr = process.communicate(timeout=2.0)
+            self.fail(f"cultmesh daemon did not publish readiness: {stderr}")
+        return json.loads(ready_path.read_text(encoding="utf-8"))
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        process.terminate()
+        try:
+            process.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5.0)
+
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(
             "mesh.server_note",
