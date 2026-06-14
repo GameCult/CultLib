@@ -30,6 +30,11 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetShardLogResponse` and `CultNetShardLogEntry` helpers
   for inspecting mutation-log entries, resync pressure, and sequence cursors,
   while cache mutation remains owned by the existing replication helpers.
+- Python CultNet database subscription changes:
+  Provides typed `CultNetDatabaseChange` parsing plus
+  `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for
+  live raw database subscriptions. Snapshot frames remain raw and feed the
+  existing snapshot replication helpers.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.

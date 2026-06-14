@@ -22,6 +22,7 @@ from cultcache_py.interop import read_note, write_note
 from cultcache_py.verify import verify
 from cultnet_py import (
     compute_simulation_claim_hash,
+    CultNetDatabaseChange,
     CultNetClientAuthorityScope,
     CultNetRawClient,
     CultNetSchemaCatalog,
@@ -355,6 +356,34 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(unsubscribe["messageId"], "unsub-message")
         self.assertEqual(unsubscribe["subscriptionId"], "sub-1")
 
+    def test_cultnet_database_change_parses_put_and_delete_shapes(self) -> None:
+        put_change = CultNetDatabaseChange.from_wire({
+            "schemaVersion": "cultnet.database_change_raw.v0",
+            "messageId": "change-put",
+            "subscriptionId": "sub-1",
+            "changeKind": "added",
+            "document": {
+                "schemaId": "schema-note",
+                "recordKey": "note:1",
+                "payload": b"payload",
+            },
+        })
+        self.assertEqual(put_change.schema_id, "schema-note")
+        self.assertEqual(put_change.record_key, "note:1")
+        self.assertEqual(put_change.to_wire()["document"]["recordKey"], "note:1")
+
+        delete_change = CultNetDatabaseChange.from_wire({
+            "schemaVersion": "cultnet.database_change_raw.v0",
+            "messageId": "change-delete",
+            "subscriptionId": "sub-1",
+            "changeKind": "removed",
+            "schemaId": "schema-note",
+            "recordKey": "note:1",
+        })
+        self.assertIsNone(delete_change.document)
+        self.assertEqual(delete_change.schema_id, "schema-note")
+        self.assertEqual(delete_change.to_wire()["recordKey"], "note:1")
+
     def test_cultnet_raw_put_helper_carries_message_id(self) -> None:
         put = document_put_raw(
             message_id="put-1",
@@ -561,13 +590,13 @@ class CultCacheTests(unittest.TestCase):
         with client.subscribe_database(subscription_id="sub-1", schema_ids=[schema_id]) as subscription:
             snapshot = subscription.read_next()
             subscription.send(put)
-            change = subscription.read_next()
+            change = subscription.read_next_change()
 
         thread.join(2.0)
         self.assertFalse(server_error)
         self.assertEqual(snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
-        self.assertEqual(change["schemaVersion"], "cultnet.database_change_raw.v0")
-        self.assertEqual(change["document"]["recordKey"], "item:sub")
+        self.assertEqual(change.change_kind, "added")
+        self.assertEqual(change.record_key, "item:sub")
         self.assertEqual(received_versions, [
             "cultnet.database_subscribe.v0",
             "cultnet.document_put_raw.v0",
@@ -1825,7 +1854,7 @@ class CultCacheTests(unittest.TestCase):
                     shard_id="primary",
                     shard_epoch=1,
                 ))
-                subscription_change = subscription.read_next()
+                subscription_change = subscription.read_next_change()
                 subscription.send(document_delete(
                     message_id="server-delete",
                     schema_id="mesh.server_note.v1",
@@ -1833,7 +1862,7 @@ class CultCacheTests(unittest.TestCase):
                     shard_id="primary",
                     shard_epoch=1,
                 ))
-                subscription_delete = subscription.read_next()
+                subscription_delete = subscription.read_next_change()
         finally:
             server.stop()
 
@@ -1859,11 +1888,11 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(fetched_verses[0].verse_id, "server-verse")
         self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
         self.assertEqual(subscription_snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
-        self.assertEqual(subscription_change["schemaVersion"], "cultnet.database_change_raw.v0")
-        self.assertEqual(subscription_change["changeKind"], "added")
-        self.assertEqual(subscription_change["document"]["recordKey"], "note:2")
-        self.assertEqual(subscription_delete["changeKind"], "removed")
-        self.assertEqual(subscription_delete["recordKey"], "note:2")
+        self.assertEqual(subscription_change.change_kind, "added")
+        self.assertEqual(subscription_change.record_key, "note:2")
+        self.assertEqual(subscription_change.document["recordKey"], "note:2")
+        self.assertEqual(subscription_delete.change_kind, "removed")
+        self.assertEqual(subscription_delete.record_key, "note:2")
         self.assertIsNone(node.database.get(document, "note:2"))
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:

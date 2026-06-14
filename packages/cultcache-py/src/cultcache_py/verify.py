@@ -28,6 +28,7 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "cultnet_py": (
         "CultNetAppliedRecord",
+        "CultNetDatabaseChange",
         "CultNetClientAuthorityScope",
         "CultNetDatabaseSubscription",
         "CultNetMessage",

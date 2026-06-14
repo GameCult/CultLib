@@ -19,6 +19,7 @@ from .messages import (
 from .schema_catalog import CultNetSchemaCatalog, CultNetSchemaDescriptor
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogResponse
+from .subscription import CultNetDatabaseChange
 
 
 @dataclass(frozen=True)
@@ -271,8 +272,18 @@ class CultNetDatabaseSubscription:
             raise ValueError(f"Unexpected CultNet subscription message {schema_version!r}")
         return response
 
+    def read_next_change(self) -> CultNetDatabaseChange:
+        message = self.read_next()
+        return CultNetDatabaseChange.from_wire(message)
+
     def iter_messages(self, *, max_messages: int | None = None) -> Any:
         received = 0
         while max_messages is None or received < max_messages:
             yield self.read_next()
+            received += 1
+
+    def iter_changes(self, *, max_messages: int | None = None) -> Any:
+        received = 0
+        while max_messages is None or received < max_messages:
+            yield self.read_next_change()
             received += 1
