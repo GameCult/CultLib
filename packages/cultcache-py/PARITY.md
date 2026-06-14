@@ -120,8 +120,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   entry, and verifies the session reports the record as reconciled.
 - Python package health:
   `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
-  export surface, `py.typed` markers, and benchmark sanity for Python-owned hot
-  paths.
+  export surface, `py.typed` markers, a live local CultMesh framed-wire smoke
+  over hello/schema/snapshot/shard catalog/shard log, and benchmark sanity for
+  Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
   benchmarks with the same operation names and reports Python-to-C# ratios. Use

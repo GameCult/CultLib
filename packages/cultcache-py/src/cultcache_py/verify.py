@@ -139,6 +139,7 @@ def verify(*, records: int = 64) -> dict[str, Any]:
     checks = [
         _check_exports(),
         _check_typed_markers(),
+        _check_local_cultmesh_wire_smoke(),
         _check_benchmark(records),
     ]
     return {
@@ -173,6 +174,61 @@ def _check_typed_markers() -> dict[str, Any]:
         "status": "ok" if not missing else "failed",
         "missing": missing,
     }
+
+
+def _check_local_cultmesh_wire_smoke() -> dict[str, Any]:
+    try:
+        from cultcache_py import define_database_entry_type
+        from cultmesh_py import CultMesh
+        from cultnet_py import hello
+
+        document = define_database_entry_type(
+            "verify.mesh_note",
+            [("body", 0)],
+            schema_id="verify.mesh_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="verify-python")
+        node.database.register_document(document)
+        node.database.put_raw_message(
+            document,
+            "note:verify",
+            {"body": "wire smoke"},
+            shard_id="verify",
+            shard_epoch=1,
+        )
+        server = CultMesh.serve_node(node, display_name="Verify Python")
+        try:
+            client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = client.request(hello(runtime_id="verify-client"), expected_schema_version="cultnet.hello.v0")
+            schema_response = client.fetch_schema_catalog(schema_ids=["verify.mesh_note.v1"])
+            snapshot_response = client.fetch_snapshot_response(schema_ids=["verify.mesh_note.v1"])
+            shard_catalog = client.fetch_shard_descriptors(schema_ids=["verify.mesh_note.v1"])
+            shard_log = client.fetch_shard_log_response(shard_id="verify", shard_epoch=1)
+        finally:
+            server.stop()
+
+        failures = []
+        if hello_response.get("runtimeId") != "verify-python":
+            failures.append("hello_runtime")
+        if not schema_response.get("schemas"):
+            failures.append("schema_catalog")
+        if not snapshot_response.documents or snapshot_response.documents[0].record_key != "note:verify":
+            failures.append("snapshot")
+        if not shard_catalog or shard_catalog[0].shard_id != "verify":
+            failures.append("shard_catalog")
+        if shard_log.resync_required or shard_log.last_sequence != 1:
+            failures.append("shard_log")
+        return {
+            "name": "local_cultmesh_wire_smoke",
+            "status": "ok" if not failures else "failed",
+            "failures": failures,
+        }
+    except Exception as exc:
+        return {
+            "name": "local_cultmesh_wire_smoke",
+            "status": "failed",
+            "error": str(exc),
+        }
 
 
 def _check_benchmark(records: int) -> dict[str, Any]:
