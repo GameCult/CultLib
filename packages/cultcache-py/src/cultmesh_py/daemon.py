@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ready-file")
     parser.add_argument("--register-interop-note", action="store_true")
     parser.add_argument("--seed-interop-note", action="store_true")
+    parser.add_argument("--seed-shard-id", default="interop")
+    parser.add_argument("--seed-shard-epoch", type=int, default=1)
     args = parser.parse_args(argv)
 
     stop = threading.Event()
@@ -57,7 +59,7 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
         if args.cache_file:
             node.database.pull()
     if args.seed_interop_note:
-        node.database.put(
+        node.database.put_raw_message(
             interop_note_document,
             f"note:{args.runtime_id}",
             {
@@ -68,6 +70,9 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
                 "body": "The Python CultMesh daemon is serving typed state over CultNet.",
                 "tags": [args.runtime_id, "python", "cultmesh", "daemon"],
             },
+            message_id=f"daemon-seed:{args.runtime_id}",
+            shard_id=args.seed_shard_id,
+            shard_epoch=args.seed_shard_epoch,
         )
     return CultMesh.serve_node(
         node,

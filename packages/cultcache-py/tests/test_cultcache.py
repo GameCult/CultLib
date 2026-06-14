@@ -3044,6 +3044,8 @@ class CultCacheTests(unittest.TestCase):
                     "--ready-file",
                     str(ready_path),
                     "--seed-interop-note",
+                    "--seed-shard-id",
+                    "daemon-interop",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3086,6 +3088,18 @@ class CultCacheTests(unittest.TestCase):
                 note = interop_note_document.decode_payload(snapshot_response.documents[0].payload)
                 self.assertEqual(note["authorRuntimeId"], "daemon-test-peer")
                 self.assertIn("daemon", note["tags"])
+
+                shard_catalog = client.fetch_shard_catalog(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(shard_catalog["shards"][0]["shardId"], "daemon-interop")
+                self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["cultcache.interop-note"])
+
+                shard_log = client.fetch_shard_log_response(shard_id="daemon-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual(shard_log.entries[0].sequence, 1)
+                self.assertEqual(shard_log.entries[0].change_kind, "added")
+                self.assertIsNotNone(shard_log.entries[0].raw_document)
+                assert shard_log.entries[0].raw_document is not None
+                self.assertEqual(shard_log.entries[0].raw_document.record_key, "note:daemon-test-peer")
             finally:
                 process.terminate()
                 try:
