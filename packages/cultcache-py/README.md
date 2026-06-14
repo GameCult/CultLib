@@ -309,6 +309,19 @@ server = CultMesh.serve_node(
     max_snapshot_documents=1000,
     max_snapshot_bytes=4 * 1024 * 1024,
 )
+```
+
+The same local server can be launched as a package daemon when another runtime
+or operator process needs a CultNet endpoint without embedding Python glue:
+
+```powershell
+python -m cultmesh_py.daemon --runtime-id python-runtime --display-name "Python Runtime" --host 127.0.0.1 --port 3075 --cache-file mesh.cc --enable-durable-shard-logs --ready-file mesh.ready.json
+```
+
+The ready file and stdout line are process readiness hints. The served state and
+capability truth still live on the framed CultNet/CultMesh endpoint.
+
+```python
 
 client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")

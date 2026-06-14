@@ -27,6 +27,7 @@ cultnet-py-interop = "cultnet_py.interop_peer:main"
 cultcache-py-benchmark = "cultcache_py.benchmark:main"
 cultcache-py-compare-csharp = "cultcache_py.compare_csharp:main"
 cultcache-py-verify = "cultcache_py.verify:main"
+cultmesh-py-daemon = "cultmesh_py.daemon:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

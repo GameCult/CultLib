@@ -97,7 +97,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
   authority leases, local TCP node serving, simulation fact commits, and the
   durable shard-log node option that attaches a file-backed authoritative log
-  store beside the cache file by default.
+  store beside the cache file by default. The `cultmesh-py-daemon` /
+  `python -m cultmesh_py.daemon` entrypoint launches that same local TCP server
+  body and emits a bounded readiness document for process supervisors while the
+  served CultNet endpoint remains the capability owner.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and
@@ -215,8 +218,8 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not own LiteNetLib security/session behavior; it speaks the
   schema-v0 interop lane used by the package harness.
 - Python does not implement the full C# daemon/server stack. Its current role is
-  package runtime, raw interop peer, local CultMesh session facade, and typed
-  state participant.
+  package runtime, raw interop peer, launchable local CultMesh endpoint, local
+  CultMesh session facade, and typed state participant.
 - Python does not claim the full C# shard mutation-log service surface. It can
   create/apply raw snapshots, create/apply package-local raw shard-log
   responses, consume remote shard-log responses, and run pull-once replica

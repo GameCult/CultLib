@@ -1,7 +1,10 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -108,6 +111,7 @@ from cultmesh_py import (
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
     CultMeshVerseDiscoveryClient,
+    READY_SCHEMA_VERSION,
     peer_exchange_request,
     simulation_fact_document,
     verse_catalog_request,
@@ -3014,6 +3018,68 @@ class CultCacheTests(unittest.TestCase):
         latest = monitor.latest()
         self.assertEqual(latest[0].peer_id, "health-loop-peer")
         self.assertTrue(latest[0].is_reachable)
+
+    def test_cultmesh_daemon_entrypoint_serves_framed_cultnet_hello(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "daemon-test-peer",
+                    "--display-name",
+                    "Daemon Test Peer",
+                    "--port",
+                    "0",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                deadline = time.monotonic() + 5.0
+                while not ready_path.exists() and time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if not ready_path.exists():
+                    _, stderr = process.communicate(timeout=2.0)
+                    self.fail(f"cultmesh daemon did not publish readiness: {stderr}")
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
+                self.assertEqual(ready["schemaVersion"], READY_SCHEMA_VERSION)
+                self.assertEqual(ready["runtimeId"], "daemon-test-peer")
+                self.assertEqual(ready["endpoint"], f"cultnet://127.0.0.1:{ready['port']}")
+
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                hello_response = client.request(
+                    hello(runtime_id="daemon-test-prober"),
+                    expected_schema_version="cultnet.hello.v0",
+                )
+
+                self.assertEqual(hello_response["runtimeId"], "daemon-test-peer")
+                self.assertEqual(hello_response["displayName"], "Daemon Test Peer")
+                self.assertIn("cultnet.hello.v0", hello_response["supportedMessageVersions"])
+                self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
+            finally:
+                process.terminate()
+                try:
+                    process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5.0)
 
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(
