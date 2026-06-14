@@ -103,7 +103,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   served CultNet endpoint remains the capability owner. The daemon can register
   and seed the package interop-note document so launched processes advertise a
   real payload schema and serve both a real snapshot and a real shard-log entry
-  over the same CultNet lane.
+  over the same CultNet lane. When launched with a Verse id, it publishes its
+  actual bound endpoint in the Verse and peer catalogs so discovery clients can
+  find the running Python peer without embedding code-owned catalogs.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and

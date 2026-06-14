@@ -12,6 +12,13 @@ from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
 
 from .facade import CultMesh
 from .server import CultMeshLocalServer
+from .wire import (
+    CultMeshPeerCard,
+    CultMeshPeerCatalog,
+    CultMeshVerseCatalog,
+    CultMeshVerseCompatibility,
+    CultMeshVerseDescriptor,
+)
 
 READY_SCHEMA_VERSION = "cultmesh.daemon_ready.v0"
 
@@ -32,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed-interop-note", action="store_true")
     parser.add_argument("--seed-shard-id", default="interop")
     parser.add_argument("--seed-shard-epoch", type=int, default=1)
+    parser.add_argument("--verse-id")
+    parser.add_argument("--verse-display-name")
+    parser.add_argument("--role", action="append", dest="roles")
     args = parser.parse_args(argv)
 
     stop = threading.Event()
@@ -74,14 +84,52 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
             shard_id=args.seed_shard_id,
             shard_epoch=args.seed_shard_epoch,
         )
-    return CultMesh.serve_node(
+    verse_catalog = CultMeshVerseCatalog()
+    peer_catalog = CultMeshPeerCatalog()
+    server = CultMesh.serve_node(
         node,
+        verse_catalog=verse_catalog,
+        peer_catalog=peer_catalog,
         host=args.host,
         port=args.port,
         display_name=args.display_name,
         max_snapshot_documents=args.max_snapshot_documents,
         max_snapshot_bytes=args.max_snapshot_bytes,
     )
+    advertise_self(server, verse_catalog, peer_catalog, args)
+    return server
+
+
+def advertise_self(
+    server: CultMeshLocalServer,
+    verse_catalog: CultMeshVerseCatalog,
+    peer_catalog: CultMeshPeerCatalog,
+    args: argparse.Namespace,
+) -> None:
+    verse_id = args.verse_id
+    if not verse_id:
+        return
+    endpoint = f"cultnet://{server.host}:{server.port}"
+    shard_ids = tuple(server.node.database.shard_ids())
+    roles = tuple(args.roles or ("read-replica",))
+    verse_catalog.upsert(CultMeshVerseDescriptor(
+        verse_id=verse_id,
+        display_name=args.verse_display_name or verse_id,
+        authority_model="local",
+        compatibility=CultMeshVerseCompatibility(
+            transport_version="cultmesh.v0",
+            rules_hash="python-daemon",
+        ),
+        discovery_endpoints=(endpoint,),
+        authority_runtime_ids=(server.node.runtime_id,),
+    ))
+    peer_catalog.upsert(CultMeshPeerCard(
+        peer_id=server.node.runtime_id,
+        verse_id=verse_id,
+        endpoints=(endpoint,),
+        roles=roles,
+        shard_ids=shard_ids,
+    ))
 
 
 def daemon_ready_document(server: CultMeshLocalServer) -> dict[str, Any]:

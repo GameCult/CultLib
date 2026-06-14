@@ -3046,6 +3046,12 @@ class CultCacheTests(unittest.TestCase):
                     "--seed-interop-note",
                     "--seed-shard-id",
                     "daemon-interop",
+                    "--verse-id",
+                    "daemon-verse",
+                    "--verse-display-name",
+                    "Daemon Verse",
+                    "--role",
+                    "shard-primary",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3100,6 +3106,19 @@ class CultCacheTests(unittest.TestCase):
                 self.assertIsNotNone(shard_log.entries[0].raw_document)
                 assert shard_log.entries[0].raw_document is not None
                 self.assertEqual(shard_log.entries[0].raw_document.record_key, "note:daemon-test-peer")
+
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+                self.assertEqual(verses[0].verse_id, "daemon-verse")
+                self.assertEqual(verses[0].display_name, "Daemon Verse")
+                self.assertEqual(verses[0].discovery_endpoints, (ready["endpoint"],))
+                self.assertEqual(verses[0].authority_runtime_ids, ("daemon-test-peer",))
+
+                peers = discovery_client.fetch_peers(verse_id="daemon-verse", roles=["shard-primary"])
+                self.assertEqual(peers[0].peer_id, "daemon-test-peer")
+                self.assertEqual(peers[0].endpoints, (ready["endpoint"],))
+                self.assertEqual(peers[0].roles, ("shard-primary",))
+                self.assertEqual(peers[0].shard_ids, ("daemon-interop",))
             finally:
                 process.terminate()
                 try:
