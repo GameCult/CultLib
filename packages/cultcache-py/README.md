@@ -418,5 +418,7 @@ registered cache, and public `CultCache` upsert/get throughput. The C# compare
 command also runs `packages/cultcache-py/tools/GameCult.Caching.Benchmark` and
 reports median Python-to-C# ratios for the shared public cache operations. It
 uses three samples by default; pass `--samples` when you need a different
-evidence shape. Treat those numbers as a local baseline, not a claim that
-Python matches the C# reference in every workload.
+evidence shape. The public in-memory cache owner stores records in
+type-partitioned dictionaries so hot `get(...)` calls avoid per-call
+composite-key allocation. Treat the benchmark numbers as a local baseline, not
+a claim that Python matches the C# reference in every workload.

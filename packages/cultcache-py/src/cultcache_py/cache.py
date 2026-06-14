@@ -17,8 +17,8 @@ class CultCacheError(RuntimeError):
 @dataclass
 class _State:
     documents: dict[str, DocumentDefinition[Any]] = field(default_factory=dict)
-    values: dict[tuple[str, str], Any] = field(default_factory=dict)
-    envelopes: dict[tuple[str, str], CultCacheEnvelope] = field(default_factory=dict)
+    values: dict[str, dict[str, Any]] = field(default_factory=dict)
+    envelopes: dict[str, dict[str, CultCacheEnvelope]] = field(default_factory=dict)
     stores_by_type: dict[str, list[BackingStore]] = field(default_factory=dict)
     generic_stores: list[BackingStore] = field(default_factory=list)
     name_extractors: dict[str, str | Any] = field(default_factory=dict)
@@ -113,13 +113,14 @@ class CultCache:
                         raise CultCacheError(f"Duplicate global document for type: {envelope.type}")
                     seen_globals.add(envelope.type)
                 value = document.decode_payload(envelope.payload)
-                self._state.values[(envelope.type, envelope.key)] = value
-                self._state.envelopes[(envelope.type, envelope.key)] = envelope
+                self._state.values.setdefault(envelope.type, {})[envelope.key] = value
+                self._state.envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
         self._rebuild_indexes()
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
         self._assert_registered(document)
-        return self._state.values.get((document.type, key))
+        values = self._state.values.get(document.type)
+        return None if values is None else values.get(key)
 
     def get_required(self, document: DocumentDefinition[T], key: str) -> T:
         value = self.get(document, key)
@@ -129,11 +130,12 @@ class CultCache:
 
     def get_all(self, document: DocumentDefinition[T]) -> list[T]:
         self._assert_registered(document)
-        return [value for (type, _), value in self._state.values.items() if type == document.type]
+        return list(self._state.values.get(document.type, {}).values())
 
     def get_envelope(self, document: DocumentDefinition[Any], key: str) -> CultCacheEnvelope | None:
         self._assert_registered(document)
-        return self._state.envelopes.get((document.type, key))
+        envelopes = self._state.envelopes.get(document.type)
+        return None if envelopes is None else envelopes.get(key)
 
     def get_required_envelope(self, document: DocumentDefinition[Any], key: str) -> CultCacheEnvelope:
         envelope = self.get_envelope(document, key)
@@ -169,7 +171,9 @@ class CultCache:
         self._assert_registered(document)
         if document.global_document and key != GLOBAL_KEY:
             raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
-        old_value = self._state.values.get((document.type, key))
+        values = self._state.values.setdefault(document.type, {})
+        envelopes = self._state.envelopes.setdefault(document.type, {})
+        old_value = values.get(key)
         catalog_entry = document.catalog_entry()
         envelope = CultCacheEnvelope.create(
             key=key,
@@ -183,8 +187,8 @@ class CultCache:
             store.push(envelope)
         if old_value is not None:
             self._remove_value_indexes(document.type, key, old_value)
-        self._state.values[(document.type, key)] = value
-        self._state.envelopes[(document.type, key)] = envelope
+        values[key] = value
+        envelopes[key] = envelope
         self._add_value_indexes(document.type, key, value)
 
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
@@ -193,14 +197,16 @@ class CultCache:
             raise CultCacheError(
                 f"Envelope type {envelope.type} does not match document type {document.type}"
             )
-        old_value = self._state.values.get((document.type, envelope.key))
+        values = self._state.values.setdefault(document.type, {})
+        envelopes = self._state.envelopes.setdefault(document.type, {})
+        old_value = values.get(envelope.key)
         value = document.decode_payload(envelope.payload)
         for store in self._stores_for_type(document.type):
             store.push(envelope)
         if old_value is not None:
             self._remove_value_indexes(document.type, envelope.key, old_value)
-        self._state.values[(document.type, envelope.key)] = value
-        self._state.envelopes[(document.type, envelope.key)] = envelope
+        values[envelope.key] = value
+        envelopes[envelope.key] = envelope
         self._add_value_indexes(document.type, envelope.key, value)
         return value
 
@@ -219,12 +225,14 @@ class CultCache:
         stores = self._stores_for_type(document.type)
         for store in stores:
             store.push_all(envelopes)
+        values_by_key = self._state.values.setdefault(document.type, {})
+        envelopes_by_key = self._state.envelopes.setdefault(document.type, {})
         for envelope, value in zip(envelopes, values):
-            old_value = self._state.values.get((document.type, envelope.key))
+            old_value = values_by_key.get(envelope.key)
             if old_value is not None:
                 self._remove_value_indexes(document.type, envelope.key, old_value)
-            self._state.values[(document.type, envelope.key)] = value
-            self._state.envelopes[(document.type, envelope.key)] = envelope
+            values_by_key[envelope.key] = value
+            envelopes_by_key[envelope.key] = envelope
             self._add_value_indexes(document.type, envelope.key, value)
         return values
 
@@ -246,8 +254,15 @@ class CultCache:
         self._assert_registered(document)
         for store in self._stores_for_type(document.type):
             store.delete(document.type, key)
-        old_value = self._state.values.pop((document.type, key), None)
-        self._state.envelopes.pop((document.type, key), None)
+        values = self._state.values.get(document.type)
+        old_value = None if values is None else values.pop(key, None)
+        if values == {}:
+            self._state.values.pop(document.type, None)
+        envelopes = self._state.envelopes.get(document.type)
+        if envelopes is not None:
+            envelopes.pop(key, None)
+            if envelopes == {}:
+                self._state.envelopes.pop(document.type, None)
         if old_value is not None:
             self._remove_value_indexes(document.type, key, old_value)
 
@@ -257,12 +272,16 @@ class CultCache:
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
-        for (type, key), value in self._state.values.items():
-            out.setdefault(type, {})[key] = value
+        for type, values in self._state.values.items():
+            out[type] = dict(values)
         return out
 
     def snapshot_envelopes(self) -> list[CultCacheEnvelope]:
-        return list(self._state.envelopes.values())
+        return [
+            envelope
+            for envelopes in self._state.envelopes.values()
+            for envelope in envelopes.values()
+        ]
 
     def _stores_for_type(self, type: str) -> list[BackingStore]:
         specific = self._state.stores_by_type.get(type)
@@ -282,8 +301,9 @@ class CultCache:
     def _rebuild_indexes(self) -> None:
         self._state.names.clear()
         self._state.indexes.clear()
-        for (type, key), value in self._state.values.items():
-            self._add_value_indexes(type, key, value)
+        for type, values in self._state.values.items():
+            for key, value in values.items():
+                self._add_value_indexes(type, key, value)
 
     def _add_value_indexes(self, type: str, key: str, value: Any) -> None:
         name_extractor = self._state.name_extractors.get(type)
@@ -315,9 +335,9 @@ class CultCache:
         name_extractor = self._state.name_extractors.get(type)
         if name_extractor is None:
             return
-        for (candidate_type, candidate_key), candidate in self._state.values.items():
+        for candidate_key, candidate in self._state.values.get(type, {}).items():
             candidate_name = extract_value(candidate, name_extractor)
-            if candidate_type == type and candidate_key != key and candidate_name is not None and str(candidate_name) == name:
+            if candidate_key != key and candidate_name is not None and str(candidate_name) == name:
                 self._state.names[lookup_key] = candidate_key
 
     def _remove_secondary_index(self, type: str, key: str, index: str, value: str) -> None:
@@ -328,9 +348,9 @@ class CultCache:
         extractor = self._state.index_extractors.get(type, {}).get(index)
         if extractor is None:
             return
-        for (candidate_type, candidate_key), candidate in self._state.values.items():
+        for candidate_key, candidate in self._state.values.get(type, {}).items():
             candidate_value = extract_value(candidate, extractor)
-            if candidate_type == type and candidate_key != key and candidate_value is not None and str(candidate_value) == value:
+            if candidate_key != key and candidate_value is not None and str(candidate_value) == value:
                 self._state.indexes[lookup_key] = candidate_key
 
     def _assert_registered(self, document: DocumentDefinition[Any]) -> None:
