@@ -186,6 +186,12 @@ test("CultNet schema discovery catalog can advertise canonical schemas without i
   assert.equal(ghostlight?.documentType, "ghostlight.agent-state");
   assert.equal(typeof ghostlight?.contentHash, "string");
   assert.equal(ghostlight?.schemaJson, undefined);
+
+  const transportProfile = response.schemas.find((schema) => schema.schemaVersion === "cultnet.transport_profile.v0");
+  assert.ok(transportProfile);
+  assert.equal(transportProfile?.kind, "shared_contract");
+  assert.equal(transportProfile?.schemaId, cultNetSchemas.transportProfileSchema.$id);
+  assert.deepEqual(transportProfile?.wireContracts, ["cultnet.schema.v0"]);
 });
 
 test("CultNet schema discovery can round-trip over the legacy wire contract when schemas are requested inline", () => {

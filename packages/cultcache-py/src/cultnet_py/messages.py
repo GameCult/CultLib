@@ -49,6 +49,68 @@ def hello(
     )
 
 
+def login(
+    *,
+    nonce: str,
+    auth: str,
+    password: str,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.login.v0",
+        {
+            "nonce": nonce,
+            "auth": auth,
+            "password": password,
+        },
+    )
+
+
+def register(
+    *,
+    nonce: str,
+    email: str,
+    password: str,
+    name: str,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.register.v0",
+        {
+            "nonce": nonce,
+            "email": email,
+            "password": password,
+            "name": name,
+        },
+    )
+
+
+def verify_session(
+    *,
+    nonce: str,
+    session: str,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.verify.v0",
+        {
+            "nonce": nonce,
+            "session": session,
+        },
+    )
+
+
+def login_success(
+    *,
+    nonce: str,
+    session: str,
+) -> CultNetMessage:
+    return CultNetMessage(
+        "cultnet.login_success.v0",
+        {
+            "nonce": nonce,
+            "session": session,
+        },
+    )
+
+
 def document_put_raw(
     *,
     message_id: str = "",

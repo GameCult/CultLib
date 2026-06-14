@@ -138,6 +138,14 @@ export const cultNetBuiltinSchemaRegistry = new CultNetSchemaRegistry([
     wireContracts: ["cultnet.schema.v0"],
   },
   {
+    schemaId: cultNetSchemas.transportProfileSchema.$id,
+    kind: "shared_contract",
+    schema: cultNetSchemas.transportProfileSchema,
+    schemaVersion: "cultnet.transport_profile.v0",
+    title: cultNetSchemas.transportProfileSchema.title,
+    wireContracts: ["cultnet.schema.v0"],
+  },
+  {
     schemaId: cultNetSchemas.loginSchema.$id,
     kind: "wire_message",
     schema: cultNetSchemas.loginSchema,

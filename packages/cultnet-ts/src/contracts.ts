@@ -14,6 +14,7 @@ import documentDeleteSchema from "../contracts/cultnet.document-delete.schema.js
 import rawDocumentRecordSchema from "../contracts/cultnet.raw-document-record.schema.json";
 import documentPutRawSchema from "../contracts/cultnet.document-put-raw.schema.json";
 import documentMutationContractSchema from "../contracts/cultnet.document-mutation-contract.schema.json";
+import transportProfileSchema from "../contracts/cultnet.transport-profile.schema.json";
 import snapshotRequestSchema from "../contracts/cultnet.snapshot-request.schema.json";
 import snapshotResponseSchema from "../contracts/cultnet.snapshot-response.schema.json";
 import snapshotResponseRawSchema from "../contracts/cultnet.snapshot-response-raw.schema.json";
@@ -53,6 +54,31 @@ export interface CultNetDocumentMutationContract {
   intentDocumentTypes?: string[];
   receiptDocumentTypes?: string[];
   notes?: string[];
+}
+
+export interface CultNetTransportProfile {
+  schemaVersion: "cultnet.transport_profile.v0";
+  runtimeId: string;
+  transports: CultNetTransportDescriptor[];
+}
+
+export interface CultNetTransportDescriptor {
+  transportId: string;
+  protocol: "tcp_framed" | "litenetlib" | "websocket" | "rudp";
+  host?: string;
+  port?: number;
+  path?: string;
+  discoveryGroup?: string;
+  wireContracts?: string[];
+  channels: CultNetTransportChannel[];
+}
+
+export interface CultNetTransportChannel {
+  channelId: string;
+  delivery: "reliable" | "unreliable";
+  ordering: "ordered" | "unordered" | "sequenced";
+  maxPayloadBytes?: number;
+  maxFragmentBytes?: number;
 }
 
 export interface CultNetDocumentRecord<TPayload = unknown> {
@@ -471,6 +497,7 @@ for (const schema of [
   documentRecordSchema,
   rawDocumentRecordSchema,
   documentMutationContractSchema,
+  transportProfileSchema,
   schemaDescriptorSchema,
   ...CULTNET_MESSAGE_SCHEMAS,
 ]) {
@@ -979,6 +1006,7 @@ export const cultNetSchemas = {
   rawDocumentRecordSchema,
   documentPutRawSchema,
   documentMutationContractSchema,
+  transportProfileSchema,
   snapshotRequestSchema,
   snapshotResponseSchema,
   snapshotResponseRawSchema,

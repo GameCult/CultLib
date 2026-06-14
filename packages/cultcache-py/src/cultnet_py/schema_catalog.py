@@ -9,10 +9,16 @@ INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
 CULTNET_SCHEMA_BASE = "https://github.com/GameCult/cultnet-ts/contracts"
 VERSE_CATALOG_REQUEST = "cultmesh.verse_catalog_request.v0"
 PEER_EXCHANGE_REQUEST = "cultmesh.peer_exchange_request.v0"
+TRANSPORT_PROFILE_SCHEMA_VERSION = "cultnet.transport_profile.v0"
+TRANSPORT_PROFILE_SCHEMA_ID = f"{CULTNET_SCHEMA_BASE}/cultnet.transport-profile.schema.json"
 
 WIRE_MESSAGE_SCHEMA_VERSIONS = (
     ("cultnet.hello.v0", "CultNet Hello Message", f"{CULTNET_SCHEMA_BASE}/cultnet.hello.schema.json"),
     ("cultnet.error.v0", "CultNet Error Message", f"{CULTNET_SCHEMA_BASE}/cultnet.error.schema.json"),
+    ("cultnet.login.v0", "CultNet Login Message", f"{CULTNET_SCHEMA_BASE}/cultnet.login.schema.json"),
+    ("cultnet.register.v0", "CultNet Register Message", f"{CULTNET_SCHEMA_BASE}/cultnet.register.schema.json"),
+    ("cultnet.verify.v0", "CultNet Verify Message", f"{CULTNET_SCHEMA_BASE}/cultnet.verify.schema.json"),
+    ("cultnet.login_success.v0", "CultNet Login Success Message", f"{CULTNET_SCHEMA_BASE}/cultnet.login-success.schema.json"),
     ("cultnet.document_delete.v0", "CultNet Document Delete Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-delete.schema.json"),
     ("cultnet.document_put_raw.v0", "CultNet Raw Document Put Message", f"{CULTNET_SCHEMA_BASE}/cultnet.document-put-raw.schema.json"),
     ("cultnet.snapshot_request.v0", "CultNet Snapshot Request Message", f"{CULTNET_SCHEMA_BASE}/cultnet.snapshot-request.schema.json"),
@@ -32,6 +38,10 @@ WIRE_MESSAGE_SCHEMA_VERSIONS = (
     ("cultmesh.verse_catalog_response.v0", "CultMesh Verse Catalog Response Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.verse-catalog-response.schema.json"),
     (PEER_EXCHANGE_REQUEST, "CultMesh Peer Exchange Request Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.peer-exchange-request.schema.json"),
     ("cultmesh.peer_exchange_response.v0", "CultMesh Peer Exchange Response Message", f"{CULTNET_SCHEMA_BASE}/cultmesh.peer-exchange-response.schema.json"),
+)
+
+SHARED_CONTRACT_SCHEMA_VERSIONS = (
+    (TRANSPORT_PROFILE_SCHEMA_VERSION, "CultNet Transport Profile", TRANSPORT_PROFILE_SCHEMA_ID),
 )
 
 
@@ -154,6 +164,19 @@ def wire_message_schema_descriptors(include_schema_json: bool) -> list[dict[str,
         if include_schema_json:
             descriptor["schemaJson"] = schema_json
         descriptors.append(descriptor)
+    for schema_version, title, schema_id in SHARED_CONTRACT_SCHEMA_VERSIONS:
+        schema_json = shared_contract_schema_json(schema_id, title, schema_version)
+        descriptor = {
+            "schemaId": schema_id,
+            "kind": "shared_contract",
+            "schemaVersion": schema_version,
+            "title": title,
+            "wireContracts": [INTEROP_WIRE_CONTRACT],
+            "contentHash": hashlib.sha256(schema_json.encode("utf-8")).hexdigest(),
+        }
+        if include_schema_json:
+            descriptor["schemaJson"] = schema_json
+        descriptors.append(descriptor)
     return descriptors
 
 
@@ -180,10 +203,63 @@ def wire_message_schema_json(schema_id: str, title: str, schema_version: str) ->
     }, separators=(",", ":"), sort_keys=True)
 
 
+def shared_contract_schema_json(schema_id: str, title: str, schema_version: str) -> str:
+    if schema_version != TRANSPORT_PROFILE_SCHEMA_VERSION:
+        raise ValueError(f"unsupported shared contract schema version {schema_version}")
+    return json.dumps({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_id,
+        "title": title,
+        "type": "object",
+        "required": ["schemaVersion", "runtimeId", "transports"],
+        "additionalProperties": False,
+        "properties": {
+            "schemaVersion": {"const": TRANSPORT_PROFILE_SCHEMA_VERSION},
+            "runtimeId": {"type": "string", "minLength": 1},
+            "transports": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["transportId", "protocol", "channels"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "transportId": {"type": "string", "minLength": 1},
+                        "protocol": {"type": "string", "enum": ["tcp_framed", "litenetlib", "websocket", "rudp"]},
+                        "host": {"type": "string", "minLength": 1},
+                        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                        "path": {"type": "string", "minLength": 1},
+                        "discoveryGroup": {"type": "string", "minLength": 1},
+                        "wireContracts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "channels": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["channelId", "delivery", "ordering"],
+                                "additionalProperties": False,
+                                "properties": {
+                                    "channelId": {"type": "string", "minLength": 1},
+                                    "delivery": {"type": "string", "enum": ["reliable", "unreliable"]},
+                                    "ordering": {"type": "string", "enum": ["ordered", "unordered", "sequenced"]},
+                                    "maxPayloadBytes": {"type": "integer", "minimum": 1},
+                                    "maxFragmentBytes": {"type": "integer", "minimum": 1},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }, separators=(",", ":"), sort_keys=True)
+
+
 def wire_message_required_fields(schema_version: str) -> list[str]:
     required = {
         "cultnet.hello.v0": ["schemaVersion", "runtimeId"],
         "cultnet.error.v0": ["schemaVersion", "error"],
+        "cultnet.login.v0": ["schemaVersion", "nonce", "auth", "password"],
+        "cultnet.register.v0": ["schemaVersion", "nonce", "email", "password", "name"],
+        "cultnet.verify.v0": ["schemaVersion", "nonce", "session"],
+        "cultnet.login_success.v0": ["schemaVersion", "nonce", "session"],
         "cultnet.document_delete.v0": ["schemaVersion", "messageId", "schemaId", "recordKey"],
         "cultnet.document_put_raw.v0": ["schemaVersion", "messageId", "document"],
         "cultnet.snapshot_request.v0": ["schemaVersion", "messageId"],
@@ -263,6 +339,25 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
             "error": {"type": "string"},
             "code": {"type": "string"},
             "details": {"type": "object", "additionalProperties": True},
+        },
+        "cultnet.login.v0": {
+            "nonce": {"type": "string", "minLength": 1},
+            "auth": {"type": "string", "minLength": 1},
+            "password": {"type": "string", "minLength": 1},
+        },
+        "cultnet.register.v0": {
+            "nonce": {"type": "string", "minLength": 1},
+            "email": {"type": "string", "minLength": 1},
+            "password": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+        },
+        "cultnet.verify.v0": {
+            "nonce": {"type": "string", "minLength": 1},
+            "session": {"type": "string", "minLength": 1},
+        },
+        "cultnet.login_success.v0": {
+            "nonce": {"type": "string", "minLength": 1},
+            "session": {"type": "string", "minLength": 1},
         },
         "cultnet.document_delete.v0": {
             **common,

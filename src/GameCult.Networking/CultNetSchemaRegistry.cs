@@ -267,6 +267,13 @@ namespace GameCult.Networking
             },
             new SchemaResourceSpec
             {
+                FileName = "cultnet.transport-profile.schema.json",
+                Kind = "shared_contract",
+                SchemaVersion = "cultnet.transport_profile.v0",
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
                 FileName = "cultnet.login.schema.json",
                 Kind = "wire_message",
                 SchemaVersion = CultNetSchemaVersions.Login,

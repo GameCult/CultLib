@@ -2323,6 +2323,8 @@ namespace GameCult.Networking.Tests
                 schema => schema.SchemaVersion == CultNetSchemaVersions.SnapshotResponseRaw);
             var ghostlight = Array.Find(response.Schemas,
                 schema => schema.SchemaVersion == "ghostlight.agent_state.v0");
+            var transportProfile = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == "cultnet.transport_profile.v0");
 
             Assert.That(rawPut, Is.Not.Null);
             Assert.That(rawPut!.WireContracts, Is.EqualTo([CultNetWireContracts.SchemaV0]));
@@ -2335,6 +2337,12 @@ namespace GameCult.Networking.Tests
             Assert.That(ghostlight, Is.Not.Null);
             Assert.That(ghostlight!.DocumentType, Is.EqualTo("ghostlight.agent-state"));
             Assert.That(ghostlight.Kind, Is.EqualTo("document_payload"));
+
+            Assert.That(transportProfile, Is.Not.Null);
+            Assert.That(transportProfile!.Kind, Is.EqualTo("shared_contract"));
+            Assert.That(transportProfile.WireContracts, Is.EqualTo([CultNetWireContracts.SchemaV0]));
+            Assert.That(transportProfile.SchemaJson, Does.Contain("cultnet.transport_profile.v0"));
+            Assert.That(transportProfile.SchemaJson, Does.Contain("litenetlib"));
         }
 
         [Test]

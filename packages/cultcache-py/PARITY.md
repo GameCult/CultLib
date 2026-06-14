@@ -38,7 +38,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   `CultNetRawClient.sync_schema_catalog(...)`. The catalog includes
   `cultnet.error.v0`, and the local server advertises that version in hello
   responses because oversized snapshots and other peer failures use that
-  contract on the wire.
+  contract on the wire. It also advertises the shared
+  `cultnet.transport_profile.v0` contract so Python peers can describe their
+  current transport honestly before the cross-runtime reliable UDP owner lands.
 - Python CultNet security/session primitives:
   `CultNetClientSecurityOptions`, `CultNetServerSecurityOptions`, and
   `CultNetSecret` mirror the C#/TS connection-key, server signing-secret,
@@ -267,6 +269,10 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not implement the full LiteNetLib client/server auth flow. It now
   owns the shared security/session primitives for helper parity, while the live
   transport harness still speaks the schema-v0 interop lane.
+- Python does not implement cross-runtime reliable UDP yet. The current
+  transport ownership map lives in `docs/cultnet-transport-parity.md`; the next
+  coherent target is a CultNet-owned transport port and `rudp` adapter shared
+  across runtimes, not a Python-only LiteNetLib imitation.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

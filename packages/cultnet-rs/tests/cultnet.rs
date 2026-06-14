@@ -328,6 +328,21 @@ fn builtin_schema_registry_advertises_canonical_ghostlight_schema_without_inline
     );
     assert_eq!(ghostlight.schema_json, None);
     assert!(!ghostlight.content_hash.is_empty());
+
+    let transport_profile = schemas
+        .iter()
+        .find(|schema| schema.schema_version.as_deref() == Some("cultnet.transport_profile.v0"))
+        .expect("transport profile schema is advertised");
+
+    assert_eq!(transport_profile.kind, CultNetSchemaKind::SharedContract);
+    assert_eq!(
+        transport_profile.schema_id,
+        "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json"
+    );
+    assert_eq!(
+        transport_profile.wire_contracts,
+        vec![CultNetWireContract::CultNetSchemaV0]
+    );
     Ok(())
 }
 

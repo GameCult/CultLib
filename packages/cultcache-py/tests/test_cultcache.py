@@ -79,13 +79,17 @@ from cultnet_py import (
     encode_frame,
     encode_witness_artifact_bundle_payload,
     hello,
+    login,
+    login_success,
     parse_message,
+    register,
     schema_catalog_request,
     schema_document_map,
     shard_catalog_request,
     shard_log_request,
     simulation_observation,
     snapshot_request,
+    verify_session,
     wire_message_schema_catalog,
     wire_message_schema_descriptors,
     witness_artifact_bundle,
@@ -1175,11 +1179,58 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(message["shardId"], "interop")
         self.assertEqual(message["shardEpoch"], 1)
 
+    def test_cultnet_auth_session_helpers_match_schema_v0_shape(self) -> None:
+        self.assertEqual(
+            login(nonce="nonce", auth="encrypted-auth", password="encrypted-password").to_wire(),
+            {
+                "schemaVersion": "cultnet.login.v0",
+                "nonce": "nonce",
+                "auth": "encrypted-auth",
+                "password": "encrypted-password",
+            },
+        )
+        self.assertEqual(
+            register(
+                nonce="nonce",
+                email="encrypted-email",
+                password="encrypted-password",
+                name="encrypted-name",
+            ).to_wire(),
+            {
+                "schemaVersion": "cultnet.register.v0",
+                "nonce": "nonce",
+                "email": "encrypted-email",
+                "password": "encrypted-password",
+                "name": "encrypted-name",
+            },
+        )
+        self.assertEqual(
+            verify_session(nonce="nonce", session="encrypted-session").to_wire(),
+            {
+                "schemaVersion": "cultnet.verify.v0",
+                "nonce": "nonce",
+                "session": "encrypted-session",
+            },
+        )
+        self.assertEqual(
+            login_success(nonce="nonce", session="encrypted-session").to_wire(),
+            {
+                "schemaVersion": "cultnet.login_success.v0",
+                "nonce": "nonce",
+                "session": "encrypted-session",
+            },
+        )
+
     def test_cultnet_wire_catalog_describes_python_handled_messages(self) -> None:
         descriptors = wire_message_schema_descriptors(include_schema_json=True)
         by_version = {descriptor["schemaVersion"]: descriptor for descriptor in descriptors}
         for schema_version in [
             "cultnet.error.v0",
+            "cultnet.login.v0",
+            "cultnet.register.v0",
+            "cultnet.verify.v0",
+            "cultnet.login_success.v0",
+            "cultnet.transport_profile.v0",
             "cultnet.document_delete.v0",
             "cultnet.database_change_raw.v0",
             "cultnet.shard_log_response.v0",
@@ -1187,7 +1238,8 @@ class CultCacheTests(unittest.TestCase):
             "cultmesh.peer_exchange_response.v0",
         ]:
             self.assertIn(schema_version, by_version)
-            self.assertEqual(by_version[schema_version]["kind"], "wire_message")
+            expected_kind = "shared_contract" if schema_version == "cultnet.transport_profile.v0" else "wire_message"
+            self.assertEqual(by_version[schema_version]["kind"], expected_kind)
             self.assertIn("cultnet.schema.v0", by_version[schema_version]["wireContracts"])
             self.assertIn(schema_version, by_version[schema_version]["schemaJson"])
             self.assertEqual(len(by_version[schema_version]["contentHash"]), 64)
@@ -1203,6 +1255,28 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(error_schema["required"], ["schemaVersion", "error"])
         self.assertEqual(error_schema["properties"]["error"]["type"], "string")
         self.assertIn("details", error_schema["properties"])
+
+        login_schema = json.loads(by_version["cultnet.login.v0"]["schemaJson"])
+        self.assertEqual(login_schema["required"], ["schemaVersion", "nonce", "auth", "password"])
+        self.assertEqual(login_schema["properties"]["auth"]["type"], "string")
+
+        register_schema = json.loads(by_version["cultnet.register.v0"]["schemaJson"])
+        self.assertEqual(register_schema["required"], ["schemaVersion", "nonce", "email", "password", "name"])
+        self.assertEqual(register_schema["properties"]["email"]["type"], "string")
+
+        verify_schema = json.loads(by_version["cultnet.verify.v0"]["schemaJson"])
+        self.assertEqual(verify_schema["required"], ["schemaVersion", "nonce", "session"])
+        self.assertEqual(verify_schema["properties"]["session"]["type"], "string")
+
+        success_schema = json.loads(by_version["cultnet.login_success.v0"]["schemaJson"])
+        self.assertEqual(success_schema["required"], ["schemaVersion", "nonce", "session"])
+
+        transport_profile_schema = json.loads(by_version["cultnet.transport_profile.v0"]["schemaJson"])
+        self.assertEqual(transport_profile_schema["required"], ["schemaVersion", "runtimeId", "transports"])
+        transport = transport_profile_schema["properties"]["transports"]["items"]
+        self.assertEqual(transport["properties"]["protocol"]["enum"], ["tcp_framed", "litenetlib", "websocket", "rudp"])
+        channel = transport["properties"]["channels"]["items"]
+        self.assertEqual(channel["properties"]["ordering"]["enum"], ["ordered", "unordered", "sequenced"])
 
         change_schema = json.loads(by_version["cultnet.database_change_raw.v0"]["schemaJson"])
         self.assertEqual(change_schema["properties"]["changeKind"]["enum"], ["added", "updated", "removed"])
