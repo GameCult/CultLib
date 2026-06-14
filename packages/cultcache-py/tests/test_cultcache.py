@@ -952,6 +952,11 @@ class CultCacheTests(unittest.TestCase):
         self.assertIn("resyncRequired", log_schema["required"])
         self.assertIn("compactedThrough", log_schema["properties"])
 
+        hello_schema = json.loads(by_version["cultnet.hello.v0"]["schemaJson"])
+        mutation_contract = hello_schema["properties"]["supportedMutationContracts"]["items"]
+        self.assertEqual(mutation_contract["type"], "object")
+        self.assertIn("operations", mutation_contract["properties"])
+
         consensus_schema = json.loads(by_version["cultnet.simulation_consensus_candidate.v0"]["schemaJson"])
         for required_field in ["witnessCount", "supportWeight", "totalWeight", "hasQuorum", "confidence"]:
             self.assertIn(required_field, consensus_schema["required"])
@@ -2101,8 +2106,13 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(hello_response["displayName"], "Mesh Server")
         self.assertIn("cultnet.database_subscribe.v0", hello_response["supportedMessageVersions"])
         self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(hello_response["supportedMutationContracts"][0]["documentType"], "mesh.server_note")
+        self.assertIn("documentDelete", hello_response["supportedMutationContracts"][0]["operations"])
+        self.assertIn("shardLog", hello_response["supportedMutationContracts"][0]["operations"])
         self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
         self.assertIn("schemaJson", schema_response["schemas"][0])
+        self.assertIn("cultnet.document_delete.v0", schema_response["schemas"][0]["wireContracts"])
+        self.assertIn("cultnet.shard_log_response.v0", schema_response["schemas"][0]["wireContracts"])
         wire_descriptors = {schema["schemaVersion"]: schema for schema in wire_schema_response["schemas"]}
         self.assertEqual(wire_descriptors["cultnet.document_put_raw.v0"]["kind"], "wire_message")
         self.assertIn("schemaJson", wire_descriptors["cultnet.document_put_raw.v0"])

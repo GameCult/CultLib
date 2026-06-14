@@ -250,6 +250,15 @@ class CultMeshLocalServer:
             "runtimeKind": self.runtime_kind,
             "displayName": self.display_name or self.node.runtime_id,
             "supportedDocumentTypes": [document.type for document in self.node.documents],
+            "supportedMutationContracts": [
+                {
+                    "documentType": document.type,
+                    "payloadSchemaVersion": document.catalog_entry().schema_version,
+                    "operations": ["snapshot", "documentPut", "documentDelete", "shardLog"],
+                    "authority": "runtime",
+                }
+                for document in self.node.documents
+            ],
             "supportedMessageVersions": [
                 "cultnet.hello.v0",
                 "cultnet.schema_catalog_request.v0",
@@ -289,7 +298,12 @@ class CultMeshLocalServer:
                 "schemaVersion": entry.schema_version,
                 "documentType": document.type,
                 "title": entry.schema_name,
-                "wireContracts": ["cultnet.document_put_raw.v0", "cultnet.snapshot_response_raw.v0"],
+                "wireContracts": [
+                    "cultnet.document_put_raw.v0",
+                    "cultnet.document_delete.v0",
+                    "cultnet.snapshot_response_raw.v0",
+                    "cultnet.shard_log_response.v0",
+                ],
                 "contentHash": entry.content_hash,
             }
             if include_schema_json:

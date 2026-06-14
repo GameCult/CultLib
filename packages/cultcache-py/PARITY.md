@@ -79,6 +79,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   for snapshot, put, and delete notifications on a connected client stream.
   Its schema catalog includes both registered document payload schemas and
   shared wire-message descriptors for the CultNet/CultMesh messages it handles.
+  Hello and payload schema descriptors advertise the raw snapshot, put, delete,
+  and shard-log mutation surfaces the server actually serves.
   Its shard catalog advertises the database-owned shard ids, schema ids, and
   latest shard epochs so discovery and shard-log catch-up agree on the same
   authority.

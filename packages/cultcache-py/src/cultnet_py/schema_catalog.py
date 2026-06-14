@@ -238,7 +238,21 @@ def wire_message_schema_properties(schema_version: str) -> dict[str, Any]:
             "agentId": {"type": "string"},
             "displayName": {"type": "string"},
             "supportedDocumentTypes": string_array,
-            "supportedMutationContracts": string_array,
+            "supportedMutationContracts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "documentType": {"type": "string"},
+                        "payloadSchemaVersion": {"type": "string"},
+                        "operations": string_array,
+                        "authority": {"type": "string"},
+                        "intentDocumentTypes": string_array,
+                        "receiptDocumentTypes": string_array,
+                    },
+                    "additionalProperties": True,
+                },
+            },
             "supportedMessageVersions": string_array,
             "supportsSchemaCatalog": {"type": "boolean"},
         },
