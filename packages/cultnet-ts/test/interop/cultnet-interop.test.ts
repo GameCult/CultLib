@@ -750,12 +750,92 @@ test("CultNet Python and TypeScript exchange schema frames when Python dials a T
   }
 });
 
-async function buildInteropPeers(): Promise<void> {
-  await execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
-    cwd: cultnetRsRoot,
+test("CultNet TypeScript and Rust exchange schema frames over the shared RUDP socket transport", async () => {
+  await buildRustInteropPeer();
+  const rustPeer = spawnRustRudpServer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const rustPort = await rustPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-rust-rudp-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: rustPort,
+      connectionId: 0x22446688,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-rust-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Rust handshake");
+    client.send("schema", Buffer.from("ts-rust-client-state"));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Rust RUDP response frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("rust-server-state"));
+
+    const [exitCode] = await withTimeout(once(rustPeer.child, "exit"), 2_000, "Rust RUDP peer exit");
+    assert.equal(exitCode, 0, rustPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (rustPeer.child.exitCode === null && !rustPeer.child.killed) {
+      rustPeer.child.kill("SIGTERM");
+      await once(rustPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet Rust and TypeScript exchange schema frames when Rust dials a TypeScript RUDP server", async () => {
+  await buildRustInteropPeer();
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-rust-rudp-server-interop",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0x88664422,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
   });
+  const rustClient = spawnRustRudpClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Rust RUDP client frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("rust-client-state"));
+    server.send("schema", Buffer.from("ts-rust-server-state"));
+
+    const [exitCode] = await withTimeout(once(rustClient.child, "exit"), 2_000, "Rust RUDP client exit");
+    assert.equal(exitCode, 0, rustClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (rustClient.child.exitCode === null && !rustClient.child.killed) {
+      rustClient.child.kill("SIGTERM");
+      await once(rustClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+async function buildInteropPeers(): Promise<void> {
+  await buildRustInteropPeer();
   await execFileAsync(dotnetCommand, ["build", csharpProjectPath, "-nologo"], {
     cwd: cultLibRoot,
+  });
+}
+
+async function buildRustInteropPeer(): Promise<void> {
+  await execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
+    cwd: cultnetRsRoot,
   });
 }
 
@@ -928,10 +1008,79 @@ function spawnPythonRudpPeer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
+function spawnRustRudpServer(): RunningPythonRudpPeer {
+  const child = spawn(rustBinaryPath, ["rudp-serve-once", "--bind-host", "127.0.0.1"], {
+    cwd: cultnetRsRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { status?: string; port?: number };
+          if (parsed.status === "ready" && typeof parsed.port === "number") {
+            resolveReady(parsed.port);
+          } else if (parsed.status !== "ok") {
+            rejectReady(new Error(`Rust RUDP peer emitted unexpected stdout: ${line}`));
+          }
+        } catch (error) {
+          rejectReady(new Error(`Rust RUDP peer emitted non-JSON stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Rust RUDP peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnRustRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(rustBinaryPath, [
+    "rudp-dial-once",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(remotePort),
+  ], {
+    cwd: cultnetRsRoot,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];

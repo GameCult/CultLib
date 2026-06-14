@@ -172,14 +172,14 @@ Current progress:
   Rust, Python, and Kotlin expose the same transport frame/stats shape through
   synchronous socket polling.
 - The TypeScript interop harness now proves bidirectional cross-runtime RUDP
-  socket exchange with Python: TypeScript can dial a Python UDP peer, Python can
-  dial a TypeScript UDP peer, and both sides exchange reliable ordered `schema`
-  frames through the shared handshake and packet language.
+  socket exchange with Python and Rust: TypeScript can dial those UDP peers,
+  Python and Rust can dial a TypeScript UDP peer, and all sides exchange
+  reliable ordered `schema` frames through the shared handshake and packet
+  language.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop beyond the first TS/Python proof into the
-  full C#/TS/Rust/Python/Kotlin loss, reordering, fragmentation, reconnect, and
-  schema-message matrix.
+  ports, then broaden RUDP interop into the full C#/TS/Rust/Python/Kotlin loss,
+  reordering, fragmentation, reconnect, and schema-message matrix.
 
 ## RUDP Packet Contract V0
 
