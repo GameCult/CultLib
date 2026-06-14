@@ -20,6 +20,7 @@ dependencies = ["msgpack>=1.0"]
 
 [project.optional-dependencies]
 msgpack = ["msgpack>=1.0"]
+crypto = ["cryptography>=42"]
 
 [project.scripts]
 cultcache-py-interop = "cultcache_py.interop:main"

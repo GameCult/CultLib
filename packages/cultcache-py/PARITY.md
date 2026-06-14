@@ -39,6 +39,16 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   `cultnet.error.v0`, and the local server advertises that version in hello
   responses because oversized snapshots and other peer failures use that
   contract on the wire.
+- Python CultNet security/session primitives:
+  `CultNetClientSecurityOptions`, `CultNetServerSecurityOptions`, and
+  `CultNetSecret` mirror the C#/TS connection-key, server signing-secret,
+  development-default, environment-validation, base64url, and HMAC-SHA256
+  session-token helper surface. Python creates C#-compatible versioned session
+  tokens with `userGuidN|expiresUnix|sessionVersion` payloads and still
+  validates legacy two-field tokens with session version `0`. AES-GCM string
+  and byte helpers use the same tag-prefix payload shape when the optional
+  `cryptography` dependency is available; without that dependency they fail
+  explicitly instead of pretending plaintext is secure.
 - Python CultNet shard catalog:
   Provides typed `CultNetShardCatalog` and `CultNetShardDescriptor` helpers for
   ingesting, filtering, and emitting shard topology responses, plus
@@ -251,8 +261,9 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   workload. It has a measured local baseline plus a shared public `CultCache`
   upsert/get comparison harness with threshold status, not a universal
   performance victory certificate.
-- Python does not own LiteNetLib security/session behavior; it speaks the
-  schema-v0 interop lane used by the package harness.
+- Python does not implement the full LiteNetLib client/server auth flow. It now
+  owns the shared security/session primitives for helper parity, while the live
+  transport harness still speaks the schema-v0 interop lane.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

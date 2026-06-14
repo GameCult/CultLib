@@ -149,7 +149,11 @@ member order.
 `cultnet_py` provides the Python schema-v0 wire helpers and an interop peer:
 
 ```python
+from datetime import UTC, datetime
+
 from cultnet_py import (
+    CultNetSecret,
+    CultNetServerSecurityOptions,
     CultNetRawClient,
     CultNetSimulationObservation,
     CultNetWitnessArtifactBundle,
@@ -205,7 +209,19 @@ witness = witness_artifact_bundle(
 )
 typed_witness = CultNetWitnessArtifactBundle.from_wire(witness)
 witness_payload = typed_witness.to_payload()
+
+security = CultNetServerSecurityOptions.development()
+token = CultNetSecret.create_session_token(
+    "318fb4b6-ff5e-4c4f-b911-d81807de53a8",
+    datetime(2035, 1, 1, tzinfo=UTC),
+    security,
+    session_version=1,
+)
+session = CultNetSecret.try_validate_session_token(token, security)
 ```
+
+AES-GCM string/byte encryption helpers are available through the same
+`CultNetSecret` surface when the optional `crypto` extra is installed.
 
 The peer can serve, dial, and probe the same raw-state interop lane used by the
 TypeScript, Rust, and C# test peers:

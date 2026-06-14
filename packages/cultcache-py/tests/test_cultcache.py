@@ -9,6 +9,8 @@ import tempfile
 import threading
 import time
 import unittest
+import hashlib
+import hmac
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,6 +55,9 @@ from cultnet_py import (
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
     CultNetPeerError,
+    CultNetClientSecurityOptions,
+    CultNetSecret,
+    CultNetServerSecurityOptions,
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
     CultNetShardMutationLogStore,
@@ -412,6 +417,95 @@ class CultCacheTests(unittest.TestCase):
         by_name = {check["name"]: check for check in result["checks"]}
         self.assertEqual(by_name["public_exports"]["missing"], {})
         self.assertEqual(by_name["cultmesh_capability_truth"]["failures"], [])
+
+    def test_cultnet_security_options_match_cultlib_defaults_and_environment_rules(self) -> None:
+        client = CultNetClientSecurityOptions.development()
+        server = CultNetServerSecurityOptions.development()
+
+        self.assertEqual(client.connection_key, "gamecult-dev-connection-key")
+        self.assertEqual(server.connection_key, "gamecult-dev-connection-key")
+        self.assertTrue(server.is_development)
+        self.assertEqual(server.to_client_options().connection_key, client.connection_key)
+        self.assertEqual(client.encryption_key(), hashlib.sha256(b"gamecult-dev-connection-key").digest())
+        self.assertEqual(server.session_signing_key(), hashlib.sha256(b"gamecult-dev-session-signing-secret").digest())
+        self.assertEqual(
+            CultNetServerSecurityOptions.from_environment({}, allow_development_defaults=True),
+            server,
+        )
+        with self.assertRaisesRegex(ValueError, "not configured"):
+            CultNetServerSecurityOptions.from_environment({})
+        with self.assertRaisesRegex(ValueError, "GAMECULT_SESSION_SIGNING_SECRET"):
+            CultNetServerSecurityOptions.from_environment({"GAMECULT_CONNECTION_KEY": "key"})
+        configured = CultNetServerSecurityOptions.from_environment({
+            "GAMECULT_CONNECTION_KEY": "prod-key",
+            "GAMECULT_SESSION_SIGNING_SECRET": "prod-secret",
+        })
+        self.assertEqual(configured.connection_key, "prod-key")
+        self.assertFalse(configured.is_development)
+
+    def test_cultnet_secret_helpers_validate_csharp_versioned_session_tokens(self) -> None:
+        security = CultNetServerSecurityOptions("connection-key", "session-secret")
+        user_id = uuid4()
+        expires = datetime(2035, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+        token = CultNetSecret.create_session_token(user_id, expires, security, session_version=7)
+        payload_b64, signature_b64 = token.split(".")
+        self.assertEqual(
+            CultNetSecret.from_base64url(payload_b64).decode("utf-8"),
+            f"{user_id.hex}|{int(expires.timestamp())}|7",
+        )
+        self.assertEqual(
+            CultNetSecret.from_base64url(signature_b64),
+            hmac.new(
+                hashlib.sha256(b"session-secret").digest(),
+                CultNetSecret.from_base64url(payload_b64),
+                hashlib.sha256,
+            ).digest(),
+        )
+
+        validated = CultNetSecret.try_validate_session_token(
+            token,
+            security,
+            now_utc=datetime(2035, 1, 2, 3, 4, 4, tzinfo=UTC),
+        )
+        self.assertIsNotNone(validated)
+        assert validated is not None
+        self.assertEqual(validated.user_id, user_id)
+        self.assertEqual(validated.expires_at_utc, expires)
+        self.assertEqual(validated.session_version, 7)
+
+        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+        self.assertIsNone(CultNetSecret.try_validate_session_token(tampered, security))
+        self.assertIsNone(CultNetSecret.try_validate_session_token(token, security, now_utc=expires))
+
+    def test_cultnet_secret_helpers_validate_legacy_two_field_session_tokens(self) -> None:
+        security = CultNetServerSecurityOptions.development()
+        user_id = uuid4()
+        expires_at_seconds = int(datetime(2036, 1, 1, tzinfo=UTC).timestamp())
+        payload = f"{user_id.hex}|{expires_at_seconds}".encode("utf-8")
+        signature = hmac.new(security.session_signing_key(), payload, hashlib.sha256).digest()
+        token = f"{CultNetSecret.to_base64url(payload)}.{CultNetSecret.to_base64url(signature)}"
+
+        validated = CultNetSecret.try_validate_session_token(
+            token,
+            security,
+            now_utc=datetime(2035, 12, 31, tzinfo=UTC),
+        )
+
+        self.assertIsNotNone(validated)
+        assert validated is not None
+        self.assertEqual(validated.user_id, user_id)
+        self.assertEqual(validated.session_version, 0)
+
+    def test_cultnet_secret_encryption_helpers_are_optional_without_crypto_dependency(self) -> None:
+        nonce = b"123456789012"
+        security = CultNetServerSecurityOptions.development()
+        try:
+            encrypted = CultNetSecret.encrypt_string("hello", nonce, security.to_client_options())
+        except ImportError as exc:
+            self.assertIn("cryptography", str(exc))
+            return
+        self.assertEqual(CultNetSecret.decrypt_string(encrypted, nonce, security), "hello")
 
     def test_cultnet_schema_message_frame_round_trip(self) -> None:
         message = hello(runtime_id="python-test", supported_schema_versions=["cultnet.hello.v0"])
