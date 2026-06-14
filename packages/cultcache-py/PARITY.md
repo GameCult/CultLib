@@ -202,7 +202,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh session watches:
   `CultMeshGameSession.watch_candidates(...)` and
   `watch_simulation_facts(...)` expose the same gameplay-facing observation and
-  committed-fact watch points as the C# session facade.
+  committed-fact watch points as the C# session facade. A game session can also
+  serve its own Verse catalog, peer catalog, and simulation observation hub over
+  the local framed CultMesh server so peer-facing session state uses the same
+  wire contracts as lower-level server callers.
 - Python package health:
   `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
   export surface declared by each package `__all__`, `py.typed` markers, a live

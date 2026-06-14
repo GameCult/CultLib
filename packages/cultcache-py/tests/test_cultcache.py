@@ -2132,6 +2132,81 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(stored.claim_hash, claim_hash)
             self.assertEqual(stored.witness_count, 2)
 
+    def test_cultmesh_game_session_serves_catalogs_and_observations_over_wire(self) -> None:
+        verse_catalog = CultMeshVerseCatalog()
+        peer_catalog = CultMeshPeerCatalog()
+        verse_catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="session-verse",
+            display_name="Session Verse",
+            authority_model="local",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "session-rules"),
+        ))
+        peer_catalog.upsert(CultMeshPeerCard(
+            peer_id="session-peer",
+            verse_id="session-verse",
+            endpoints=("cultnet://127.0.0.1:0",),
+            roles=("simulation-observer", "read-replica"),
+            shard_ids=("arena",),
+        ))
+        session = CultMesh.create_game_session(
+            CultMesh.create_node(runtime_id="session-peer"),
+            CultMeshGameSessionOptions(
+                verse_catalog=verse_catalog,
+                peer_catalog=peer_catalog,
+                consensus_options=CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0),
+            ),
+        )
+        server = session.serve(display_name="Session Peer")
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(
+                hello(runtime_id="session-prober"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            peers = discovery_client.fetch_peers(verse_id="session-verse", roles=["simulation-observer"])
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+            first = raw_client.request(
+                simulation_observation(
+                    message_id="session-wire-1",
+                    witness_runtime_id="watcher-1",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+            second = raw_client.request(
+                simulation_observation(
+                    message_id="session-wire-2",
+                    witness_runtime_id="watcher-2",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+        finally:
+            server.stop()
+
+        self.assertIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(verses[0].verse_id, "session-verse")
+        self.assertEqual(peers[0].peer_id, "session-peer")
+        self.assertIn("simulation-observer", peers[0].roles)
+        self.assertFalse(first["hasQuorum"])
+        self.assertEqual(first["witnessCount"], 1)
+        self.assertTrue(second["hasQuorum"])
+        self.assertEqual(second["witnessCount"], 2)
+
     def test_cultmesh_game_session_prediction_requires_scope_and_reconciles_shard_log(self) -> None:
         note_doc = define_database_entry_type(
             "mesh.input",

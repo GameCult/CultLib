@@ -51,6 +51,9 @@ class CultMeshGameSessionOptions:
     authority_leases: CultMeshAuthorityLeaseCatalog | None = None
     consensus_options: CultNetSimulationConsensusOptions | None = None
     client_authority_scopes: tuple[CultNetClientAuthorityScope, ...] = ()
+    serve_verse_discovery: bool = True
+    serve_peer_exchange: bool = True
+    serve_simulation_observations: bool = True
 
 
 @dataclass
@@ -70,6 +73,32 @@ class CultMeshGameSession:
         self._committed_fact_ids: set[str] = set()
         self._client_authority_scopes = tuple(options.client_authority_scopes)
         self._predictions: dict[tuple[str, str], CultMeshPrediction] = {}
+        self._serve_verse_discovery = options.serve_verse_discovery
+        self._serve_peer_exchange = options.serve_peer_exchange
+        self._serve_simulation_observations = options.serve_simulation_observations
+
+    def serve(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        display_name: str | None = None,
+        max_snapshot_documents: int | None = None,
+        max_snapshot_bytes: int | None = None,
+    ) -> Any:
+        from .server import CultMeshLocalServer
+
+        return CultMeshLocalServer(
+            node=self.node,
+            verse_catalog=self.verse_catalog if self._serve_verse_discovery else CultMeshVerseCatalog(),
+            peer_catalog=self.peer_catalog if self._serve_peer_exchange else CultMeshPeerCatalog(),
+            observation_hub=self.observation_hub if self._serve_simulation_observations else None,
+            host=host,
+            port=port,
+            display_name=display_name,
+            max_snapshot_documents=max_snapshot_documents,
+            max_snapshot_bytes=max_snapshot_bytes,
+        ).start()
 
     def predict(self, document: DocumentDefinition[Any], key: str, value: Any) -> CultMeshPrediction:
         schema_id = document.catalog_entry().schema_id
