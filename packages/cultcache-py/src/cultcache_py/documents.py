@@ -89,6 +89,7 @@ class DocumentDefinition(Generic[T]):
     canonical_schema_json: str | None = None
     compatible_schema_ids: tuple[str, ...] = field(default_factory=tuple)
     members: tuple[CultCacheSchemaCatalogMember, ...] = field(default_factory=tuple)
+    _catalog_entry: CultCacheSchemaCatalogEntry | None = field(default=None, init=False, repr=False, compare=False)
 
     def encode_payload(self, value: T) -> bytes:
         if self.validate:
@@ -102,6 +103,8 @@ class DocumentDefinition(Generic[T]):
         return value
 
     def catalog_entry(self) -> CultCacheSchemaCatalogEntry:
+        if self._catalog_entry is not None:
+            return self._catalog_entry
         schema_id = self.schema_id or self.type
         schema_name = self.schema_name or self.type
         schema_version = self.schema_version or f"{schema_name}.v1"
@@ -127,7 +130,7 @@ class DocumentDefinition(Generic[T]):
             separators=(",", ":"),
         )
         compatible_schema_ids = self.compatible_schema_ids or (schema_id,)
-        return CultCacheSchemaCatalogEntry(
+        catalog_entry = CultCacheSchemaCatalogEntry(
             schema_id=schema_id,
             schema_name=schema_name,
             schema_version=schema_version,
@@ -136,6 +139,8 @@ class DocumentDefinition(Generic[T]):
             compatible_schema_ids=tuple(compatible_schema_ids),
             members=tuple(self.members),
         )
+        object.__setattr__(self, "_catalog_entry", catalog_entry)
+        return catalog_entry
 
 
 def define_document_type(

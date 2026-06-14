@@ -190,6 +190,21 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(msgpack.unpackb(payload, raw=False), ["ash", None, 3])
         self.assertEqual(document.decode_payload(msgpack.packb(["ash"], use_bin_type=True)).retries, 0)
 
+    def test_document_catalog_entry_is_cached_after_first_derivation(self) -> None:
+        document = define_database_entry_type(
+            "settings",
+            [
+                ("theme", 0),
+                ("retries", 2, 0),
+            ],
+        )
+
+        first = document.catalog_entry()
+        second = document.catalog_entry()
+
+        self.assertIs(first, second)
+        self.assertEqual([member.slot for member in first.members], [0, 2])
+
     def test_messagepack_store_writes_v1_snapshot(self) -> None:
         try:
             import msgpack  # type: ignore
