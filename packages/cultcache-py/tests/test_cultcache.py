@@ -69,6 +69,9 @@ from cultnet_py import (
     CultNetSimulationObservationHub,
     CultNetRudpPacket,
     CultNetRudpPacketType,
+    CultNetRudpSendOptions,
+    CultNetRudpSession,
+    CultNetRudpSessionOptions,
     TcpFramedTransportConnection,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
@@ -505,7 +508,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(validated.expires_at_utc, expires)
         self.assertEqual(validated.session_version, 7)
 
-        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+        tampered_payload = CultNetSecret.to_base64url(CultNetSecret.from_base64url(payload_b64) + b"tamper")
+        tampered = f"{tampered_payload}.{signature_b64}"
         self.assertIsNone(CultNetSecret.try_validate_session_token(tampered, security))
         self.assertIsNone(CultNetSecret.try_validate_session_token(token, security, now_utc=expires))
 
@@ -644,6 +648,120 @@ class CultCacheTests(unittest.TestCase):
                 ("latest", "unreliable", "sequenced"),
                 ("realtime", "unreliable", "unordered"),
             ],
+        )
+
+    def test_cultnet_rudp_session_handshake_acks_reliable_connect_and_accept_packets(self) -> None:
+        client = CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=0x0A0B0C0D, initial_sequence=1, resend_delay_ms=50)
+        )
+        server = CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=0x0A0B0C0D, initial_sequence=100, resend_delay_ms=50)
+        )
+
+        connect = client.create_connect(0, b"join")
+        self.assertEqual(connect.packet_type, CultNetRudpPacketType.CONNECT)
+        self.assertEqual(connect.sequence, 1)
+        self.assertEqual(client.pending_reliable_sequences, (1,))
+
+        accept = server.accept_connect(connect, 10, b"ok")
+        self.assertEqual(accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        self.assertEqual(accept.ack, 1)
+        self.assertTrue(server.connected)
+        self.assertEqual(server.pending_reliable_sequences, (100,))
+
+        client.receive(accept, 20)
+        self.assertTrue(client.connected)
+        self.assertEqual(client.pending_reliable_sequences, ())
+
+        ack = client.create_ack()
+        self.assertEqual(ack.ack, 100)
+        server.receive(ack, 30)
+        self.assertEqual(server.pending_reliable_sequences, ())
+
+    def test_cultnet_rudp_session_computes_ack_masks_and_clears_pending_reliable_packets(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=7, initial_sequence=10, resend_delay_ms=100))
+        receiver = CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=7, initial_sequence=200, resend_delay_ms=100)
+        )
+        sender.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 7, 1, 0, 0, "control")
+        )
+        receiver.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 7, 2, 0, 0, "control")
+        )
+
+        first = sender.send(
+            "schema",
+            b"first",
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=0),
+        )
+        second = sender.send(
+            "schema",
+            b"second",
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=0),
+        )
+        third = sender.send(
+            "schema",
+            b"third",
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=0),
+        )
+        self.assertEqual(sender.pending_reliable_sequences, (10, 11, 12))
+
+        receiver.receive(first)
+        receiver.receive(third)
+        ack_with_gap = receiver.create_ack()
+        self.assertEqual(ack_with_gap.ack, 12)
+        self.assertEqual(ack_with_gap.ack_mask, 0b10 | (1 << 9))
+        sender.receive(ack_with_gap)
+        self.assertEqual(sender.pending_reliable_sequences, (11,))
+
+        receiver.receive(second)
+        full_ack = receiver.create_ack()
+        self.assertEqual(full_ack.ack, 12)
+        self.assertEqual(full_ack.ack_mask, 0b11 | (1 << 9))
+        sender.receive(full_ack)
+        self.assertEqual(sender.pending_reliable_sequences, ())
+
+    def test_cultnet_rudp_session_schedules_reliable_resends_until_acked(self) -> None:
+        session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=99, initial_sequence=1, resend_delay_ms=100))
+        session.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 99, 50, 0, 0, "control")
+        )
+        sent = session.send(
+            "schema",
+            b"payload",
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=10),
+        )
+
+        self.assertEqual(session.due_resends(90), ())
+        self.assertEqual(tuple(packet.sequence for packet in session.due_resends(110)), (sent.sequence,))
+        self.assertEqual(session.due_resends(150), ())
+
+        session.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACK, 99, 51, sent.sequence, 0, "control")
+        )
+        self.assertEqual(session.due_resends(250), ())
+
+    def test_cultnet_rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=100))
+        sender.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 90, 0, 0, "control")
+        )
+        receiver.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 91, 0, 0, "control")
+        )
+
+        first = sender.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
+        second = sender.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))
+        third = sender.send("schema", b"third", CultNetRudpSendOptions(reliable=True, ordered=True))
+
+        self.assertEqual([frame.payload.decode("utf-8") for frame in receiver.receive(first).delivered], ["first"])
+        self.assertEqual(receiver.receive(third).delivered, ())
+        self.assertEqual(receiver.receive(first).delivered, ())
+        self.assertEqual(
+            [frame.payload.decode("utf-8") for frame in receiver.receive(second).delivered],
+            ["second", "third"],
         )
 
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:

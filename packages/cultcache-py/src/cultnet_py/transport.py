@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, BinaryIO
 
@@ -90,6 +90,40 @@ class CultNetRudpPacket:
     payload: bytes = b""
 
 
+@dataclass(frozen=True)
+class CultNetRudpDeliveredFrame:
+    channel_id: str
+    payload: bytes
+    sequence: int
+
+
+@dataclass(frozen=True)
+class CultNetRudpReceiveResult:
+    delivered: tuple[CultNetRudpDeliveredFrame, ...] = field(default_factory=tuple)
+    reply: CultNetRudpPacket | None = None
+
+
+@dataclass(frozen=True)
+class CultNetRudpSessionOptions:
+    connection_id: int
+    initial_sequence: int = 1
+    resend_delay_ms: int = 250
+
+
+@dataclass(frozen=True)
+class CultNetRudpSendOptions:
+    reliable: bool = False
+    ordered: bool = False
+    sequenced: bool = False
+    now_ms: int = 0
+
+
+@dataclass
+class _PendingReliablePacket:
+    packet: CultNetRudpPacket
+    last_sent_at_ms: int
+
+
 _RUDP_PACKET_TYPE_TO_CODE = {
     CultNetRudpPacketType.CONNECT: 1,
     CultNetRudpPacketType.ACCEPT: 2,
@@ -143,6 +177,230 @@ def create_rudp_transport_profile(
         "runtimeId": runtime_id,
         "transports": [transport],
     }
+
+
+class CultNetRudpSession:
+    def __init__(self, options: CultNetRudpSessionOptions) -> None:
+        self.connection_id = _uint32(options.connection_id, "connection_id")
+        self.resend_delay_ms = options.resend_delay_ms
+        self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
+        self._connected = False
+        self._highest_received_sequence: int | None = None
+        self._received_sequences: set[int] = set()
+        self._pending_reliable: dict[int, _PendingReliablePacket] = {}
+        self._ordered_next_sequence_by_channel: dict[str, int] = {}
+        self._ordered_buffers: dict[str, dict[int, CultNetRudpDeliveredFrame]] = {}
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def pending_reliable_sequences(self) -> tuple[int, ...]:
+        return tuple(sorted(self._pending_reliable))
+
+    def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
+        packet = self._create_packet(
+            CultNetRudpPacketType.CONNECT,
+            "control",
+            payload,
+            reliable=True,
+            ordered=True,
+        )
+        self._track_reliable(packet, now_ms)
+        return packet
+
+    def accept_connect(
+        self,
+        packet: CultNetRudpPacket,
+        now_ms: int = 0,
+        payload: bytes = b"",
+    ) -> CultNetRudpPacket:
+        self._require_connection(packet)
+        if packet.packet_type != CultNetRudpPacketType.CONNECT:
+            raise ValueError(f"Expected RUDP connect packet, got {packet.packet_type.value}")
+
+        self._remember_received(packet.sequence)
+        self._connected = True
+        response = self._create_packet(
+            CultNetRudpPacketType.ACCEPT,
+            "control",
+            payload,
+            reliable=True,
+            ordered=True,
+        )
+        self._track_reliable(response, now_ms)
+        return response
+
+    def send(
+        self,
+        channel_id: str,
+        payload: bytes,
+        options: CultNetRudpSendOptions | None = None,
+    ) -> CultNetRudpPacket:
+        if not self._connected:
+            raise ValueError("Cannot send RUDP data before the session is connected")
+
+        options = options or CultNetRudpSendOptions()
+        packet = self._create_packet(
+            CultNetRudpPacketType.DATA,
+            channel_id,
+            payload,
+            reliable=options.reliable,
+            ordered=options.ordered,
+            sequenced=options.sequenced,
+        )
+        if packet.reliable:
+            self._track_reliable(packet, options.now_ms)
+        return packet
+
+    def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
+        del now_ms
+        self._require_connection(packet)
+        self._apply_acknowledgements(packet)
+
+        if packet.packet_type == CultNetRudpPacketType.ACCEPT:
+            self._remember_received(packet.sequence)
+            self._connected = True
+            return CultNetRudpReceiveResult()
+
+        if packet.packet_type == CultNetRudpPacketType.PING:
+            self._remember_received(packet.sequence)
+            return CultNetRudpReceiveResult(
+                reply=self._create_packet(CultNetRudpPacketType.PONG, "control", packet.payload)
+            )
+
+        if packet.packet_type in (CultNetRudpPacketType.ACK, CultNetRudpPacketType.PONG):
+            self._remember_received(packet.sequence)
+            return CultNetRudpReceiveResult()
+
+        if packet.packet_type != CultNetRudpPacketType.DATA:
+            return CultNetRudpReceiveResult()
+
+        duplicate = packet.sequence in self._received_sequences
+        self._remember_received(packet.sequence)
+        if duplicate:
+            return CultNetRudpReceiveResult()
+
+        frame = CultNetRudpDeliveredFrame(
+            channel_id=packet.channel_id,
+            payload=bytes(packet.payload),
+            sequence=packet.sequence,
+        )
+        if not packet.ordered:
+            return CultNetRudpReceiveResult(delivered=(frame,))
+        return CultNetRudpReceiveResult(delivered=tuple(self._deliver_ordered(frame)))
+
+    def create_ack(self) -> CultNetRudpPacket:
+        return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
+
+    def due_resends(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
+        due: list[CultNetRudpPacket] = []
+        for pending in self._pending_reliable.values():
+            if now_ms - pending.last_sent_at_ms >= self.resend_delay_ms:
+                pending.last_sent_at_ms = now_ms
+                due.append(pending.packet)
+        return tuple(sorted(due, key=lambda packet: packet.sequence))
+
+    def _create_packet(
+        self,
+        packet_type: CultNetRudpPacketType,
+        channel_id: str,
+        payload: bytes,
+        *,
+        reliable: bool = False,
+        ordered: bool = False,
+        sequenced: bool = False,
+    ) -> CultNetRudpPacket:
+        sequence = self._next_sequence
+        self._next_sequence = _uint32(self._next_sequence + 1, "sequence")
+        ack, ack_mask = self._ack_state()
+        return CultNetRudpPacket(
+            packet_type=packet_type,
+            connection_id=self.connection_id,
+            sequence=sequence,
+            ack=ack,
+            ack_mask=ack_mask,
+            channel_id=channel_id,
+            reliable=reliable,
+            ordered=ordered,
+            sequenced=sequenced,
+            payload=bytes(payload),
+        )
+
+    def _track_reliable(self, packet: CultNetRudpPacket, now_ms: int) -> None:
+        self._pending_reliable[packet.sequence] = _PendingReliablePacket(
+            packet=CultNetRudpPacket(
+                packet_type=packet.packet_type,
+                connection_id=packet.connection_id,
+                sequence=packet.sequence,
+                ack=packet.ack,
+                ack_mask=packet.ack_mask,
+                channel_id=packet.channel_id,
+                reliable=packet.reliable,
+                ordered=packet.ordered,
+                sequenced=packet.sequenced,
+                fragment_id=packet.fragment_id,
+                fragment_index=packet.fragment_index,
+                fragment_count=packet.fragment_count,
+                payload=bytes(packet.payload),
+            ),
+            last_sent_at_ms=now_ms,
+        )
+
+    def _apply_acknowledgements(self, packet: CultNetRudpPacket) -> None:
+        self._pending_reliable.pop(packet.ack, None)
+        for bit in range(32):
+            if packet.ack_mask & (1 << bit):
+                self._pending_reliable.pop(packet.ack - bit - 1, None)
+
+    def _remember_received(self, sequence: int) -> None:
+        self._received_sequences.add(sequence)
+        if self._highest_received_sequence is None or sequence > self._highest_received_sequence:
+            self._highest_received_sequence = sequence
+
+    def _ack_state(self) -> tuple[int, int]:
+        ack = self._highest_received_sequence or 0
+        ack_mask = 0
+        for bit in range(32):
+            if ack > bit and (ack - bit - 1) in self._received_sequences:
+                ack_mask |= 1 << bit
+        return ack, ack_mask
+
+    def _deliver_ordered(self, frame: CultNetRudpDeliveredFrame) -> list[CultNetRudpDeliveredFrame]:
+        next_sequence = self._ordered_next_sequence_by_channel.get(frame.channel_id)
+        if next_sequence is None:
+            self._ordered_next_sequence_by_channel[frame.channel_id] = frame.sequence + 1
+            return [frame, *self._drain_ordered(frame.channel_id)]
+        if frame.sequence < next_sequence:
+            return []
+        if frame.sequence > next_sequence:
+            self._ordered_buffers.setdefault(frame.channel_id, {})[frame.sequence] = frame
+            return []
+
+        self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence + 1
+        return [frame, *self._drain_ordered(frame.channel_id)]
+
+    def _drain_ordered(self, channel_id: str) -> list[CultNetRudpDeliveredFrame]:
+        delivered: list[CultNetRudpDeliveredFrame] = []
+        buffer = self._ordered_buffers.get(channel_id)
+        if buffer is None:
+            return delivered
+
+        while True:
+            next_sequence = self._ordered_next_sequence_by_channel[channel_id]
+            frame = buffer.pop(next_sequence, None)
+            if frame is None:
+                break
+            delivered.append(frame)
+            self._ordered_next_sequence_by_channel[channel_id] = next_sequence + 1
+        return delivered
+
+    def _require_connection(self, packet: CultNetRudpPacket) -> None:
+        if packet.connection_id != self.connection_id:
+            raise ValueError(
+                f"RUDP packet belongs to connection {packet.connection_id}, expected {self.connection_id}"
+            )
 
 
 def encode_rudp_packet(packet: CultNetRudpPacket) -> bytes:

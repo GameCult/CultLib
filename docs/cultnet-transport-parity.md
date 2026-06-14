@@ -26,9 +26,9 @@ CultNet owns cross-runtime transport semantics:
 | --- | --- | --- | --- |
 | C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered` | LiteNetLib connection requests and app-level peer/catalog surfaces | C# owns the production-shaped realtime semantics |
 | C# interop peer | TCP stream with 4-byte length-prefixed MessagePack frames | UDP multicast probe/announce | Test harness only |
-| TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`; interop uses TCP | UDP multicast probe/announce in the interop peer | Byte-stream abstraction; no UDP reliability owner |
-| Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames | UDP multicast probe/announce | Example harness; no UDP reliability owner |
-| Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client | Endpoint lists and CultMesh peer/Verse catalogs | Local framed service body; no UDP reliability owner |
+| TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`; interop uses TCP | UDP multicast probe/announce in the interop peer | Byte-stream abstraction plus socket-free RUDP reliability owner; no UDP socket binding yet |
+| Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames | UDP multicast probe/announce | Example harness plus socket-free RUDP reliability owner; no UDP socket binding yet |
+| Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client | Endpoint lists and CultMesh peer/Verse catalogs | Local framed service body plus socket-free RUDP reliability owner; no UDP socket binding yet |
 | Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket | None found in the live package | Thin client surface |
 
 The live split is therefore: payload language is converging, transport language
@@ -160,15 +160,15 @@ Current progress:
   the RUDP runtime yet; it is the binary packet language the runtimes must
   converge on before resend loops, windows, and timeout behavior are allowed to
   claim parity.
-- TypeScript, C#, and Rust now share the first deterministic RUDP reliability state
-  machine: connect/accept handshake, packet-level ack/ack-mask accounting,
-  reliable resend scheduling, duplicate suppression, and reliable ordered
-  channel delivery. It is in-memory and socket-free so the behavior can be
-  ported before any runtime binds it to UDP I/O.
+- TypeScript, C#, Rust, and Python now share the first deterministic RUDP
+  reliability state machine: connect/accept handshake, packet-level
+  ack/ack-mask accounting, reliable resend scheduling, duplicate suppression,
+  and reliable ordered channel delivery. It is in-memory and socket-free so the
+  behavior can be tested before any runtime binds it to UDP I/O.
 - The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
-  TCP/LiteNetLib/WebSocket bodies behind those ports, port the RUDP reliability
-  state machine into Python, then bind it to UDP sockets.
+  TCP/LiteNetLib/WebSocket bodies behind those ports, then bind the shared RUDP
+  reliability state machine to UDP sockets.
 
 ## RUDP Packet Contract V0
 
