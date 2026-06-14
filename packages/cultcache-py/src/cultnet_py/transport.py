@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import socket
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, BinaryIO
@@ -116,6 +119,25 @@ class CultNetRudpSendOptions:
     ordered: bool = False
     sequenced: bool = False
     now_ms: int = 0
+
+
+class CultNetRudpSocketMode(str, Enum):
+    CLIENT = "client"
+    SERVER = "server"
+
+
+@dataclass(frozen=True)
+class CultNetRudpSocketTransportOptions:
+    runtime_id: str
+    socket: socket.socket
+    mode: CultNetRudpSocketMode
+    connection_id: int
+    remote_addr: tuple[str, int] | None = None
+    initial_sequence: int = 1
+    resend_delay_ms: int = 250
+    transport_id: str = "rudp"
+    max_payload_bytes: int | None = None
+    max_fragment_bytes: int | None = None
 
 
 @dataclass
@@ -403,6 +425,116 @@ class CultNetRudpSession:
             )
 
 
+class CultNetRudpSocketTransportConnection:
+    def __init__(self, options: CultNetRudpSocketTransportOptions) -> None:
+        self.socket = options.socket
+        self.mode = CultNetRudpSocketMode(options.mode)
+        self.remote_addr = options.remote_addr
+        self.session = CultNetRudpSession(
+            CultNetRudpSessionOptions(
+                connection_id=options.connection_id,
+                initial_sequence=options.initial_sequence,
+                resend_delay_ms=options.resend_delay_ms,
+            )
+        )
+        host, port = self.socket.getsockname()[:2]
+        self.profile = create_rudp_transport_profile(
+            options.runtime_id,
+            transport_id=options.transport_id,
+            host=host,
+            port=port,
+            max_payload_bytes=options.max_payload_bytes,
+            max_fragment_bytes=options.max_fragment_bytes,
+        )
+        self._bytes_received = 0
+        self._bytes_sent = 0
+        self._frames_received = 0
+        self._frames_sent = 0
+        self._delivered_frames: deque[CultNetTransportFrame] = deque()
+        self._closed = False
+
+    @property
+    def connected(self) -> bool:
+        return self.session.connected
+
+    @property
+    def stats(self) -> CultNetTransportStats:
+        return CultNetTransportStats(
+            bytes_received=self._bytes_received,
+            bytes_sent=self._bytes_sent,
+            frames_received=self._frames_received,
+            frames_sent=self._frames_sent,
+        )
+
+    def connect(self, payload: bytes = b"") -> None:
+        if self.mode != CultNetRudpSocketMode.CLIENT:
+            raise ValueError("Only a client RUDP socket transport can initiate connect")
+        self._send_packet(self.session.create_connect(_now_ms(), payload))
+
+    def send(self, channel_id: str, payload: bytes) -> None:
+        packet = self.session.send(
+            channel_id,
+            payload,
+            _channel_send_options(channel_id, _now_ms()),
+        )
+        self._send_packet(packet)
+        self._frames_sent += 1
+
+    def receive_once(self) -> CultNetTransportFrame | None:
+        if self._delivered_frames:
+            return self._delivered_frames.popleft()
+
+        try:
+            wire, remote_addr = self.socket.recvfrom(65535)
+        except TimeoutError:
+            return None
+        except BlockingIOError:
+            return None
+        self._bytes_received += len(wire)
+
+        if self.remote_addr is None:
+            self.remote_addr = remote_addr
+        elif remote_addr != self.remote_addr:
+            return None
+
+        packet = decode_rudp_packet(wire)
+        if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type == CultNetRudpPacketType.CONNECT:
+            self._send_packet(self.session.accept_connect(packet, _now_ms()))
+            return None
+
+        result = self.session.receive(packet, _now_ms())
+        if result.reply is not None:
+            self._send_packet(result.reply)
+
+        for frame in result.delivered:
+            self._delivered_frames.append(
+                CultNetTransportFrame(channel_id=frame.channel_id, payload=frame.payload)
+            )
+            self._frames_received += 1
+
+        frame = self._delivered_frames.popleft() if self._delivered_frames else None
+        if packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
+            self._send_packet(self.session.create_ack())
+        return frame
+
+    def poll_resends(self) -> None:
+        for packet in self.session.due_resends(_now_ms()):
+            self._send_packet(packet)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.socket.close()
+
+    def _send_packet(self, packet: CultNetRudpPacket) -> None:
+        if self.remote_addr is None:
+            raise ValueError("RUDP socket transport does not have a remote endpoint")
+        wire = encode_rudp_packet(packet)
+        sent = self.socket.sendto(wire, self.remote_addr)
+        self._bytes_sent += sent
+
+
 def encode_rudp_packet(packet: CultNetRudpPacket) -> bytes:
     channel_id = packet.channel_id.encode("utf-8")
     if len(channel_id) > MAX_RUDP_CHANNEL_ID_BYTES:
@@ -489,6 +621,18 @@ def _uint16(value: int, field_name: str) -> int:
     if value < 0 or value > 0xFFFF:
         raise ValueError(f"CultNet RUDP {field_name} must fit in uint16")
     return value
+
+
+def _channel_send_options(channel_id: str, now_ms: int) -> CultNetRudpSendOptions:
+    if channel_id == "schema":
+        return CultNetRudpSendOptions(reliable=True, ordered=True, sequenced=False, now_ms=now_ms)
+    if channel_id == "latest":
+        return CultNetRudpSendOptions(reliable=False, ordered=False, sequenced=True, now_ms=now_ms)
+    return CultNetRudpSendOptions(reliable=False, ordered=False, sequenced=False, now_ms=now_ms)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 class TcpFramedTransportConnection:

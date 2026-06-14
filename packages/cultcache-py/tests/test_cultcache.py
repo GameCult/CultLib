@@ -72,6 +72,9 @@ from cultnet_py import (
     CultNetRudpSendOptions,
     CultNetRudpSession,
     CultNetRudpSessionOptions,
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
     TcpFramedTransportConnection,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
@@ -136,6 +139,36 @@ from cultmesh_py import (
     simulation_fact_document,
     verse_catalog_request,
 )
+
+
+def bind_udp_socket() -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(0.02)
+    return sock
+
+
+def pump_rudp_handshake(
+    client: CultNetRudpSocketTransportConnection,
+    server: CultNetRudpSocketTransportConnection,
+) -> None:
+    for _ in range(20):
+        server.receive_once()
+        client.receive_once()
+        server.receive_once()
+        if client.connected and server.connected:
+            return
+        time.sleep(0.005)
+    raise AssertionError("RUDP socket handshake did not complete")
+
+
+def receive_rudp_frame(transport: CultNetRudpSocketTransportConnection):
+    for _ in range(20):
+        frame = transport.receive_once()
+        if frame is not None:
+            return frame
+        time.sleep(0.005)
+    raise AssertionError("RUDP socket frame was not delivered")
 
 
 @dataclass
@@ -763,6 +796,54 @@ class CultCacheTests(unittest.TestCase):
             [frame.payload.decode("utf-8") for frame in receiver.receive(second).delivered],
             ["second", "third"],
         )
+
+    def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
+        server_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        connection_id = 0x10203040
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+                initial_sequence=100,
+                resend_delay_ms=25,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+                initial_sequence=1,
+                resend_delay_ms=25,
+            )
+        )
+
+        try:
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            self.assertTrue(client.connected)
+            self.assertTrue(server.connected)
+
+            client.send("schema", b"client-state")
+            server_frame = receive_rudp_frame(server)
+            self.assertEqual(server_frame.channel_id, "schema")
+            self.assertEqual(server_frame.payload, b"client-state")
+
+            server.send("schema", b"server-state")
+            client_frame = receive_rudp_frame(client)
+            self.assertEqual(client_frame.channel_id, "schema")
+            self.assertEqual(client_frame.payload, b"server-state")
+            self.assertEqual(server.profile["transports"][0]["protocol"], "rudp")
+            self.assertEqual(client.stats.frames_sent, 1)
+            self.assertEqual(server.stats.frames_received, 1)
+        finally:
+            client.close()
+            server.close()
 
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
         subscribe = database_subscribe(
