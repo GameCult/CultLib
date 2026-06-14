@@ -80,10 +80,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   from endpoint lists, de-duplicate discovery targets, fan out one-shot
   discovery from endpoints already advertised in local Verse and peer catalogs,
   fan out raw snapshot fetches and simulation observations to peer-card
-  endpoints, apply peer snapshots through a caller-owned database, run a
-  lightweight scheduled simulation-observation fanout loop, and upsert results
-  into local catalogs with the same count-returning ergonomics as the C#
-  discovery clients.
+  endpoints, apply peer snapshots through a caller-owned database, run
+  lightweight scheduled snapshot and simulation-observation fanout loops, and
+  upsert results into local catalogs with the same count-returning ergonomics
+  as the C# discovery clients.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,

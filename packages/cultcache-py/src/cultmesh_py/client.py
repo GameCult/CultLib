@@ -425,6 +425,65 @@ class CultMeshSimulationObservationFanout:
             self.flush()
 
 
+@dataclass
+class CultMeshSnapshotFanout:
+    client: CultMeshDiscoveryClient
+    database: Any
+    peer_catalog: CultMeshPeerCatalog
+    verse_id: str
+    roles: list[str] | None = None
+    schema_ids: list[str] | None = None
+    record_keys: list[str] | None = None
+    shard_id: str | None = None
+    shard_epoch: int | None = None
+    interval_seconds: float = 1.0
+    on_applied: Callable[[Any], None] | None = None
+    on_error: Callable[[str, Exception], None] | None = None
+    _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def sync_once(self) -> list[Any]:
+        applied = self.client.sync_snapshots(
+            self.database,
+            self.peer_catalog,
+            verse_id=self.verse_id,
+            roles=self.roles,
+            schema_ids=self.schema_ids,
+            record_keys=self.record_keys,
+            shard_id=self.shard_id,
+            shard_epoch=self.shard_epoch,
+            on_error=self.on_error,
+        )
+        for record in applied:
+            if self.on_applied is not None:
+                self.on_applied(record)
+        return applied
+
+    def start(self) -> "CultMeshSnapshotFanout":
+        if self._thread is not None:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.interval_seconds * 2.0))
+            self._thread = None
+
+    def __enter__(self) -> "CultMeshSnapshotFanout":
+        return self.start()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.stop()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.sync_once()
+
+
 def _parse_endpoint(endpoint: str) -> tuple[str, int]:
     if not endpoint or not endpoint.strip():
         raise ValueError("endpoint must be non-empty")

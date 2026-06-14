@@ -91,6 +91,7 @@ from cultmesh_py import (
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
     CultMeshSimulationObservationFanout,
+    CultMeshSnapshotFanout,
     CultMeshStreamCatalog,
     CultMeshStreamConsumerProfile,
     CultMeshStreamDescriptor,
@@ -2702,6 +2703,87 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(sorted(record.record_key for record in applied), ["note:a", "note:b"])
         self.assertEqual(target.database.get_required(document, "note:a")["body"], "from-a")
         self.assertEqual(target.database.get_required(document, "note:b")["body"], "from-b")
+
+    def test_cultmesh_snapshot_fanout_syncs_once_and_reports_applied_records(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_loop_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_loop_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-loop-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:sync-once", {"body": "from-source"})
+        target = CultMesh.create_node(runtime_id="snapshot-loop-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-loop-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_loop_note.v1"],
+                on_applied=lambda record: seen.append(record.record_key),
+            )
+
+            applied = fanout.sync_once()
+        finally:
+            server.stop()
+
+        self.assertEqual([record.record_key for record in applied], ["note:sync-once"])
+        self.assertEqual(seen, ["note:sync-once"])
+        self.assertEqual(target.database.get_required(document, "note:sync-once")["body"], "from-source")
+
+    def test_cultmesh_snapshot_fanout_runs_background_loop(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_background_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_background_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-background-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:background", {"body": "from-background"})
+        target = CultMesh.create_node(runtime_id="snapshot-background-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-background-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_background_note.v1"],
+                interval_seconds=0.05,
+                on_applied=lambda record: seen.append(record.record_key),
+            )
+            fanout.start()
+            deadline = time.monotonic() + 2.0
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            fanout.stop()
+        finally:
+            server.stop()
+
+        self.assertTrue(seen)
+        self.assertEqual(target.database.get_required(document, "note:background")["body"], "from-background")
 
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(

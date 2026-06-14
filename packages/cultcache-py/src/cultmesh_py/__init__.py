@@ -2,6 +2,7 @@ from .client import (
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
     CultMeshSimulationObservationFanout,
+    CultMeshSnapshotFanout,
     CultMeshVerseDiscoveryClient,
 )
 from .facade import CultMesh
@@ -69,6 +70,7 @@ __all__ = [
     "CultMeshDiscoveryClient",
     "CultMeshPeerExchangeClient",
     "CultMeshSimulationObservationFanout",
+    "CultMeshSnapshotFanout",
     "CultMeshVerseDiscoveryClient",
     "CultMeshStreamCatalog",
     "CultMeshStreamConsumerProfile",

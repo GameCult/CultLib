@@ -94,7 +94,8 @@ Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- scheduled peer-to-peer snapshot fanout beyond Python's one-shot client helper
+- cross-runtime scheduled peer-to-peer snapshot fanout beyond Python's local
+  fanout loop
 - cross-runtime scheduled peer-to-peer fanout for observation gossip and
   candidate propagation beyond Python's local fanout loop
 - cross-runtime rollback/resimulation helpers for simulation frames
@@ -149,8 +150,8 @@ Add discovery fanout and operational polish:
   package-local Python HMAC verifier
 - standardize cross-runtime simulation-frame rollback/resimulation helpers beyond
   Python's local pending-prediction rollback surface
-- add scheduled peer-to-peer snapshot fanout beyond Python's one-shot client
-  helper
+- standardize cross-runtime scheduled peer-to-peer snapshot fanout beyond
+  Python's local fanout loop
 - standardize cross-runtime scheduled peer-to-peer fanout for observation gossip
   and candidate propagation beyond Python's local fanout loop
 
