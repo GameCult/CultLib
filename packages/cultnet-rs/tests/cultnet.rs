@@ -13,6 +13,9 @@ use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetRudpPacket;
 use cultnet_rs::CultNetRudpPacketType;
+use cultnet_rs::CultNetRudpSendOptions;
+use cultnet_rs::CultNetRudpSession;
+use cultnet_rs::CultNetRudpSessionOptions;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
@@ -263,6 +266,268 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             ),
         ]
     );
+}
+
+#[test]
+fn rudp_session_handshake_acks_reliable_connect_and_accept_packets() -> Result<()> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 0x0a0b0c0d,
+        initial_sequence: 1,
+        resend_delay_ms: 50,
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 0x0a0b0c0d,
+        initial_sequence: 100,
+        resend_delay_ms: 50,
+    });
+
+    let connect = client.create_connect(0, b"join".to_vec());
+    assert_eq!(connect.packet_type, CultNetRudpPacketType::Connect);
+    assert_eq!(connect.sequence, 1);
+    assert_eq!(client.pending_reliable_sequences(), vec![1]);
+
+    let accept = server.accept_connect(&connect, 10, b"ok".to_vec())?;
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    assert_eq!(accept.ack, 1);
+    assert!(server.connected());
+    assert_eq!(server.pending_reliable_sequences(), vec![100]);
+
+    client.receive(&accept, 20)?;
+    assert!(client.connected());
+    assert!(client.pending_reliable_sequences().is_empty());
+
+    let ack = client.create_ack();
+    assert_eq!(ack.ack, 100);
+    server.receive(&ack, 30)?;
+    assert!(server.pending_reliable_sequences().is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 7,
+        initial_sequence: 10,
+        resend_delay_ms: 100,
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 7,
+        initial_sequence: 200,
+        resend_delay_ms: 100,
+    });
+    sender.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 7,
+            sequence: 1,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    receiver.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 7,
+            sequence: 2,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+
+    let options = CultNetRudpSendOptions {
+        reliable: true,
+        ordered: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    let first = sender.send("schema", b"first".to_vec(), options.clone())?;
+    let second = sender.send("schema", b"second".to_vec(), options.clone())?;
+    let third = sender.send("schema", b"third".to_vec(), options)?;
+    assert_eq!(sender.pending_reliable_sequences(), vec![10, 11, 12]);
+
+    receiver.receive(&first, 0)?;
+    receiver.receive(&third, 0)?;
+    let ack_with_gap = receiver.create_ack();
+    assert_eq!(ack_with_gap.ack, 12);
+    assert_eq!(ack_with_gap.ack_mask, 0b10 | (1 << 9));
+    sender.receive(&ack_with_gap, 0)?;
+    assert_eq!(sender.pending_reliable_sequences(), vec![11]);
+
+    receiver.receive(&second, 0)?;
+    let full_ack = receiver.create_ack();
+    assert_eq!(full_ack.ack, 12);
+    assert_eq!(full_ack.ack_mask, 0b11 | (1 << 9));
+    sender.receive(&full_ack, 0)?;
+    assert!(sender.pending_reliable_sequences().is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 99,
+        initial_sequence: 1,
+        resend_delay_ms: 100,
+    });
+    session.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 99,
+            sequence: 50,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    let sent = session.send(
+        "schema",
+        b"payload".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            now_ms: 10,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+
+    assert!(session.due_resends(90).is_empty());
+    assert_eq!(
+        session
+            .due_resends(110)
+            .iter()
+            .map(|packet| packet.sequence)
+            .collect::<Vec<_>>(),
+        vec![sent.sequence]
+    );
+    assert!(session.due_resends(150).is_empty());
+
+    session.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Ack,
+            connection_id: 99,
+            sequence: 51,
+            ack: sent.sequence,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    assert!(session.due_resends(250).is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_sequence()
+-> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 123,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 123,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    sender.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 123,
+            sequence: 90,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    receiver.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 123,
+            sequence: 91,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+
+    let options = CultNetRudpSendOptions {
+        reliable: true,
+        ordered: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    let first = sender.send("schema", b"first".to_vec(), options.clone())?;
+    let second = sender.send("schema", b"second".to_vec(), options.clone())?;
+    let third = sender.send("schema", b"third".to_vec(), options)?;
+
+    assert_eq!(
+        receiver
+            .receive(&first, 0)?
+            .delivered
+            .iter()
+            .map(|frame| String::from_utf8(frame.payload.clone()).unwrap())
+            .collect::<Vec<_>>(),
+        vec!["first"]
+    );
+    assert!(receiver.receive(&third, 0)?.delivered.is_empty());
+    assert!(receiver.receive(&first, 0)?.delivered.is_empty());
+    assert_eq!(
+        receiver
+            .receive(&second, 0)?
+            .delivered
+            .iter()
+            .map(|frame| String::from_utf8(frame.payload.clone()).unwrap())
+            .collect::<Vec<_>>(),
+        vec!["second", "third"]
+    );
+    Ok(())
 }
 
 #[test]

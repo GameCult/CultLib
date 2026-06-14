@@ -1,5 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
@@ -38,6 +40,400 @@ pub struct CultNetRudpPacket {
     pub fragment_index: u16,
     pub fragment_count: u16,
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultNetRudpDeliveredFrame {
+    pub channel_id: String,
+    pub payload: Vec<u8>,
+    pub sequence: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultNetRudpReceiveResult {
+    pub delivered: Vec<CultNetRudpDeliveredFrame>,
+    pub reply: Option<CultNetRudpPacket>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultNetRudpSessionOptions {
+    pub connection_id: u32,
+    pub initial_sequence: u32,
+    pub resend_delay_ms: u64,
+}
+
+impl Default for CultNetRudpSessionOptions {
+    fn default() -> Self {
+        Self {
+            connection_id: 0,
+            initial_sequence: 1,
+            resend_delay_ms: 250,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CultNetRudpSendOptions {
+    pub reliable: bool,
+    pub ordered: bool,
+    pub sequenced: bool,
+    pub now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingReliablePacket {
+    packet: CultNetRudpPacket,
+    last_sent_at_ms: u64,
+}
+
+pub struct CultNetRudpSession {
+    connection_id: u32,
+    resend_delay_ms: u64,
+    next_sequence: u32,
+    connected: bool,
+    highest_received_sequence: Option<u32>,
+    received_sequences: BTreeSet<u32>,
+    pending_reliable: BTreeMap<u32, PendingReliablePacket>,
+    ordered_next_sequence_by_channel: BTreeMap<String, u32>,
+    ordered_buffers: BTreeMap<String, BTreeMap<u32, CultNetRudpDeliveredFrame>>,
+}
+
+impl CultNetRudpSession {
+    pub fn new(options: CultNetRudpSessionOptions) -> Self {
+        Self {
+            connection_id: options.connection_id,
+            resend_delay_ms: options.resend_delay_ms,
+            next_sequence: options.initial_sequence,
+            connected: false,
+            highest_received_sequence: None,
+            received_sequences: BTreeSet::new(),
+            pending_reliable: BTreeMap::new(),
+            ordered_next_sequence_by_channel: BTreeMap::new(),
+            ordered_buffers: BTreeMap::new(),
+        }
+    }
+
+    pub fn connection_id(&self) -> u32 {
+        self.connection_id
+    }
+
+    pub fn resend_delay_ms(&self) -> u64 {
+        self.resend_delay_ms
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn pending_reliable_sequences(&self) -> Vec<u32> {
+        self.pending_reliable.keys().copied().collect()
+    }
+
+    pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> CultNetRudpPacket {
+        let packet = self.create_packet(
+            CultNetRudpPacketType::Connect,
+            "control",
+            payload,
+            true,
+            true,
+            false,
+        );
+        self.track_reliable(packet.clone(), now_ms);
+        packet
+    }
+
+    pub fn accept_connect(
+        &mut self,
+        packet: &CultNetRudpPacket,
+        now_ms: u64,
+        payload: Vec<u8>,
+    ) -> Result<CultNetRudpPacket> {
+        self.require_connection(packet)?;
+        if packet.packet_type != CultNetRudpPacketType::Connect {
+            return Err(anyhow!(
+                "Expected RUDP connect packet, got {:?}",
+                packet.packet_type
+            ));
+        }
+
+        self.remember_received(packet.sequence);
+        self.connected = true;
+        let response = self.create_packet(
+            CultNetRudpPacketType::Accept,
+            "control",
+            payload,
+            true,
+            true,
+            false,
+        );
+        self.track_reliable(response.clone(), now_ms);
+        Ok(response)
+    }
+
+    pub fn send(
+        &mut self,
+        channel_id: &str,
+        payload: Vec<u8>,
+        options: CultNetRudpSendOptions,
+    ) -> Result<CultNetRudpPacket> {
+        if !self.connected {
+            return Err(anyhow!(
+                "Cannot send RUDP data before the session is connected"
+            ));
+        }
+
+        let packet = self.create_packet(
+            CultNetRudpPacketType::Data,
+            channel_id,
+            payload,
+            options.reliable,
+            options.ordered,
+            options.sequenced,
+        );
+        if packet.reliable {
+            self.track_reliable(packet.clone(), options.now_ms);
+        }
+        Ok(packet)
+    }
+
+    pub fn receive(
+        &mut self,
+        packet: &CultNetRudpPacket,
+        _now_ms: u64,
+    ) -> Result<CultNetRudpReceiveResult> {
+        self.require_connection(packet)?;
+        self.apply_acknowledgements(packet);
+
+        if packet.packet_type == CultNetRudpPacketType::Accept {
+            self.remember_received(packet.sequence);
+            self.connected = true;
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+            });
+        }
+
+        if packet.packet_type == CultNetRudpPacketType::Ping {
+            self.remember_received(packet.sequence);
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: Some(self.create_packet(
+                    CultNetRudpPacketType::Pong,
+                    "control",
+                    packet.payload.clone(),
+                    false,
+                    false,
+                    false,
+                )),
+            });
+        }
+
+        if packet.packet_type == CultNetRudpPacketType::Ack
+            || packet.packet_type == CultNetRudpPacketType::Pong
+        {
+            self.remember_received(packet.sequence);
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+            });
+        }
+
+        if packet.packet_type != CultNetRudpPacketType::Data {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+            });
+        }
+
+        let duplicate = self.received_sequences.contains(&packet.sequence);
+        self.remember_received(packet.sequence);
+        if duplicate {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+            });
+        }
+
+        let frame = CultNetRudpDeliveredFrame {
+            channel_id: packet.channel_id.clone(),
+            payload: packet.payload.clone(),
+            sequence: packet.sequence,
+        };
+        let delivered = if packet.ordered {
+            self.deliver_ordered(frame)
+        } else {
+            vec![frame]
+        };
+        Ok(CultNetRudpReceiveResult {
+            delivered,
+            reply: None,
+        })
+    }
+
+    pub fn create_ack(&mut self) -> CultNetRudpPacket {
+        self.create_packet(
+            CultNetRudpPacketType::Ack,
+            "control",
+            Vec::new(),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn due_resends(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
+        let mut due = Vec::new();
+        for pending in self.pending_reliable.values_mut() {
+            if now_ms.saturating_sub(pending.last_sent_at_ms) >= self.resend_delay_ms {
+                pending.last_sent_at_ms = now_ms;
+                due.push(pending.packet.clone());
+            }
+        }
+        due.sort_by_key(|packet| packet.sequence);
+        due
+    }
+
+    fn create_packet(
+        &mut self,
+        packet_type: CultNetRudpPacketType,
+        channel_id: &str,
+        payload: Vec<u8>,
+        reliable: bool,
+        ordered: bool,
+        sequenced: bool,
+    ) -> CultNetRudpPacket {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("sequence overflow");
+        let (ack, ack_mask) = self.ack_state();
+        CultNetRudpPacket {
+            packet_type,
+            connection_id: self.connection_id,
+            sequence,
+            ack,
+            ack_mask,
+            channel_id: channel_id.to_string(),
+            reliable,
+            ordered,
+            sequenced,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload,
+        }
+    }
+
+    fn track_reliable(&mut self, packet: CultNetRudpPacket, now_ms: u64) {
+        self.pending_reliable.insert(
+            packet.sequence,
+            PendingReliablePacket {
+                packet,
+                last_sent_at_ms: now_ms,
+            },
+        );
+    }
+
+    fn apply_acknowledgements(&mut self, packet: &CultNetRudpPacket) {
+        self.pending_reliable.remove(&packet.ack);
+        for bit in 0..32 {
+            if (packet.ack_mask & (1_u32 << bit)) != 0 && packet.ack > bit {
+                self.pending_reliable.remove(&(packet.ack - bit - 1));
+            }
+        }
+    }
+
+    fn remember_received(&mut self, sequence: u32) {
+        self.received_sequences.insert(sequence);
+        if self
+            .highest_received_sequence
+            .is_none_or(|highest| sequence > highest)
+        {
+            self.highest_received_sequence = Some(sequence);
+        }
+    }
+
+    fn ack_state(&self) -> (u32, u32) {
+        let ack = self.highest_received_sequence.unwrap_or(0);
+        let mut ack_mask = 0_u32;
+        for bit in 0..32 {
+            if ack > bit && self.received_sequences.contains(&(ack - bit - 1)) {
+                ack_mask |= 1_u32 << bit;
+            }
+        }
+        (ack, ack_mask)
+    }
+
+    fn deliver_ordered(
+        &mut self,
+        frame: CultNetRudpDeliveredFrame,
+    ) -> Vec<CultNetRudpDeliveredFrame> {
+        let channel_id = frame.channel_id.clone();
+        let Some(next) = self
+            .ordered_next_sequence_by_channel
+            .get(&channel_id)
+            .copied()
+        else {
+            self.ordered_next_sequence_by_channel
+                .insert(channel_id.clone(), frame.sequence + 1);
+            let mut delivered = vec![frame];
+            delivered.extend(self.drain_ordered(&channel_id));
+            return delivered;
+        };
+
+        if frame.sequence < next {
+            return Vec::new();
+        }
+
+        if frame.sequence > next {
+            self.ordered_buffers
+                .entry(channel_id)
+                .or_default()
+                .insert(frame.sequence, frame);
+            return Vec::new();
+        }
+
+        self.ordered_next_sequence_by_channel
+            .insert(channel_id.clone(), next + 1);
+        let mut delivered = vec![frame];
+        delivered.extend(self.drain_ordered(&channel_id));
+        delivered
+    }
+
+    fn drain_ordered(&mut self, channel_id: &str) -> Vec<CultNetRudpDeliveredFrame> {
+        let mut delivered = Vec::new();
+        loop {
+            let Some(next) = self
+                .ordered_next_sequence_by_channel
+                .get(channel_id)
+                .copied()
+            else {
+                break;
+            };
+            let Some(buffer) = self.ordered_buffers.get_mut(channel_id) else {
+                break;
+            };
+            let Some(frame) = buffer.remove(&next) else {
+                break;
+            };
+            delivered.push(frame);
+            self.ordered_next_sequence_by_channel
+                .insert(channel_id.to_string(), next + 1);
+        }
+        delivered
+    }
+
+    fn require_connection(&self, packet: &CultNetRudpPacket) -> Result<()> {
+        if packet.connection_id != self.connection_id {
+            return Err(anyhow!(
+                "RUDP packet connection id {} does not match {}",
+                packet.connection_id,
+                self.connection_id
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default)]

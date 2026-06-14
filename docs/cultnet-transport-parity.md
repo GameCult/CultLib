@@ -160,7 +160,7 @@ Current progress:
   the RUDP runtime yet; it is the binary packet language the runtimes must
   converge on before resend loops, windows, and timeout behavior are allowed to
   claim parity.
-- TypeScript and C# now share the first deterministic RUDP reliability state
+- TypeScript, C#, and Rust now share the first deterministic RUDP reliability state
   machine: connect/accept handshake, packet-level ack/ack-mask accounting,
   reliable resend scheduling, duplicate suppression, and reliable ordered
   channel delivery. It is in-memory and socket-free so the behavior can be
@@ -168,7 +168,7 @@ Current progress:
 - The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
   TCP/LiteNetLib/WebSocket bodies behind those ports, port the RUDP reliability
-  state machine into Rust/Python, then bind it to UDP sockets.
+  state machine into Python, then bind it to UDP sockets.
 
 ## RUDP Packet Contract V0
 
