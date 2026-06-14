@@ -39,6 +39,7 @@ from cultmesh_py import (
 
 from .framing import read_frame, write_frame
 from .schema_catalog import INTEROP_WIRE_CONTRACT, wire_message_schema_descriptors
+from .transport import create_tcp_framed_transport_profile
 
 INTEROP_DOCUMENT_TYPE = "cultnet.interop-note"
 INTEROP_SCHEMA_VERSION = "cultnet.interop_note.v0"
@@ -570,26 +571,12 @@ def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, stat
             "tcpPort": tcp_port,
             "wireContract": INTEROP_WIRE_CONTRACT,
             "transportProfiles": [
-                {
-                    "schemaVersion": "cultnet.transport_profile.v0",
-                    "runtimeId": state.runtime_id,
-                    "transports": [
-                        {
-                            "transportId": "interop-tcp",
-                            "protocol": "tcp_framed",
-                            "host": advertise_host,
-                            "port": tcp_port,
-                            "wireContracts": [INTEROP_WIRE_CONTRACT],
-                            "channels": [
-                                {
-                                    "channelId": "schema",
-                                    "delivery": "reliable",
-                                    "ordering": "ordered",
-                                }
-                            ],
-                        }
-                    ],
-                }
+                create_tcp_framed_transport_profile(
+                    state.runtime_id,
+                    transport_id="interop-tcp",
+                    host=advertise_host,
+                    port=tcp_port,
+                )
             ],
             "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE],
             "supportsSchemaCatalog": True,

@@ -142,9 +142,14 @@ Current progress:
   frame/close/error events, `send(channel, payload)`, `close`, and transfer
   stats, and `CultNetPeer` can now run over either the legacy `Duplex` stream
   path or the transport connection path.
-- The remaining parity work is to add equivalent ports to C#, Rust, Python, and
-  Kotlin, then move each runtime's existing TCP/LiteNetLib/WebSocket bodies
-  behind those ports before implementing `rudp`.
+- Python now has the same `tcp_framed` transport profile helper plus a
+  synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
+  and stats. `CultNetRawClient` and database subscriptions send/read through
+  that port instead of owning frame I/O directly.
+- The remaining parity work is to add equivalent ports to C#, Rust, and Kotlin,
+  deepen Python's server-side use of its port, and move each runtime's existing
+  TCP/LiteNetLib/WebSocket bodies behind those ports before implementing
+  `rudp`.
 
 ## Reliable UDP Semantics To Lift From LiteNetLib
 

@@ -11,6 +11,7 @@ import time
 import unittest
 import hashlib
 import hmac
+import io
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,10 +67,12 @@ from cultnet_py import (
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
     CultNetSimulationObservationHub,
+    TcpFramedTransportConnection,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
+    create_tcp_framed_transport_profile,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
@@ -552,6 +555,30 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(parsed.schema_version, "cultnet.hello.v0")
         self.assertEqual(parsed.body["runtimeId"], "python-test")
         self.assertEqual(parsed.body["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
+
+    def test_cultnet_tcp_framed_transport_carries_schema_payloads_with_stats(self) -> None:
+        payload = b"cultnet-payload"
+        output = io.BytesIO()
+        sender = TcpFramedTransportConnection(
+            output,
+            profile=create_tcp_framed_transport_profile("sender", transport_id="test-tcp"),
+        )
+        sender.send("schema", payload)
+        self.assertEqual(sender.stats.frames_sent, 1)
+        self.assertEqual(sender.stats.bytes_sent, len(payload) + 4)
+        with self.assertRaisesRegex(ValueError, "only supports the schema channel"):
+            sender.send("unreliable", b"")
+
+        receiver = TcpFramedTransportConnection(
+            io.BytesIO(output.getvalue()),
+            profile=create_tcp_framed_transport_profile("receiver", transport_id="test-tcp"),
+        )
+        frame = receiver.receive()
+        self.assertEqual(frame.channel_id, "schema")
+        self.assertEqual(frame.payload, payload)
+        self.assertEqual(receiver.stats.frames_received, 1)
+        self.assertEqual(receiver.stats.bytes_received, len(payload) + 4)
+        self.assertEqual(receiver.profile["transports"][0]["protocol"], "tcp_framed")
 
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
         subscribe = database_subscribe(

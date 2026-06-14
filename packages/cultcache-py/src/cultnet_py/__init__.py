@@ -65,6 +65,12 @@ from .shard_replication import (
 )
 from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
+from .transport import (
+    CultNetTransportFrame,
+    CultNetTransportStats,
+    TcpFramedTransportConnection,
+    create_tcp_framed_transport_profile,
+)
 from .simulation import (
     CultNetSimulationConsensus,
     CultNetSimulationConsensusCandidate,
@@ -112,11 +118,15 @@ __all__ = [
     "CultNetSimulationConsensusOptions",
     "CultNetSimulationObservation",
     "CultNetSimulationObservationHub",
+    "CultNetTransportFrame",
+    "CultNetTransportStats",
+    "TcpFramedTransportConnection",
     "ValidatedCultNetSessionToken",
     "apply_raw_document_record",
     "apply_raw_snapshot",
     "apply_shard_log_response",
     "compute_simulation_claim_hash",
+    "create_tcp_framed_transport_profile",
     "database_subscribe",
     "database_unsubscribe",
     "decode_witness_artifact_bundle_payload",

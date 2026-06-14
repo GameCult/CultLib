@@ -6,7 +6,6 @@ from typing import Any
 
 import msgpack
 
-from .framing import read_frame, write_frame
 from .messages import (
     CultNetMessage,
     database_subscribe,
@@ -21,6 +20,7 @@ from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogResponse
 from .snapshot import CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
+from .transport import TcpFramedTransportConnection, create_tcp_framed_transport_profile
 
 
 class CultNetPeerError(RuntimeError):
@@ -41,17 +41,23 @@ class CultNetRawClient:
         with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
             connection.settimeout(self.timeout_seconds)
             stream = connection.makefile("rwb")
-            write_frame(stream, msgpack.packb(wire, use_bin_type=True))
-            stream.flush()
+            transport = TcpFramedTransportConnection(
+                stream,
+                profile=create_tcp_framed_transport_profile("cultnet-python-client", host=self.host, port=self.port),
+            )
+            transport.send("schema", msgpack.packb(wire, use_bin_type=True))
 
     def request(self, message: CultNetMessage | dict[str, Any], *, expected_schema_version: str) -> dict[str, Any]:
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
         with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
             connection.settimeout(self.timeout_seconds)
             stream = connection.makefile("rwb")
-            write_frame(stream, msgpack.packb(wire, use_bin_type=True))
-            stream.flush()
-            response = msgpack.unpackb(read_frame(stream), raw=False)
+            transport = TcpFramedTransportConnection(
+                stream,
+                profile=create_tcp_framed_transport_profile("cultnet-python-client", host=self.host, port=self.port),
+            )
+            transport.send("schema", msgpack.packb(wire, use_bin_type=True))
+            response = msgpack.unpackb(transport.receive().payload, raw=False)
         if not isinstance(response, dict):
             raise ValueError("CultNet response must be a MessagePack map")
         schema_version = response.get("schemaVersion")
@@ -259,11 +265,16 @@ class CultNetDatabaseSubscription:
     include_snapshot: bool = True
     _connection: socket.socket | None = None
     _stream: Any | None = None
+    _transport: TcpFramedTransportConnection | None = None
 
     def __enter__(self) -> "CultNetDatabaseSubscription":
         self._connection = socket.create_connection((self.host, self.port), timeout=self.timeout_seconds)
         self._connection.settimeout(self.timeout_seconds)
         self._stream = self._connection.makefile("rwb")
+        self._transport = TcpFramedTransportConnection(
+            self._stream,
+            profile=create_tcp_framed_transport_profile("cultnet-python-subscription", host=self.host, port=self.port),
+        )
         self.send(database_subscribe(
             message_id=self.message_id,
             subscription_id=self.subscription_id,
@@ -281,24 +292,25 @@ class CultNetDatabaseSubscription:
                     subscription_id=self.subscription_id,
                 ))
         finally:
+            if self._transport is not None:
+                self._transport.close()
+                self._transport = None
             if self._stream is not None:
-                self._stream.close()
                 self._stream = None
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
 
     def send(self, message: CultNetMessage | dict[str, Any]) -> None:
-        if self._stream is None:
+        if self._transport is None:
             raise RuntimeError("CultNet database subscription is not open")
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
-        write_frame(self._stream, msgpack.packb(wire, use_bin_type=True))
-        self._stream.flush()
+        self._transport.send("schema", msgpack.packb(wire, use_bin_type=True))
 
     def read_next(self) -> dict[str, Any]:
-        if self._stream is None:
+        if self._transport is None:
             raise RuntimeError("CultNet database subscription is not open")
-        response = msgpack.unpackb(read_frame(self._stream), raw=False)
+        response = msgpack.unpackb(self._transport.receive().payload, raw=False)
         if not isinstance(response, dict):
             raise ValueError("CultNet subscription response must be a MessagePack map")
         schema_version = response.get("schemaVersion")

@@ -7,7 +7,13 @@ from typing import Any
 
 import msgpack
 
-from cultnet_py import CultNetSimulationObservationHub, read_frame, wire_message_schema_descriptors, write_frame
+from cultnet_py import (
+    CultNetSimulationObservationHub,
+    create_tcp_framed_transport_profile,
+    read_frame,
+    wire_message_schema_descriptors,
+    write_frame,
+)
 
 from .node import CultMeshNode
 from .wire import (
@@ -309,26 +315,12 @@ class CultMeshLocalServer:
                 else []
             ),
             "transportProfiles": [
-                {
-                    "schemaVersion": "cultnet.transport_profile.v0",
-                    "runtimeId": self.node.runtime_id,
-                    "transports": [
-                        {
-                            "transportId": "cultmesh-local-tcp",
-                            "protocol": "tcp_framed",
-                            "host": self.host,
-                            "port": self.port,
-                            "wireContracts": ["cultnet.schema.v0"],
-                            "channels": [
-                                {
-                                    "channelId": "schema",
-                                    "delivery": "reliable",
-                                    "ordering": "ordered",
-                                }
-                            ],
-                        }
-                    ],
-                }
+                create_tcp_framed_transport_profile(
+                    self.node.runtime_id,
+                    transport_id="cultmesh-local-tcp",
+                    host=self.host,
+                    port=self.port,
+                )
             ],
             "supportsSchemaCatalog": True,
         }
