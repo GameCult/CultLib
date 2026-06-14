@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
-from cultcache_py.documents import DocumentDefinition
+from cultcache_py.documents import DocumentDefinition, extract_value
 from cultnet_py import (
     CultNetAppliedRecord,
     CultNetMessage,
@@ -171,7 +171,51 @@ class CultMeshDatabase:
     ) -> Callable[[], None]:
         return self.watch(callback, document=document, key=key)
 
+    def watch_by_name(
+        self,
+        document: DocumentDefinition[Any],
+        name: str,
+        callback: Callable[[CultMeshDatabaseChange], None],
+    ) -> Callable[[], None]:
+        if not name:
+            raise ValueError("Name watch values must be non-empty")
+        if document.name is None:
+            raise ValueError(f"Document type {document.type!r} has no name lookup")
+
+        def filtered(change: CultMeshDatabaseChange) -> None:
+            if self._change_matches_extractor(change, document.name, name):
+                callback(change)
+
+        return self.watch(filtered, document=document)
+
+    def watch_by_index(
+        self,
+        document: DocumentDefinition[Any],
+        index: str,
+        value: str,
+        callback: Callable[[CultMeshDatabaseChange], None],
+    ) -> Callable[[], None]:
+        if not index:
+            raise ValueError("Index watch aliases must be non-empty")
+        if not value:
+            raise ValueError("Index watch values must be non-empty")
+        extractor = document.indexes.get(index)
+        if extractor is None:
+            raise ValueError(f"Document type {document.type!r} has no index {index!r}")
+
+        def filtered(change: CultMeshDatabaseChange) -> None:
+            if self._change_matches_extractor(change, extractor, value):
+                callback(change)
+
+        return self.watch(filtered, document=document)
+
     def register_document(self, document: DocumentDefinition[Any]) -> None:
+        for registered in self.documents:
+            if registered.type != document.type:
+                continue
+            if registered == document:
+                return
+            raise ValueError(f"Document type {document.type!r} is already registered with a different definition")
         self.cache.register_document_type(document)
         self.documents.append(document)
 
@@ -284,13 +328,15 @@ class CultMeshDatabase:
         return self.apply_shard_log_response(response)
 
     def apply_snapshot_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
+        previous = self._previous_values_for_snapshot_response(response)
         applied = apply_cultnet_raw_snapshot(self.cache, self.documents, response)
-        self._publish_applied_records(applied)
+        self._publish_applied_records(applied, previous)
         return applied
 
     def apply_shard_log_response(self, response: dict[str, Any]) -> list[CultNetAppliedRecord]:
+        previous = self._previous_values_for_shard_log_response(response)
         applied = apply_cultnet_shard_log_response(self.cache, self.documents, response)
-        self._publish_applied_records(applied)
+        self._publish_applied_records(applied, previous)
         return applied
 
     def _publish_local_change(
@@ -310,18 +356,27 @@ class CultMeshDatabase:
             previous_value=previous,
         ))
 
-    def _publish_applied_records(self, applied: list[CultNetAppliedRecord]) -> None:
+    def _publish_applied_records(
+        self,
+        applied: list[CultNetAppliedRecord],
+        previous: dict[tuple[str, str], Any],
+    ) -> None:
         documents_by_schema_id = schema_document_map(self.documents)
         for record in applied:
             document = documents_by_schema_id.get(record.schema_id)
             if document is None:
                 continue
+            previous_value = previous.get((record.schema_id, record.record_key))
+            change_kind = record.change_kind
+            if change_kind == "added" and previous_value is not None:
+                change_kind = "updated"
             self._publish(CultMeshDatabaseChange(
                 document=document,
                 schema_id=record.schema_id,
                 record_key=record.record_key,
-                change_kind=record.change_kind,
+                change_kind=change_kind,
                 value=record.value,
+                previous_value=previous_value,
             ))
 
     def _publish(self, change: CultMeshDatabaseChange) -> None:
@@ -331,6 +386,70 @@ class CultMeshDatabase:
             if key is not None and key != change.record_key:
                 continue
             callback(change)
+
+    def _change_matches_extractor(
+        self,
+        change: CultMeshDatabaseChange,
+        extractor: str | Callable[[Any], str | int | float | bool | None],
+        expected: str,
+    ) -> bool:
+        return (
+            self._value_matches_extractor(change.value, extractor, expected)
+            or self._value_matches_extractor(change.previous_value, extractor, expected)
+        )
+
+    def _value_matches_extractor(
+        self,
+        value: Any | None,
+        extractor: str | Callable[[Any], str | int | float | bool | None],
+        expected: str,
+    ) -> bool:
+        if value is None:
+            return False
+        actual = extract_value(value, extractor)
+        return actual is not None and str(actual) == expected
+
+    def _previous_values_for_snapshot_response(self, response: dict[str, Any]) -> dict[tuple[str, str], Any]:
+        if response.get("schemaVersion") != "cultnet.snapshot_response_raw.v0":
+            return {}
+        return self._previous_values_for_raw_records(response.get("documents", []))
+
+    def _previous_values_for_shard_log_response(self, response: dict[str, Any]) -> dict[tuple[str, str], Any]:
+        if response.get("schemaVersion") != "cultnet.shard_log_response.v0":
+            return {}
+        records: list[dict[str, Any]] = []
+        deletes: list[dict[str, Any]] = []
+        for entry in response.get("entries", []):
+            if not isinstance(entry, dict):
+                continue
+            if isinstance(entry.get("put"), dict) and isinstance(entry["put"].get("document"), dict):
+                records.append(entry["put"]["document"])
+            elif isinstance(entry.get("delete"), dict):
+                deletes.append(entry["delete"])
+        previous = self._previous_values_for_raw_records(records)
+        documents_by_schema_id = schema_document_map(self.documents)
+        for delete in deletes:
+            schema_id = str(delete.get("schemaId"))
+            document = documents_by_schema_id.get(schema_id)
+            if document is None:
+                continue
+            record_key = str(delete.get("recordKey"))
+            previous[(schema_id, record_key)] = self.cache.get(document, record_key)
+        return previous
+
+    def _previous_values_for_raw_records(self, records: Any) -> dict[tuple[str, str], Any]:
+        previous: dict[tuple[str, str], Any] = {}
+        documents_by_schema_id = schema_document_map(self.documents)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            schema_id = str(record.get("schemaId"))
+            document = documents_by_schema_id.get(schema_id)
+            if document is None:
+                continue
+            record_key = str(record.get("recordKey"))
+            previous[(schema_id, record_key)] = self.cache.get(document, record_key)
+        return previous
 
 
 def create_node(cache_path: str | Path | None = None, *, runtime_id: str = "python-runtime") -> CultMeshNode:

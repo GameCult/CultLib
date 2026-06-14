@@ -221,13 +221,26 @@ from cultcache_py import define_database_entry_type
 from cultnet_py import CultNetClientAuthorityScope, CultNetRawClient
 from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_request
 
-note_doc = define_database_entry_type("mesh.note", [("body", 0)])
+note_doc = define_database_entry_type(
+    "mesh.note",
+    [("body", 0), ("name", 1), ("kind", 2)],
+    name="name",
+    indexes={"kind": "kind"},
+)
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
 node.database.register_document(note_doc)
 unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
-node.database.put(note_doc, "note:1", {"body": "hello"})
+unsubscribe_named = node.database.watch_by_name(note_doc, "intro", lambda change: print(change.record_key))
+unsubscribe_kind = node.database.watch_by_index(note_doc, "kind", "guide", lambda change: print(change.record_key))
+node.database.put(note_doc, "note:1", {"body": "hello", "name": "intro", "kind": "guide"})
 live_note = node.database.get_required(note_doc, "note:1")
-put_message = node.database.put_raw_message(note_doc, "note:2", {"body": "wire me"}, shard_id="interop", shard_epoch=1)
+put_message = node.database.put_raw_message(
+    note_doc,
+    "note:2",
+    {"body": "wire me", "name": "wire", "kind": "interop"},
+    shard_id="interop",
+    shard_epoch=1,
+)
 delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
 
 peers = CultMesh.create_peer_catalog()

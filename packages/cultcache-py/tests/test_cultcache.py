@@ -903,6 +903,61 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(changes[2].value)
         self.assertEqual([change.record_key for change in all_changes], ["note:1", "note:2", "note:1", "note:1", "note:1"])
 
+    def test_cultmesh_database_register_document_is_idempotent(self) -> None:
+        document = define_database_entry_type("mesh.idempotent", [("body", 0)])
+        conflicting = define_database_entry_type("mesh.idempotent", [("title", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-idempotent")
+
+        node.database.register_document(document)
+        node.database.register_document(document)
+        node.database.put(document, "note:1", {"body": "still registered once"})
+
+        self.assertEqual(node.database.get_required(document, "note:1")["body"], "still registered once")
+        self.assertEqual([registered.type for registered in node.documents], ["mesh.idempotent"])
+        with self.assertRaises(ValueError):
+            node.database.register_document(conflicting)
+
+    def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.named_watch",
+            [("name", 0), ("kind", 1)],
+            name="name",
+            indexes={"kind": "kind"},
+        )
+        node = CultMesh.create_node(runtime_id="mesh-named-watch")
+        node.database.register_document(document)
+        name_changes: list[CultMeshDatabaseChange] = []
+        index_changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_by_name(document, "Potion", name_changes.append)
+        node.database.watch_by_index(document, "kind", "consumable", index_changes.append)
+
+        node.database.put(document, "item:1", {"name": "Potion", "kind": "consumable"})
+        node.database.put(document, "item:2", {"name": "Sword", "kind": "weapon"})
+        node.database.put(document, "item:1", {"name": "Elixir", "kind": "rare"})
+        node.database.delete(document, "item:1")
+
+        self.assertEqual([change.change_kind for change in name_changes], ["added", "updated"])
+        self.assertEqual([change.record_key for change in name_changes], ["item:1", "item:1"])
+        self.assertEqual(name_changes[1].previous_value, {"name": "Potion", "kind": "consumable"})
+        self.assertEqual([change.change_kind for change in index_changes], ["added", "updated"])
+        self.assertEqual([change.record_key for change in index_changes], ["item:1", "item:1"])
+        self.assertEqual(index_changes[1].value, {"name": "Elixir", "kind": "rare"})
+
+    def test_cultmesh_database_watch_by_name_and_index_validate_lookup_shape(self) -> None:
+        document = define_database_entry_type("mesh.unnamed_watch", [("body", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-watch-validation")
+        node.database.register_document(document)
+
+        with self.assertRaises(ValueError):
+            node.database.watch_by_name(document, "missing", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "missing", "value", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "", "value", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "missing", "", lambda _: None)
+
     def test_cultmesh_facade_matches_peer_runtime_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store_path = Path(tmp) / "mesh.cc"
@@ -1196,6 +1251,7 @@ class CultCacheTests(unittest.TestCase):
 
         self.assertEqual([change.change_kind for change in seen], ["added", "updated"])
         self.assertEqual(seen[1].value, {"body": "authoritative"})
+        self.assertEqual(seen[1].previous_value, {"body": "predicted"})
         self.assertEqual(session_changes[0].change_kind, "reconciled")
 
     def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
