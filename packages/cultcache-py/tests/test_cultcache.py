@@ -1304,6 +1304,9 @@ class CultCacheTests(unittest.TestCase):
         source.database.put_raw_message(document, "note:2", {"body": "other"}, shard_id="other", shard_epoch=1)
         source.database.delete_raw_message(document, "note:1", shard_id="notes", shard_epoch=3)
 
+        self.assertEqual(source.database.shard_ids(), ["notes", "other"])
+        self.assertEqual(source.database.shard_schema_ids("notes"), ["mesh.log_note.v1"])
+
         typed_response = source.database.build_shard_log_response(
             message_id="log-1",
             shard_id="notes",
@@ -1942,7 +1945,7 @@ class CultCacheTests(unittest.TestCase):
         )
         node = CultMesh.create_node(runtime_id="mesh-server")
         node.database.register_document(document)
-        node.database.put_raw_message(document, "note:1", {"body": "served"}, shard_id="primary", shard_epoch=1)
+        node.database.put_raw_message(document, "note:1", {"body": "served"}, shard_id="notes", shard_epoch=1)
         verses = CultMeshVerseCatalog()
         verses.upsert(
             CultMeshVerseDescriptor(
@@ -1979,8 +1982,8 @@ class CultCacheTests(unittest.TestCase):
             shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
             synced_shard_catalog = CultNetShardCatalog()
             synced_shards = raw_client.sync_shard_catalog(synced_shard_catalog, schema_ids=["mesh.server_note.v1"])
-            shard_log = raw_client.fetch_shard_log(shard_id="primary", shard_epoch=1)
-            typed_shard_log = raw_client.fetch_shard_log_response(shard_id="primary", shard_epoch=1)
+            shard_log = raw_client.fetch_shard_log(shard_id="notes", shard_epoch=1)
+            typed_shard_log = raw_client.fetch_shard_log_response(shard_id="notes", shard_epoch=1)
             discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
             fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
@@ -2024,9 +2027,10 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(typed_snapshot_response.documents[0].schema_id, "mesh.server_note.v1")
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
         self.assertEqual(shard_catalog["shards"][0]["epoch"], 1)
-        self.assertEqual(synced_shards[0].shard_id, "primary")
+        self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
+        self.assertEqual(synced_shards[0].shard_id, "notes")
         self.assertEqual(synced_shards[0].epoch, 1)
-        self.assertEqual(synced_shard_catalog.get("primary"), synced_shards[0])
+        self.assertEqual(synced_shard_catalog.get("notes"), synced_shards[0])
         self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
         self.assertEqual(typed_shard_log.last_sequence, 1)
         self.assertEqual(typed_shard_log.entries[0].put["document"]["recordKey"], "note:1")

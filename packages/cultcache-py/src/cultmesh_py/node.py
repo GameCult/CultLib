@@ -450,6 +450,24 @@ class CultMeshDatabase:
     def shard_epoch(self, shard_id: str) -> int:
         return self._latest_shard_epoch(shard_id) or 0
 
+    def shard_ids(self) -> list[str]:
+        return sorted(self._shard_logs)
+
+    def shard_schema_ids(self, shard_id: str) -> list[str]:
+        schema_ids: set[str] = set()
+        for entry in self._shard_logs.get(shard_id, []):
+            put = entry.get("put")
+            if isinstance(put, dict) and isinstance(put.get("document"), dict):
+                schema_id = put["document"].get("schemaId")
+                if schema_id:
+                    schema_ids.add(str(schema_id))
+            delete = entry.get("delete")
+            if isinstance(delete, dict):
+                schema_id = delete.get("schemaId")
+                if schema_id:
+                    schema_ids.add(str(schema_id))
+        return sorted(schema_ids)
+
     def create_snapshot_response(
         self,
         *,

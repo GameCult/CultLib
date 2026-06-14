@@ -303,15 +303,19 @@ class CultMeshLocalServer:
 
     def _shard_catalog_response(self, request: dict[str, Any]) -> dict[str, Any]:
         requested_schema_ids = {str(value) for value in request.get("schemaIds") or []}
-        schema_ids = [document.catalog_entry().schema_id for document in self.node.documents]
-        if requested_schema_ids:
-            schema_ids = [schema_id for schema_id in schema_ids if schema_id in requested_schema_ids]
+        document_schema_ids = [document.catalog_entry().schema_id for document in self.node.documents]
+        shard_ids = self.node.database.shard_ids() or ["primary"]
         shards = []
-        if schema_ids:
+        for shard_id in shard_ids:
+            schema_ids = self.node.database.shard_schema_ids(shard_id) or document_schema_ids
+            if requested_schema_ids:
+                schema_ids = [schema_id for schema_id in schema_ids if schema_id in requested_schema_ids]
+            if not schema_ids:
+                continue
             shards.append({
-                "shardId": "primary",
+                "shardId": shard_id,
                 "ownerRuntimeId": self.node.runtime_id,
-                "epoch": self.node.database.shard_epoch("primary"),
+                "epoch": self.node.database.shard_epoch(shard_id),
                 "isPrimary": True,
                 "schemaIds": schema_ids,
                 "keyPrefix": "",

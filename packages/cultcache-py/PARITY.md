@@ -76,8 +76,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   for snapshot, put, and delete notifications on a connected client stream.
   Its schema catalog includes both registered document payload schemas and
   shared wire-message descriptors for the CultNet/CultMesh messages it handles.
-  Its shard catalog advertises the database-owned latest shard epoch so
-  discovery and shard-log catch-up agree on the same authority.
+  Its shard catalog advertises the database-owned shard ids, schema ids, and
+  latest shard epochs so discovery and shard-log catch-up agree on the same
+  authority.
 - Python CultMesh reactive catalogs:
   Verse and peer catalogs expose sorted local views, `get(...)`, response
   application, and `watch(...)` callbacks for local discovery updates. Verse
