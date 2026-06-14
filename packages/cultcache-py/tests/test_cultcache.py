@@ -47,6 +47,7 @@ from cultnet_py.interop_peer import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
+    CultMeshDatabase,
     CultMeshGameSessionOptions,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
@@ -867,13 +868,15 @@ class CultCacheTests(unittest.TestCase):
             document = define_database_entry_type("mesh.note", [("body", 0)])
             store_path = Path(tmp) / "mesh.cc"
             node = create_node(store_path, runtime_id="mesh-test")
-            node.register_document(document)
-            node.put(document, "note:1", {"body": "hello"})
+            self.assertIsInstance(node.database, CultMeshDatabase)
+            node.database.register_document(document)
+            node.database.put(document, "note:1", {"body": "hello"})
+            self.assertEqual(node.get_required(document, "note:1")["body"], "hello")
 
             reopened = create_node(store_path, runtime_id="mesh-test")
-            reopened.register_document(document)
-            reopened.pull()
-            self.assertEqual(reopened.get(document, "note:1")["body"], "hello")
+            reopened.database.register_document(document)
+            reopened.database.pull()
+            self.assertEqual(reopened.database.get(document, "note:1")["body"], "hello")
 
     def test_cultmesh_facade_matches_peer_runtime_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

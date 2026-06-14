@@ -21,6 +21,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
   authority leases, and simulation fact commits.
+- Python CultMesh database facade:
+  `node.database` owns the local typed document read/write/snapshot/sync surface
+  so Python callers do not need to reach through the node composition wrapper.
 - Python CultMesh committed simulation facts:
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`

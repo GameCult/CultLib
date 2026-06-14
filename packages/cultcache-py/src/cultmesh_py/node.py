@@ -22,6 +22,118 @@ class CultMeshNode:
     cache: CultCache = field(default_factory=CultCache)
     runtime_id: str = "python-runtime"
     documents: list[DocumentDefinition[Any]] = field(default_factory=list)
+    database: "CultMeshDatabase" = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.database = CultMeshDatabase(self)
+
+    def register_document(self, document: DocumentDefinition[Any]) -> None:
+        self.database.register_document(document)
+
+    def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
+        self.database.put(document, key, value)
+
+    def put_raw_message(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        value: Any,
+        *,
+        message_id: str = "",
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultNetMessage:
+        return self.database.put_raw_message(
+            document,
+            key,
+            value,
+            message_id=message_id,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
+    def get(self, document: DocumentDefinition[Any], key: str) -> Any:
+        return self.database.get(document, key)
+
+    def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
+        return self.database.get_required(document, key)
+
+    def delete(self, document: DocumentDefinition[Any], key: str) -> None:
+        self.database.delete(document, key)
+
+    def delete_raw_message(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        message_id: str = "",
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultNetMessage:
+        return self.database.delete_raw_message(
+            document,
+            key,
+            message_id=message_id,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        return self.database.snapshot()
+
+    def pull(self) -> None:
+        self.database.pull()
+
+    def sync_snapshot(
+        self,
+        client: CultNetRawClient,
+        *,
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> list[CultNetAppliedRecord]:
+        return self.database.sync_snapshot(
+            client,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
+    def sync_shard_log(
+        self,
+        client: CultNetRawClient,
+        *,
+        shard_id: str,
+        shard_epoch: int | None = None,
+        after_sequence: int = 0,
+        limit: int | None = None,
+    ) -> list[CultNetAppliedRecord]:
+        return self.database.sync_shard_log(
+            client,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+
+
+class CultMeshDatabase:
+    def __init__(self, node: CultMeshNode) -> None:
+        self._node = node
+
+    @property
+    def cache(self) -> CultCache:
+        return self._node.cache
+
+    @property
+    def documents(self) -> list[DocumentDefinition[Any]]:
+        return self._node.documents
+
+    @property
+    def runtime_id(self) -> str:
+        return self._node.runtime_id
 
     def register_document(self, document: DocumentDefinition[Any]) -> None:
         self.cache.register_document_type(document)

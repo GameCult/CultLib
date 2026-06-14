@@ -223,11 +223,11 @@ from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_requ
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
-node.register_document(note_doc)
-node.put(note_doc, "note:1", {"body": "hello"})
-live_note = node.get_required(note_doc, "note:1")
-put_message = node.put_raw_message(note_doc, "note:2", {"body": "wire me"}, shard_id="interop", shard_epoch=1)
-delete_message = node.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
+node.database.register_document(note_doc)
+node.database.put(note_doc, "note:1", {"body": "hello"})
+live_note = node.database.get_required(note_doc, "note:1")
+put_message = node.database.put_raw_message(note_doc, "note:2", {"body": "wire me"}, shard_id="interop", shard_epoch=1)
+delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
 
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
@@ -238,8 +238,8 @@ mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"
 client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
 
 raw_client = CultNetRawClient("127.0.0.1", 3075)
-node.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
-node.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
+node.database.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
+node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
 
 streams = CultMesh.create_stream_catalog()
 
