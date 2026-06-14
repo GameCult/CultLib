@@ -116,6 +116,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   shared wire-message descriptors for the CultNet/CultMesh messages it handles.
   Hello and payload schema descriptors advertise the raw snapshot, put, delete,
   and shard-log mutation surfaces the server actually serves.
+  Unsupported request schemas, malformed raw put/delete messages, and snapshot
+  limit violations return structured `cultnet.error.v0` documents instead of
+  silent stream stalls.
   Its shard catalog advertises the database-owned shard ids, schema ids, and
   latest shard epochs so discovery and shard-log catch-up agree on the same
   authority.

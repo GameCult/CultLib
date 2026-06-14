@@ -113,7 +113,12 @@ class CultMeshLocalServer:
         if schema_version == "cultnet.simulation_observation.v0":
             candidates = self._candidate_responses(message)
             return candidates[0] if candidates else None
-        return None
+        return self._error_response(
+            f"Unsupported CultNet message schema: {schema_version!r}.",
+            message_id=str(message.get("messageId") or ""),
+            code="unsupported_schema_version",
+            details={"schemaVersion": schema_version},
+        )
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
@@ -186,10 +191,18 @@ class CultMeshLocalServer:
     ) -> list[dict[str, Any]]:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
-            return []
+            return [self._error_response(
+                "Raw put messages must contain a document map.",
+                message_id=str(message.get("messageId") or ""),
+                code="malformed_document_put",
+            )]
         change = self.node.database.apply_raw_put_message(message)
         if change is None:
-            return []
+            return [self._error_response(
+                "Raw put message did not apply to a registered document.",
+                message_id=str(message.get("messageId") or ""),
+                code="unregistered_document_put",
+            )]
         return self._database_change_notifications(message, document_record, change.change_kind, subscriptions)
 
     def _handle_raw_delete(
@@ -200,10 +213,18 @@ class CultMeshLocalServer:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
         if not schema_id or not record_key:
-            return []
+            return [self._error_response(
+                "Raw delete messages must contain schemaId and recordKey.",
+                message_id=str(message.get("messageId") or ""),
+                code="malformed_document_delete",
+            )]
         change = self.node.database.apply_raw_delete_message(message)
         if change is None:
-            return []
+            return [self._error_response(
+                "Raw delete message did not apply to a registered document.",
+                message_id=str(message.get("messageId") or ""),
+                code="unregistered_document_delete",
+            )]
         return self._database_delete_notifications(message, subscriptions)
 
     def _database_change_notifications(
@@ -299,22 +320,40 @@ class CultMeshLocalServer:
         document_count = len(response.get("documents") or [])
         if self.max_snapshot_documents is not None and document_count > self.max_snapshot_documents:
             return self._error_response(
-                f"Snapshot document limit exceeded: {document_count} > {self.max_snapshot_documents}."
+                f"Snapshot document limit exceeded: {document_count} > {self.max_snapshot_documents}.",
+                message_id=str(response.get("messageId") or ""),
+                code="snapshot_document_limit_exceeded",
+                details={"documentCount": document_count, "maxSnapshotDocuments": self.max_snapshot_documents},
             )
         if self.max_snapshot_bytes is not None:
             response_bytes = len(msgpack.packb(response, use_bin_type=True))
             if response_bytes > self.max_snapshot_bytes:
                 return self._error_response(
-                    f"Snapshot byte limit exceeded: {response_bytes} > {self.max_snapshot_bytes}."
+                    f"Snapshot byte limit exceeded: {response_bytes} > {self.max_snapshot_bytes}.",
+                    message_id=str(response.get("messageId") or ""),
+                    code="snapshot_byte_limit_exceeded",
+                    details={"responseBytes": response_bytes, "maxSnapshotBytes": self.max_snapshot_bytes},
                 )
         return response
 
     @staticmethod
-    def _error_response(error: str) -> dict[str, Any]:
-        return {
+    def _error_response(
+        error: str,
+        *,
+        message_id: str = "",
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {
             "schemaVersion": "cultnet.error.v0",
+            "messageId": message_id,
             "error": error,
         }
+        if code is not None:
+            response["code"] = code
+        if details is not None:
+            response["details"] = details
+        return response
 
     def _candidate_responses(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         if self.observation_hub is None:
