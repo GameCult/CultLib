@@ -298,11 +298,16 @@ class CultMeshLocalServer:
                 "cultnet.document_delete.v0",
                 "cultnet.shard_catalog_request.v0",
                 "cultnet.shard_log_request.v0",
-                "cultnet.simulation_observation.v0",
-                "cultnet.simulation_consensus_candidate.v0",
                 VERSE_CATALOG_REQUEST,
                 PEER_EXCHANGE_REQUEST,
-            ],
+            ] + (
+                [
+                    "cultnet.simulation_observation.v0",
+                    "cultnet.simulation_consensus_candidate.v0",
+                ]
+                if self.observation_hub is not None
+                else []
+            ),
             "supportsSchemaCatalog": True,
         }
 
@@ -357,7 +362,12 @@ class CultMeshLocalServer:
 
     def _candidate_responses(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         if self.observation_hub is None:
-            return []
+            return [self._error_response(
+                "Simulation observations are not enabled for this CultMesh server.",
+                message_id=str(message.get("messageId") or ""),
+                code="simulation_observations_disabled",
+                details={"schemaVersion": "cultnet.simulation_observation.v0"},
+            )]
         message_id = str(message.get("messageId") or "")
         return [
             {

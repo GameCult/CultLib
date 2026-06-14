@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
-from cultnet_py import hello
+from cultnet_py import CultNetSimulationConsensusOptions, CultNetSimulationObservationHub, hello
 
 from .facade import CultMesh
 from .server import CultMeshLocalServer
@@ -40,6 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed-interop-note", action="store_true")
     parser.add_argument("--seed-shard-id", default="interop")
     parser.add_argument("--seed-shard-epoch", type=int, default=1)
+    parser.add_argument("--enable-simulation-observations", action="store_true")
+    parser.add_argument("--simulation-minimum-witnesses", type=int, default=1)
+    parser.add_argument("--simulation-quorum-ratio", type=float, default=0.5)
     parser.add_argument("--verse-id")
     parser.add_argument("--verse-display-name")
     parser.add_argument("--role", action="append", dest="roles")
@@ -87,10 +90,19 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
         )
     verse_catalog = CultMeshVerseCatalog()
     peer_catalog = CultMeshPeerCatalog()
+    observation_hub = None
+    if args.enable_simulation_observations:
+        observation_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(
+                minimum_witnesses=args.simulation_minimum_witnesses,
+                quorum_ratio=args.simulation_quorum_ratio,
+            )
+        )
     server = CultMesh.serve_node(
         node,
         verse_catalog=verse_catalog,
         peer_catalog=peer_catalog,
+        observation_hub=observation_hub,
         host=args.host,
         port=args.port,
         display_name=args.display_name,

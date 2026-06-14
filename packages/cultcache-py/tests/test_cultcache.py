@@ -3089,6 +3089,7 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(ready["supportedDocumentTypes"], ["cultcache.interop-note"])
                 self.assertIn("cultnet.hello.v0", ready["supportedMessageVersions"])
                 self.assertIn("cultnet.document_put_raw.v0", ready["supportedMessageVersions"])
+                self.assertNotIn("cultnet.simulation_observation.v0", ready["supportedMessageVersions"])
                 self.assertEqual(ready["supportedMutationContracts"][0]["documentType"], "cultcache.interop-note")
                 self.assertIn("shardLog", ready["supportedMutationContracts"][0]["operations"])
                 self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": None})
@@ -3103,6 +3104,7 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(hello_response["displayName"], "Daemon Test Peer")
                 self.assertIn("cultnet.hello.v0", hello_response["supportedMessageVersions"])
                 self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
+                self.assertNotIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
                 self.assertEqual(hello_response["supportedDocumentTypes"], ["cultcache.interop-note"])
                 self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
                 self.assertEqual(ready["supportedMutationContracts"], hello_response["supportedMutationContracts"])
@@ -3576,6 +3578,90 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(raised.exception.response["code"], "snapshot_document_limit_exceeded")
                 self.assertEqual(raised.exception.response["details"]["documentCount"], 1)
                 self.assertEqual(raised.exception.response["details"]["maxSnapshotDocuments"], 0)
+            finally:
+                self._terminate_process(process)
+
+    def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "simulation-daemon-peer",
+                    "--port",
+                    "0",
+                    "--enable-simulation-observations",
+                    "--simulation-minimum-witnesses",
+                    "2",
+                    "--simulation-quorum-ratio",
+                    "1.0",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                self.assertIn("cultnet.simulation_observation.v0", ready["supportedMessageVersions"])
+                self.assertIn("cultnet.simulation_consensus_candidate.v0", ready["supportedMessageVersions"])
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                hello_response = client.request(
+                    hello(runtime_id="simulation-daemon-prober"),
+                    expected_schema_version="cultnet.hello.v0",
+                )
+                self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
+
+                claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+                first = client.request(
+                    simulation_observation(
+                        message_id="daemon-sim-1",
+                        witness_runtime_id="watcher-1",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=claim_hash,
+                        claim_summary="alice shot bob first",
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+                second = client.request(
+                    simulation_observation(
+                        message_id="daemon-sim-2",
+                        witness_runtime_id="watcher-2",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=claim_hash,
+                        claim_summary="alice shot bob first",
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+
+                self.assertEqual(first["messageId"], "daemon-sim-1")
+                self.assertFalse(first["hasQuorum"])
+                self.assertEqual(first["witnessCount"], 1)
+                self.assertEqual(second["messageId"], "daemon-sim-2")
+                self.assertTrue(second["hasQuorum"])
+                self.assertEqual(second["witnessCount"], 2)
+                self.assertEqual(second["claimHash"], claim_hash)
             finally:
                 self._terminate_process(process)
 

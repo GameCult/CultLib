@@ -119,7 +119,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   notification, and records the mutation in the served shard log. If its durable
   shard log has been compacted, stale shard-log requests return the same
   explicit `compacted_history` resync boundary over the daemon wire endpoint
-  instead of silently looking empty.
+  instead of silently looking empty. Simulation observation serving is opt-in:
+  the daemon only advertises `cultnet.simulation_observation.v0` when an
+  observation hub is attached, and an opt-in launched daemon answers witness
+  observations with schema-v0 consensus candidates.
   The daemon CLI snapshot document/byte limits feed the same public server edge;
   oversized daemon snapshot responses are returned as structured
   `cultnet.error.v0` peer errors rather than partial payloads.
