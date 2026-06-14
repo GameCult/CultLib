@@ -1,6 +1,7 @@
 from .client import CultMeshDiscoveryClient, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .facade import CultMesh
 from .node import CultMeshDatabase, CultMeshDatabaseChange, CultMeshNode, create_node
+from .server import CultMeshLocalServer
 from .session import (
     CultMeshGameSession,
     CultMeshGameSessionOptions,
@@ -45,6 +46,7 @@ __all__ = [
     "CultMesh",
     "CultMeshGameSession",
     "CultMeshGameSessionOptions",
+    "CultMeshLocalServer",
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
     "CultMeshPrediction",

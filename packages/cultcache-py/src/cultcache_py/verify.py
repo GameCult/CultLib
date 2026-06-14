@@ -68,6 +68,7 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
         "CultMeshDiscoveryClient",
         "CultMeshGameSession",
         "CultMeshGameSessionOptions",
+        "CultMeshLocalServer",
         "CultMeshNode",
         "CultMeshPeerCard",
         "CultMeshPeerCatalog",

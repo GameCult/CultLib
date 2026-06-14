@@ -246,6 +246,7 @@ delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="
 
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
+server = CultMesh.serve_node(node, peer_catalog=peers, port=3075)
 
 client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
@@ -255,6 +256,7 @@ client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"
 raw_client = CultNetRawClient("127.0.0.1", 3075)
 node.database.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
 node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
+server.stop()
 
 streams = CultMesh.create_stream_catalog()
 

@@ -6,6 +6,7 @@ from cultnet_py import CultNetRawClient
 
 from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import CultMeshNode, create_node
+from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
 from .wire import (
@@ -69,6 +70,25 @@ class CultMesh:
         options: CultMeshGameSessionOptions | None = None,
     ) -> CultMeshGameSession:
         return CultMeshGameSession(node, options)
+
+    @staticmethod
+    def serve_node(
+        node: CultMeshNode,
+        *,
+        verse_catalog: CultMeshVerseCatalog | None = None,
+        peer_catalog: CultMeshPeerCatalog | None = None,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        display_name: str | None = None,
+    ) -> CultMeshLocalServer:
+        return CultMeshLocalServer(
+            node=node,
+            verse_catalog=verse_catalog or CultMeshVerseCatalog(),
+            peer_catalog=peer_catalog or CultMeshPeerCatalog(),
+            host=host,
+            port=port,
+            display_name=display_name,
+        ).start()
 
     @staticmethod
     def create_client(

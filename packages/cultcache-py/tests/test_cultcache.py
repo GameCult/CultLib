@@ -1624,6 +1624,58 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(local_peers.find("aetheria-main", role="read-replica")[0].peer_id, "peer-a")
         self.assertEqual(synced_peers[0].roles, ("read-replica",))
 
+    def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
+        document = define_database_entry_type(
+            "mesh.server_note",
+            [("body", 0)],
+            schema_id="mesh.server_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(document, "note:1", {"body": "served"}, shard_id="primary", shard_epoch=1)
+        verses = CultMeshVerseCatalog()
+        verses.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="server-verse",
+                display_name="Server Verse",
+                authority_model="local",
+                compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            )
+        )
+        peers = CultMeshPeerCatalog()
+        peers.upsert(
+            CultMeshPeerCard(
+                peer_id="mesh-server",
+                verse_id="server-verse",
+                endpoints=("cultnet://127.0.0.1:0",),
+                roles=("read-replica",),
+            )
+        )
+
+        server = CultMesh.serve_node(node, verse_catalog=verses, peer_catalog=peers, display_name="Mesh Server")
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
+            schema_response = raw_client.fetch_schema_catalog(schema_ids=["mesh.server_note.v1"], include_schema_json=True)
+            snapshot_response = raw_client.fetch_snapshot(schema_ids=["mesh.server_note.v1"])
+            shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
+            shard_log = raw_client.fetch_shard_log(shard_id="primary", shard_epoch=1)
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
+        finally:
+            server.stop()
+
+        self.assertEqual(hello_response["runtimeId"], "mesh-server")
+        self.assertEqual(hello_response["displayName"], "Mesh Server")
+        self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
+        self.assertIn("schemaJson", schema_response["schemas"][0])
+        self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
+        self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
+        self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
+        self.assertEqual(fetched_verses[0].verse_id, "server-verse")
+        self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
+
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(
             peer_id="voidbot-local",

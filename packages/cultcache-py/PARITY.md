@@ -20,7 +20,11 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
-  authority leases, and simulation fact commits.
+  authority leases, local TCP node serving, and simulation fact commits.
+- Python CultMesh local server:
+  Serves a `CultMeshNode` plus Verse and peer catalogs over the same framed
+  MessagePack request/response lane used by `CultNetRawClient` and
+  `CultMeshDiscoveryClient`.
 - Python CultMesh reactive catalogs:
   Verse and peer catalogs expose sorted local views, `get(...)`, response
   application, and `watch(...)` callbacks for local discovery updates. Verse
