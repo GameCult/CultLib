@@ -52,7 +52,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   unknown shards or stale epoch cursors; `create_shard_log_response(...)`
   remains the raw wire-dict compatibility projection.
 - Python CultNet shard replication:
-  Provides schema-v0 shard-log and shard-snapshot fetchers plus a pull-once
+  Provides schema-v0 shard-log and shard-snapshot fetchers, a schema-v0
+  write-forwarder for raw put/delete messages, plus a pull-once
   `CultNetShardReplicator` that tracks replica cursors, applies log responses
   through the existing database owner, and recovers from compacted-history
   resync pressure by fetching a shard snapshot. Replica cursor storage can be
@@ -180,6 +181,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not claim the full C# shard mutation-log service surface. It can
   create/apply raw snapshots, create/apply package-local raw shard-log
   responses, consume remote shard-log responses, and run pull-once replica
-  catch-up with snapshot recovery and a file-backed replica cursor store. It
-  does not yet claim the full C# background replicator, write-forwarder, or
-  file-backed authoritative mutation-log store.
+  catch-up with snapshot recovery, a file-backed replica cursor store, and
+  schema-v0 write forwarding. It does not yet claim the full C# background
+  replicator or file-backed authoritative mutation-log store.

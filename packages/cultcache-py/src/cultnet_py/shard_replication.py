@@ -14,6 +14,14 @@ from .shard_log import CultNetShardLogResponse
 from .snapshot import CultNetRawSnapshotResponse
 
 
+class CultNetShardWriteForwarder(Protocol):
+    def forward_put(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        ...
+
+    def forward_delete(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        ...
+
+
 class CultNetShardLogFetcher(Protocol):
     def fetch(
         self,
@@ -112,6 +120,32 @@ class CultNetFileShardReplicaCursorStore:
             last_applied_sequence=int(value.get("lastAppliedSequence") or 0),
             updated_at=str(value.get("updatedAt") or ""),
         )
+
+
+@dataclass(frozen=True)
+class CultNetSchemaWriteForwarder:
+    timeout_seconds: float = 4.0
+
+    def forward_put(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        if message.get("schemaVersion") != "cultnet.document_put_raw.v0":
+            raise ValueError("forward_put requires a cultnet.document_put_raw.v0 message")
+        wire = dict(message)
+        wire.setdefault("shardId", shard.shard_id)
+        wire.setdefault("shardEpoch", shard.epoch)
+        self._send(shard, wire)
+
+    def forward_delete(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        if message.get("schemaVersion") != "cultnet.document_delete.v0":
+            raise ValueError("forward_delete requires a cultnet.document_delete.v0 message")
+        wire = dict(message)
+        wire.setdefault("shardId", shard.shard_id)
+        wire.setdefault("shardEpoch", shard.epoch)
+        self._send(shard, wire)
+
+    def _send(self, shard: CultNetShardDescriptor, message: dict[str, Any]) -> None:
+        endpoint = _resolve_primary_endpoint(shard)
+        host, port = _parse_endpoint(endpoint)
+        CultNetRawClient(host, port, self.timeout_seconds).send(message)
 
 
 @dataclass(frozen=True)

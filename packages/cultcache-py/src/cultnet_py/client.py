@@ -29,6 +29,14 @@ class CultNetRawClient:
     port: int
     timeout_seconds: float = 4.0
 
+    def send(self, message: CultNetMessage | dict[str, Any]) -> None:
+        wire = message.to_wire() if isinstance(message, CultNetMessage) else message
+        with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
+            connection.settimeout(self.timeout_seconds)
+            stream = connection.makefile("rwb")
+            write_frame(stream, msgpack.packb(wire, use_bin_type=True))
+            stream.flush()
+
     def request(self, message: CultNetMessage | dict[str, Any], *, expected_schema_version: str) -> dict[str, Any]:
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
         with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:

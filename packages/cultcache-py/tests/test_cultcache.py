@@ -4,10 +4,12 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from cultcache_py import (
@@ -37,10 +39,12 @@ from cultnet_py import (
     CultNetShardLogResponse,
     CultNetFileShardReplicaCursorStore,
     CultNetInMemoryShardReplicaCursorStore,
+    CultNetSchemaWriteForwarder,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
+    CultNetShardWriteForwarder,
     CultNetSimulationConsensusOptions,
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
@@ -1555,6 +1559,60 @@ class CultCacheTests(unittest.TestCase):
 
         self.assertEqual(resync_sequence, 2)
         self.assertEqual(resync_target.get_required(document, "note:1")["body"], "one")
+
+    def test_cultnet_schema_write_forwarder_sends_raw_writes_to_primary(self) -> None:
+        document = define_database_entry_type(
+            "mesh.forward_note",
+            [("body", 0)],
+            schema_id="mesh.forward_note.v1",
+        )
+        primary = CultMesh.create_node(runtime_id="forward-primary")
+        primary.database.register_document(document)
+        server = CultMesh.serve_node(primary)
+        try:
+            shard = CultNetShardDescriptor(
+                shard_id="forward",
+                owner_runtime_id="forward-primary",
+                epoch=9,
+                is_primary=False,
+                schema_ids=("mesh.forward_note.v1",),
+                primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+            )
+            forwarder: CultNetShardWriteForwarder = CultNetSchemaWriteForwarder(timeout_seconds=2.0)
+            put = document_put_raw(
+                message_id="forward-put",
+                key="note:forward",
+                schema_id=document.catalog_entry().schema_id,
+                stored_at="2026-06-14T00:00:00Z",
+                payload=document.encode_payload({"body": "forwarded"}),
+            ).to_wire()
+            delete = document_delete(
+                message_id="forward-delete",
+                schema_id=document.catalog_entry().schema_id,
+                record_key="note:forward",
+            ).to_wire()
+
+            forwarder.forward_put(shard, put)
+            self._eventually(lambda: primary.database.get(document, "note:forward") is not None)
+            self.assertEqual(primary.database.get_required(document, "note:forward")["body"], "forwarded")
+            forwarder.forward_delete(shard, delete)
+            self._eventually(lambda: primary.database.get(document, "note:forward") is None)
+
+            log = primary.database.build_shard_log_response(shard_id="forward", shard_epoch=9)
+            self.assertIsNone(primary.database.get(document, "note:forward"))
+            self.assertEqual([entry.change_kind for entry in log.entries], ["added", "removed"])
+            self.assertEqual(log.entries[0].put["shardId"], "forward")
+            self.assertEqual(log.entries[1].delete["shardEpoch"], 9)
+        finally:
+            server.stop()
+
+    def _eventually(self, predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.assertTrue(predicate())
 
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(
