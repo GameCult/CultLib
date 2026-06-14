@@ -35,6 +35,11 @@ from cultnet_py import (
     CultNetShardDescriptor,
     CultNetShardLogEntry,
     CultNetShardLogResponse,
+    CultNetInMemoryShardReplicaCursorStore,
+    CultNetSchemaShardLogFetcher,
+    CultNetSchemaShardSnapshotFetcher,
+    CultNetShardReplicator,
+    CultNetShardReplicatorOptions,
     CultNetSimulationConsensusOptions,
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
@@ -1450,6 +1455,94 @@ class CultCacheTests(unittest.TestCase):
         typed_applied = typed_target.database.apply_shard_log_response(typed_response)
         self.assertEqual([record.change_kind for record in typed_applied], ["updated", "removed"])
         self.assertIsNone(typed_target.database.get(document, "note:1"))
+
+    def test_cultnet_shard_replicator_pulls_logs_and_resyncs_from_snapshot(self) -> None:
+        document = define_database_entry_type(
+            "mesh.replica_note",
+            [("body", 0)],
+            schema_id="mesh.replica_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="primary")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:1", {"body": "one"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:2", {"body": "two"}, shard_id="notes", shard_epoch=3)
+        server = CultMesh.serve_node(source)
+        try:
+            shard = CultNetShardDescriptor(
+                shard_id="notes",
+                owner_runtime_id="primary",
+                epoch=3,
+                is_primary=False,
+                schema_ids=("mesh.replica_note.v1",),
+                primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+            )
+            target = CultMesh.create_node(runtime_id="replica")
+            target.database.register_document(document)
+            cursor_store = CultNetInMemoryShardReplicaCursorStore()
+            replicator = CultNetShardReplicator(
+                target.database,
+                CultNetShardReplicatorOptions(
+                    fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
+                    snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
+                    cursor_store=cursor_store,
+                    batch_size=16,
+                ),
+            )
+
+            first_sequence = replicator.pull_once(shard)
+            second_sequence = replicator.pull_once(shard)
+
+            self.assertEqual(first_sequence, 2)
+            self.assertEqual(second_sequence, 2)
+            self.assertEqual(target.get_required(document, "note:1")["body"], "one")
+            self.assertEqual(target.get_required(document, "note:2")["body"], "two")
+            cursor = cursor_store.read("notes")
+            self.assertIsNotNone(cursor)
+            assert cursor is not None
+            self.assertEqual(cursor.last_applied_sequence, 2)
+            self.assertEqual(cursor.shard_epoch, 3)
+        finally:
+            server.stop()
+
+        resync_target = CultMesh.create_node(runtime_id="resync-replica")
+        resync_target.database.register_document(document)
+        snapshot = source.database.build_snapshot_response(shard_id="notes", shard_epoch=3, shard_log_sequence=2)
+
+        class CompactingFetcher:
+            def fetch(self, shard: CultNetShardDescriptor, *, after_sequence: int, limit: int | None = None) -> CultNetShardLogResponse:
+                return CultNetShardLogResponse(
+                    message_id="compact",
+                    shard_id=shard.shard_id,
+                    shard_epoch=shard.epoch,
+                    entries=(),
+                    resync_required=True,
+                    reason="compacted_history",
+                    compacted_through=after_sequence,
+                )
+
+        class SnapshotFetcher:
+            def fetch(self, shard: CultNetShardDescriptor) -> CultNetRawSnapshotResponse:
+                return snapshot
+
+        resync_replicator = CultNetShardReplicator(
+            resync_target.database,
+            CultNetShardReplicatorOptions(
+                fetcher=CompactingFetcher(),
+                snapshot_fetcher=SnapshotFetcher(),
+                cursor_store=CultNetInMemoryShardReplicaCursorStore(),
+            ),
+        )
+        resync_sequence = resync_replicator.pull_once(CultNetShardDescriptor(
+            shard_id="notes",
+            owner_runtime_id="primary",
+            epoch=3,
+            is_primary=False,
+            schema_ids=("mesh.replica_note.v1",),
+            primary_endpoints=("cultnet://primary:3075",),
+        ))
+
+        self.assertEqual(resync_sequence, 2)
+        self.assertEqual(resync_target.get_required(document, "note:1")["body"], "one")
 
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(

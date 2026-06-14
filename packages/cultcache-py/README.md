@@ -223,7 +223,15 @@ local prediction reconciliation:
 
 ```python
 from cultcache_py import define_database_entry_type
-from cultnet_py import CultNetClientAuthorityScope, CultNetRawClient
+from cultnet_py import (
+    CultNetClientAuthorityScope,
+    CultNetRawClient,
+    CultNetSchemaShardLogFetcher,
+    CultNetSchemaShardSnapshotFetcher,
+    CultNetShardDescriptor,
+    CultNetShardReplicator,
+    CultNetShardReplicatorOptions,
+)
 from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_request
 
 note_doc = define_database_entry_type(
@@ -264,6 +272,20 @@ client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"
 raw_client = CultNetRawClient("127.0.0.1", 3075)
 node.database.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
 node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
+replicator = CultNetShardReplicator(
+    node.database,
+    CultNetShardReplicatorOptions(
+        fetcher=CultNetSchemaShardLogFetcher(),
+        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(),
+    ),
+)
+replicator.pull_once(CultNetShardDescriptor(
+    shard_id="interop",
+    owner_runtime_id="primary-runtime",
+    epoch=1,
+    schema_ids=(note_doc.catalog_entry().schema_id,),
+    primary_endpoints=("cultnet://127.0.0.1:3075",),
+))
 server.stop()
 
 streams = CultMesh.create_stream_catalog()

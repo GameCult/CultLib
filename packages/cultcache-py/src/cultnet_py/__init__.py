@@ -37,6 +37,17 @@ from .schema_catalog import (
 )
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogEntry, CultNetShardLogResponse
+from .shard_replication import (
+    CultNetInMemoryShardReplicaCursorStore,
+    CultNetSchemaShardLogFetcher,
+    CultNetSchemaShardSnapshotFetcher,
+    CultNetShardLogFetcher,
+    CultNetShardReplicaCursor,
+    CultNetShardReplicaCursorStore,
+    CultNetShardReplicator,
+    CultNetShardReplicatorOptions,
+    CultNetShardSnapshotFetcher,
+)
 from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 from .simulation import (
@@ -59,6 +70,15 @@ __all__ = [
     "CultNetShardDescriptor",
     "CultNetShardLogEntry",
     "CultNetShardLogResponse",
+    "CultNetInMemoryShardReplicaCursorStore",
+    "CultNetSchemaShardLogFetcher",
+    "CultNetSchemaShardSnapshotFetcher",
+    "CultNetShardLogFetcher",
+    "CultNetShardReplicaCursor",
+    "CultNetShardReplicaCursorStore",
+    "CultNetShardReplicator",
+    "CultNetShardReplicatorOptions",
+    "CultNetShardSnapshotFetcher",
     "CultNetRawDocumentRecord",
     "CultNetRawSnapshotResponse",
     "CultNetAppliedRecord",
