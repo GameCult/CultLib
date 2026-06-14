@@ -34,6 +34,8 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
         "CultNetRawClient",
         "CultNetSchemaCatalog",
         "CultNetSchemaDescriptor",
+        "CultNetShardCatalog",
+        "CultNetShardDescriptor",
         "CultNetSimulationConsensus",
         "CultNetSimulationConsensusOptions",
         "CultNetSimulationObservationHub",

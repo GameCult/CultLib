@@ -26,6 +26,8 @@ from cultnet_py import (
     CultNetRawClient,
     CultNetSchemaCatalog,
     CultNetSchemaDescriptor,
+    CultNetShardCatalog,
+    CultNetShardDescriptor,
     CultNetSimulationConsensusOptions,
     apply_raw_snapshot,
     apply_shard_log_response,
@@ -426,7 +428,18 @@ class CultCacheTests(unittest.TestCase):
                                 self.assertEqual(request["shardId"], "interop")
                                 response = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": request["messageId"], "documents": []}
                             elif request["schemaVersion"] == "cultnet.shard_catalog_request.v0":
-                                response = {"schemaVersion": "cultnet.shard_catalog_response.v0", "messageId": request["messageId"], "shards": []}
+                                response = {
+                                    "schemaVersion": "cultnet.shard_catalog_response.v0",
+                                    "messageId": request["messageId"],
+                                    "shards": [{
+                                        "shardId": "interop",
+                                        "ownerRuntimeId": "socket-test",
+                                        "epoch": 1,
+                                        "schemaIds": request["schemaIds"],
+                                        "keyPrefix": "record-",
+                                        "primaryEndpoints": ["cultnet://127.0.0.1:1"],
+                                    }],
+                                }
                             elif request["schemaVersion"] == "cultnet.shard_log_request.v0":
                                 self.assertEqual(request["afterSequence"], 7)
                                 response = {
@@ -453,7 +466,10 @@ class CultCacheTests(unittest.TestCase):
         client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
         self.assertEqual(client.fetch_schema_catalog(kinds=["wire_message"])["schemaVersion"], "cultnet.schema_catalog_response.v0")
         self.assertEqual(client.fetch_snapshot(shard_id="interop", shard_epoch=1)["schemaVersion"], "cultnet.snapshot_response_raw.v0")
-        self.assertEqual(client.fetch_shard_catalog(schema_ids=["schema-a"])["schemaVersion"], "cultnet.shard_catalog_response.v0")
+        shard_catalog = CultNetShardCatalog()
+        synced_shards = client.sync_shard_catalog(shard_catalog, schema_ids=["schema-a"])
+        self.assertEqual(synced_shards[0].shard_id, "interop")
+        self.assertEqual(shard_catalog.get("interop"), synced_shards[0])
         self.assertEqual(client.fetch_shard_log(shard_id="interop", shard_epoch=1, after_sequence=7)["schemaVersion"], "cultnet.shard_log_response.v0")
 
         thread.join(2.0)
@@ -901,6 +917,47 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(log["shardEpoch"], 7)
         self.assertEqual(log["afterSequence"], 3)
         self.assertEqual(log["limit"], 2)
+
+    def test_cultnet_shard_catalog_applies_filters_and_responses(self) -> None:
+        catalog = CultNetShardCatalog()
+        primary = catalog.upsert(CultNetShardDescriptor(
+            shard_id="notes",
+            owner_runtime_id="python-runtime",
+            epoch=2,
+            is_primary=True,
+            schema_ids=("schema-note",),
+            key_prefix="note:",
+            primary_endpoints=("cultnet://127.0.0.1:3075",),
+            read_replica_endpoints=("cultnet://127.0.0.1:3075",),
+            region="local",
+        ))
+        catalog.upsert({
+            "shardId": "facts",
+            "ownerRuntimeId": "python-runtime",
+            "epoch": 1,
+            "schemaIds": ["schema-fact"],
+            "keyPrefix": "fact:",
+            "primaryEndpoints": ["cultnet://127.0.0.1:3076"],
+        })
+
+        self.assertTrue(primary.serves(schema_id="schema-note", record_key="note:1"))
+        self.assertFalse(primary.serves(schema_id="schema-note", record_key="fact:1"))
+        self.assertEqual(catalog.list(schema_ids=["schema-note"]), [primary])
+        self.assertEqual(catalog.list(record_keys=["note:1"]), [primary])
+
+        response = catalog.create_response(
+            message_id="shards",
+            schema_ids=["schema-note"],
+            record_keys=["note:1"],
+        )
+        self.assertEqual(response["schemaVersion"], "cultnet.shard_catalog_response.v0")
+        self.assertEqual(response["shards"][0]["shardId"], "notes")
+        self.assertEqual(response["shards"][0]["ownerRuntimeId"], "python-runtime")
+
+        remote = CultNetShardCatalog()
+        applied = remote.apply_response(response)
+        self.assertEqual(applied[0].shard_id, "notes")
+        self.assertEqual(remote.get("notes"), applied[0])
 
     def test_cultnet_simulation_observation_helper_matches_schema_v0_shape(self) -> None:
         claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
@@ -1708,6 +1765,8 @@ class CultCacheTests(unittest.TestCase):
             )
             snapshot_response = raw_client.fetch_snapshot(schema_ids=["mesh.server_note.v1"])
             shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
+            synced_shard_catalog = CultNetShardCatalog()
+            synced_shards = raw_client.sync_shard_catalog(synced_shard_catalog, schema_ids=["mesh.server_note.v1"])
             shard_log = raw_client.fetch_shard_log(shard_id="primary", shard_epoch=1)
             discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
@@ -1749,6 +1808,8 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json"))
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
+        self.assertEqual(synced_shards[0].shard_id, "primary")
+        self.assertEqual(synced_shard_catalog.get("primary"), synced_shards[0])
         self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
         self.assertEqual(fetched_verses[0].verse_id, "server-verse")
         self.assertEqual(fetched_peers[0].peer_id, "mesh-server")

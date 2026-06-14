@@ -17,6 +17,7 @@ from .messages import (
     snapshot_request,
 )
 from .schema_catalog import CultNetSchemaCatalog, CultNetSchemaDescriptor
+from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,35 @@ class CultNetRawClient:
             shard_catalog_request(message_id=message_id, schema_ids=schema_ids, record_keys=record_keys),
             expected_schema_version="cultnet.shard_catalog_response.v0",
         )
+
+    def fetch_shard_descriptors(
+        self,
+        *,
+        message_id: str = "cultnet-python-shard-catalog",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+    ) -> list[CultNetShardDescriptor]:
+        response = self.fetch_shard_catalog(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+        )
+        return CultNetShardCatalog().apply_response(response)
+
+    def sync_shard_catalog(
+        self,
+        catalog: CultNetShardCatalog,
+        *,
+        message_id: str = "cultnet-python-shard-catalog",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+    ) -> list[CultNetShardDescriptor]:
+        response = self.fetch_shard_catalog(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+        )
+        return catalog.apply_response(response)
 
     def fetch_shard_log(
         self,
