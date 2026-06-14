@@ -89,8 +89,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   store beside the cache file by default.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
-  owns sorted listing, lookup, upsert, and authorization delegation, matching
-  the C# reference authority boundary.
+  owns sorted listing, lookup, upsert, signature verification policy, and
+  authorization delegation, matching the C# reference authority boundary.
+  Callers can require verified signatures and use the packaged HMAC verifier to
+  issue and verify canonical lease payloads keyed by issuer runtime.
 - Python CultMesh local server:
   Serves a `CultMeshNode` plus Verse and peer catalogs over the same framed
   MessagePack request/response lane used by `CultNetRawClient` and

@@ -217,11 +217,13 @@ python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-p
 ```
 
 `cultmesh_py` includes a local cache-backed node, schema-v0 helpers for the
-CultMesh Verse catalog and peer exchange wire messages, local authority lease
-checks, stream transport negotiation, committed simulation fact documents, and
-local prediction reconciliation:
+CultMesh Verse catalog and peer exchange wire messages, local and verified
+authority lease checks, stream transport negotiation, committed simulation fact
+documents, and local prediction reconciliation:
 
 ```python
+from datetime import UTC, datetime, timedelta
+
 from cultcache_py import define_database_entry_type
 from cultnet_py import (
     CultNetClientAuthorityScope,
@@ -233,7 +235,14 @@ from cultnet_py import (
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
 )
-from cultmesh_py import CultMesh, CultMeshGameSessionOptions, CultMeshNodeOptions, peer_exchange_request
+from cultmesh_py import (
+    CultMesh,
+    CultMeshAuthorityLease,
+    CultMeshGameSessionOptions,
+    CultMeshHmacAuthorityLeaseVerifier,
+    CultMeshNodeOptions,
+    peer_exchange_request,
+)
 
 note_doc = define_database_entry_type(
     "mesh.note",
@@ -267,6 +276,23 @@ shard_log_wire = node.database.create_shard_log_response(shard_id="interop", sha
 
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
+lease_verifier = CultMeshHmacAuthorityLeaseVerifier({"odin": b"shared-lease-key"})
+lease_catalog = CultMesh.create_authority_lease_catalog(
+    signature_verifier=lease_verifier.verify,
+    require_verified_signatures=True,
+)
+lease_valid_from = datetime.now(UTC)
+lease = lease_verifier.issue(CultMeshAuthorityLease(
+    lease_id="lease:python-runtime",
+    verse_id="local",
+    peer_id="python-runtime",
+    roles=("shard-primary",),
+    valid_from=lease_valid_from,
+    expires_at=lease_valid_from + timedelta(minutes=5),
+    shard_ids=("interop",),
+    issuer_runtime_id="odin",
+))
+lease_catalog.upsert(lease)
 session = CultMesh.create_game_session(
     node,
     CultMeshGameSessionOptions(

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import base64
+import hmac
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Callable
+from hashlib import sha256
+from typing import Any, Callable, Mapping
+
+import msgpack
 
 
 VERSE_CATALOG_REQUEST = "cultmesh.verse_catalog_request.v0"
@@ -242,6 +247,23 @@ class CultMeshAuthorityLease:
         object.__setattr__(self, "roles", _clean_tuple(self.roles))
         object.__setattr__(self, "shard_ids", _clean_tuple(self.shard_ids))
 
+    def signature_payload(self) -> bytes:
+        return msgpack.packb([
+            "cultmesh.authority_lease.v0",
+            self.lease_id,
+            self.verse_id,
+            self.peer_id,
+            list(self.roles),
+            self.valid_from.isoformat(),
+            self.expires_at.isoformat(),
+            list(self.shard_ids),
+            self.issuer_runtime_id,
+        ], use_bin_type=True)
+
+    def with_signature(self, signature: str) -> "CultMeshAuthorityLease":
+        require_non_empty(signature, "signature")
+        return replace(self, signature=signature)
+
     def is_valid_at(self, at: datetime) -> bool:
         return self.valid_from <= at < self.expires_at
 
@@ -265,9 +287,42 @@ class CultMeshAuthorityLease:
         )
 
 
+AuthorityLeaseVerifier = Callable[[CultMeshAuthorityLease], bool]
+
+
+@dataclass(frozen=True)
+class CultMeshHmacAuthorityLeaseVerifier:
+    keys_by_issuer: Mapping[str, bytes | str]
+
+    def sign(self, lease: CultMeshAuthorityLease) -> str:
+        key = self._key_for(lease.issuer_runtime_id)
+        digest = hmac.new(key, lease.signature_payload(), sha256).digest()
+        encoded = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+        return f"hmac-sha256:{encoded}"
+
+    def issue(self, lease: CultMeshAuthorityLease) -> CultMeshAuthorityLease:
+        return lease.with_signature(self.sign(lease))
+
+    def verify(self, lease: CultMeshAuthorityLease) -> bool:
+        signature = lease.signature or ""
+        if not signature:
+            return False
+        try:
+            expected = self.sign(lease)
+        except KeyError:
+            return False
+        return hmac.compare_digest(signature, expected)
+
+    def _key_for(self, issuer_runtime_id: str) -> bytes:
+        key = self.keys_by_issuer[issuer_runtime_id]
+        return key.encode("utf-8") if isinstance(key, str) else key
+
+
 @dataclass
 class CultMeshAuthorityLeaseCatalog:
     _leases: dict[str, CultMeshAuthorityLease] = field(default_factory=dict)
+    signature_verifier: AuthorityLeaseVerifier | None = None
+    require_verified_signatures: bool = False
 
     @property
     def leases(self) -> tuple[CultMeshAuthorityLease, ...]:
@@ -299,7 +354,18 @@ class CultMeshAuthorityLeaseCatalog:
         lease = self._leases.get(peer.authority_lease_id)
         if lease is None:
             return False
+        if not self._is_verified(lease):
+            return False
         return lease.covers(peer, role, shard_id, at)
+
+    def is_verified(self, lease_id: str) -> bool:
+        lease = self.get(lease_id)
+        return False if lease is None else self._is_verified(lease)
+
+    def _is_verified(self, lease: CultMeshAuthorityLease) -> bool:
+        if self.signature_verifier is None:
+            return not self.require_verified_signatures
+        return self.signature_verifier(lease)
 
 
 ZERO_COPY_TRANSPORTS = {

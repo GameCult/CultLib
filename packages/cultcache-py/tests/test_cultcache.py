@@ -87,6 +87,7 @@ from cultmesh_py import (
     CultMeshSimulationFact,
     CultMeshAuthorityLease,
     CultMeshAuthorityLeaseCatalog,
+    CultMeshHmacAuthorityLeaseVerifier,
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
     CultMeshStreamCatalog,
@@ -2635,6 +2636,63 @@ class CultCacheTests(unittest.TestCase):
         self.assertFalse(leases.is_authorized(peer, "shard-primary", shard_id="shard-b", at=now))
         self.assertFalse(leases.is_authorized(peer, "read-replica", at=now))
         self.assertIsNone(leases.get("missing"))
+
+    def test_cultmesh_authority_lease_catalog_can_require_verified_signatures(self) -> None:
+        peer = CultMeshPeerCard(
+            peer_id="voidbot-local",
+            verse_id="local",
+            endpoints=("cultmesh://localhost",),
+            roles=("shard-primary",),
+            shard_ids=("shard-a",),
+            authority_lease_id="lease:voidbot-local",
+        )
+        now = datetime.now(UTC)
+        unsigned = CultMeshAuthorityLease(
+            lease_id="lease:voidbot-local",
+            verse_id="local",
+            peer_id="voidbot-local",
+            roles=("shard-primary",),
+            valid_from=now - timedelta(seconds=1),
+            expires_at=now + timedelta(seconds=30),
+            shard_ids=("shard-a",),
+            issuer_runtime_id="odin",
+        )
+        verifier = CultMeshHmacAuthorityLeaseVerifier({"odin": b"lease-secret"})
+        signed = verifier.issue(unsigned)
+        strict_leases = CultMesh.create_authority_lease_catalog(
+            signature_verifier=verifier.verify,
+            require_verified_signatures=True,
+        )
+        strict_leases.upsert(unsigned)
+        self.assertFalse(strict_leases.is_verified(unsigned.lease_id))
+        self.assertFalse(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        strict_leases.upsert(signed)
+        self.assertTrue(strict_leases.is_verified(signed.lease_id))
+        self.assertTrue(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        wrong_key = CultMesh.create_authority_lease_catalog(
+            signature_verifier=CultMeshHmacAuthorityLeaseVerifier({"odin": b"wrong-secret"}).verify,
+            require_verified_signatures=True,
+        )
+        wrong_key.upsert(signed)
+        self.assertFalse(wrong_key.is_verified(signed.lease_id))
+        self.assertFalse(wrong_key.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        tampered = CultMeshAuthorityLease(
+            lease_id=signed.lease_id,
+            verse_id=signed.verse_id,
+            peer_id=signed.peer_id,
+            roles=("shard-primary", "read-replica"),
+            valid_from=signed.valid_from,
+            expires_at=signed.expires_at,
+            shard_ids=signed.shard_ids,
+            issuer_runtime_id=signed.issuer_runtime_id,
+            signature=signed.signature,
+        )
+        strict_leases.upsert(tampered)
+        self.assertFalse(strict_leases.is_verified(tampered.lease_id))
+        self.assertFalse(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
 
     def test_cultmesh_stream_catalog_negotiates_transport_and_latest_frame(self) -> None:
         streams = CultMeshStreamCatalog()

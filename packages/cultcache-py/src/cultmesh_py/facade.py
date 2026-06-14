@@ -10,6 +10,7 @@ from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
 from .wire import (
+    AuthorityLeaseVerifier,
     CultMeshAuthorityLeaseCatalog,
     CultMeshPeerCatalog,
     CultMeshStreamCatalog,
@@ -61,8 +62,15 @@ class CultMesh:
         return CultMeshPeerCatalog()
 
     @staticmethod
-    def create_authority_lease_catalog() -> CultMeshAuthorityLeaseCatalog:
-        return CultMeshAuthorityLeaseCatalog()
+    def create_authority_lease_catalog(
+        *,
+        signature_verifier: AuthorityLeaseVerifier | None = None,
+        require_verified_signatures: bool = False,
+    ) -> CultMeshAuthorityLeaseCatalog:
+        return CultMeshAuthorityLeaseCatalog(
+            signature_verifier=signature_verifier,
+            require_verified_signatures=require_verified_signatures,
+        )
 
     @staticmethod
     def create_stream_catalog() -> CultMeshStreamCatalog:

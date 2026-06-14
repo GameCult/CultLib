@@ -144,8 +144,8 @@ Not implemented yet:
 Add discovery fanout and operational polish:
 
 - add periodic gossip fanout over known peer cards
-- add real signature verification for authority leases
-- add snapshot throttling and size limits for public mesh edges
+- standardize cross-runtime authority lease signature algorithms beyond the
+  package-local Python HMAC verifier
 - add simulation-frame rollback/resimulation helpers around predicted input
   streams
 - add peer-to-peer fanout for observation gossip and candidate propagation
