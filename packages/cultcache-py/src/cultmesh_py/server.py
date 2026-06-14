@@ -7,7 +7,7 @@ from typing import Any
 
 import msgpack
 
-from cultnet_py import read_frame, write_frame
+from cultnet_py import read_frame, wire_message_schema_descriptors, write_frame
 
 from .node import CultMeshNode
 from .wire import (
@@ -271,6 +271,12 @@ class CultMeshLocalServer:
         requested_kinds = {str(value) for value in request.get("kinds") or []}
         include_schema_json = request.get("includeSchemaJson") is True
         schemas = []
+        for descriptor in wire_message_schema_descriptors(include_schema_json):
+            if requested_schema_ids and descriptor["schemaId"] not in requested_schema_ids:
+                continue
+            if requested_kinds and descriptor["kind"] not in requested_kinds:
+                continue
+            schemas.append(descriptor)
         for document in self.node.documents:
             entry = document.catalog_entry()
             if requested_schema_ids and entry.schema_id not in requested_schema_ids:

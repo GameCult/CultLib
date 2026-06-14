@@ -26,6 +26,11 @@ from .replication import (
     apply_shard_log_response,
     schema_document_map,
 )
+from .schema_catalog import (
+    INTEROP_WIRE_CONTRACT,
+    wire_message_schema_descriptors,
+    wire_message_schema_json,
+)
 from .simulation import (
     CultNetSimulationConsensus,
     CultNetSimulationConsensusOptions,
@@ -54,6 +59,7 @@ __all__ = [
     "encode_witness_artifact_bundle_payload",
     "encode_frame",
     "hello",
+    "INTEROP_WIRE_CONTRACT",
     "parse_message",
     "read_frame",
     "schema_catalog_request",
@@ -62,6 +68,8 @@ __all__ = [
     "shard_log_request",
     "simulation_observation",
     "snapshot_request",
+    "wire_message_schema_descriptors",
+    "wire_message_schema_json",
     "witness_artifact_bundle",
     "write_frame",
 ]

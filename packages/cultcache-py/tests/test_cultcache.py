@@ -44,7 +44,7 @@ from cultnet_py import (
     snapshot_request,
     witness_artifact_bundle,
 )
-from cultnet_py.interop_peer import wire_message_schema_descriptors
+from cultnet_py import wire_message_schema_descriptors
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
@@ -1657,6 +1657,7 @@ class CultCacheTests(unittest.TestCase):
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
             schema_response = raw_client.fetch_schema_catalog(schema_ids=["mesh.server_note.v1"], include_schema_json=True)
+            wire_schema_response = raw_client.fetch_schema_catalog(kinds=["wire_message"], include_schema_json=True)
             snapshot_response = raw_client.fetch_snapshot(schema_ids=["mesh.server_note.v1"])
             shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
             shard_log = raw_client.fetch_shard_log(shard_id="primary", shard_epoch=1)
@@ -1692,6 +1693,10 @@ class CultCacheTests(unittest.TestCase):
         self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
         self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
         self.assertIn("schemaJson", schema_response["schemas"][0])
+        wire_descriptors = {schema["schemaVersion"]: schema for schema in wire_schema_response["schemas"]}
+        self.assertEqual(wire_descriptors["cultnet.document_put_raw.v0"]["kind"], "wire_message")
+        self.assertIn("schemaJson", wire_descriptors["cultnet.document_put_raw.v0"])
+        self.assertIn("cultmesh.peer_exchange_response.v0", wire_descriptors)
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
         self.assertEqual(shard_log["entries"][0]["changeKind"], "added")

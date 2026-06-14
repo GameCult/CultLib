@@ -14,6 +14,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultNet raw client:
   Fetches schema catalogs, raw snapshots, shard catalogs, shard logs, and live
   database subscription changes.
+- Python CultNet schema catalog:
+  Exposes shared wire-message schema descriptors from the package surface so
+  both the interop peer and CultMesh local server describe the CultNet/CultMesh
+  messages they speak through the same catalog authority.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.
@@ -26,6 +30,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   MessagePack request/response lane used by `CultNetRawClient` and
   `CultMeshDiscoveryClient`. It also supports live raw database subscriptions
   for snapshot, put, and delete notifications on a connected client stream.
+  Its schema catalog includes both registered document payload schemas and
+  shared wire-message descriptors for the CultNet/CultMesh messages it handles.
 - Python CultMesh reactive catalogs:
   Verse and peer catalogs expose sorted local views, `get(...)`, response
   application, and `watch(...)` callbacks for local discovery updates. Verse
