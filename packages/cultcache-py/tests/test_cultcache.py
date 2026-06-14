@@ -3431,6 +3431,98 @@ class CultCacheTests(unittest.TestCase):
             finally:
                 self._terminate_process(process)
 
+    def test_cultmesh_daemon_accepts_schema_write_forwarder_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "forwarder-daemon-peer",
+                    "--port",
+                    "0",
+                    "--register-interop-note",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                endpoint = f"cultnet://127.0.0.1:{ready['port']}"
+                shard = CultNetShardDescriptor(
+                    shard_id="forwarded-interop",
+                    owner_runtime_id="forwarder-daemon-peer",
+                    epoch=3,
+                    is_primary=False,
+                    schema_ids=("cultcache.interop-note",),
+                    primary_endpoints=(endpoint,),
+                )
+                forwarder: CultNetShardWriteForwarder = CultNetSchemaWriteForwarder(timeout_seconds=2.0)
+                note = {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:forwarded-daemon",
+                    "authorRuntimeId": "forwarding-client",
+                    "title": "forwarded daemon note",
+                    "body": "forwarded through the schema write-forwarder",
+                    "tags": ["daemon", "forwarded"],
+                }
+
+                forwarder.forward_put(shard, document_put_raw(
+                    message_id="forwarded-daemon-put",
+                    key="note:forwarded-daemon",
+                    schema_id="cultcache.interop-note",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=interop_note_document.encode_payload(note),
+                    source_runtime_id="forwarding-client",
+                ).to_wire())
+
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                self._eventually(lambda: bool(client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                ).documents))
+                snapshot = client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                )
+                self.assertEqual(
+                    interop_note_document.decode_payload(snapshot.documents[0].payload),
+                    note,
+                )
+
+                forwarder.forward_delete(shard, document_delete(
+                    message_id="forwarded-daemon-delete",
+                    schema_id="cultcache.interop-note",
+                    record_key="note:forwarded-daemon",
+                ).to_wire())
+                self._eventually(lambda: not client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                ).documents)
+
+                shard_log = client.fetch_shard_log_response(shard_id="forwarded-interop", shard_epoch=3)
+                self.assertEqual([entry.change_kind for entry in shard_log.entries], ["added", "removed"])
+                self.assertEqual(shard_log.entries[0].put["shardId"], "forwarded-interop")
+                self.assertEqual(shard_log.entries[0].put["shardEpoch"], 3)
+                self.assertEqual(shard_log.entries[1].delete["shardId"], "forwarded-interop")
+                self.assertEqual(shard_log.entries[1].delete["shardEpoch"], 3)
+            finally:
+                self._terminate_process(process)
+
     def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
         deadline = time.monotonic() + 5.0
         while not ready_path.exists() and time.monotonic() < deadline:

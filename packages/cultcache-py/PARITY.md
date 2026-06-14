@@ -65,7 +65,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   non-primary shards with advertised primaries, reports loop errors through a
   caller-owned callback, and recovers from compacted-history resync pressure by
   fetching a shard snapshot. Replica cursor storage can be in-memory or
-  restart-safe through a local MessagePack cursor file.
+  restart-safe through a local MessagePack cursor file. The write-forwarder is
+  also exercised against a launched Python daemon endpoint: forwarded raw
+  put/delete messages mutate daemon state and are recorded in the daemon-served
+  shard log.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for
