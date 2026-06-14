@@ -1,4 +1,8 @@
+import { EventEmitter } from "node:events";
+import { type RemoteInfo, type Socket } from "node:dgram";
+
 import type { CultNetTransportProfile } from "./contracts";
+import type { CultNetTransportConnection, CultNetTransportFrame, CultNetTransportStats } from "./transport";
 
 const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
@@ -56,6 +60,21 @@ export interface RudpTransportProfileOptions {
   transportId?: string;
   host?: string;
   port?: number;
+  maxPayloadBytes?: number;
+  maxFragmentBytes?: number;
+}
+
+export interface CultNetRudpSocketTransportOptions {
+  runtimeId: string;
+  socket: Socket;
+  mode: "client" | "server";
+  remoteHost?: string;
+  remotePort?: number;
+  connectionId: number;
+  initialSequence?: number;
+  resendDelayMs?: number;
+  resendPollMs?: number;
+  transportId?: string;
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
 }
@@ -336,46 +355,200 @@ export class CultNetRudpSession {
   }
 }
 
+export class CultNetRudpSocketTransportConnection extends EventEmitter implements CultNetTransportConnection {
+  readonly profile: CultNetTransportProfile;
+  readonly #socket: Socket;
+  readonly #session: CultNetRudpSession;
+  readonly #mode: "client" | "server";
+  readonly #resendTimer: NodeJS.Timeout;
+  #remoteHost: string | undefined;
+  #remotePort: number | undefined;
+  #closed = false;
+  readonly #stats: CultNetTransportStats = {
+    bytesReceived: 0,
+    bytesSent: 0,
+    framesReceived: 0,
+    framesSent: 0,
+  };
+
+  constructor(options: CultNetRudpSocketTransportOptions) {
+    super();
+    this.#socket = options.socket;
+    this.#mode = options.mode;
+    this.#remoteHost = options.remoteHost;
+    this.#remotePort = options.remotePort;
+    this.#session = new CultNetRudpSession({
+      connectionId: options.connectionId,
+      initialSequence: options.initialSequence,
+      resendDelayMs: options.resendDelayMs,
+    });
+    const address = this.#socket.address();
+    const localPort = typeof address === "string" ? undefined : address.port;
+    const localHost = typeof address === "string" ? undefined : address.address;
+    this.profile = createRudpTransportProfile(options.runtimeId, {
+      transportId: options.transportId,
+      host: localHost,
+      port: localPort,
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxFragmentBytes: options.maxFragmentBytes,
+    });
+
+    this.#socket.on("message", (wire, remote) => this.#receiveDatagram(wire, remote));
+    this.#socket.on("close", () => {
+      this.#closed = true;
+      clearInterval(this.#resendTimer);
+      this.emit("close");
+    });
+    this.#socket.on("error", (error) => this.emit("error", error instanceof Error ? error : new Error(String(error))));
+    this.#resendTimer = setInterval(() => this.#sendDueResends(), options.resendPollMs ?? 25);
+    this.#resendTimer.unref?.();
+  }
+
+  get connected(): boolean {
+    return this.#session.connected;
+  }
+
+  get stats(): CultNetTransportStats {
+    return { ...this.#stats };
+  }
+
+  connect(payload = new Uint8Array()): void {
+    if (this.#mode !== "client") {
+      throw new Error("Only a client RUDP socket transport can initiate connect.");
+    }
+    this.#sendPacket(this.#session.createConnect(Date.now(), payload));
+  }
+
+  send(channelId: string, payload: Uint8Array): void {
+    const packet = this.#session.send(channelId, payload, {
+      ...channelOptions(channelId),
+      nowMs: Date.now(),
+    });
+    this.#sendPacket(packet);
+    this.#stats.framesSent += 1;
+  }
+
+  close(): void {
+    clearInterval(this.#resendTimer);
+    if (!this.#closed) {
+      this.#closed = true;
+      this.#socket.close();
+    }
+  }
+
+  #receiveDatagram(wire: Buffer, remote: RemoteInfo): void {
+    this.#stats.bytesReceived += wire.length;
+    let packet: CultNetRudpPacket;
+    try {
+      packet = decodeRudpPacket(wire);
+    } catch (error) {
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    if (!this.#remoteHost || this.#remotePort === undefined) {
+      this.#remoteHost = remote.address;
+      this.#remotePort = remote.port;
+    } else if (remote.address !== this.#remoteHost || remote.port !== this.#remotePort) {
+      return;
+    }
+
+    try {
+      if (this.#mode === "server" && packet.packetType === "connect") {
+        this.#sendPacket(this.#session.acceptConnect(packet, Date.now()));
+        return;
+      }
+
+      const result = this.#session.receive(packet, Date.now());
+      if (result.reply) {
+        this.#sendPacket(result.reply);
+      }
+      for (const frame of result.delivered) {
+        this.#stats.framesReceived += 1;
+        this.emit("frame", {
+          channelId: frame.channelId,
+          payload: frame.payload,
+        } satisfies CultNetTransportFrame);
+      }
+      if (packet.packetType === "accept" || result.delivered.length > 0) {
+        this.#sendPacket(this.#session.createAck());
+      }
+    } catch (error) {
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  #sendDueResends(): void {
+    for (const packet of this.#session.dueResends(Date.now())) {
+      this.#sendPacket(packet);
+    }
+  }
+
+  #sendPacket(packet: CultNetRudpPacket): void {
+    if (!this.#remoteHost || this.#remotePort === undefined) {
+      throw new Error("RUDP socket transport does not have a remote endpoint.");
+    }
+    const wire = encodeRudpPacket(packet);
+    this.#stats.bytesSent += wire.length;
+    this.#socket.send(wire, this.#remotePort, this.#remoteHost);
+  }
+}
+
 export function createRudpTransportProfile(
   runtimeId: string,
   options: RudpTransportProfileOptions = {},
 ): CultNetTransportProfile {
+  const channel = (
+    channelId: string,
+    delivery: "reliable" | "unreliable",
+    ordering: "ordered" | "unordered" | "sequenced",
+  ): CultNetTransportProfile["transports"][number]["channels"][number] => {
+    const value: CultNetTransportProfile["transports"][number]["channels"][number] = {
+      channelId,
+      delivery,
+      ordering,
+    };
+    if (options.maxPayloadBytes !== undefined) {
+      value.maxPayloadBytes = options.maxPayloadBytes;
+    }
+    if (options.maxFragmentBytes !== undefined) {
+      value.maxFragmentBytes = options.maxFragmentBytes;
+    }
+    return value;
+  };
+
+  const transport: CultNetTransportProfile["transports"][number] = {
+    transportId: options.transportId ?? "rudp",
+    protocol: "rudp",
+    wireContracts: ["cultnet.schema.v0"],
+    channels: [
+      channel("schema", "reliable", "ordered"),
+      channel("latest", "unreliable", "sequenced"),
+      channel("realtime", "unreliable", "unordered"),
+    ],
+  };
+  if (options.host !== undefined) {
+    transport.host = options.host;
+  }
+  if (options.port !== undefined) {
+    transport.port = options.port;
+  }
+
   return {
     schemaVersion: "cultnet.transport_profile.v0",
     runtimeId,
-    transports: [
-      {
-        transportId: options.transportId ?? "rudp",
-        protocol: "rudp",
-        host: options.host,
-        port: options.port,
-        wireContracts: ["cultnet.schema.v0"],
-        channels: [
-          {
-            channelId: "schema",
-            delivery: "reliable",
-            ordering: "ordered",
-            maxPayloadBytes: options.maxPayloadBytes,
-            maxFragmentBytes: options.maxFragmentBytes,
-          },
-          {
-            channelId: "latest",
-            delivery: "unreliable",
-            ordering: "sequenced",
-            maxPayloadBytes: options.maxPayloadBytes,
-            maxFragmentBytes: options.maxFragmentBytes,
-          },
-          {
-            channelId: "realtime",
-            delivery: "unreliable",
-            ordering: "unordered",
-            maxPayloadBytes: options.maxPayloadBytes,
-            maxFragmentBytes: options.maxFragmentBytes,
-          },
-        ],
-      },
-    ],
+    transports: [transport],
   };
+}
+
+function channelOptions(channelId: string): { reliable: boolean; ordered: boolean; sequenced: boolean } {
+  if (channelId === "schema") {
+    return { reliable: true, ordered: true, sequenced: false };
+  }
+  if (channelId === "latest") {
+    return { reliable: false, ordered: false, sequenced: true };
+  }
+  return { reliable: false, ordered: false, sequenced: false };
 }
 
 export function encodeRudpPacket(packet: CultNetRudpPacket): Uint8Array {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Duplex } from "node:stream";
+import dgram, { type Socket } from "node:dgram";
 import { rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
   CultNetDocumentRegistry,
   CultNetPeer,
   CultNetRudpSession,
+  CultNetRudpSocketTransportConnection,
   CultNetSchemaRegistry,
   CultNetSecret,
   CultNetServerSecurityOptions,
@@ -72,6 +74,28 @@ function createDuplexPair(): { a: Duplex; b: Duplex } {
   a.peer = b;
   b.peer = a;
   return { a, b };
+}
+
+async function bindUdpSocket(): Promise<Socket> {
+  const socket = dgram.createSocket("udp4");
+  await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve));
+  return socket;
+}
+
+function udpPort(socket: Socket): number {
+  const address = socket.address();
+  assert.notEqual(typeof address, "string");
+  return address.port;
+}
+
+async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > 1_000) {
+      throw new Error(`Timed out waiting for ${description}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test("CultNet secret helpers round-trip encrypted strings and validate sessions", () => {
@@ -333,6 +357,119 @@ test("rudp session suppresses duplicates and delivers reliable ordered payloads 
     "second",
     "third",
   ]);
+});
+
+test("rudp socket transport handshakes and carries reliable ordered schema frames over UDP", async () => {
+  const serverSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const connectionId = 0x10203040;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(serverSocket),
+    connectionId,
+    initialSequence: 1,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+
+  try {
+    const serverFrame = new Promise<{ channelId: string; payload: Uint8Array }>((resolve, reject) => {
+      server.once("frame", resolve);
+      server.once("error", reject);
+    });
+    client.connect(Buffer.from("join", "utf8"));
+    await waitFor(() => client.connected && server.connected, "RUDP socket handshake");
+    client.send("schema", Buffer.from("client-state", "utf8"));
+
+    const receivedByServer = await serverFrame;
+    assert.equal(receivedByServer.channelId, "schema");
+    assert.equal(Buffer.from(receivedByServer.payload).toString("utf8"), "client-state");
+
+    const clientFrame = new Promise<{ channelId: string; payload: Uint8Array }>((resolve, reject) => {
+      client.once("frame", resolve);
+      client.once("error", reject);
+    });
+    server.send("schema", Buffer.from("server-state", "utf8"));
+    const receivedByClient = await clientFrame;
+    assert.equal(receivedByClient.channelId, "schema");
+    assert.equal(Buffer.from(receivedByClient.payload).toString("utf8"), "server-state");
+    assert.equal(client.stats.framesSent, 1);
+    assert.equal(server.stats.framesReceived, 1);
+    assert.equal(server.profile.transports[0]?.protocol, "rudp");
+  } finally {
+    client.close();
+    server.close();
+  }
+});
+
+test("CultNet peer can speak schema messages through the RUDP socket transport", async () => {
+  const serverSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const connectionId = 0x50607080;
+  const serverTransport = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-peer-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    initialSequence: 500,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const clientTransport = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-peer-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(serverSocket),
+    connectionId,
+    initialSequence: 10,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+
+  try {
+    const sender = new CultNetPeer(clientTransport, { wireContract: "cultnet.schema.v0" });
+    const receiver = new CultNetPeer(serverTransport, { wireContract: "cultnet.schema.v0" });
+    clientTransport.connect();
+    await waitFor(() => clientTransport.connected && serverTransport.connected, "RUDP peer socket handshake");
+
+    const message = await new Promise<ReturnType<typeof parseCultNetMessage>>((resolve, reject) => {
+      receiver.once("message", resolve);
+      receiver.once("invalidMessage", reject);
+      clientTransport.once("error", reject);
+      serverTransport.once("error", reject);
+      sender.sendHello({
+        schemaVersion: "cultnet.hello.v0",
+        runtimeId: "rudp-peer-client",
+        runtimeKind: "node-worker",
+        transportProfiles: [clientTransport.profile],
+      });
+    });
+
+    assert.equal(message.schemaVersion, "cultnet.hello.v0");
+    if (message.schemaVersion === "cultnet.hello.v0") {
+      assert.equal(message.runtimeId, "rudp-peer-client");
+      assert.equal(message.transportProfiles?.[0]?.transports[0]?.protocol, "rudp");
+    }
+
+    sender.close();
+    receiver.close();
+  } finally {
+    clientTransport.close();
+    serverTransport.close();
+  }
 });
 
 test("CultNet peer can speak through a transport connection", async () => {

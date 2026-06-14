@@ -45,27 +45,35 @@ export function createTcpFramedTransportProfile(
   runtimeId: string,
   options: TcpFramedTransportProfileOptions = {},
 ): CultNetTransportProfile {
+  const channel: CultNetTransportProfile["transports"][number]["channels"][number] = {
+    channelId: "schema",
+    delivery: "reliable",
+    ordering: "ordered",
+  };
+  if (options.maxPayloadBytes !== undefined) {
+    channel.maxPayloadBytes = options.maxPayloadBytes;
+  }
+  if (options.maxFragmentBytes !== undefined) {
+    channel.maxFragmentBytes = options.maxFragmentBytes;
+  }
+
+  const transport: CultNetTransportProfile["transports"][number] = {
+    transportId: options.transportId ?? "tcp-framed",
+    protocol: "tcp_framed",
+    wireContracts: ["cultnet.schema.v0"],
+    channels: [channel],
+  };
+  if (options.host !== undefined) {
+    transport.host = options.host;
+  }
+  if (options.port !== undefined) {
+    transport.port = options.port;
+  }
+
   return {
     schemaVersion: "cultnet.transport_profile.v0",
     runtimeId,
-    transports: [
-      {
-        transportId: options.transportId ?? "tcp-framed",
-        protocol: "tcp_framed",
-        host: options.host,
-        port: options.port,
-        wireContracts: ["cultnet.schema.v0"],
-        channels: [
-          {
-            channelId: "schema",
-            delivery: "reliable",
-            ordering: "ordered",
-            maxPayloadBytes: options.maxPayloadBytes,
-            maxFragmentBytes: options.maxFragmentBytes,
-          },
-        ],
-      },
-    ],
+    transports: [transport],
   };
 }
 

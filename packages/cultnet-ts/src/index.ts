@@ -70,10 +70,12 @@ export {
   decodeRudpPacket,
   encodeRudpPacket,
   CultNetRudpSession,
+  CultNetRudpSocketTransportConnection,
   type CultNetRudpDeliveredFrame,
   type CultNetRudpPacket,
   type CultNetRudpPacketType,
   type CultNetRudpReceiveResult,
+  type CultNetRudpSocketTransportOptions,
   type CultNetRudpSessionOptions,
   type RudpTransportProfileOptions,
 } from "./rudp";
