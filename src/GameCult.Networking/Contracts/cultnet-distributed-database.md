@@ -94,7 +94,7 @@ Not implemented yet:
 
 - membership/failure detection
 - leader election or automatic shard failover
-- peer-to-peer snapshot fanout and throttling
+- scheduled peer-to-peer snapshot fanout beyond Python's one-shot client helper
 - scheduled peer-to-peer fanout for observation gossip and candidate propagation
 - cross-runtime rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
@@ -148,6 +148,8 @@ Add discovery fanout and operational polish:
   package-local Python HMAC verifier
 - standardize cross-runtime simulation-frame rollback/resimulation helpers beyond
   Python's local pending-prediction rollback surface
+- add scheduled peer-to-peer snapshot fanout beyond Python's one-shot client
+  helper
 - add scheduled peer-to-peer fanout for observation gossip and candidate
   propagation beyond Python's one-shot client helper
 

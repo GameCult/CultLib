@@ -2554,6 +2554,65 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual({candidate["messageId"] for candidate in candidates}, {"fanout-observation"})
         self.assertEqual({candidate["hasQuorum"] for candidate in candidates}, {True})
 
+    def test_cultmesh_discovery_client_fans_out_snapshots_to_peers(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_fanout_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_fanout_note.v1",
+        )
+        first = CultMesh.create_node(runtime_id="snapshot-peer-a")
+        first.database.register_document(document)
+        first.database.put_raw_message(document, "note:a", {"body": "from-a"}, shard_id="notes", shard_epoch=1)
+        second = CultMesh.create_node(runtime_id="snapshot-peer-b")
+        second.database.register_document(document)
+        second.database.put_raw_message(document, "note:b", {"body": "from-b"}, shard_id="notes", shard_epoch=1)
+        target = CultMesh.create_node(runtime_id="snapshot-target")
+        target.database.register_document(document)
+        first_server = CultMesh.serve_node(first)
+        second_server = CultMesh.serve_node(second)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-peer-a",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{first_server.port}", f"cultnet://127.0.0.1:{first_server.port}"),
+                roles=("read-replica",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-peer-b",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{second_server.port}",),
+                roles=("read-replica",),
+            ))
+
+            client = CultMeshDiscoveryClient("127.0.0.1", first_server.port, timeout_seconds=2.0)
+            responses = client.fanout_snapshot_responses(
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_fanout_note.v1"],
+            )
+            applied = client.sync_snapshots(
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_fanout_note.v1"],
+            )
+        finally:
+            first_server.stop()
+            second_server.stop()
+
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(isinstance(response, CultNetRawSnapshotResponse) for response in responses))
+        self.assertEqual(
+            sorted(record.record_key for response in responses for record in response.documents),
+            ["note:a", "note:b"],
+        )
+        self.assertEqual(sorted(record.record_key for record in applied), ["note:a", "note:b"])
+        self.assertEqual(target.database.get_required(document, "note:a")["body"], "from-a")
+        self.assertEqual(target.database.get_required(document, "note:b")["body"], "from-b")
+
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(
             "mesh.server_note",

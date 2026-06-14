@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from cultnet_py import CultNetRawClient
+from cultnet_py import CultNetRawClient, CultNetRawSnapshotResponse
 
 from .wire import (
     PEER_EXCHANGE_RESPONSE,
@@ -208,15 +208,8 @@ class CultMeshDiscoveryClient:
         roles: list[str] | None = None,
         on_error: Callable[[str, Exception], None] | None = None,
     ) -> list[dict[str, Any]]:
-        requested_roles = set(roles or [])
-        endpoints = [
-            endpoint
-            for peer in catalog.find(verse_id)
-            if not requested_roles or requested_roles.intersection(peer.roles)
-            for endpoint in peer.endpoints
-        ]
         candidates = []
-        for endpoint in _distinct_non_empty(endpoints):
+        for endpoint in self._fanout_endpoints(catalog, verse_id=verse_id, roles=roles):
             try:
                 client = type(self).from_endpoint(endpoint, timeout_seconds=self.timeout_seconds)
                 candidates.append(client.submit_simulation_observation(message))
@@ -225,6 +218,80 @@ class CultMeshDiscoveryClient:
                     raise
                 on_error(endpoint, error)
         return candidates
+
+    def fanout_snapshot_responses(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        on_error: Callable[[str, Exception], None] | None = None,
+    ) -> list[CultNetRawSnapshotResponse]:
+        responses: list[CultNetRawSnapshotResponse] = []
+        for endpoint in self._fanout_endpoints(catalog, verse_id=verse_id, roles=roles):
+            try:
+                client = type(self).from_endpoint(endpoint, timeout_seconds=self.timeout_seconds)
+                raw_client = CultNetRawClient(client.host, client.port, client.timeout_seconds)
+                responses.append(
+                    raw_client.fetch_snapshot_response(
+                        schema_ids=schema_ids,
+                        record_keys=record_keys,
+                        shard_id=shard_id,
+                        shard_epoch=shard_epoch,
+                    )
+                )
+            except Exception as error:
+                if on_error is None:
+                    raise
+                on_error(endpoint, error)
+        return responses
+
+    def sync_snapshots(
+        self,
+        database: Any,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        on_error: Callable[[str, Exception], None] | None = None,
+    ) -> list[Any]:
+        applied = []
+        for response in self.fanout_snapshot_responses(
+            catalog,
+            verse_id=verse_id,
+            roles=roles,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            on_error=on_error,
+        ):
+            applied.extend(database.apply_snapshot_response(response))
+        return applied
+
+    def _fanout_endpoints(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+    ) -> list[str]:
+        requested_roles = set(roles or [])
+        endpoints = [
+            endpoint
+            for peer in catalog.find(verse_id)
+            if not requested_roles or requested_roles.intersection(peer.roles)
+            for endpoint in peer.endpoints
+        ]
+        return _distinct_non_empty(endpoints)
 
     @classmethod
     def from_endpoint(cls, endpoint: str, *, timeout_seconds: float = 4.0) -> "CultMeshDiscoveryClient":
