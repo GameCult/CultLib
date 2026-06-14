@@ -24,7 +24,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh local server:
   Serves a `CultMeshNode` plus Verse and peer catalogs over the same framed
   MessagePack request/response lane used by `CultNetRawClient` and
-  `CultMeshDiscoveryClient`.
+  `CultMeshDiscoveryClient`. It also supports live raw database subscriptions
+  for snapshot, put, and delete notifications on a connected client stream.
 - Python CultMesh reactive catalogs:
   Verse and peer catalogs expose sorted local views, `get(...)`, response
   application, and `watch(...)` callbacks for local discovery updates. Verse

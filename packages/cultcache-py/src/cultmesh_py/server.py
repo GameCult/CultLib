@@ -7,7 +7,8 @@ from typing import Any
 
 import msgpack
 
-from cultnet_py import read_frame, write_frame
+from cultcache_py import CultCacheEnvelope
+from cultnet_py import CultNetMessage, read_frame, write_frame
 
 from .node import CultMeshNode
 from .wire import (
@@ -16,6 +17,21 @@ from .wire import (
     CultMeshPeerCatalog,
     CultMeshVerseCatalog,
 )
+
+
+@dataclass(frozen=True)
+class _DatabaseSubscription:
+    subscription_id: str
+    schema_ids: set[str]
+    record_keys: set[str]
+
+    def matches(self, document: dict[str, Any]) -> bool:
+        schema_id = str(document.get("schemaId") or "")
+        record_key = str(document.get("recordKey") or "")
+        return (
+            (not self.schema_ids or schema_id in self.schema_ids)
+            and (not self.record_keys or record_key in self.record_keys)
+        )
 
 
 @dataclass
@@ -110,6 +126,7 @@ class CultMeshLocalServer:
     def _handle_connection(self, client: socket.socket) -> None:
         with client:
             stream = client.makefile("rwb")
+            subscriptions: dict[str, _DatabaseSubscription] = {}
             while not self._stop.is_set():
                 try:
                     message = msgpack.unpackb(read_frame(stream), raw=False)
@@ -117,11 +134,126 @@ class CultMeshLocalServer:
                     return
                 if not isinstance(message, dict):
                     continue
-                response = self.handle_message(message)
-                if response is None:
-                    continue
-                write_frame(stream, msgpack.packb(response, use_bin_type=True))
-                stream.flush()
+                responses = self._handle_connection_message(message, subscriptions)
+                for response in responses:
+                    write_frame(stream, msgpack.packb(response, use_bin_type=True))
+                    stream.flush()
+
+    def _handle_connection_message(
+        self,
+        message: dict[str, Any],
+        subscriptions: dict[str, _DatabaseSubscription],
+    ) -> list[dict[str, Any]]:
+        schema_version = message.get("schemaVersion")
+        if schema_version == "cultnet.database_subscribe.v0":
+            subscription_id = str(message.get("subscriptionId") or message.get("messageId") or "")
+            if not subscription_id:
+                return []
+            subscriptions[subscription_id] = _DatabaseSubscription(
+                subscription_id=subscription_id,
+                schema_ids={str(value) for value in message.get("schemaIds") or []},
+                record_keys={str(value) for value in message.get("recordKeys") or []},
+            )
+            if message.get("includeSnapshot", True) is False:
+                return []
+            return [
+                self.node.database.create_snapshot_response(
+                    message_id=str(message.get("messageId") or ""),
+                    schema_ids=list(subscriptions[subscription_id].schema_ids),
+                    record_keys=list(subscriptions[subscription_id].record_keys),
+                )
+            ]
+        if schema_version == "cultnet.database_unsubscribe.v0":
+            subscriptions.pop(str(message.get("subscriptionId") or ""), None)
+            return []
+        if schema_version == "cultnet.document_put_raw.v0":
+            return self._handle_raw_put(message, subscriptions)
+        if schema_version == "cultnet.document_delete.v0":
+            return self._handle_raw_delete(message, subscriptions)
+        response = self.handle_message(message)
+        return [] if response is None else [response]
+
+    def _handle_raw_put(
+        self,
+        message: dict[str, Any],
+        subscriptions: dict[str, _DatabaseSubscription],
+    ) -> list[dict[str, Any]]:
+        document_record = message.get("document")
+        if not isinstance(document_record, dict):
+            return []
+        schema_id = str(document_record.get("schemaId") or "")
+        document = self._document_for_schema(schema_id)
+        if document is None:
+            return []
+        record_key = str(document_record["recordKey"])
+        previous = self.node.cache.get(document, record_key)
+        value = self.node.cache.put_envelope(document, self._envelope_from_raw_record(document, document_record))
+        change_kind = "added" if previous is None else "updated"
+        self.node.database._publish_local_change(document, record_key, change_kind, value, previous)
+        self.node.database._append_shard_log_put(CultNetMessage("cultnet.document_put_raw.v0", {
+            key: value for key, value in message.items() if key != "schemaVersion"
+        }), change_kind)
+        return self._database_change_notifications(message, document_record, change_kind, subscriptions)
+
+    def _handle_raw_delete(
+        self,
+        message: dict[str, Any],
+        subscriptions: dict[str, _DatabaseSubscription],
+    ) -> list[dict[str, Any]]:
+        schema_id = str(message.get("schemaId") or "")
+        record_key = str(message.get("recordKey") or "")
+        document = self._document_for_schema(schema_id)
+        if document is None or not record_key:
+            return []
+        self.node.database.delete(document, record_key)
+        self.node.database._append_shard_log_delete(CultNetMessage("cultnet.document_delete.v0", {
+            key: value for key, value in message.items() if key != "schemaVersion"
+        }))
+        return self._database_delete_notifications(message, subscriptions)
+
+    def _database_change_notifications(
+        self,
+        message: dict[str, Any],
+        document: dict[str, Any],
+        change_kind: str,
+        subscriptions: dict[str, _DatabaseSubscription],
+    ) -> list[dict[str, Any]]:
+        notifications = []
+        for subscription in subscriptions.values():
+            if not subscription.matches(document):
+                continue
+            message_id = message.get("messageId") or document.get("recordKey") or "change"
+            notifications.append({
+                "schemaVersion": "cultnet.database_change_raw.v0",
+                "messageId": f"{message_id}:{subscription.subscription_id}",
+                "subscriptionId": subscription.subscription_id,
+                "changeKind": change_kind,
+                "document": document,
+            })
+        return notifications
+
+    def _database_delete_notifications(
+        self,
+        message: dict[str, Any],
+        subscriptions: dict[str, _DatabaseSubscription],
+    ) -> list[dict[str, Any]]:
+        schema_id = str(message.get("schemaId") or "")
+        record_key = str(message.get("recordKey") or "")
+        notifications = []
+        document = {"schemaId": schema_id, "recordKey": record_key}
+        for subscription in subscriptions.values():
+            if not subscription.matches(document):
+                continue
+            message_id = message.get("messageId") or record_key or "change"
+            notifications.append({
+                "schemaVersion": "cultnet.database_change_raw.v0",
+                "messageId": f"{message_id}:{subscription.subscription_id}",
+                "subscriptionId": subscription.subscription_id,
+                "changeKind": "removed",
+                "schemaId": schema_id,
+                "recordKey": record_key,
+            })
+        return notifications
 
     def _hello_response(self) -> dict[str, Any]:
         return {
@@ -134,6 +266,10 @@ class CultMeshLocalServer:
                 "cultnet.hello.v0",
                 "cultnet.schema_catalog_request.v0",
                 "cultnet.snapshot_request.v0",
+                "cultnet.database_subscribe.v0",
+                "cultnet.database_unsubscribe.v0",
+                "cultnet.document_put_raw.v0",
+                "cultnet.document_delete.v0",
                 "cultnet.shard_catalog_request.v0",
                 "cultnet.shard_log_request.v0",
                 VERSE_CATALOG_REQUEST,
@@ -195,3 +331,20 @@ class CultMeshLocalServer:
             "messageId": request.get("messageId", ""),
             "shards": shards,
         }
+
+    def _document_for_schema(self, schema_id: str) -> Any:
+        for document in self.node.documents:
+            entry = document.catalog_entry()
+            if schema_id == entry.schema_id or schema_id in entry.compatible_schema_ids:
+                return document
+        return None
+
+    def _envelope_from_raw_record(self, document: Any, record: dict[str, Any]) -> Any:
+        return CultCacheEnvelope(
+            key=str(record["recordKey"]),
+            type=document.type,
+            schema_id=str(record["schemaId"]),
+            payload=bytes(record["payload"]),
+            stored_at=str(record.get("storedAt") or ""),
+            catalog_entry=document.catalog_entry(),
+        )

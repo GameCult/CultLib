@@ -1663,11 +1663,33 @@ class CultCacheTests(unittest.TestCase):
             discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
             fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
+            with raw_client.subscribe_database(subscription_id="sub-server", schema_ids=["mesh.server_note.v1"]) as subscription:
+                subscription_snapshot = subscription.read_next()
+                subscription.send(document_put_raw(
+                    message_id="server-put",
+                    key="note:2",
+                    schema_id="mesh.server_note.v1",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=document.encode_payload({"body": "subscribed"}),
+                    shard_id="primary",
+                    shard_epoch=1,
+                ))
+                subscription_change = subscription.read_next()
+                subscription.send(document_delete(
+                    message_id="server-delete",
+                    schema_id="mesh.server_note.v1",
+                    record_key="note:2",
+                    shard_id="primary",
+                    shard_epoch=1,
+                ))
+                subscription_delete = subscription.read_next()
         finally:
             server.stop()
 
         self.assertEqual(hello_response["runtimeId"], "mesh-server")
         self.assertEqual(hello_response["displayName"], "Mesh Server")
+        self.assertIn("cultnet.database_subscribe.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
         self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
         self.assertIn("schemaJson", schema_response["schemas"][0])
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
@@ -1675,6 +1697,13 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
         self.assertEqual(fetched_verses[0].verse_id, "server-verse")
         self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
+        self.assertEqual(subscription_snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(subscription_change["schemaVersion"], "cultnet.database_change_raw.v0")
+        self.assertEqual(subscription_change["changeKind"], "added")
+        self.assertEqual(subscription_change["document"]["recordKey"], "note:2")
+        self.assertEqual(subscription_delete["changeKind"], "removed")
+        self.assertEqual(subscription_delete["recordKey"], "note:2")
+        self.assertIsNone(node.database.get(document, "note:2"))
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(
