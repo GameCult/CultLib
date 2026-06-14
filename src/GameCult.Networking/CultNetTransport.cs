@@ -3,6 +3,8 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -487,6 +489,68 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Role for a single-peer CultNet RUDP socket transport.
+    /// </summary>
+    public enum CultNetRudpSocketMode
+    {
+        /// <summary>
+        /// Initiates the connect packet.
+        /// </summary>
+        Client,
+        /// <summary>
+        /// Accepts the first connect packet from a remote endpoint.
+        /// </summary>
+        Server
+    }
+
+    /// <summary>
+    /// Options for binding a CultNet RUDP session to a UDP socket.
+    /// </summary>
+    public sealed class CultNetRudpSocketTransportOptions
+    {
+        /// <summary>
+        /// Gets or sets the runtime id advertised by this transport.
+        /// </summary>
+        public string RuntimeId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the bound UDP socket.
+        /// </summary>
+        public Socket Socket { get; set; } = null!;
+        /// <summary>
+        /// Gets or sets whether this side initiates or accepts the handshake.
+        /// </summary>
+        public CultNetRudpSocketMode Mode { get; set; }
+        /// <summary>
+        /// Gets or sets the expected remote endpoint. Servers may leave this unset until the first connect packet.
+        /// </summary>
+        public EndPoint? RemoteEndPoint { get; set; }
+        /// <summary>
+        /// Gets or sets the RUDP connection/session binding id.
+        /// </summary>
+        public uint ConnectionId { get; set; }
+        /// <summary>
+        /// Gets or sets the first local packet sequence.
+        /// </summary>
+        public uint InitialSequence { get; set; } = 1;
+        /// <summary>
+        /// Gets or sets the resend delay in milliseconds.
+        /// </summary>
+        public long ResendDelayMs { get; set; } = 250;
+        /// <summary>
+        /// Gets or sets the advertised transport id.
+        /// </summary>
+        public string TransportId { get; set; } = "rudp";
+        /// <summary>
+        /// Gets or sets the maximum payload size for RUDP channels.
+        /// </summary>
+        public int? MaxPayloadBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum fragment size for RUDP channels.
+        /// </summary>
+        public int? MaxFragmentBytes { get; set; }
+    }
+
+    /// <summary>
     /// Socket-free reliability state machine for CultNet RUDP.
     /// </summary>
     public sealed class CultNetRudpSession
@@ -818,6 +882,205 @@ namespace GameCult.Networking
                 FragmentCount = packet.FragmentCount,
                 Payload = packet.Payload?.ToArray() ?? Array.Empty<byte>()
             };
+        }
+    }
+
+    /// <summary>
+    /// Single-peer UDP socket binding for the CultNet RUDP reliability session.
+    /// </summary>
+    public sealed class CultNetRudpSocketTransportConnection : IDisposable
+    {
+        private readonly Socket _socket;
+        private readonly CultNetRudpSession _session;
+        private readonly CultNetRudpSocketMode _mode;
+        private readonly CultNetTransportStats _stats = new CultNetTransportStats();
+        private readonly Queue<CultNetTransportFrame> _deliveredFrames = new Queue<CultNetTransportFrame>();
+        private EndPoint? _remoteEndPoint;
+        private bool _disposed;
+
+        /// <summary>
+        /// Initializes a UDP socket binding around a CultNet RUDP session.
+        /// </summary>
+        public CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptions options)
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            if (string.IsNullOrWhiteSpace(options.RuntimeId)) throw new ArgumentException("Runtime id is required.", nameof(options));
+            _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
+            _mode = options.Mode;
+            _remoteEndPoint = options.RemoteEndPoint;
+            _session = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = options.ConnectionId,
+                InitialSequence = options.InitialSequence,
+                ResendDelayMs = options.ResendDelayMs
+            });
+
+            var local = _socket.LocalEndPoint as IPEndPoint;
+            Profile = CultNetTransportProfiles.CreateRudp(
+                options.RuntimeId,
+                new RudpTransportProfileOptions
+                {
+                    TransportId = options.TransportId,
+                    Host = local?.Address.ToString(),
+                    Port = local?.Port,
+                    MaxPayloadBytes = options.MaxPayloadBytes,
+                    MaxFragmentBytes = options.MaxFragmentBytes
+                });
+        }
+
+        /// <summary>
+        /// Gets the profile this connection implements.
+        /// </summary>
+        public CultNetTransportProfile Profile { get; }
+
+        /// <summary>
+        /// Gets whether the RUDP handshake has completed.
+        /// </summary>
+        public bool Connected => _session.Connected;
+
+        /// <summary>
+        /// Gets a snapshot of the current transfer counters.
+        /// </summary>
+        public CultNetTransportStats Stats => _stats.Snapshot();
+
+        /// <summary>
+        /// Sends the client connect packet.
+        /// </summary>
+        public void Connect(byte[]? payload = null)
+        {
+            if (_mode != CultNetRudpSocketMode.Client)
+            {
+                throw new InvalidOperationException("Only a client RUDP socket transport can initiate connect.");
+            }
+
+            SendPacket(_session.CreateConnect(NowMs(), payload ?? Array.Empty<byte>()));
+        }
+
+        /// <summary>
+        /// Sends a logical transport frame through the RUDP session.
+        /// </summary>
+        public void Send(string channelId, byte[] payload)
+        {
+            var packet = _session.Send(channelId, payload, ChannelSendOptions(channelId));
+            SendPacket(packet);
+            _stats.FramesSent++;
+        }
+
+        /// <summary>
+        /// Polls the UDP socket once and returns the next delivered transport frame if one is available.
+        /// </summary>
+        public CultNetTransportFrame? ReceiveOnce()
+        {
+            if (_deliveredFrames.Count > 0)
+            {
+                return _deliveredFrames.Dequeue();
+            }
+
+            var buffer = new byte[65535];
+            EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+            int received;
+            try
+            {
+                received = _socket.ReceiveFrom(buffer, ref remote);
+            }
+            catch (SocketException error) when (
+                error.SocketErrorCode == SocketError.WouldBlock ||
+                error.SocketErrorCode == SocketError.TimedOut)
+            {
+                return null;
+            }
+
+            _stats.BytesReceived += received;
+            if (_remoteEndPoint == null)
+            {
+                _remoteEndPoint = remote;
+            }
+            else if (!_remoteEndPoint.Equals(remote))
+            {
+                return null;
+            }
+
+            var wire = new byte[received];
+            Array.Copy(buffer, wire, received);
+            var packet = CultNetRudpPacketCodec.Decode(wire);
+            if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
+            {
+                SendPacket(_session.AcceptConnect(packet, NowMs()));
+                return null;
+            }
+
+            var result = _session.Receive(packet, NowMs());
+            if (result.Reply != null)
+            {
+                SendPacket(result.Reply);
+            }
+
+            foreach (var frame in result.Delivered)
+            {
+                _deliveredFrames.Enqueue(new CultNetTransportFrame
+                {
+                    ChannelId = frame.ChannelId,
+                    Payload = frame.Payload
+                });
+                _stats.FramesReceived++;
+            }
+
+            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            if (packet.PacketType == CultNetRudpPacketType.Accept || delivered != null)
+            {
+                SendPacket(_session.CreateAck());
+            }
+
+            return delivered;
+        }
+
+        /// <summary>
+        /// Sends any reliable packets whose resend timers are due.
+        /// </summary>
+        public void PollResends()
+        {
+            foreach (var packet in _session.DueResends(NowMs()))
+            {
+                SendPacket(packet);
+            }
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _socket.Dispose();
+        }
+
+        private void SendPacket(CultNetRudpPacket packet)
+        {
+            if (_remoteEndPoint == null)
+            {
+                throw new InvalidOperationException("RUDP socket transport does not have a remote endpoint.");
+            }
+
+            var wire = CultNetRudpPacketCodec.Encode(packet);
+            var sent = _socket.SendTo(wire, _remoteEndPoint);
+            _stats.BytesSent += sent;
+        }
+
+        private static CultNetRudpSendOptions ChannelSendOptions(string channelId)
+        {
+            return string.Equals(channelId, "schema", StringComparison.Ordinal)
+                ? new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = NowMs() }
+                : string.Equals(channelId, "latest", StringComparison.Ordinal)
+                    ? new CultNetRudpSendOptions { Sequenced = true, NowMs = NowMs() }
+                    : new CultNetRudpSendOptions { NowMs = NowMs() };
+        }
+
+        private static long NowMs()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
     }
 

@@ -24,7 +24,7 @@ CultNet owns cross-runtime transport semantics:
 
 | Runtime | Current data transport | Discovery | Transport authority today |
 | --- | --- | --- | --- |
-| C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered` | LiteNetLib connection requests and app-level peer/catalog surfaces | C# owns the production-shaped realtime semantics |
+| C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered`; single-peer RUDP socket transport exists in the library | LiteNetLib connection requests and app-level peer/catalog surfaces | Production LiteNetLib path plus UDP socket binding for the shared RUDP reliability owner |
 | C# interop peer | TCP stream with 4-byte length-prefixed MessagePack frames | UDP multicast probe/announce | Test harness only |
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
@@ -165,16 +165,15 @@ Current progress:
   ack/ack-mask accounting, reliable resend scheduling, duplicate suppression,
   and reliable ordered channel delivery. It is in-memory and socket-free so the
   behavior can be tested before any runtime binds it to UDP I/O.
-- TypeScript, Rust, and Python now have socket-backed RUDP transport
+- C#, TypeScript, Rust, and Python now have socket-backed RUDP transport
   connections that bind a single UDP peer to the shared RUDP session. TypeScript
   emits the same `frame` events as the TCP-framed transport and can carry
-  `CultNetPeer` schema messages over reliable ordered `schema` frames; Rust and
-  Python expose the same transport frame/stats shape through synchronous socket
-  polling.
+  `CultNetPeer` schema messages over reliable ordered `schema` frames; C#,
+  Rust, and Python expose the same transport frame/stats shape through
+  synchronous socket polling.
 - The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
-  TCP/LiteNetLib/WebSocket bodies behind those ports, then bind the shared RUDP
-  reliability state machine to UDP sockets in C#.
+  TCP/LiteNetLib/WebSocket bodies behind those ports.
 
 ## RUDP Packet Contract V0
 

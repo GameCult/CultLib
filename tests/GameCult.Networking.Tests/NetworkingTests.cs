@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -18,6 +20,51 @@ namespace GameCult.Networking.Tests
     {
         private static readonly ServerSecurityOptions DevelopmentServerSecurity = ServerSecurityOptions.Development();
         private static readonly ClientSecurityOptions DevelopmentClientSecurity = ClientSecurityOptions.Development();
+
+        private static Socket BindUdpSocket()
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            socket.ReceiveTimeout = 20;
+            return socket;
+        }
+
+        private static void PumpRudpHandshake(
+            CultNetRudpSocketTransportConnection client,
+            CultNetRudpSocketTransportConnection server)
+        {
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                server.ReceiveOnce();
+                client.ReceiveOnce();
+                server.ReceiveOnce();
+                if (client.Connected && server.Connected)
+                {
+                    return;
+                }
+
+                Task.Delay(5).GetAwaiter().GetResult();
+            }
+
+            Assert.Fail("RUDP socket handshake did not complete.");
+        }
+
+        private static CultNetTransportFrame ReceiveRudpFrame(CultNetRudpSocketTransportConnection transport)
+        {
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                var frame = transport.ReceiveOnce();
+                if (frame != null)
+                {
+                    return frame;
+                }
+
+                Task.Delay(5).GetAwaiter().GetResult();
+            }
+
+            Assert.Fail("RUDP socket frame was not delivered.");
+            throw new InvalidOperationException("Unreachable.");
+        }
 
         [Test]
         public void EncryptDecrypt_Roundtrip()
@@ -445,6 +492,52 @@ namespace GameCult.Networking.Tests
             Assert.That(
                 receiver.Receive(second).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
                 Is.EqualTo(new[] { "second", "third" }));
+        }
+
+        [Test]
+        public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203040;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25
+            });
+
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+            Assert.That(client.Connected, Is.True);
+            Assert.That(server.Connected, Is.True);
+
+            client.Send("schema", Encoding.UTF8.GetBytes("client-state"));
+            var serverFrame = ReceiveRudpFrame(server);
+            Assert.That(serverFrame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(Encoding.UTF8.GetString(serverFrame.Payload), Is.EqualTo("client-state"));
+
+            server.Send("schema", Encoding.UTF8.GetBytes("server-state"));
+            var clientFrame = ReceiveRudpFrame(client);
+            Assert.That(clientFrame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(Encoding.UTF8.GetString(clientFrame.Payload), Is.EqualTo("server-state"));
+            Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(client.Stats.FramesSent, Is.EqualTo(1));
+            Assert.That(server.Stats.FramesReceived, Is.EqualTo(1));
         }
 
         [Test]
