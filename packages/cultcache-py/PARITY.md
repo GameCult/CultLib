@@ -117,6 +117,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   shard log. If its durable shard log has been compacted, stale shard-log
   requests return the same explicit `compacted_history` resync boundary over
   the daemon wire endpoint instead of silently looking empty.
+  The daemon CLI snapshot document/byte limits feed the same public server edge;
+  oversized daemon snapshot responses are returned as structured
+  `cultnet.error.v0` peer errors rather than partial payloads.
 - Python CultMesh authority leases:
   Lease objects own validity and peer/role/shard coverage checks; the catalog
   owns sorted listing, lookup, upsert, signature verification policy, and

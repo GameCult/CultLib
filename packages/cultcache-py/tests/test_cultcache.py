@@ -3523,6 +3523,51 @@ class CultCacheTests(unittest.TestCase):
             finally:
                 self._terminate_process(process)
 
+    def test_cultmesh_daemon_enforces_snapshot_document_limit_as_peer_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "limited-daemon-peer",
+                    "--port",
+                    "0",
+                    "--seed-interop-note",
+                    "--max-snapshot-documents",
+                    "0",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:
+                    client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+
+                self.assertEqual(raised.exception.response["schemaVersion"], "cultnet.error.v0")
+                self.assertEqual(raised.exception.response["code"], "snapshot_document_limit_exceeded")
+                self.assertEqual(raised.exception.response["details"]["documentCount"], 1)
+                self.assertEqual(raised.exception.response["details"]["maxSnapshotDocuments"], 0)
+            finally:
+                self._terminate_process(process)
+
     def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
         deadline = time.monotonic() + 5.0
         while not ready_path.exists() and time.monotonic() < deadline:
