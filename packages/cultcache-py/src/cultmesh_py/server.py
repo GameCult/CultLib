@@ -7,7 +7,7 @@ from typing import Any
 
 import msgpack
 
-from cultnet_py import read_frame, wire_message_schema_descriptors, write_frame
+from cultnet_py import CultNetSimulationObservationHub, read_frame, wire_message_schema_descriptors, write_frame
 
 from .node import CultMeshNode
 from .wire import (
@@ -38,6 +38,7 @@ class CultMeshLocalServer:
     node: CultMeshNode
     verse_catalog: CultMeshVerseCatalog = field(default_factory=CultMeshVerseCatalog)
     peer_catalog: CultMeshPeerCatalog = field(default_factory=CultMeshPeerCatalog)
+    observation_hub: CultNetSimulationObservationHub | None = None
     host: str = "127.0.0.1"
     port: int = 0
     display_name: str | None = None
@@ -107,6 +108,9 @@ class CultMeshLocalServer:
             return self.verse_catalog.create_response(message)
         if schema_version == PEER_EXCHANGE_REQUEST:
             return self.peer_catalog.create_response(message)
+        if schema_version == "cultnet.simulation_observation.v0":
+            candidates = self._candidate_responses(message)
+            return candidates[0] if candidates else None
         return None
 
     def _accept_loop(self) -> None:
@@ -169,6 +173,8 @@ class CultMeshLocalServer:
             return self._handle_raw_put(message, subscriptions)
         if schema_version == "cultnet.document_delete.v0":
             return self._handle_raw_delete(message, subscriptions)
+        if schema_version == "cultnet.simulation_observation.v0":
+            return self._candidate_responses(message)
         response = self.handle_message(message)
         return [] if response is None else [response]
 
@@ -269,11 +275,25 @@ class CultMeshLocalServer:
                 "cultnet.document_delete.v0",
                 "cultnet.shard_catalog_request.v0",
                 "cultnet.shard_log_request.v0",
+                "cultnet.simulation_observation.v0",
+                "cultnet.simulation_consensus_candidate.v0",
                 VERSE_CATALOG_REQUEST,
                 PEER_EXCHANGE_REQUEST,
             ],
             "supportsSchemaCatalog": True,
         }
+
+    def _candidate_responses(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        if self.observation_hub is None:
+            return []
+        message_id = str(message.get("messageId") or "")
+        return [
+            {
+                **candidate.to_wire(),
+                "messageId": message_id,
+            }
+            for candidate in self.observation_hub.submit_candidate_objects(message)
+        ]
 
     def _schema_catalog_response(self, request: dict[str, Any]) -> dict[str, Any]:
         requested_schema_ids = {str(value) for value in request.get("schemaIds") or []}

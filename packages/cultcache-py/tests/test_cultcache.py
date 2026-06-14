@@ -50,6 +50,7 @@ from cultnet_py import (
     CultNetSimulationConsensusOptions,
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
+    CultNetSimulationObservationHub,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
     apply_raw_snapshot,
@@ -2370,6 +2371,12 @@ class CultCacheTests(unittest.TestCase):
         node = CultMesh.create_node(runtime_id="mesh-server")
         node.database.register_document(document)
         node.database.put_raw_message(document, "note:1", {"body": "served"}, shard_id="notes", shard_epoch=1)
+        observation_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
+        )
+        seen_candidates: list[CultNetSimulationConsensusCandidate] = []
+        unsubscribe_candidates = observation_hub.watch_candidates(seen_candidates.append)
+        claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
         verses = CultMeshVerseCatalog()
         verses.upsert(
             CultMeshVerseDescriptor(
@@ -2389,7 +2396,13 @@ class CultCacheTests(unittest.TestCase):
             )
         )
 
-        server = CultMesh.serve_node(node, verse_catalog=verses, peer_catalog=peers, display_name="Mesh Server")
+        server = CultMesh.serve_node(
+            node,
+            verse_catalog=verses,
+            peer_catalog=peers,
+            observation_hub=observation_hub,
+            display_name="Mesh Server",
+        )
         try:
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
@@ -2412,6 +2425,34 @@ class CultCacheTests(unittest.TestCase):
             discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
             fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
             fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
+            first_candidate = raw_client.request(
+                simulation_observation(
+                    message_id="obs-1",
+                    witness_runtime_id="watcher-1",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+            quorum_candidate = raw_client.request(
+                simulation_observation(
+                    message_id="obs-2",
+                    witness_runtime_id="watcher-2",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
             with raw_client.subscribe_database(subscription_id="sub-server", schema_ids=["mesh.server_note.v1"]) as subscription:
                 subscription_snapshot = subscription.read_next_snapshot_response()
                 subscription.send(document_put_raw(
@@ -2433,12 +2474,14 @@ class CultCacheTests(unittest.TestCase):
                 ))
                 subscription_delete = subscription.read_next_change()
         finally:
+            unsubscribe_candidates()
             server.stop()
 
         self.assertEqual(hello_response["runtimeId"], "mesh-server")
         self.assertEqual(hello_response["displayName"], "Mesh Server")
         self.assertIn("cultnet.database_subscribe.v0", hello_response["supportedMessageVersions"])
         self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
         self.assertEqual(hello_response["supportedMutationContracts"][0]["documentType"], "mesh.server_note")
         self.assertIn("documentDelete", hello_response["supportedMutationContracts"][0]["operations"])
         self.assertIn("shardLog", hello_response["supportedMutationContracts"][0]["operations"])
@@ -2472,6 +2515,13 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(typed_shard_log.entries[0].raw_document.record_key, "note:1")
         self.assertEqual(fetched_verses[0].verse_id, "server-verse")
         self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
+        self.assertEqual(first_candidate["messageId"], "obs-1")
+        self.assertFalse(first_candidate["hasQuorum"])
+        self.assertEqual(quorum_candidate["messageId"], "obs-2")
+        self.assertEqual(quorum_candidate["claimHash"], claim_hash)
+        self.assertTrue(quorum_candidate["hasQuorum"])
+        self.assertEqual(quorum_candidate["witnessCount"], 2)
+        self.assertEqual([candidate.claim_hash for candidate in seen_candidates], [claim_hash, claim_hash])
         self.assertIsInstance(subscription_snapshot, CultNetRawSnapshotResponse)
         self.assertEqual(subscription_snapshot.to_wire()["schemaVersion"], "cultnet.snapshot_response_raw.v0")
         self.assertEqual(subscription_change.change_kind, "added")

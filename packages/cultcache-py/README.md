@@ -267,7 +267,15 @@ shard_log_wire = node.database.create_shard_log_response(shard_id="interop", sha
 
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
-server = CultMesh.serve_node(node, peer_catalog=peers, port=3075)
+session = CultMesh.create_game_session(
+    node,
+    CultMeshGameSessionOptions(
+        client_authority_scopes=(
+            CultNetClientAuthorityScope("python-runtime", schema_ids=(note_doc.catalog_entry().schema_id,), key_prefix="input:python"),
+        ),
+    ),
+)
+server = CultMesh.serve_node(node, peer_catalog=peers, observation_hub=session.observation_hub, port=3075)
 
 client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
@@ -316,15 +324,6 @@ committed = facts.commit({
     "confidence": 1.0,
     "hasQuorum": True,
 })
-
-session = CultMesh.create_game_session(
-    node,
-    CultMeshGameSessionOptions(
-        client_authority_scopes=(
-            CultNetClientAuthorityScope("python-runtime", schema_ids=(note_doc.catalog_entry().schema_id,), key_prefix="input:python"),
-        ),
-    ),
-)
 session_commits = session.submit_and_commit(typed_observation)
 prediction = session.predict(note_doc, "input:python:move", {"body": "predicted input"})
 unsubscribe()

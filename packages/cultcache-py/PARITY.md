@@ -95,6 +95,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   MessagePack request/response lane used by `CultNetRawClient` and
   `CultMeshDiscoveryClient`. It also supports live raw database subscriptions
   for snapshot, put, and delete notifications on a connected client stream.
+  When given a `CultNetSimulationObservationHub`, it accepts
+  `cultnet.simulation_observation.v0` messages and replies with current
+  `cultnet.simulation_consensus_candidate.v0` messages through the same framed
+  lane.
   Its schema catalog includes both registered document payload schemas and
   shared wire-message descriptors for the CultNet/CultMesh messages it handles.
   Hello and payload schema descriptors advertise the raw snapshot, put, delete,

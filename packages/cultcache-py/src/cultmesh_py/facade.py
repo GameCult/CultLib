@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cultnet_py import CultNetRawClient
+from cultnet_py import CultNetRawClient, CultNetSimulationObservationHub
 
 from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import CultMeshNode, CultMeshNodeOptions, create_node
@@ -103,6 +103,7 @@ class CultMesh:
         *,
         verse_catalog: CultMeshVerseCatalog | None = None,
         peer_catalog: CultMeshPeerCatalog | None = None,
+        observation_hub: CultNetSimulationObservationHub | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
         display_name: str | None = None,
@@ -111,6 +112,7 @@ class CultMesh:
             node=node,
             verse_catalog=verse_catalog or CultMeshVerseCatalog(),
             peer_catalog=peer_catalog or CultMeshPeerCatalog(),
+            observation_hub=observation_hub,
             host=host,
             port=port,
             display_name=display_name,
