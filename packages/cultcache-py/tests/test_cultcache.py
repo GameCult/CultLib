@@ -2395,6 +2395,67 @@ class CultCacheTests(unittest.TestCase):
             {peer.peer_id for peer in fanout_peers.find("aetheria-main", role="read-replica")},
         )
 
+    def test_cultmesh_discovery_client_fans_out_simulation_observations_to_peers(self) -> None:
+        first_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        second_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        first_server = CultMesh.serve_node(
+            CultMesh.create_node(runtime_id="sim-peer-a"),
+            observation_hub=first_hub,
+        )
+        second_server = CultMesh.serve_node(
+            CultMesh.create_node(runtime_id="sim-peer-b"),
+            observation_hub=second_hub,
+        )
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-peer-a",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{first_server.port}",),
+                roles=("simulation-witness",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-peer-b",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{second_server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:200")
+            message = simulation_observation(
+                message_id="fanout-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=200,
+                subject_id="bob",
+                claim_kind="hit",
+                claim_hash=claim_hash,
+                claim_summary="alice hit bob",
+            ).to_wire()
+
+            client = CultMeshDiscoveryClient("127.0.0.1", first_server.port, timeout_seconds=2.0)
+            candidates = client.fanout_simulation_observation(
+                peers,
+                message,
+                verse_id="arena",
+                roles=["simulation-witness"],
+            )
+        finally:
+            first_server.stop()
+            second_server.stop()
+
+        self.assertEqual([candidate["schemaVersion"] for candidate in candidates], [
+            "cultnet.simulation_consensus_candidate.v0",
+            "cultnet.simulation_consensus_candidate.v0",
+        ])
+        self.assertEqual({candidate["claimHash"] for candidate in candidates}, {claim_hash})
+        self.assertEqual({candidate["messageId"] for candidate in candidates}, {"fanout-observation"})
+        self.assertEqual({candidate["hasQuorum"] for candidate in candidates}, {True})
+
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(
             "mesh.server_note",

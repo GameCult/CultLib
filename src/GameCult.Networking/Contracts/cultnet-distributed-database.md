@@ -95,7 +95,7 @@ Not implemented yet:
 - membership/failure detection
 - leader election or automatic shard failover
 - peer-to-peer snapshot fanout and throttling
-- peer-to-peer fanout for observation gossip and candidate propagation
+- scheduled peer-to-peer fanout for observation gossip and candidate propagation
 - rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
@@ -148,7 +148,8 @@ Add discovery fanout and operational polish:
   package-local Python HMAC verifier
 - add simulation-frame rollback/resimulation helpers around predicted input
   streams
-- add peer-to-peer fanout for observation gossip and candidate propagation
+- add scheduled peer-to-peer fanout for observation gossip and candidate
+  propagation beyond Python's one-shot client helper
 
 The log is wire-readable, replicas can apply it explicitly, a pull loop can
 drive non-primary shards from primary endpoints, and replica cursors can survive

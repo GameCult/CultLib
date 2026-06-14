@@ -79,8 +79,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   CultNet frames. It can also parse `cultnet://host:port` endpoints, discover
   from endpoint lists, de-duplicate discovery targets, fan out one-shot
   discovery from endpoints already advertised in local Verse and peer catalogs,
-  and upsert results into local catalogs with the same count-returning
-  ergonomics as the C# discovery clients.
+  fan out simulation observations to peer-card endpoints, and upsert results
+  into local catalogs with the same count-returning ergonomics as the C#
+  discovery clients.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,

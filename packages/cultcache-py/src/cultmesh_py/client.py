@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from cultnet_py import CultNetRawClient
@@ -192,6 +192,39 @@ class CultMeshDiscoveryClient:
             roles=roles,
             limit=limit,
         )
+
+    def submit_simulation_observation(self, message: dict[str, Any]) -> dict[str, Any]:
+        return self.request(
+            message,
+            expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+        )
+
+    def fanout_simulation_observation(
+        self,
+        catalog: CultMeshPeerCatalog,
+        message: dict[str, Any],
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+        on_error: Callable[[str, Exception], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        requested_roles = set(roles or [])
+        endpoints = [
+            endpoint
+            for peer in catalog.find(verse_id)
+            if not requested_roles or requested_roles.intersection(peer.roles)
+            for endpoint in peer.endpoints
+        ]
+        candidates = []
+        for endpoint in _distinct_non_empty(endpoints):
+            try:
+                client = type(self).from_endpoint(endpoint, timeout_seconds=self.timeout_seconds)
+                candidates.append(client.submit_simulation_observation(message))
+            except Exception as error:
+                if on_error is None:
+                    raise
+                on_error(endpoint, error)
+        return candidates
 
     @classmethod
     def from_endpoint(cls, endpoint: str, *, timeout_seconds: float = 4.0) -> "CultMeshDiscoveryClient":
