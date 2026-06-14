@@ -270,6 +270,9 @@ prediction = session.predict(note_doc, "input:python:move", {"body": "predicted 
 
 ## Wire Parity
 
+See [PARITY.md](PARITY.md) for the current evidence map, gates, and things this
+package still does not claim.
+
 The Python interop peer is `cultcache_py.interop`:
 
 ```powershell
@@ -308,6 +311,7 @@ The package ships a lightweight benchmark for Python-owned hot paths:
 
 ```powershell
 python -m cultcache_py.benchmark --records 1000 --json
+python -m cultcache_py.verify --json
 ```
 
 It reports slot-indexed `DatabaseEntry` encode/decode throughput, framed

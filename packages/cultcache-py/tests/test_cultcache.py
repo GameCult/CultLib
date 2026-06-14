@@ -18,6 +18,7 @@ from cultcache_py import (
 )
 from cultcache_py.benchmark import run_benchmark
 from cultcache_py.interop import read_note, write_note
+from cultcache_py.verify import verify
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetClientAuthorityScope,
@@ -212,6 +213,12 @@ class CultCacheTests(unittest.TestCase):
             "raw_snapshot_apply",
         })
         self.assertTrue(all(metric["opsPerSecond"] > 0 for metric in result["metrics"]))
+
+    def test_verify_reports_python_runtime_surface_health(self) -> None:
+        result = verify(records=4)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual({check["name"] for check in result["checks"]}, {"public_exports", "typed_markers", "benchmark_sanity"})
 
     def test_cultnet_schema_message_frame_round_trip(self) -> None:
         message = hello(runtime_id="python-test", supported_schema_versions=["cultnet.hello.v0"])
