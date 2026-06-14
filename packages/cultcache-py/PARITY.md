@@ -89,9 +89,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   endpoints, apply peer snapshots through a caller-owned database, run
   lightweight scheduled snapshot and simulation-observation fanout loops, probe
   peer-card endpoints for hello-level reachability, preserve hello capability
-  metadata on health results, run immediate scheduled health probes on start,
-  and upsert results into local catalogs with the same count-returning
-  ergonomics as the C# discovery clients.
+  metadata on health results including document types, message versions, and
+  mutation contracts, run immediate scheduled health probes on start, and
+  upsert results into local catalogs with the same count-returning ergonomics
+  as the C# discovery clients.
 - Python CultMesh facade:
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,

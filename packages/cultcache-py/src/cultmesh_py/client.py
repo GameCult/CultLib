@@ -498,7 +498,9 @@ class CultMeshPeerHealth:
     runtime_id: str | None = None
     runtime_kind: str | None = None
     display_name: str | None = None
+    supported_document_types: tuple[str, ...] = ()
     supported_message_versions: tuple[str, ...] = ()
+    supported_mutation_contracts: tuple[dict[str, Any], ...] = ()
     error: str | None = None
 
 
@@ -599,10 +601,20 @@ class CultMeshPeerHealthMonitor:
                 runtime_id=str(response.get("runtimeId") or ""),
                 runtime_kind=_optional_string(response.get("runtimeKind")),
                 display_name=_optional_string(response.get("displayName")),
+                supported_document_types=tuple(
+                    str(value)
+                    for value in response.get("supportedDocumentTypes") or ()
+                    if value is not None
+                ),
                 supported_message_versions=tuple(
                     str(value)
                     for value in response.get("supportedMessageVersions") or ()
                     if value is not None
+                ),
+                supported_mutation_contracts=tuple(
+                    dict(value)
+                    for value in response.get("supportedMutationContracts") or ()
+                    if isinstance(value, dict)
                 ),
             )
         except Exception as error:

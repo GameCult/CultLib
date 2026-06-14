@@ -2942,7 +2942,14 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(target.database.get_required(document, "note:background")["body"], "from-background")
 
     def test_cultmesh_peer_health_monitor_probes_reachable_and_failed_endpoints(self) -> None:
-        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="health-peer"))
+        document = define_database_entry_type(
+            "mesh.health_note",
+            [("body", 0)],
+            schema_id="mesh.health_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="health-peer")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node)
         closed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         closed_socket.bind(("127.0.0.1", 0))
         closed_port = closed_socket.getsockname()[1]
@@ -2977,11 +2984,16 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(by_peer["health-peer"].runtime_id, "health-peer")
         self.assertEqual(by_peer["health-peer"].runtime_kind, "python")
         self.assertEqual(by_peer["health-peer"].display_name, "health-peer")
+        self.assertEqual(by_peer["health-peer"].supported_document_types, ("mesh.health_note",))
         self.assertIn("cultnet.hello.v0", by_peer["health-peer"].supported_message_versions)
         self.assertIn("cultnet.error.v0", by_peer["health-peer"].supported_message_versions)
+        self.assertEqual(by_peer["health-peer"].supported_mutation_contracts[0]["documentType"], "mesh.health_note")
+        self.assertIn("shardLog", by_peer["health-peer"].supported_mutation_contracts[0]["operations"])
         self.assertFalse(by_peer["closed-peer"].is_reachable)
         self.assertIsNone(by_peer["closed-peer"].runtime_kind)
+        self.assertEqual(by_peer["closed-peer"].supported_document_types, ())
         self.assertEqual(by_peer["closed-peer"].supported_message_versions, ())
+        self.assertEqual(by_peer["closed-peer"].supported_mutation_contracts, ())
         self.assertTrue(by_peer["closed-peer"].error)
         self.assertEqual({peer_id for peer_id, _ in seen}, {"health-peer", "closed-peer"})
         self.assertEqual(len(monitor.latest()), 2)
@@ -3119,6 +3131,13 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(peers[0].endpoints, (ready["endpoint"],))
                 self.assertEqual(peers[0].roles, ("shard-primary",))
                 self.assertEqual(peers[0].shard_ids, ("daemon-interop",))
+
+                monitor = CultMeshPeerHealthMonitor(runtime_id="daemon-health-prober", timeout_seconds=2.0)
+                health = monitor.probe_peer(peers[0])[0]
+                self.assertTrue(health.is_reachable)
+                self.assertEqual(health.runtime_id, "daemon-test-peer")
+                self.assertEqual(health.supported_document_types, ("cultcache.interop-note",))
+                self.assertEqual(health.supported_mutation_contracts[0]["documentType"], "cultcache.interop-note")
             finally:
                 process.terminate()
                 try:

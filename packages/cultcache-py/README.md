@@ -327,6 +327,10 @@ path, so peers can read them through both snapshot and shard-log catch-up. Add
 `--verse-id` and one or more `--role` values to publish the launched endpoint in
 its own Verse and peer catalogs for discovery clients.
 
+`CultMeshPeerHealthMonitor` probes peer-card endpoints with `cultnet.hello.v0`
+and preserves the runtime id, display name, document types, message versions,
+and mutation contracts reported by the peer.
+
 ```python
 
 client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
