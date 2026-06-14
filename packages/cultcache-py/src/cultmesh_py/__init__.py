@@ -1,6 +1,8 @@
 from .client import (
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
+    CultMeshPeerHealth,
+    CultMeshPeerHealthMonitor,
     CultMeshSimulationObservationFanout,
     CultMeshSnapshotFanout,
     CultMeshVerseDiscoveryClient,
@@ -69,6 +71,8 @@ __all__ = [
     "AuthorityLeaseVerifier",
     "CultMeshDiscoveryClient",
     "CultMeshPeerExchangeClient",
+    "CultMeshPeerHealth",
+    "CultMeshPeerHealthMonitor",
     "CultMeshSimulationObservationFanout",
     "CultMeshSnapshotFanout",
     "CultMeshVerseDiscoveryClient",

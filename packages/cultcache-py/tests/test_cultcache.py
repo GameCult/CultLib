@@ -90,6 +90,7 @@ from cultmesh_py import (
     CultMeshHmacAuthorityLeaseVerifier,
     CultMeshDiscoveryClient,
     CultMeshPeerExchangeClient,
+    CultMeshPeerHealthMonitor,
     CultMeshSimulationObservationFanout,
     CultMeshSnapshotFanout,
     CultMeshStreamCatalog,
@@ -2784,6 +2785,75 @@ class CultCacheTests(unittest.TestCase):
 
         self.assertTrue(seen)
         self.assertEqual(target.database.get_required(document, "note:background")["body"], "from-background")
+
+    def test_cultmesh_peer_health_monitor_probes_reachable_and_failed_endpoints(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="health-peer"))
+        closed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed_socket.bind(("127.0.0.1", 0))
+        closed_port = closed_socket.getsockname()[1]
+        closed_socket.close()
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="health-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="closed-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{closed_port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[tuple[str, bool]] = []
+            monitor = CultMeshPeerHealthMonitor(
+                runtime_id="health-prober",
+                timeout_seconds=0.2,
+                on_update=lambda health: seen.append((health.peer_id, health.is_reachable)),
+            )
+
+            results = monitor.probe_catalog(peers, verse_id="mesh", roles=["read-replica"])
+        finally:
+            server.stop()
+
+        by_peer = {result.peer_id: result for result in results}
+        self.assertTrue(by_peer["health-peer"].is_reachable)
+        self.assertEqual(by_peer["health-peer"].runtime_id, "health-peer")
+        self.assertFalse(by_peer["closed-peer"].is_reachable)
+        self.assertTrue(by_peer["closed-peer"].error)
+        self.assertEqual({peer_id for peer_id, _ in seen}, {"health-peer", "closed-peer"})
+        self.assertEqual(len(monitor.latest()), 2)
+
+    def test_cultmesh_peer_health_monitor_runs_background_probe_loop(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="health-loop-peer"))
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="health-loop-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            monitor = CultMeshPeerHealthMonitor(
+                runtime_id="health-loop-prober",
+                timeout_seconds=0.2,
+                interval_seconds=0.05,
+                on_update=lambda health: seen.append(health.peer_id),
+            )
+            monitor.start(peers, verse_id="mesh", roles=["read-replica"])
+            deadline = time.monotonic() + 2.0
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            monitor.stop()
+        finally:
+            server.stop()
+
+        self.assertTrue(seen)
+        latest = monitor.latest()
+        self.assertEqual(latest[0].peer_id, "health-loop-peer")
+        self.assertTrue(latest[0].is_reachable)
 
     def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
         document = define_database_entry_type(

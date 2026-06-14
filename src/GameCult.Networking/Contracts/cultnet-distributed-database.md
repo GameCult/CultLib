@@ -92,7 +92,8 @@ Implemented:
 
 Not implemented yet:
 
-- membership/failure detection
+- SWIM-style membership/failure detection beyond Python's hello-level health
+  monitor
 - leader election or automatic shard failover
 - cross-runtime scheduled peer-to-peer snapshot fanout beyond Python's local
   fanout loop
@@ -145,7 +146,8 @@ Not implemented yet:
 
 Add discovery fanout and operational polish:
 
-- add periodic gossip fanout over known peer cards
+- standardize periodic gossip fanout over known peer cards beyond Python's
+  local schedulers and health monitor
 - standardize cross-runtime authority lease signature algorithms beyond the
   package-local Python HMAC verifier
 - standardize cross-runtime simulation-frame rollback/resimulation helpers beyond

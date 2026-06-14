@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from cultnet_py import CultNetRawClient, CultNetRawSnapshotResponse
+from cultnet_py import CultNetRawClient, CultNetRawSnapshotResponse, hello
 
 from .wire import (
     PEER_EXCHANGE_RESPONSE,
@@ -482,6 +483,128 @@ class CultMeshSnapshotFanout:
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             self.sync_once()
+
+
+@dataclass(frozen=True)
+class CultMeshPeerHealth:
+    peer_id: str
+    endpoint: str
+    checked_at: datetime
+    is_reachable: bool
+    runtime_id: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class CultMeshPeerHealthMonitor:
+    runtime_id: str
+    timeout_seconds: float = 2.0
+    interval_seconds: float = 5.0
+    on_update: Callable[[CultMeshPeerHealth], None] | None = None
+    _latest: dict[tuple[str, str], CultMeshPeerHealth] = field(default_factory=dict, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def probe_peer(self, peer: CultMeshPeerCard) -> list[CultMeshPeerHealth]:
+        return [
+            self._record(self._probe_endpoint(peer.peer_id, endpoint))
+            for endpoint in _distinct_non_empty(list(peer.endpoints))
+        ]
+
+    def probe_catalog(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+    ) -> list[CultMeshPeerHealth]:
+        requested_roles = set(roles or [])
+        results = []
+        for peer in catalog.find(verse_id):
+            if requested_roles and not requested_roles.intersection(peer.roles):
+                continue
+            results.extend(self.probe_peer(peer))
+        return results
+
+    def latest(self) -> tuple[CultMeshPeerHealth, ...]:
+        with self._lock:
+            return tuple(
+                self._latest[key]
+                for key in sorted(self._latest)
+            )
+
+    def start(
+        self,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        roles: list[str] | None = None,
+    ) -> "CultMeshPeerHealthMonitor":
+        if self._thread is not None:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(catalog, verse_id, roles),
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.interval_seconds * 2.0))
+            self._thread = None
+
+    def __enter__(self) -> "CultMeshPeerHealthMonitor":
+        if self._thread is None:
+            raise RuntimeError("CultMeshPeerHealthMonitor.start(...) must be called before entering context")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.stop()
+
+    def _run(
+        self,
+        catalog: CultMeshPeerCatalog,
+        verse_id: str,
+        roles: list[str] | None,
+    ) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.probe_catalog(catalog, verse_id=verse_id, roles=roles)
+
+    def _probe_endpoint(self, peer_id: str, endpoint: str) -> CultMeshPeerHealth:
+        checked_at = datetime.now(UTC)
+        try:
+            host, port = _parse_endpoint(endpoint)
+            response = CultNetRawClient(host, port, self.timeout_seconds).request(
+                hello(runtime_id=self.runtime_id),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            return CultMeshPeerHealth(
+                peer_id=peer_id,
+                endpoint=endpoint,
+                checked_at=checked_at,
+                is_reachable=True,
+                runtime_id=str(response.get("runtimeId") or ""),
+            )
+        except Exception as error:
+            return CultMeshPeerHealth(
+                peer_id=peer_id,
+                endpoint=endpoint,
+                checked_at=checked_at,
+                is_reachable=False,
+                error=str(error),
+            )
+
+    def _record(self, health: CultMeshPeerHealth) -> CultMeshPeerHealth:
+        with self._lock:
+            self._latest[(health.peer_id, health.endpoint)] = health
+        if self.on_update is not None:
+            self.on_update(health)
+        return health
 
 
 def _parse_endpoint(endpoint: str) -> tuple[str, int]:
