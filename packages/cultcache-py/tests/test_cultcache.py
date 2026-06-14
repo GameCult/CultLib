@@ -18,7 +18,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.benchmark import run_benchmark
-from cultcache_py.compare_csharp import _median_result
+from cultcache_py.compare_csharp import DEFAULT_SAMPLE_COUNT, _median_result
 from cultcache_py.interop import read_note, write_note
 from cultcache_py.verify import verify
 from cultnet_py.interop_peer import append_shard_log_put, build_state, raw_snapshot_response
@@ -282,6 +282,7 @@ class CultCacheTests(unittest.TestCase):
         self.assertTrue(all(metric["opsPerSecond"] > 0 for metric in result["metrics"]))
 
     def test_compare_csharp_median_result_summarizes_samples(self) -> None:
+        self.assertEqual(DEFAULT_SAMPLE_COUNT, 3)
         samples = [
             {
                 "runtime": "python",

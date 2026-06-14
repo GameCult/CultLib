@@ -127,9 +127,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
-  benchmarks with the same operation names and reports Python-to-C# ratios. Use
-  `--samples` when a performance claim needs median evidence instead of a single
-  noisy run.
+  benchmarks with the same operation names and reports median Python-to-C# ratios
+  from three samples by default.
 
 ## Local Python Gates
 

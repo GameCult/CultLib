@@ -11,10 +11,13 @@ from typing import Any
 from .benchmark import run_benchmark
 
 
+DEFAULT_SAMPLE_COUNT = 3
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultcache-py-compare-csharp")
     parser.add_argument("--records", type=int, default=5000)
-    parser.add_argument("--samples", type=int, default=1)
+    parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLE_COUNT)
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--json", action="store_true", dest="emit_json")
     args = parser.parse_args(argv)
@@ -39,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["csharpStatus"] == "ok" else 1
 
 
-def compare_with_csharp(*, records: int, samples: int = 1, repo_root: Path | None = None) -> dict[str, Any]:
+def compare_with_csharp(*, records: int, samples: int = DEFAULT_SAMPLE_COUNT, repo_root: Path | None = None) -> dict[str, Any]:
     resolved_root = _resolve_repo_root(repo_root)
     python_samples = [run_benchmark(records) for _ in range(samples)]
     python_result = _median_result(python_samples)
