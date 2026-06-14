@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
+
+import msgpack
 
 from .client import CultNetRawClient
 from .shard_catalog import CultNetShardDescriptor
@@ -54,6 +57,61 @@ class CultNetInMemoryShardReplicaCursorStore:
     def write(self, cursor: CultNetShardReplicaCursor) -> None:
         _require_non_empty(cursor.shard_id, "cursor.shard_id")
         self._cursors[cursor.shard_id] = cursor
+
+
+@dataclass(frozen=True)
+class CultNetFileShardReplicaCursorStore:
+    file_path: str | Path
+
+    def read(self, shard_id: str) -> CultNetShardReplicaCursor | None:
+        _require_non_empty(shard_id, "shard_id")
+        return next((cursor for cursor in self._read_all() if cursor.shard_id == shard_id), None)
+
+    def write(self, cursor: CultNetShardReplicaCursor) -> None:
+        _require_non_empty(cursor.shard_id, "cursor.shard_id")
+        cursors = [
+            existing
+            for existing in self._read_all()
+            if existing.shard_id != cursor.shard_id
+        ]
+        cursors.append(cursor)
+        path = Path(self.file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(msgpack.packb(
+            [self._cursor_to_wire(value) for value in sorted(cursors, key=lambda value: value.shard_id)],
+            use_bin_type=True,
+        ))
+
+    def _read_all(self) -> list[CultNetShardReplicaCursor]:
+        path = Path(self.file_path)
+        if not path.exists() or path.stat().st_size == 0:
+            return []
+        value = msgpack.unpackb(path.read_bytes(), raw=False)
+        if not isinstance(value, list):
+            raise ValueError("CultNet shard replica cursor file must contain a MessagePack array")
+        return [
+            self._cursor_from_wire(item)
+            for item in value
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def _cursor_to_wire(cursor: CultNetShardReplicaCursor) -> dict[str, Any]:
+        return {
+            "shardId": cursor.shard_id,
+            "shardEpoch": cursor.shard_epoch,
+            "lastAppliedSequence": cursor.last_applied_sequence,
+            "updatedAt": cursor.updated_at,
+        }
+
+    @staticmethod
+    def _cursor_from_wire(value: dict[str, Any]) -> CultNetShardReplicaCursor:
+        return CultNetShardReplicaCursor(
+            shard_id=str(value.get("shardId") or ""),
+            shard_epoch=int(value.get("shardEpoch") or 0),
+            last_applied_sequence=int(value.get("lastAppliedSequence") or 0),
+            updated_at=str(value.get("updatedAt") or ""),
+        )
 
 
 @dataclass(frozen=True)

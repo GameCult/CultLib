@@ -55,7 +55,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides schema-v0 shard-log and shard-snapshot fetchers plus a pull-once
   `CultNetShardReplicator` that tracks replica cursors, applies log responses
   through the existing database owner, and recovers from compacted-history
-  resync pressure by fetching a shard snapshot.
+  resync pressure by fetching a shard snapshot. Replica cursor storage can be
+  in-memory or restart-safe through a local MessagePack cursor file.
 - Python CultNet database subscription changes:
   Provides typed `CultNetDatabaseChange` parsing plus
   `CultNetDatabaseSubscription.read_next_change(...)` / `iter_changes(...)` for
@@ -179,6 +180,6 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not claim the full C# shard mutation-log service surface. It can
   create/apply raw snapshots, create/apply package-local raw shard-log
   responses, consume remote shard-log responses, and run pull-once replica
-  catch-up with snapshot recovery. It does not yet claim the full C# background
-  replicator, durable cursor file store, write-forwarder, or file-backed
-  authoritative mutation-log store.
+  catch-up with snapshot recovery and a file-backed replica cursor store. It
+  does not yet claim the full C# background replicator, write-forwarder, or
+  file-backed authoritative mutation-log store.

@@ -35,6 +35,7 @@ from cultnet_py import (
     CultNetShardDescriptor,
     CultNetShardLogEntry,
     CultNetShardLogResponse,
+    CultNetFileShardReplicaCursorStore,
     CultNetInMemoryShardReplicaCursorStore,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
@@ -1466,43 +1467,54 @@ class CultCacheTests(unittest.TestCase):
         source.database.register_document(document)
         source.database.put_raw_message(document, "note:1", {"body": "one"}, shard_id="notes", shard_epoch=3)
         source.database.put_raw_message(document, "note:2", {"body": "two"}, shard_id="notes", shard_epoch=3)
-        server = CultMesh.serve_node(source)
-        try:
-            shard = CultNetShardDescriptor(
-                shard_id="notes",
-                owner_runtime_id="primary",
-                epoch=3,
-                is_primary=False,
-                schema_ids=("mesh.replica_note.v1",),
-                primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
-            )
-            target = CultMesh.create_node(runtime_id="replica")
-            target.database.register_document(document)
-            cursor_store = CultNetInMemoryShardReplicaCursorStore()
-            replicator = CultNetShardReplicator(
-                target.database,
-                CultNetShardReplicatorOptions(
-                    fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
-                    snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
-                    cursor_store=cursor_store,
-                    batch_size=16,
-                ),
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            cursor_path = Path(tmp) / "replica-cursors.msgpack"
+            server = CultMesh.serve_node(source)
+            try:
+                shard = CultNetShardDescriptor(
+                    shard_id="notes",
+                    owner_runtime_id="primary",
+                    epoch=3,
+                    is_primary=False,
+                    schema_ids=("mesh.replica_note.v1",),
+                    primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                )
+                target = CultMesh.create_node(runtime_id="replica")
+                target.database.register_document(document)
+                cursor_store = CultNetFileShardReplicaCursorStore(cursor_path)
+                replicator = CultNetShardReplicator(
+                    target.database,
+                    CultNetShardReplicatorOptions(
+                        fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
+                        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
+                        cursor_store=cursor_store,
+                        batch_size=16,
+                    ),
+                )
 
-            first_sequence = replicator.pull_once(shard)
-            second_sequence = replicator.pull_once(shard)
+                first_sequence = replicator.pull_once(shard)
+                restarted_replicator = CultNetShardReplicator(
+                    target.database,
+                    CultNetShardReplicatorOptions(
+                        fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
+                        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
+                        cursor_store=CultNetFileShardReplicaCursorStore(cursor_path),
+                        batch_size=16,
+                    ),
+                )
+                second_sequence = restarted_replicator.pull_once(shard)
 
-            self.assertEqual(first_sequence, 2)
-            self.assertEqual(second_sequence, 2)
-            self.assertEqual(target.get_required(document, "note:1")["body"], "one")
-            self.assertEqual(target.get_required(document, "note:2")["body"], "two")
-            cursor = cursor_store.read("notes")
-            self.assertIsNotNone(cursor)
-            assert cursor is not None
-            self.assertEqual(cursor.last_applied_sequence, 2)
-            self.assertEqual(cursor.shard_epoch, 3)
-        finally:
-            server.stop()
+                self.assertEqual(first_sequence, 2)
+                self.assertEqual(second_sequence, 2)
+                self.assertEqual(target.get_required(document, "note:1")["body"], "one")
+                self.assertEqual(target.get_required(document, "note:2")["body"], "two")
+                cursor = CultNetFileShardReplicaCursorStore(cursor_path).read("notes")
+                self.assertIsNotNone(cursor)
+                assert cursor is not None
+                self.assertEqual(cursor.last_applied_sequence, 2)
+                self.assertEqual(cursor.shard_epoch, 3)
+            finally:
+                server.stop()
 
         resync_target = CultMesh.create_node(runtime_id="resync-replica")
         resync_target.database.register_document(document)

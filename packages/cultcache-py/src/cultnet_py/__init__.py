@@ -38,6 +38,7 @@ from .schema_catalog import (
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogEntry, CultNetShardLogResponse
 from .shard_replication import (
+    CultNetFileShardReplicaCursorStore,
     CultNetInMemoryShardReplicaCursorStore,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
@@ -70,6 +71,7 @@ __all__ = [
     "CultNetShardDescriptor",
     "CultNetShardLogEntry",
     "CultNetShardLogResponse",
+    "CultNetFileShardReplicaCursorStore",
     "CultNetInMemoryShardReplicaCursorStore",
     "CultNetSchemaShardLogFetcher",
     "CultNetSchemaShardSnapshotFetcher",

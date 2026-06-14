@@ -225,6 +225,7 @@ local prediction reconciliation:
 from cultcache_py import define_database_entry_type
 from cultnet_py import (
     CultNetClientAuthorityScope,
+    CultNetFileShardReplicaCursorStore,
     CultNetRawClient,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
@@ -277,6 +278,7 @@ replicator = CultNetShardReplicator(
     CultNetShardReplicatorOptions(
         fetcher=CultNetSchemaShardLogFetcher(),
         snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(),
+        cursor_store=CultNetFileShardReplicaCursorStore("mesh.replica-cursors.msgpack"),
     ),
 )
 replicator.pull_once(CultNetShardDescriptor(
