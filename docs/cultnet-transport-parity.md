@@ -137,6 +137,10 @@ lets the runtimes stop guessing what kind of pipe a peer is offering.
 Current progress:
 
 - Steps 1-3 are live in C#, TypeScript, Rust, and Python.
+- C# now has the shared `tcp_framed` transport profile helper plus a
+  `TcpFramedTransportConnection` with schema-channel `SendAsync`,
+  `ReceiveAsync`, and transfer stats. The C# interop peer advertises and uses
+  that shared port instead of owning raw TCP frame I/O directly.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer
@@ -150,7 +154,7 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
   instead of owning raw TCP frame I/O directly.
-- The remaining parity work is to add equivalent ports to C# and Kotlin, deepen
+- The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
   TCP/LiteNetLib/WebSocket bodies behind those ports before implementing
   `rudp`.

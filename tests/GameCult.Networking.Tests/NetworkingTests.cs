@@ -224,6 +224,39 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task TcpFramedTransportConnection_CarriesSchemaPayloadsWithStats()
+        {
+            var payload = Encoding.UTF8.GetBytes("cultnet-payload");
+            var profile = CultNetTransportProfiles.CreateTcpFramed(
+                "csharp-transport",
+                new TcpFramedTransportProfileOptions
+                {
+                    TransportId = "test-tcp"
+                });
+            using var stream = new MemoryStream();
+            var sender = new TcpFramedTransportConnection(stream, profile);
+
+            await sender.SendAsync("schema", payload);
+
+            Assert.That(sender.Stats.FramesSent, Is.EqualTo(1));
+            Assert.That(sender.Stats.BytesSent, Is.EqualTo(payload.Length + 4));
+            Assert.That(
+                Assert.ThrowsAsync<InvalidOperationException>(
+                    async () => await sender.SendAsync("unreliable", Array.Empty<byte>())),
+                Is.Not.Null);
+
+            stream.Position = 0;
+            var receiver = new TcpFramedTransportConnection(stream, profile);
+            var frame = await receiver.ReceiveAsync();
+
+            Assert.That(frame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(frame.Payload, Is.EqualTo(payload));
+            Assert.That(receiver.Stats.FramesReceived, Is.EqualTo(1));
+            Assert.That(receiver.Stats.BytesReceived, Is.EqualTo(frame.Payload.Length + 4));
+            Assert.That(receiver.Profile.Transports[0].Protocol, Is.EqualTo("tcp_framed"));
+        }
+
+        [Test]
         public void CultNetSchemaMessageSerialization_RoundTrips_RawSnapshotResponse()
         {
             var message = new CultNetSnapshotResponseRawMessage

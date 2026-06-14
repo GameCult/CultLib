@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -183,8 +182,11 @@ static async Task DialAsync(DialConfig config)
     using var client = new TcpClient();
     await client.ConnectAsync(config.TargetHost, config.TargetPort);
     using var stream = client.GetStream();
+    var transport = new TcpFramedTransportConnection(
+        stream,
+        CreateTcpFramedTransportProfile(config.RuntimeId, config.TargetHost, config.TargetPort));
 
-    await SendMessageAsync(stream, new CultNetHelloMessage
+    await SendMessageAsync(transport, new CultNetHelloMessage
     {
         RuntimeId = config.RuntimeId,
         RuntimeKind = config.RuntimeKind,
@@ -196,24 +198,24 @@ static async Task DialAsync(DialConfig config)
         SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
         SupportsSchemaCatalog = true
     });
-    var remoteHello = await ExpectMessageAsync<CultNetHelloMessage>(stream, CultNetSchemaVersions.Hello);
+    var remoteHello = await ExpectMessageAsync<CultNetHelloMessage>(transport, CultNetSchemaVersions.Hello);
 
-    await SendMessageAsync(stream, new CultNetSchemaCatalogRequestMessage
+    await SendMessageAsync(transport, new CultNetSchemaCatalogRequestMessage
     {
         MessageId = $"{config.RuntimeId}-catalog",
         IncludeSchemaJson = true,
         SchemaIds = [schemaRegistration.SchemaId],
         Kinds = ["document_payload"]
     });
-    var catalog = await ExpectMessageAsync<CultNetSchemaCatalogResponseMessage>(stream, CultNetSchemaVersions.SchemaCatalogResponse);
+    var catalog = await ExpectMessageAsync<CultNetSchemaCatalogResponseMessage>(transport, CultNetSchemaVersions.SchemaCatalogResponse);
 
-    await SendMessageAsync(stream, new CultNetSnapshotRequestMessage
+    await SendMessageAsync(transport, new CultNetSnapshotRequestMessage
     {
         MessageId = $"{config.RuntimeId}-snapshot",
         SchemaIds = [schemaRegistration.SchemaId],
         RecordKeys = [$"note:{remoteHello.RuntimeId}"]
     });
-    var snapshot = await ExpectMessageAsync<CultNetSnapshotResponseRawMessage>(stream, CultNetSchemaVersions.SnapshotResponseRaw);
+    var snapshot = await ExpectMessageAsync<CultNetSnapshotResponseRawMessage>(transport, CultNetSchemaVersions.SnapshotResponseRaw);
     await documentRegistry.ApplyRawSnapshotResponseAsync(cache, snapshot);
 
     var note = cache.AllEntries
@@ -224,8 +226,8 @@ static async Task DialAsync(DialConfig config)
         string.Equals(schema.SchemaId, schemaRegistration.SchemaId, StringComparison.Ordinal) &&
         string.Equals(schema.DocumentType, InteropPeerShared.InteropDocumentType, StringComparison.Ordinal));
 
-    var mutation = await MutateRemoteNoteAsync(stream, cache, documentRegistry, config.RuntimeId, note);
-    var fireReceipt = await FireRemoteWeaponAsync(stream, cache, documentRegistry, config.RuntimeId, remoteHello.RuntimeId);
+    var mutation = await MutateRemoteNoteAsync(transport, cache, documentRegistry, config.RuntimeId, note);
+    var fireReceipt = await FireRemoteWeaponAsync(transport, cache, documentRegistry, config.RuntimeId, remoteHello.RuntimeId);
 
     WriteJsonLine(new
     {
@@ -261,7 +263,7 @@ static async Task DialAsync(DialConfig config)
 }
 
 static async Task<object> MutateRemoteNoteAsync(
-    NetworkStream stream,
+    TcpFramedTransportConnection transport,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
     string runtimeId,
@@ -274,16 +276,16 @@ static async Task<object> MutateRemoteNoteAsync(
         AppendBody = $" Decorated by {runtimeId}.",
         AppendTag = $"decorated:{runtimeId}"
     };
-    await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+    await SendMessageAsync(transport, documentRegistry.CreateRawDocumentPutMessage(
         $"{runtimeId}-decorate-put",
         new CultRecordHandle<CultNetInteropMutationIntent>(new CultRecordKey(intent.IntentId)),
         intent));
     await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropMutationReceipt>(
         cache,
-        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(transport, CultNetSchemaVersions.DocumentPutRaw));
     var mutated = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropNote>(
         cache,
-        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(transport, CultNetSchemaVersions.DocumentPutRaw));
     return new
     {
         schemaVersion = mutated.SchemaVersion,
@@ -296,7 +298,7 @@ static async Task<object> MutateRemoteNoteAsync(
 }
 
 static async Task<object> FireRemoteWeaponAsync(
-    NetworkStream stream,
+    TcpFramedTransportConnection transport,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
     string runtimeId,
@@ -308,13 +310,13 @@ static async Task<object> FireRemoteWeaponAsync(
         CharacterId = remoteRuntimeId,
         WeaponId = "interop-rifle"
     };
-    await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+    await SendMessageAsync(transport, documentRegistry.CreateRawDocumentPutMessage(
         $"{runtimeId}-fire-put",
         new CultRecordHandle<CultNetInteropFireCommand>(new CultRecordKey(command.CommandId)),
         command));
     var receipt = await documentRegistry.ApplyRawDocumentPutMessageAsync<CultNetInteropFireReceipt>(
         cache,
-        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(stream, CultNetSchemaVersions.DocumentPutRaw));
+        await ExpectMessageAsync<CultNetDocumentPutRawMessage>(transport, CultNetSchemaVersions.DocumentPutRaw));
     return new
     {
         schemaVersion = receipt.SchemaVersion,
@@ -364,33 +366,7 @@ static async Task RunDiscoveryServerAsync(Socket socket, ServeConfig config, Can
                 TcpPort = config.TcpPort,
                 WireContract = CultNetWireContracts.SchemaV0,
                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
-                TransportProfiles =
-                [
-                    new CultNetTransportProfile
-                    {
-                        RuntimeId = config.RuntimeId,
-                        Transports =
-                        [
-                            new CultNetTransportDescriptor
-                            {
-                                TransportId = "interop-tcp",
-                                Protocol = "tcp_framed",
-                                Host = config.AdvertiseHost,
-                                Port = config.TcpPort,
-                                WireContracts = [CultNetWireContracts.SchemaV0],
-                                Channels =
-                                [
-                                    new CultNetTransportChannel
-                                    {
-                                        ChannelId = "schema",
-                                        Delivery = "reliable",
-                                        Ordering = "ordered"
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ],
+                TransportProfiles = [CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort)],
                 SupportsSchemaCatalog = true
             };
             var announceBytes = MessagePackSerializer.Serialize(announce, CultNetSchemaMessageSerialization.Options);
@@ -437,12 +413,15 @@ static async Task RunTcpServerAsync(
             try
             {
                 using var stream = ownedClient.GetStream();
+                var transport = new TcpFramedTransportConnection(
+                    stream,
+                    CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort));
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     ICultNetSchemaMessage message;
                     try
                     {
-                        message = await ReadMessageAsync(stream, cancellationToken);
+                        message = await ReadMessageAsync(transport, cancellationToken);
                     }
                     catch (EndOfStreamException)
                     {
@@ -452,7 +431,7 @@ static async Task RunTcpServerAsync(
                     switch (message)
                     {
                         case CultNetHelloMessage:
-                            await SendMessageAsync(stream, new CultNetHelloMessage
+                            await SendMessageAsync(transport, new CultNetHelloMessage
                             {
                                 RuntimeId = config.RuntimeId,
                                 RuntimeKind = config.RuntimeKind,
@@ -462,42 +441,16 @@ static async Task RunTcpServerAsync(
                                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
                                 SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
                                 SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
-                                TransportProfiles =
-                                [
-                                    new CultNetTransportProfile
-                                    {
-                                        RuntimeId = config.RuntimeId,
-                                        Transports =
-                                        [
-                                            new CultNetTransportDescriptor
-                                            {
-                                                TransportId = "interop-tcp",
-                                                Protocol = "tcp_framed",
-                                                Host = config.AdvertiseHost,
-                                                Port = config.TcpPort,
-                                                WireContracts = [CultNetWireContracts.SchemaV0],
-                                                Channels =
-                                                [
-                                                    new CultNetTransportChannel
-                                                    {
-                                                        ChannelId = "schema",
-                                                        Delivery = "reliable",
-                                                        Ordering = "ordered"
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ],
+                                TransportProfiles = [CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort)],
                                 SupportsSchemaCatalog = true
                             }, cancellationToken);
                             break;
                         case CultNetSchemaCatalogRequestMessage catalogRequest:
-                            await SendMessageAsync(stream, CreateCatalogResponse(customSchemaRegistry, catalogRequest), cancellationToken);
+                            await SendMessageAsync(transport, CreateCatalogResponse(customSchemaRegistry, catalogRequest), cancellationToken);
                             break;
                         case CultNetSnapshotRequestMessage snapshotRequest:
                             await SendMessageAsync(
-                                stream,
+                                transport,
                                 documentRegistry.CreateRawSnapshotResponse(
                                     cache,
                                     snapshotRequest.MessageId,
@@ -512,7 +465,7 @@ static async Task RunTcpServerAsync(
                                 cancellationToken);
                             break;
                         case CultNetDocumentPutRawMessage rawPut:
-                            await HandleRawPutAsync(stream, config, cache, documentRegistry, rawPut, cancellationToken);
+                            await HandleRawPutAsync(transport, config, cache, documentRegistry, rawPut, cancellationToken);
                             break;
                     }
                 }
@@ -526,7 +479,7 @@ static async Task RunTcpServerAsync(
 }
 
 static async Task HandleRawPutAsync(
-    NetworkStream stream,
+    TcpFramedTransportConnection transport,
     ServeConfig config,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
@@ -553,12 +506,12 @@ static async Task HandleRawPutAsync(
                 Tags = note.Tags
             };
             var options = ResponseOptions(config, "mutation");
-            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+            await SendMessageAsync(transport, documentRegistry.CreateRawDocumentPutMessage(
                 $"{config.RuntimeId}-mutation-receipt",
                 new CultRecordHandle<CultNetInteropMutationReceipt>(new CultRecordKey(receipt.IntentId)),
                 receipt,
                 options), cancellationToken);
-            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+            await SendMessageAsync(transport, documentRegistry.CreateRawDocumentPutMessage(
                 $"{config.RuntimeId}-mutated-note",
                 new CultRecordHandle<CultNetInteropNote>(new CultRecordKey(note.DocumentId)),
                 note,
@@ -577,7 +530,7 @@ static async Task HandleRawPutAsync(
                 ShotsFired = 1,
                 AmmoRemaining = 29
             };
-            await SendMessageAsync(stream, documentRegistry.CreateRawDocumentPutMessage(
+            await SendMessageAsync(transport, documentRegistry.CreateRawDocumentPutMessage(
                 $"{config.RuntimeId}-fire-receipt",
                 new CultRecordHandle<CultNetInteropFireReceipt>(new CultRecordKey(receipt.CommandId)),
                 receipt,
@@ -607,21 +560,32 @@ static CultNetSchemaCatalogResponseMessage CreateCatalogResponse(
     };
 }
 
-static async Task SendMessageAsync<TMessage>(NetworkStream stream, TMessage message, CancellationToken cancellationToken = default)
+static CultNetTransportProfile CreateTcpFramedTransportProfile(string runtimeId, string host, int port)
+{
+    return CultNetTransportProfiles.CreateTcpFramed(runtimeId, new TcpFramedTransportProfileOptions
+    {
+        TransportId = "interop-tcp",
+        Host = host,
+        Port = port
+    });
+}
+
+static async Task SendMessageAsync<TMessage>(
+    TcpFramedTransportConnection transport,
+    TMessage message,
+    CancellationToken cancellationToken = default)
     where TMessage : ICultNetSchemaMessage
 {
     var payload = CultNetSchemaMessageSerialization.Serialize(message);
-    var header = new byte[4];
-    BinaryPrimitives.WriteUInt32BigEndian(header, checked((uint)payload.Length));
-    await stream.WriteAsync(header, cancellationToken);
-    await stream.WriteAsync(payload, cancellationToken);
-    await stream.FlushAsync(cancellationToken);
+    await transport.SendAsync("schema", payload, cancellationToken);
 }
 
-static async Task<TMessage> ExpectMessageAsync<TMessage>(NetworkStream stream, string expectedSchemaVersion)
+static async Task<TMessage> ExpectMessageAsync<TMessage>(
+    TcpFramedTransportConnection transport,
+    string expectedSchemaVersion)
     where TMessage : class, ICultNetSchemaMessage
 {
-    var message = await ReadMessageAsync(stream, CancellationToken.None);
+    var message = await ReadMessageAsync(transport, CancellationToken.None);
     if (!string.Equals(message.SchemaVersion, expectedSchemaVersion, StringComparison.Ordinal))
     {
         throw new InvalidOperationException($"Expected {expectedSchemaVersion} but received {message.SchemaVersion}.");
@@ -631,29 +595,12 @@ static async Task<TMessage> ExpectMessageAsync<TMessage>(NetworkStream stream, s
         ?? throw new InvalidOperationException($"Expected {typeof(TMessage).Name} but received {message.GetType().Name}.");
 }
 
-static async Task<ICultNetSchemaMessage> ReadMessageAsync(NetworkStream stream, CancellationToken cancellationToken)
+static async Task<ICultNetSchemaMessage> ReadMessageAsync(
+    TcpFramedTransportConnection transport,
+    CancellationToken cancellationToken)
 {
-    var header = new byte[4];
-    await ReadExactlyAsync(stream, header, cancellationToken);
-    var payloadLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(header));
-    var payload = new byte[payloadLength];
-    await ReadExactlyAsync(stream, payload, cancellationToken);
-    return CultNetSchemaMessageSerialization.Deserialize(payload);
-}
-
-static async Task ReadExactlyAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)
-{
-    var offset = 0;
-    while (offset < buffer.Length)
-    {
-        var read = await stream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset), cancellationToken);
-        if (read == 0)
-        {
-            throw new EndOfStreamException();
-        }
-
-        offset += read;
-    }
+    var frame = await transport.ReceiveAsync(cancellationToken);
+    return CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
 }
 
 static Socket CreateDiscoverySocket(int port, IPAddress multicastGroup)
