@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
+import dgram, { type Socket } from "node:dgram";
 import { once } from "node:events";
 import { existsSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer } from "node:net";
@@ -8,9 +9,11 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { decode, encode } from "@msgpack/msgpack";
 import { encodeFrame, LengthPrefixedMessageFramer } from "../../src/framing";
+import { CultNetRudpSocketTransportConnection } from "../../src";
 import { INTEROP_SCHEMA_VERSION } from "./cultnet-interop-shared";
 
 const execFileAsync = promisify(execFile);
@@ -54,6 +57,53 @@ const rustBinaryPath = resolve(
 );
 
 const discoveryGroup = "239.77.44.11";
+
+const pythonRudpPeerScript = String.raw`
+import socket
+import time
+
+from cultnet_py import (
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(0.02)
+transport = CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptions(
+    runtime_id="python-rudp-interop",
+    socket=sock,
+    mode=CultNetRudpSocketMode.SERVER,
+    connection_id=0x55667788,
+    initial_sequence=100,
+    resend_delay_ms=25,
+))
+print(f"PORT {sock.getsockname()[1]}", flush=True)
+
+deadline = time.time() + 5
+while time.time() < deadline:
+    frame = transport.receive_once()
+    transport.poll_resends()
+    if frame is None:
+        time.sleep(0.005)
+        continue
+    if frame.channel_id != "schema" or frame.payload != b"client-state":
+        transport.close()
+        raise SystemExit(f"unexpected RUDP frame: {frame.channel_id!r} {frame.payload!r}")
+    transport.send("schema", b"python-state")
+    print("OK", flush=True)
+    ack_deadline = time.time() + 0.25
+    while time.time() < ack_deadline:
+        transport.receive_once()
+        transport.poll_resends()
+        time.sleep(0.005)
+    transport.close()
+    raise SystemExit(0)
+
+transport.close()
+raise SystemExit("timed out waiting for RUDP frame")
+`;
 
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   await buildInteropPeers();
@@ -578,6 +628,49 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }, expectedPeers);
 });
 
+test("CultNet TypeScript and Python exchange schema frames over the shared RUDP socket transport", async () => {
+  const pythonPeer = spawnPythonRudpPeer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const pythonPort = await pythonPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-rudp-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: pythonPort,
+      connectionId: 0x55667788,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Python handshake");
+    client.send("schema", Buffer.from("client-state"));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP response frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("python-state"));
+
+    const [exitCode] = await withTimeout(once(pythonPeer.child, "exit"), 2_000, "Python RUDP peer exit");
+    assert.equal(exitCode, 0, pythonPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (pythonPeer.child.exitCode === null && !pythonPeer.child.killed) {
+      pythonPeer.child.kill("SIGTERM");
+      await once(pythonPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
     cwd: cultnetRsRoot,
@@ -699,6 +792,99 @@ async function runJsonCommand(
     return JSON.parse(lines.at(-1) as string);
   } catch (error) {
     throw new Error(`${name} did not end with JSON stdout.\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+}
+
+interface RunningPythonRudpPeer {
+  child: ChildProcessByStdio<null, Readable, Readable>;
+  ready: Promise<number>;
+  stderr: string[];
+}
+
+function spawnPythonRudpPeer(): RunningPythonRudpPeer {
+  const child = spawn(pythonCommand, ["-c", pythonRudpPeerScript], {
+    cwd: cultcachePyRoot,
+    env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        const portMatch = /^PORT\s+(\d+)$/.exec(line);
+        if (portMatch) {
+          resolveReady(Number(portMatch[1]));
+          continue;
+        }
+        if (line !== "OK") {
+          rejectReady(new Error(`Python RUDP peer emitted unexpected stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Python RUDP peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
+async function bindUdpSocket(): Promise<Socket> {
+  const socket = dgram.createSocket("udp4");
+  await new Promise<void>((resolveBind, rejectBind) => {
+    socket.once("error", rejectBind);
+    socket.bind(0, "127.0.0.1", () => {
+      socket.off("error", rejectBind);
+      resolveBind();
+    });
+  });
+  return socket;
+}
+
+async function waitFor(predicate: () => boolean, description: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for ${description}.`);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, description: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${description}.`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
