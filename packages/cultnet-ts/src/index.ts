@@ -69,8 +69,12 @@ export {
   createRudpTransportProfile,
   decodeRudpPacket,
   encodeRudpPacket,
+  CultNetRudpSession,
+  type CultNetRudpDeliveredFrame,
   type CultNetRudpPacket,
   type CultNetRudpPacketType,
+  type CultNetRudpReceiveResult,
+  type CultNetRudpSessionOptions,
   type RudpTransportProfileOptions,
 } from "./rudp";
 export {

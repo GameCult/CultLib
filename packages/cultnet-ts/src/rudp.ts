@@ -30,6 +30,28 @@ export interface CultNetRudpPacket {
   payload?: Uint8Array;
 }
 
+export interface CultNetRudpDeliveredFrame {
+  channelId: string;
+  payload: Uint8Array;
+  sequence: number;
+}
+
+export interface CultNetRudpSessionOptions {
+  connectionId: number;
+  initialSequence?: number;
+  resendDelayMs?: number;
+}
+
+export interface CultNetRudpReceiveResult {
+  delivered: CultNetRudpDeliveredFrame[];
+  reply?: CultNetRudpPacket;
+}
+
+type PendingReliablePacket = {
+  packet: CultNetRudpPacket;
+  lastSentAtMs: number;
+};
+
 export interface RudpTransportProfileOptions {
   transportId?: string;
   host?: string;
@@ -51,6 +73,268 @@ const packetTypeToCode: Record<CultNetRudpPacketType, number> = {
 const packetTypeFromCode = new Map<number, CultNetRudpPacketType>(
   Object.entries(packetTypeToCode).map(([name, code]) => [code, name as CultNetRudpPacketType]),
 );
+
+export class CultNetRudpSession {
+  readonly connectionId: number;
+  readonly resendDelayMs: number;
+  #nextSequence: number;
+  #connected = false;
+  #highestReceivedSequence: number | undefined;
+  readonly #receivedSequences = new Set<number>();
+  readonly #pendingReliable = new Map<number, PendingReliablePacket>();
+  readonly #orderedNextSequenceByChannel = new Map<string, number>();
+  readonly #orderedBuffers = new Map<string, Map<number, CultNetRudpDeliveredFrame>>();
+
+  constructor(options: CultNetRudpSessionOptions) {
+    this.connectionId = toUint32(options.connectionId, "connectionId");
+    this.#nextSequence = toUint32(options.initialSequence ?? 1, "initialSequence");
+    this.resendDelayMs = options.resendDelayMs ?? 250;
+  }
+
+  get connected(): boolean {
+    return this.#connected;
+  }
+
+  get pendingReliableSequences(): number[] {
+    return [...this.#pendingReliable.keys()].sort((left, right) => left - right);
+  }
+
+  createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
+    const packet = this.#createPacket({
+      packetType: "connect",
+      channelId: "control",
+      reliable: true,
+      ordered: true,
+      payload,
+    });
+    this.#trackReliable(packet, nowMs);
+    return packet;
+  }
+
+  acceptConnect(packet: CultNetRudpPacket, nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
+    this.#requireConnection(packet);
+    if (packet.packetType !== "connect") {
+      throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
+    }
+
+    this.#rememberReceived(packet.sequence);
+    this.#connected = true;
+    const response = this.#createPacket({
+      packetType: "accept",
+      channelId: "control",
+      reliable: true,
+      ordered: true,
+      payload,
+    });
+    this.#trackReliable(response, nowMs);
+    return response;
+  }
+
+  send(
+    channelId: string,
+    payload: Uint8Array,
+    options: { reliable?: boolean; ordered?: boolean; sequenced?: boolean; nowMs?: number } = {},
+  ): CultNetRudpPacket {
+    if (!this.#connected) {
+      throw new Error("Cannot send RUDP data before the session is connected.");
+    }
+
+    const packet = this.#createPacket({
+      packetType: "data",
+      channelId,
+      payload,
+      reliable: options.reliable,
+      ordered: options.ordered,
+      sequenced: options.sequenced,
+    });
+    if (packet.reliable) {
+      this.#trackReliable(packet, options.nowMs ?? 0);
+    }
+    return packet;
+  }
+
+  receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
+    this.#requireConnection(packet);
+    this.#applyAcknowledgements(packet);
+
+    if (packet.packetType === "accept") {
+      this.#rememberReceived(packet.sequence);
+      this.#connected = true;
+      return { delivered: [] };
+    }
+
+    if (packet.packetType === "ping") {
+      this.#rememberReceived(packet.sequence);
+      return {
+        delivered: [],
+        reply: this.#createPacket({
+          packetType: "pong",
+          channelId: "control",
+          payload: packet.payload ?? new Uint8Array(),
+        }),
+      };
+    }
+
+    if (packet.packetType === "ack" || packet.packetType === "pong") {
+      this.#rememberReceived(packet.sequence);
+      return { delivered: [] };
+    }
+
+    if (packet.packetType !== "data") {
+      return { delivered: [] };
+    }
+
+    const isDuplicate = this.#receivedSequences.has(packet.sequence);
+    this.#rememberReceived(packet.sequence);
+    if (isDuplicate) {
+      return { delivered: [] };
+    }
+
+    const frame: CultNetRudpDeliveredFrame = {
+      channelId: packet.channelId,
+      payload: packet.payload ?? new Uint8Array(),
+      sequence: packet.sequence,
+    };
+
+    if (!packet.ordered) {
+      return { delivered: [frame] };
+    }
+
+    return { delivered: this.#deliverOrdered(frame) };
+  }
+
+  createAck(): CultNetRudpPacket {
+    return this.#createPacket({
+      packetType: "ack",
+      channelId: "control",
+    });
+  }
+
+  dueResends(nowMs: number): CultNetRudpPacket[] {
+    const due: CultNetRudpPacket[] = [];
+    for (const pending of this.#pendingReliable.values()) {
+      if (nowMs - pending.lastSentAtMs >= this.resendDelayMs) {
+        pending.lastSentAtMs = nowMs;
+        due.push({ ...pending.packet });
+      }
+    }
+    return due.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  #createPacket(packet: {
+    packetType: CultNetRudpPacketType;
+    channelId: string;
+    payload?: Uint8Array;
+    reliable?: boolean;
+    ordered?: boolean;
+    sequenced?: boolean;
+  }): CultNetRudpPacket {
+    const sequence = this.#nextSequence;
+    this.#nextSequence = toUint32(this.#nextSequence + 1, "sequence");
+    const { ack, ackMask } = this.#ackState();
+    return {
+      packetType: packet.packetType,
+      connectionId: this.connectionId,
+      sequence,
+      ack,
+      ackMask,
+      channelId: packet.channelId,
+      reliable: packet.reliable ?? false,
+      ordered: packet.ordered ?? false,
+      sequenced: packet.sequenced ?? false,
+      payload: packet.payload ?? new Uint8Array(),
+    };
+  }
+
+  #trackReliable(packet: CultNetRudpPacket, nowMs: number): void {
+    this.#pendingReliable.set(packet.sequence, {
+      packet: { ...packet, payload: packet.payload ? new Uint8Array(packet.payload) : new Uint8Array() },
+      lastSentAtMs: nowMs,
+    });
+  }
+
+  #applyAcknowledgements(packet: CultNetRudpPacket): void {
+    this.#pendingReliable.delete(packet.ack);
+    for (let bit = 0; bit < 32; bit += 1) {
+      if ((packet.ackMask & (1 << bit)) !== 0) {
+        this.#pendingReliable.delete(packet.ack - bit - 1);
+      }
+    }
+  }
+
+  #rememberReceived(sequence: number): void {
+    this.#receivedSequences.add(sequence);
+    if (this.#highestReceivedSequence === undefined || sequence > this.#highestReceivedSequence) {
+      this.#highestReceivedSequence = sequence;
+    }
+  }
+
+  #ackState(): { ack: number; ackMask: number } {
+    const ack = this.#highestReceivedSequence ?? 0;
+    let ackMask = 0;
+    for (let bit = 0; bit < 32; bit += 1) {
+      if (ack > bit && this.#receivedSequences.has(ack - bit - 1)) {
+        ackMask |= 1 << bit;
+      }
+    }
+    return { ack, ackMask: ackMask >>> 0 };
+  }
+
+  #deliverOrdered(frame: CultNetRudpDeliveredFrame): CultNetRudpDeliveredFrame[] {
+    const next = this.#orderedNextSequenceByChannel.get(frame.channelId);
+    if (next === undefined) {
+      this.#orderedNextSequenceByChannel.set(frame.channelId, frame.sequence + 1);
+      return [
+        frame,
+        ...this.#drainOrdered(frame.channelId),
+      ];
+    }
+
+    if (frame.sequence < next) {
+      return [];
+    }
+
+    if (frame.sequence > next) {
+      let buffer = this.#orderedBuffers.get(frame.channelId);
+      if (!buffer) {
+        buffer = new Map();
+        this.#orderedBuffers.set(frame.channelId, buffer);
+      }
+      buffer.set(frame.sequence, frame);
+      return [];
+    }
+
+    this.#orderedNextSequenceByChannel.set(frame.channelId, next + 1);
+    return [
+      frame,
+      ...this.#drainOrdered(frame.channelId),
+    ];
+  }
+
+  #drainOrdered(channelId: string): CultNetRudpDeliveredFrame[] {
+    const delivered: CultNetRudpDeliveredFrame[] = [];
+    const buffer = this.#orderedBuffers.get(channelId);
+    if (!buffer) {
+      return delivered;
+    }
+
+    let next = this.#orderedNextSequenceByChannel.get(channelId);
+    while (next !== undefined && buffer.has(next)) {
+      const frame = buffer.get(next)!;
+      buffer.delete(next);
+      delivered.push(frame);
+      next += 1;
+      this.#orderedNextSequenceByChannel.set(channelId, next);
+    }
+    return delivered;
+  }
+
+  #requireConnection(packet: CultNetRudpPacket): void {
+    if (packet.connectionId !== this.connectionId) {
+      throw new Error(`RUDP packet connection id ${packet.connectionId} does not match ${this.connectionId}.`);
+    }
+  }
+}
 
 export function createRudpTransportProfile(
   runtimeId: string,

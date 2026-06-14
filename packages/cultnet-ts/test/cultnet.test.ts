@@ -16,6 +16,7 @@ import {
   CultNetClientSecurityOptions,
   CultNetDocumentRegistry,
   CultNetPeer,
+  CultNetRudpSession,
   CultNetSchemaRegistry,
   CultNetSecret,
   CultNetServerSecurityOptions,
@@ -248,6 +249,90 @@ test("rudp transport profile advertises state and realtime channel semantics", (
       ["realtime", "unreliable", "unordered"],
     ],
   );
+});
+
+test("rudp session handshake acks reliable connect and accept packets", () => {
+  const client = new CultNetRudpSession({ connectionId: 0x0a0b0c0d, initialSequence: 1, resendDelayMs: 50 });
+  const server = new CultNetRudpSession({ connectionId: 0x0a0b0c0d, initialSequence: 100, resendDelayMs: 50 });
+
+  const connect = client.createConnect(0, Buffer.from("join", "utf8"));
+  assert.equal(connect.packetType, "connect");
+  assert.equal(connect.sequence, 1);
+  assert.deepEqual(client.pendingReliableSequences, [1]);
+
+  const accept = server.acceptConnect(connect, 10, Buffer.from("ok", "utf8"));
+  assert.equal(accept.packetType, "accept");
+  assert.equal(accept.ack, 1);
+  assert.equal(server.connected, true);
+  assert.deepEqual(server.pendingReliableSequences, [100]);
+
+  client.receive(accept, 20);
+  assert.equal(client.connected, true);
+  assert.deepEqual(client.pendingReliableSequences, []);
+
+  const ack = client.createAck();
+  assert.equal(ack.ack, 100);
+  server.receive(ack, 30);
+  assert.deepEqual(server.pendingReliableSequences, []);
+});
+
+test("rudp session computes ack masks and clears pending reliable packets", () => {
+  const sender = new CultNetRudpSession({ connectionId: 7, initialSequence: 10, resendDelayMs: 100 });
+  const receiver = new CultNetRudpSession({ connectionId: 7, initialSequence: 200, resendDelayMs: 100 });
+  sender.receive({ packetType: "accept", connectionId: 7, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId: 7, sequence: 2, ack: 0, ackMask: 0, channelId: "control" });
+
+  const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true, nowMs: 0 });
+  const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true, nowMs: 0 });
+  const third = sender.send("schema", Buffer.from("third"), { reliable: true, ordered: true, nowMs: 0 });
+  assert.deepEqual(sender.pendingReliableSequences, [10, 11, 12]);
+
+  receiver.receive(first);
+  receiver.receive(third);
+  const ackWithGap = receiver.createAck();
+  assert.equal(ackWithGap.ack, 12);
+  assert.equal(ackWithGap.ackMask, 0b10 | (1 << 9));
+  sender.receive(ackWithGap);
+  assert.deepEqual(sender.pendingReliableSequences, [11]);
+
+  receiver.receive(second);
+  const fullAck = receiver.createAck();
+  assert.equal(fullAck.ack, 12);
+  assert.equal(fullAck.ackMask, 0b11 | (1 << 9));
+  sender.receive(fullAck);
+  assert.deepEqual(sender.pendingReliableSequences, []);
+});
+
+test("rudp session schedules reliable resends until acked", () => {
+  const session = new CultNetRudpSession({ connectionId: 99, initialSequence: 1, resendDelayMs: 100 });
+  session.receive({ packetType: "accept", connectionId: 99, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  const sent = session.send("schema", Buffer.from("payload"), { reliable: true, ordered: true, nowMs: 10 });
+
+  assert.deepEqual(session.dueResends(90), []);
+  assert.deepEqual(session.dueResends(110).map((packet) => packet.sequence), [sent.sequence]);
+  assert.deepEqual(session.dueResends(150), []);
+
+  session.receive({ packetType: "ack", connectionId: 99, sequence: 51, ack: sent.sequence, ackMask: 0, channelId: "control" });
+  assert.deepEqual(session.dueResends(250), []);
+});
+
+test("rudp session suppresses duplicates and delivers reliable ordered payloads in sequence", () => {
+  const sender = new CultNetRudpSession({ connectionId: 123, initialSequence: 1 });
+  const receiver = new CultNetRudpSession({ connectionId: 123, initialSequence: 100 });
+  sender.receive({ packetType: "accept", connectionId: 123, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId: 123, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+
+  const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
+  const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true });
+  const third = sender.send("schema", Buffer.from("third"), { reliable: true, ordered: true });
+
+  assert.deepEqual(receiver.receive(first).delivered.map((frame) => Buffer.from(frame.payload).toString("utf8")), ["first"]);
+  assert.deepEqual(receiver.receive(third).delivered, []);
+  assert.deepEqual(receiver.receive(first).delivered, []);
+  assert.deepEqual(receiver.receive(second).delivered.map((frame) => Buffer.from(frame.payload).toString("utf8")), [
+    "second",
+    "third",
+  ]);
 });
 
 test("CultNet peer can speak through a transport connection", async () => {
