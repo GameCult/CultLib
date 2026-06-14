@@ -23,7 +23,10 @@ use cultnet_rs::CultNetTransportProfile;
 use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::LengthPrefixedMessageFramer;
+use cultnet_rs::TcpFramedTransportConnection;
+use cultnet_rs::TcpFramedTransportProfileOptions;
 use cultnet_rs::builtin_schema_registry;
+use cultnet_rs::create_tcp_framed_transport_profile;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_for_wire;
 use cultnet_rs::encode_cultnet_message_to_vec;
@@ -128,6 +131,39 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
     let decoded =
         decode_cultnet_message_from_slice(&frames[0], CultNetWireContract::CultNetSchemaV0)?;
     assert_eq!(decoded, message);
+    Ok(())
+}
+
+#[test]
+fn tcp_framed_transport_carries_schema_payloads_with_stats() -> Result<()> {
+    let payload = b"cultnet-payload".to_vec();
+    let profile = create_tcp_framed_transport_profile(
+        "rust-transport",
+        TcpFramedTransportProfileOptions {
+            transport_id: Some("test-tcp".to_string()),
+            ..TcpFramedTransportProfileOptions::default()
+        },
+    );
+    let mut sender = TcpFramedTransportConnection::new(Vec::<u8>::new(), profile.clone());
+    sender.send("schema", &payload)?;
+    assert_eq!(sender.stats().frames_sent, 1);
+    assert_eq!(sender.stats().bytes_sent, (payload.len() + 4) as u64);
+    assert!(sender.send("unreliable", &[]).is_err());
+
+    let bytes = sender.into_inner();
+    let mut receiver = TcpFramedTransportConnection::new(std::io::Cursor::new(bytes), profile);
+    let frame = receiver.receive()?;
+    assert_eq!(frame.channel_id, "schema");
+    assert_eq!(frame.payload, payload);
+    assert_eq!(receiver.stats().frames_received, 1);
+    assert_eq!(
+        receiver.stats().bytes_received,
+        (frame.payload.len() + 4) as u64
+    );
+    assert_eq!(
+        receiver.profile.transports[0].protocol,
+        CultNetTransportProtocol::TcpFramed
+    );
     Ok(())
 }
 

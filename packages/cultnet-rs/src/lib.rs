@@ -3,9 +3,11 @@ mod framing;
 mod replication;
 mod schema_discovery;
 mod security;
+mod transport;
 
 pub use contracts::*;
 pub use framing::*;
 pub use replication::*;
 pub use schema_discovery::*;
 pub use security::*;
+pub use transport::*;

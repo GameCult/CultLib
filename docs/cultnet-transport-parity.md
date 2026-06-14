@@ -146,8 +146,12 @@ Current progress:
   synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
   and stats. `CultNetRawClient` and database subscriptions send/read through
   that port instead of owning frame I/O directly.
-- The remaining parity work is to add equivalent ports to C#, Rust, and Kotlin,
-  deepen Python's server-side use of its port, and move each runtime's existing
+- Rust now has the same `tcp_framed` transport profile helper plus a
+  `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
+  transfer stats. The Rust interop peer advertises and uses that shared port
+  instead of owning raw TCP frame I/O directly.
+- The remaining parity work is to add equivalent ports to C# and Kotlin, deepen
+  Python's server-side use of its port, and move each runtime's existing
   TCP/LiteNetLib/WebSocket bodies behind those ports before implementing
   `rudp`.
 

@@ -14,17 +14,14 @@ use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
-use cultnet_rs::CultNetTransportChannel;
-use cultnet_rs::CultNetTransportDelivery;
-use cultnet_rs::CultNetTransportDescriptor;
-use cultnet_rs::CultNetTransportOrdering;
 use cultnet_rs::CultNetTransportProfile;
-use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
+use cultnet_rs::TcpFramedTransportConnection;
+use cultnet_rs::TcpFramedTransportProfileOptions;
 use cultnet_rs::builtin_schema_registry;
+use cultnet_rs::create_tcp_framed_transport_profile;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
-use cultnet_rs::encode_frame;
 use serde::Deserialize;
 use serde::Serialize;
 use socket2::Domain;
@@ -33,8 +30,6 @@ use socket2::Socket;
 use socket2::Type;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
-use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
@@ -355,16 +350,20 @@ fn dial(config: DialConfig) -> Result<()> {
     let mut document_registry = CultNetDocumentRegistry::new();
     register_capability_bindings(&mut document_registry, &schema_registration.schema_id);
 
-    let mut stream = TcpStream::connect((config.target_host.as_str(), config.target_port))
+    let stream = TcpStream::connect((config.target_host.as_str(), config.target_port))
         .with_context(|| {
             format!(
                 "failed to connect to {}:{}",
                 config.target_host, config.target_port
             )
         })?;
+    let mut transport = TcpFramedTransportConnection::new(
+        stream,
+        tcp_transport_profile(&config.runtime_id, &config.target_host, config.target_port),
+    );
 
     send_message(
-        &mut stream,
+        &mut transport,
         &CultNetMessage::Hello {
             runtime_id: config.runtime_id.clone(),
             runtime_kind: config.runtime_kind.clone(),
@@ -379,14 +378,14 @@ fn dial(config: DialConfig) -> Result<()> {
         },
     )?;
 
-    let remote_hello = read_message(&mut stream)?;
+    let remote_hello = read_message(&mut transport)?;
     let remote_runtime_id = match &remote_hello {
         CultNetMessage::Hello { runtime_id, .. } => runtime_id.clone(),
         other => return Err(anyhow!("expected hello response, got {other:?}")),
     };
 
     send_message(
-        &mut stream,
+        &mut transport,
         &CultNetMessage::SchemaCatalogRequest {
             message_id: format!("{}-catalog", config.runtime_id),
             include_schema_json: Some(true),
@@ -394,7 +393,7 @@ fn dial(config: DialConfig) -> Result<()> {
             kinds: None,
         },
     )?;
-    let catalog_response = read_message(&mut stream)?;
+    let catalog_response = read_message(&mut transport)?;
     let has_interop_schema = match &catalog_response {
         CultNetMessage::SchemaCatalogResponse { schemas, .. } => schemas.iter().any(|schema| {
             schema.schema_id == schema_registration.schema_id
@@ -404,14 +403,14 @@ fn dial(config: DialConfig) -> Result<()> {
     };
 
     send_message(
-        &mut stream,
+        &mut transport,
         &CultNetMessage::SnapshotRequest {
             message_id: format!("{}-snapshot", config.runtime_id),
             schema_ids: Some(vec![schema_registration.schema_id.clone()]),
             record_keys: None,
         },
     )?;
-    let snapshot_response = read_message(&mut stream)?;
+    let snapshot_response = read_message(&mut transport)?;
     let applied = document_registry
         .apply_raw_snapshot_response::<CultNetInteropNote>(&mut cache, &snapshot_response)?;
     let note = applied
@@ -437,14 +436,14 @@ fn dial(config: DialConfig) -> Result<()> {
             "body": note.body,
             "tags": note.tags,
         },
-        "mutatedNote": mutate_remote_note(&mut stream, &mut cache, &document_registry, &schema_registration.schema_id, &config.runtime_id, &note)?,
-        "fireReceipt": fire_remote_weapon(&mut stream, &mut cache, &document_registry, &config.runtime_id, &remote_runtime_id)?,
+        "mutatedNote": mutate_remote_note(&mut transport, &mut cache, &document_registry, &schema_registration.schema_id, &config.runtime_id, &note)?,
+        "fireReceipt": fire_remote_weapon(&mut transport, &mut cache, &document_registry, &config.runtime_id, &remote_runtime_id)?,
     }))?;
     Ok(())
 }
 
 fn mutate_remote_note(
-    stream: &mut TcpStream,
+    transport: &mut TcpFramedTransportConnection<TcpStream>,
     cache: &mut CultCache,
     document_registry: &CultNetDocumentRegistry,
     note_schema_id: &str,
@@ -464,12 +463,12 @@ fn mutate_remote_note(
         &intent,
         CultNetDocumentPutOptions::default(),
     )?;
-    send_message(stream, &message)?;
+    send_message(transport, &message)?;
 
-    let receipt_message = read_message(stream)?;
+    let receipt_message = read_message(transport)?;
     let _receipt = document_registry
         .apply_raw_document_put_message::<CultNetInteropMutationReceipt>(cache, &receipt_message)?;
-    let mutated_message = read_message(stream)?;
+    let mutated_message = read_message(transport)?;
     let mutated = document_registry
         .apply_raw_document_put_message::<CultNetInteropNote>(cache, &mutated_message)?;
     if mutated_message_schema_id(&mutated_message) != Some(note_schema_id) {
@@ -486,7 +485,7 @@ fn mutate_remote_note(
 }
 
 fn fire_remote_weapon(
-    stream: &mut TcpStream,
+    transport: &mut TcpFramedTransportConnection<TcpStream>,
     cache: &mut CultCache,
     document_registry: &CultNetDocumentRegistry,
     runtime_id: &str,
@@ -504,8 +503,8 @@ fn fire_remote_weapon(
         &command,
         CultNetDocumentPutOptions::default(),
     )?;
-    send_message(stream, &message)?;
-    let receipt_message = read_message(stream)?;
+    send_message(transport, &message)?;
+    let receipt_message = read_message(transport)?;
     let receipt = document_registry
         .apply_raw_document_put_message::<CultNetInteropFireReceipt>(cache, &receipt_message)?;
     Ok(serde_json::json!({
@@ -605,14 +604,18 @@ fn start_tcp_server(
 }
 
 fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     config: Arc<PeerConfig>,
     cache: Arc<Mutex<CultCache>>,
     document_registry: Arc<CultNetDocumentRegistry>,
     schema_registry: Arc<CultNetSchemaRegistry>,
 ) -> Result<()> {
+    let mut transport = TcpFramedTransportConnection::new(
+        stream,
+        tcp_transport_profile(&config.runtime_id, &config.advertise_host, config.tcp_port),
+    );
     loop {
-        let message = match read_message(&mut stream) {
+        let message = match read_message(&mut transport) {
             Ok(message) => message,
             Err(error) if is_eof_like(&error) => break,
             Err(error) => return Err(error),
@@ -621,28 +624,28 @@ fn handle_connection(
         match message {
             CultNetMessage::Hello { .. } => {
                 send_message(
-                    &mut stream,
+                    &mut transport,
                     &CultNetMessage::Hello {
                         runtime_id: config.runtime_id.clone(),
                         runtime_kind: config.runtime_kind.clone(),
                         agent_id: Some(config.agent_id.clone()),
                         role: None,
                         display_name: Some(config.display_name.clone()),
-                    supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
-                    supported_mutation_contracts: Some(interaction_contracts()),
-                    supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
-                    transport_profiles: Some(tcp_transport_profiles(
-                        &config.runtime_id,
-                        &config.advertise_host,
-                        config.tcp_port,
-                    )),
-                    supports_schema_catalog: Some(true),
-                },
+                        supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
+                        supported_mutation_contracts: Some(interaction_contracts()),
+                        supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+                        transport_profiles: Some(tcp_transport_profiles(
+                            &config.runtime_id,
+                            &config.advertise_host,
+                            config.tcp_port,
+                        )),
+                        supports_schema_catalog: Some(true),
+                    },
                 )?;
             }
             request @ CultNetMessage::SchemaCatalogRequest { .. } => {
                 let response = schema_registry.create_catalog_response(&request)?;
-                send_message(&mut stream, &response)?;
+                send_message(&mut transport, &response)?;
             }
             CultNetMessage::SnapshotRequest {
                 message_id,
@@ -664,10 +667,16 @@ fn handle_connection(
                             Some(vec!["interop".to_string(), config.runtime_id.clone()]);
                     }
                 }
-                send_message(&mut stream, &response)?;
+                send_message(&mut transport, &response)?;
             }
             message @ CultNetMessage::DocumentPutRaw { .. } => {
-                handle_raw_put(&mut stream, &config, &cache, &document_registry, &message)?;
+                handle_raw_put(
+                    &mut transport,
+                    &config,
+                    &cache,
+                    &document_registry,
+                    &message,
+                )?;
             }
             _ => {}
         }
@@ -677,7 +686,7 @@ fn handle_connection(
 }
 
 fn handle_raw_put(
-    stream: &mut TcpStream,
+    transport: &mut TcpFramedTransportConnection<TcpStream>,
     config: &PeerConfig,
     cache: &Arc<Mutex<CultCache>>,
     document_registry: &CultNetDocumentRegistry,
@@ -715,8 +724,8 @@ fn handle_raw_put(
             &note,
             options,
         )?;
-        send_message(stream, &receipt_message)?;
-        send_message(stream, &note_message)?;
+        send_message(transport, &receipt_message)?;
+        send_message(transport, &note_message)?;
     } else if document.schema_id == FIRE_COMMAND_SCHEMA_ID {
         let mut cache = cache.lock().expect("cache poisoned");
         let command = document_registry
@@ -736,7 +745,7 @@ fn handle_raw_put(
             &receipt,
             response_options(config, "side-effect"),
         )?;
-        send_message(stream, &receipt_message)?;
+        send_message(transport, &receipt_message)?;
     }
     Ok(())
 }
@@ -835,27 +844,20 @@ fn interaction_contracts() -> Vec<CultNetDocumentMutationContract> {
     }]
 }
 
-fn tcp_transport_profiles(runtime_id: &str, host: &str, port: u16) -> Vec<CultNetTransportProfile> {
-    vec![CultNetTransportProfile {
-        schema_version: "cultnet.transport_profile.v0".to_string(),
-        runtime_id: runtime_id.to_string(),
-        transports: vec![CultNetTransportDescriptor {
-            transport_id: "interop-tcp".to_string(),
-            protocol: CultNetTransportProtocol::TcpFramed,
+fn tcp_transport_profile(runtime_id: &str, host: &str, port: u16) -> CultNetTransportProfile {
+    create_tcp_framed_transport_profile(
+        runtime_id,
+        TcpFramedTransportProfileOptions {
+            transport_id: Some("interop-tcp".to_string()),
             host: Some(host.to_string()),
             port: Some(port),
-            path: None,
-            discovery_group: None,
-            wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
-            channels: vec![CultNetTransportChannel {
-                channel_id: "schema".to_string(),
-                delivery: CultNetTransportDelivery::Reliable,
-                ordering: CultNetTransportOrdering::Ordered,
-                max_payload_bytes: None,
-                max_fragment_bytes: None,
-            }],
-        }],
-    }]
+            ..TcpFramedTransportProfileOptions::default()
+        },
+    )
+}
+
+fn tcp_transport_profiles(runtime_id: &str, host: &str, port: u16) -> Vec<CultNetTransportProfile> {
+    vec![tcp_transport_profile(runtime_id, host, port)]
 }
 
 fn response_options(config: &PeerConfig, tag: &str) -> CultNetDocumentPutOptions {
@@ -892,21 +894,17 @@ fn build_note(runtime_id: &str, display_name: &str) -> CultNetInteropNote {
     }
 }
 
-fn send_message(stream: &mut TcpStream, message: &CultNetMessage) -> Result<()> {
+fn send_message(
+    transport: &mut TcpFramedTransportConnection<TcpStream>,
+    message: &CultNetMessage,
+) -> Result<()> {
     let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
-    let frame = encode_frame(&payload)?;
-    stream.write_all(&frame)?;
-    stream.flush()?;
-    Ok(())
+    transport.send("schema", &payload)
 }
 
-fn read_message(stream: &mut TcpStream) -> Result<CultNetMessage> {
-    let mut header = [0_u8; 4];
-    stream.read_exact(&mut header)?;
-    let payload_len = u32::from_be_bytes(header) as usize;
-    let mut payload = vec![0_u8; payload_len];
-    stream.read_exact(&mut payload)?;
-    decode_cultnet_message_from_slice(&payload, CultNetWireContract::CultNetSchemaV0)
+fn read_message(transport: &mut TcpFramedTransportConnection<TcpStream>) -> Result<CultNetMessage> {
+    let frame = transport.receive()?;
+    decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)
 }
 
 fn is_eof_like(error: &anyhow::Error) -> bool {
