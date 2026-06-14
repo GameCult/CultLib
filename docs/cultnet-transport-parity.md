@@ -154,10 +154,58 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
   instead of owning raw TCP frame I/O directly.
+- TypeScript now has the first `cultnet.transport.rudp.v0` packet codec and a
+  deterministic reliable ordered data-packet fixture. This is not the RUDP
+  runtime yet; it is the binary packet language the runtimes must converge on.
 - The remaining parity work is to add the equivalent port to Kotlin, deepen
   Python's server-side use of its port, and move each runtime's existing
-  TCP/LiteNetLib/WebSocket bodies behind those ports before implementing
-  `rudp`.
+  TCP/LiteNetLib/WebSocket bodies behind those ports, port the RUDP packet
+  fixture into C#/Rust/Python, then implement `rudp`.
+
+## RUDP Packet Contract V0
+
+`cultnet.transport.rudp.v0` packets start with a fixed binary header, followed
+by a UTF-8 channel id and payload bytes. All integer fields are unsigned
+big-endian. The first deterministic fixture lives in TypeScript and must be
+ported byte-for-byte before runtime-specific resend loops are allowed to claim
+parity.
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| 0 | 4 | magic | ASCII `CNR0` |
+| 4 | 1 | version | `0` |
+| 5 | 1 | packet type | `1=connect`, `2=accept`, `3=data`, `4=ack`, `5=ping`, `6=pong`, `7=disconnect` |
+| 6 | 1 | flags | bit 0 reliable, bit 1 ordered, bit 2 sequenced, bit 3 fragmented |
+| 7 | 1 | header bytes | fixed header plus channel id bytes |
+| 8 | 4 | connection id | peer/session binding token |
+| 12 | 4 | sequence | packet sequence number |
+| 16 | 4 | ack | latest received sequence being acknowledged |
+| 20 | 4 | ack mask | selective acknowledgement mask for prior packets |
+| 24 | 2 | fragment id | `0` when not fragmented |
+| 26 | 2 | fragment index | zero-based fragment index |
+| 28 | 2 | fragment count | total fragments, `0` when not fragmented |
+| 30 | 4 | payload bytes | payload length |
+| 34 | 1 | channel id bytes | UTF-8 byte count, max 255 |
+| 35 | 1 | reserved | `0` |
+| 36 | n | channel id | UTF-8 channel id |
+| 36+n | m | payload | transport-neutral payload bytes |
+
+Canonical reliable ordered data fixture:
+
+```text
+packetType=data
+connectionId=0x01020304
+sequence=0x0000002a
+ack=0x00000029
+ackMask=0x80000001
+channelId=schema
+flags=reliable|ordered|fragmented
+fragmentId=7
+fragmentIndex=1
+fragmentCount=3
+payload=hello
+hex=434e523000030b2a010203040000002a0000002980000001000700010003000000050600736368656d6168656c6c6f
+```
 
 ## Reliable UDP Semantics To Lift From LiteNetLib
 

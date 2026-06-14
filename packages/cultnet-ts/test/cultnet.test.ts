@@ -23,8 +23,11 @@ import {
   cultNetSchemas,
   cultNetBuiltinSchemaRegistry,
   createTcpFramedTransportProfile,
+  createRudpTransportProfile,
   defineCultNetDocumentBinding,
+  decodeRudpPacket,
   encodeCultNetMessageForWire,
+  encodeRudpPacket,
   ghostlightAgentStateGeneratedContract,
   parseCultNetMessage,
   validateGhostlightAgentStateGenerated,
@@ -188,6 +191,63 @@ test("tcp_framed transport carries raw schema channel payloads with stats", asyn
 
   left.close();
   right.close();
+});
+
+test("rudp packet codec has a deterministic reliable ordered fixture", () => {
+  const encoded = encodeRudpPacket({
+    packetType: "data",
+    connectionId: 0x01020304,
+    sequence: 0x0000002a,
+    ack: 0x00000029,
+    ackMask: 0x80000001,
+    channelId: "schema",
+    reliable: true,
+    ordered: true,
+    fragmentId: 7,
+    fragmentIndex: 1,
+    fragmentCount: 3,
+    payload: Buffer.from("hello", "utf8"),
+  });
+
+  assert.equal(
+    Buffer.from(encoded).toString("hex"),
+    "434e523000030b2a010203040000002a0000002980000001000700010003000000050600736368656d6168656c6c6f",
+  );
+
+  const decoded = decodeRudpPacket(encoded);
+  assert.equal(decoded.packetType, "data");
+  assert.equal(decoded.connectionId, 0x01020304);
+  assert.equal(decoded.sequence, 0x0000002a);
+  assert.equal(decoded.ack, 0x00000029);
+  assert.equal(decoded.ackMask, 0x80000001);
+  assert.equal(decoded.channelId, "schema");
+  assert.equal(decoded.reliable, true);
+  assert.equal(decoded.ordered, true);
+  assert.equal(decoded.sequenced, false);
+  assert.equal(decoded.fragmentId, 7);
+  assert.equal(decoded.fragmentIndex, 1);
+  assert.equal(decoded.fragmentCount, 3);
+  assert.equal(Buffer.from(decoded.payload ?? []).toString("utf8"), "hello");
+});
+
+test("rudp transport profile advertises state and realtime channel semantics", () => {
+  const profile = createRudpTransportProfile("node-rudp", {
+    transportId: "public-rudp",
+    host: "127.0.0.1",
+    port: 7777,
+    maxPayloadBytes: 1200,
+    maxFragmentBytes: 1000,
+  });
+
+  assert.equal(profile.transports[0]?.protocol, "rudp");
+  assert.deepEqual(
+    profile.transports[0]?.channels.map((channel) => [channel.channelId, channel.delivery, channel.ordering]),
+    [
+      ["schema", "reliable", "ordered"],
+      ["latest", "unreliable", "sequenced"],
+      ["realtime", "unreliable", "unordered"],
+    ],
+  );
 });
 
 test("CultNet peer can speak through a transport connection", async () => {
