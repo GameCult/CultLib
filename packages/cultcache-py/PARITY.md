@@ -149,6 +149,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   The live interop harness runs a Python CultMesh session client, writes a local
   prediction, pulls the live Python peer shard log, applies the authoritative
   entry, and verifies the session reports the record as reconciled.
+  Python sessions also expose pending prediction inspection, resimulation input
+  listing, explicit rollback of one or all pending predictions, and
+  authoritative-delete rollback when a shard log rejects speculative local
+  input.
 - Python CultMesh session watches:
   `CultMeshGameSession.watch_candidates(...)` and
   `watch_simulation_facts(...)` expose the same gameplay-facing observation and

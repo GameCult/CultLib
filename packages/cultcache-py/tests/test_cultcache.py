@@ -2060,6 +2060,104 @@ class CultCacheTests(unittest.TestCase):
 
             self.assertEqual(changes[0].change_kind, "reconciled")
             self.assertEqual(node.get_required(note_doc, prediction.key)["body"], "authoritative")
+            self.assertEqual(session.pending_predictions(), ())
+            self.assertEqual(session.resimulation_inputs(), ())
+
+    def test_cultmesh_game_session_rolls_back_pending_predictions(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.rollback_input",
+            [("body", 0)],
+            schema_id="mesh.rollback_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-rollback")
+        node.register_document(note_doc)
+        node.put(note_doc, "input:client-rollback:existing", {"body": "previous"})
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-rollback",
+                        schema_ids=("mesh.rollback_input.v1",),
+                        key_prefix="input:client-rollback",
+                    ),
+                )
+            ),
+        )
+
+        existing = session.predict(note_doc, "input:client-rollback:existing", {"body": "predicted-existing"})
+        created = session.predict(note_doc, "input:client-rollback:new", {"body": "predicted-new"})
+        self.assertEqual(
+            [prediction.key for prediction in session.pending_predictions()],
+            ["input:client-rollback:existing", "input:client-rollback:new"],
+        )
+        self.assertEqual([prediction.key for prediction in session.resimulation_inputs()], [
+            "input:client-rollback:existing",
+            "input:client-rollback:new",
+        ])
+
+        restored = session.rollback_prediction(existing)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.change_kind, "rolled_back")
+        self.assertEqual(restored.value, {"body": "previous"})
+        self.assertEqual(node.get_required(note_doc, "input:client-rollback:existing")["body"], "previous")
+
+        rolled_back = session.rollback_predictions()
+        self.assertEqual([(change.change_kind, change.record_key, change.value) for change in rolled_back], [
+            ("rolled_back", created.key, None),
+        ])
+        self.assertIsNone(node.get(note_doc, created.key))
+        self.assertEqual(session.pending_predictions(), ())
+
+    def test_cultmesh_game_session_authoritative_delete_rolls_back_prediction(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.deleted_input",
+            [("body", 0)],
+            schema_id="mesh.deleted_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-delete")
+        node.register_document(note_doc)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-delete",
+                        schema_ids=("mesh.deleted_input.v1",),
+                        key_prefix="input:client-delete",
+                    ),
+                )
+            ),
+        )
+
+        prediction = session.predict(note_doc, "input:client-delete:move", {"body": "predicted"})
+        delete = document_delete(
+            message_id="authoritative-delete",
+            schema_id=prediction.schema_id,
+            record_key=prediction.key,
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+        changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-delete-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "removed",
+                    "delete": delete.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual(changes[0].change_kind, "rolled_back")
+        self.assertIsNone(node.get(note_doc, prediction.key))
+        self.assertEqual(session.pending_predictions(), ())
 
     def test_cultmesh_database_watchers_observe_authoritative_shard_log_reconciliation(self) -> None:
         note_doc = define_database_entry_type(

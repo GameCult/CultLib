@@ -32,6 +32,8 @@ class CultMeshPrediction:
     schema_id: str
     document: DocumentDefinition[Any]
     value: Any
+    had_previous_value: bool = False
+    previous_value: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -67,7 +69,7 @@ class CultMeshGameSession:
         self.fact_committer = CultMeshSimulationFactCommitter(self.node)
         self._committed_fact_ids: set[str] = set()
         self._client_authority_scopes = tuple(options.client_authority_scopes)
-        self._predicted_keys: set[tuple[str, str]] = set()
+        self._predictions: dict[tuple[str, str], CultMeshPrediction] = {}
 
     def predict(self, document: DocumentDefinition[Any], key: str, value: Any) -> CultMeshPrediction:
         schema_id = document.catalog_entry().schema_id
@@ -76,9 +78,58 @@ class CultMeshGameSession:
                 f"Runtime {self.node.runtime_id!r} does not have client prediction authority "
                 f"for schema {schema_id!r} key {key!r}"
             )
+        had_previous_value = self.node.cache.get_envelope(document, key) is not None
+        previous_value = self.node.get(document, key)
         self.node.put(document, key, value)
-        self._predicted_keys.add((schema_id, key))
-        return CultMeshPrediction(key=key, schema_id=schema_id, document=document, value=value)
+        prediction = CultMeshPrediction(
+            key=key,
+            schema_id=schema_id,
+            document=document,
+            value=value,
+            had_previous_value=had_previous_value,
+            previous_value=previous_value,
+        )
+        self._predictions[(schema_id, key)] = prediction
+        return prediction
+
+    def pending_predictions(self) -> tuple[CultMeshPrediction, ...]:
+        return tuple(
+            self._predictions[key]
+            for key in sorted(self._predictions)
+        )
+
+    def resimulation_inputs(self) -> tuple[CultMeshPrediction, ...]:
+        return self.pending_predictions()
+
+    def rollback_prediction(
+        self,
+        prediction_or_schema_id: CultMeshPrediction | str,
+        key: str | None = None,
+    ) -> CultMeshSessionChange | None:
+        schema_id, record_key = self._prediction_identity(prediction_or_schema_id, key)
+        prediction = self._predictions.pop((schema_id, record_key), None)
+        if prediction is None:
+            return None
+        if prediction.had_previous_value:
+            self.node.put(prediction.document, prediction.key, prediction.previous_value)
+            value = prediction.previous_value
+        else:
+            self.node.delete(prediction.document, prediction.key)
+            value = None
+        return CultMeshSessionChange(
+            schema_id=prediction.schema_id,
+            record_key=prediction.key,
+            change_kind="rolled_back",
+            value=value,
+        )
+
+    def rollback_predictions(self) -> list[CultMeshSessionChange]:
+        return [
+            change
+            for prediction in list(self.pending_predictions())
+            for change in [self.rollback_prediction(prediction)]
+            if change is not None
+        ]
 
     def watch_candidates(
         self,
@@ -156,9 +207,9 @@ class CultMeshGameSession:
         for record in applied:
             key = (record.schema_id, record.record_key)
             change_kind = record.change_kind
-            if key in self._predicted_keys and record.change_kind in {"added", "updated"}:
-                self._predicted_keys.remove(key)
-                change_kind = "reconciled"
+            if key in self._predictions:
+                del self._predictions[key]
+                change_kind = "reconciled" if record.change_kind in {"added", "updated"} else "rolled_back"
             changes.append(CultMeshSessionChange(
                 schema_id=record.schema_id,
                 record_key=record.record_key,
@@ -166,3 +217,16 @@ class CultMeshGameSession:
                 value=record.value,
             ))
         return changes
+
+    @staticmethod
+    def _prediction_identity(
+        prediction_or_schema_id: CultMeshPrediction | str,
+        key: str | None,
+    ) -> tuple[str, str]:
+        if isinstance(prediction_or_schema_id, CultMeshPrediction):
+            if key is not None:
+                raise ValueError("key must be omitted when rolling back a CultMeshPrediction")
+            return prediction_or_schema_id.schema_id, prediction_or_schema_id.key
+        if key is None:
+            raise ValueError("key is required when rolling back by schema id")
+        return prediction_or_schema_id, key

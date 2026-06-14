@@ -96,7 +96,7 @@ Not implemented yet:
 - leader election or automatic shard failover
 - peer-to-peer snapshot fanout and throttling
 - scheduled peer-to-peer fanout for observation gossip and candidate propagation
-- rollback/resimulation helpers for simulation frames
+- cross-runtime rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
 ## Live Invariants
@@ -146,8 +146,8 @@ Add discovery fanout and operational polish:
 - add periodic gossip fanout over known peer cards
 - standardize cross-runtime authority lease signature algorithms beyond the
   package-local Python HMAC verifier
-- add simulation-frame rollback/resimulation helpers around predicted input
-  streams
+- standardize cross-runtime simulation-frame rollback/resimulation helpers beyond
+  Python's local pending-prediction rollback surface
 - add scheduled peer-to-peer fanout for observation gossip and candidate
   propagation beyond Python's one-shot client helper
 
