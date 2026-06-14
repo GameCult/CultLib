@@ -33,6 +33,8 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
         "CultNetDatabaseSubscription",
         "CultNetMessage",
         "CultNetRawClient",
+        "CultNetRawDocumentRecord",
+        "CultNetRawSnapshotResponse",
         "CultNetSchemaCatalog",
         "CultNetSchemaDescriptor",
         "CultNetShardCatalog",

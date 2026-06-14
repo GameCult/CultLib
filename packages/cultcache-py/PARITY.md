@@ -14,6 +14,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultNet raw client:
   Fetches schema catalogs, raw snapshots, shard catalogs, shard logs, and live
   database subscription changes.
+- Python CultNet raw snapshot:
+  Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
+  helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting
+  peer snapshots before handing them to the existing replication helpers.
 - Python CultNet schema catalog:
   Exposes shared wire-message schema descriptors from the package surface so
   both the interop peer and CultMesh local server describe the CultNet/CultMesh

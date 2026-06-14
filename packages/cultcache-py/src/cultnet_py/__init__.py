@@ -36,6 +36,7 @@ from .schema_catalog import (
 )
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogEntry, CultNetShardLogResponse
+from .snapshot import CultNetRawDocumentRecord, CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 from .simulation import (
     CultNetSimulationConsensus,
@@ -54,6 +55,8 @@ __all__ = [
     "CultNetShardDescriptor",
     "CultNetShardLogEntry",
     "CultNetShardLogResponse",
+    "CultNetRawDocumentRecord",
+    "CultNetRawSnapshotResponse",
     "CultNetAppliedRecord",
     "CultNetClientAuthorityScope",
     "CultNetSimulationConsensus",

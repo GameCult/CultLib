@@ -19,6 +19,7 @@ from .messages import (
 from .schema_catalog import CultNetSchemaCatalog, CultNetSchemaDescriptor
 from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogResponse
+from .snapshot import CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 
 
@@ -113,6 +114,23 @@ class CultNetRawClient:
             ),
             expected_schema_version="cultnet.snapshot_response_raw.v0",
         )
+
+    def fetch_snapshot_response(
+        self,
+        *,
+        message_id: str = "cultnet-python-snapshot",
+        schema_ids: list[str] | None = None,
+        record_keys: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultNetRawSnapshotResponse:
+        return CultNetRawSnapshotResponse.from_wire(self.fetch_snapshot(
+            message_id=message_id,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        ))
 
     def fetch_shard_catalog(
         self,
