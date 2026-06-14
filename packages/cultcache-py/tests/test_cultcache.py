@@ -917,6 +917,29 @@ class CultCacheTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.database.register_document(conflicting)
 
+    def test_cultmesh_database_global_document_facade_uses_singleton_key_and_watchers(self) -> None:
+        document = define_database_entry_type(
+            "mesh.global_settings",
+            [("theme", 0)],
+            global_document=True,
+        )
+        node = CultMesh.create_node(runtime_id="mesh-global")
+        node.database.register_document(document)
+        changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_global(document, changes.append)
+        node.database.put_global(document, {"theme": "ash"})
+        node.put_global(document, {"theme": "ember"})
+        node.delete_global(document)
+
+        self.assertIsNone(node.database.get_global(document))
+        self.assertEqual([change.record_key for change in changes], [node.cache.GLOBAL_KEY] * 3)
+        self.assertEqual([change.change_kind for change in changes], ["added", "updated", "removed"])
+        self.assertEqual(changes[1].previous_value, {"theme": "ash"})
+        self.assertEqual(changes[2].previous_value, {"theme": "ember"})
+        with self.assertRaises(Exception):
+            node.database.put(document, "settings:wrong", {"theme": "bad"})
+
     def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
         document = define_database_entry_type(
             "mesh.named_watch",

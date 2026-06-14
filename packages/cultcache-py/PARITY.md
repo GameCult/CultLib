@@ -24,9 +24,12 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh database facade:
   `node.database` owns the local typed document read/write/snapshot/sync surface
   so Python callers do not need to reach through the node composition wrapper.
-  It also exposes local `watch(...)`, `watch_record(...)`, `watch_by_name(...)`,
-  and `watch_by_index(...)` callbacks for database changes, including
-  authoritative shard-log reconciliation applied through the session facade.
+  It includes global document helpers that delegate through the same singleton
+  key invariant as `CultCache`.
+  It also exposes local `watch(...)`, `watch_record(...)`, `watch_global(...)`,
+  `watch_by_name(...)`, and `watch_by_index(...)` callbacks for database changes,
+  including authoritative shard-log reconciliation applied through the session
+  facade.
   Change notifications carry previous values when the database can observe the
   old record before local or replicated application.
 - Python CultMesh committed simulation facts:

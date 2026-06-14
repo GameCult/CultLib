@@ -44,6 +44,9 @@ class CultMeshNode:
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
         self.database.put(document, key, value)
 
+    def put_global(self, document: DocumentDefinition[Any], value: Any) -> None:
+        self.database.put_global(document, value)
+
     def put_raw_message(
         self,
         document: DocumentDefinition[Any],
@@ -69,8 +72,17 @@ class CultMeshNode:
     def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
         return self.database.get_required(document, key)
 
+    def get_global(self, document: DocumentDefinition[Any]) -> Any:
+        return self.database.get_global(document)
+
+    def get_required_global(self, document: DocumentDefinition[Any]) -> Any:
+        return self.database.get_required_global(document)
+
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self.database.delete(document, key)
+
+    def delete_global(self, document: DocumentDefinition[Any]) -> None:
+        self.database.delete_global(document)
 
     def delete_raw_message(
         self,
@@ -171,6 +183,13 @@ class CultMeshDatabase:
     ) -> Callable[[], None]:
         return self.watch(callback, document=document, key=key)
 
+    def watch_global(
+        self,
+        document: DocumentDefinition[Any],
+        callback: Callable[[CultMeshDatabaseChange], None],
+    ) -> Callable[[], None]:
+        return self.watch_record(document, self.cache.GLOBAL_KEY, callback)
+
     def watch_by_name(
         self,
         document: DocumentDefinition[Any],
@@ -224,6 +243,9 @@ class CultMeshDatabase:
         self.cache.put(document, key, value)
         self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
 
+    def put_global(self, document: DocumentDefinition[Any], value: Any) -> None:
+        self.put(document, self.cache.GLOBAL_KEY, value)
+
     def put_raw_message(
         self,
         document: DocumentDefinition[Any],
@@ -262,11 +284,20 @@ class CultMeshDatabase:
     def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
         return self.cache.get_required(document, key)
 
+    def get_global(self, document: DocumentDefinition[Any]) -> Any:
+        return self.cache.get_global(document)
+
+    def get_required_global(self, document: DocumentDefinition[Any]) -> Any:
+        return self.cache.get_required_global(document)
+
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
         previous = self.cache.get(document, key)
         self.cache.delete(document, key)
         if previous is not None:
             self._publish_local_change(document, key, "removed", None, previous)
+
+    def delete_global(self, document: DocumentDefinition[Any]) -> None:
+        self.delete(document, self.cache.GLOBAL_KEY)
 
     def delete_raw_message(
         self,
