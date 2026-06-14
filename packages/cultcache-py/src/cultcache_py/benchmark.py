@@ -88,14 +88,27 @@ def run_benchmark(records: int) -> dict[str, Any]:
     cache.register_document_type(document)
     cache.add_generic_store(InMemoryBackingStore())
     _, apply_metric = measure("raw_snapshot_apply", records, lambda: apply_raw_snapshot(cache, [document], snapshot))
+    upsert_cache = CultCache()
+    upsert_cache.register_document_type(document)
+    _, upsert_metric = measure("cache_upsert", records, lambda: [
+        upsert_cache.put(document, f"item:{index}", values[index])
+        for index in range(records)
+    ])
+    _, get_metric = measure("cache_get", records, lambda: [
+        upsert_cache.get(document, f"item:{index}")
+        for index in range(records)
+    ])
 
     return {
+        "runtime": "python",
         "records": records,
         "metrics": [
             encode_metric,
             decode_metric,
             frame_metric,
             apply_metric,
+            upsert_metric,
+            get_metric,
         ],
         "wireMessageCount": len(wire_messages),
     }

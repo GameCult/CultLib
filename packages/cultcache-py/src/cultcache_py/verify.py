@@ -100,6 +100,8 @@ def _check_benchmark(records: int) -> dict[str, Any]:
         "database_entry_decode",
         "cultnet_frame_parse",
         "raw_snapshot_apply",
+        "cache_upsert",
+        "cache_get",
     ]
     metric_map = {metric["name"]: metric for metric in metrics["metrics"]}
     missing = [

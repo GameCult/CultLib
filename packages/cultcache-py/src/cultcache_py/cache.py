@@ -178,8 +178,6 @@ class CultCache:
             catalog_entry=catalog_entry,
         )
         stores = self._stores_for_type(document.type)
-        if not stores:
-            raise CultCacheError(f"No backing store registered for {document.type}")
         for store in stores:
             store.push(envelope)
         self._state.values[(document.type, key)] = value

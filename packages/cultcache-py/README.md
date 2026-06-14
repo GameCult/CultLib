@@ -10,6 +10,7 @@ It is intentionally small. It is not an ORM, a database, or distributed consensu
 ## Current Shape
 
 - document types are registered explicitly
+- a registered cache can be used in memory without attaching a backing store
 - `SingleFileMessagePackBackingStore` writes `cultcache.store.v1` snapshots:
   `[format, schemaCatalog, records]`
 - records store raw MessagePack payload bytes under schema-catalog identity
@@ -29,7 +30,7 @@ It is intentionally small. It is not an ORM, a database, or distributed consensu
 
 ```python
 from dataclasses import dataclass, asdict
-from cultcache_py import CultCache, JsonLinesBackingStore, define_document_type
+from cultcache_py import CultCache, define_document_type
 
 @dataclass
 class Settings:
@@ -46,14 +47,16 @@ settings_doc = define_document_type(
 cache = (
     CultCache.builder()
     .register_document_type(settings_doc)
-    .add_generic_store(JsonLinesBackingStore("state.cultcache.jsonl"))
     .build()
 )
 
-cache.pull_all_backing_stores()
 cache.put_global(settings_doc, Settings(theme="ash", retries=3))
 settings = cache.get_required_global(settings_doc)
 ```
+
+Add `JsonLinesBackingStore` or `SingleFileMessagePackBackingStore` when the
+cache should persist state; local in-memory cache reads and writes do not need a
+store.
 
 ## Public Surface
 
@@ -308,14 +311,19 @@ Current receipts:
 
 ## Performance Baseline
 
-The package ships a lightweight benchmark for Python-owned hot paths:
+The package ships a lightweight benchmark for Python-owned hot paths. In a
+CultLib source checkout, it can also run the C# reference benchmark beside it:
 
 ```powershell
 python -m cultcache_py.benchmark --records 1000 --json
+python -m cultcache_py.compare_csharp --records 1000 --json
 python -m cultcache_py.verify --json
 ```
 
 It reports slot-indexed `DatabaseEntry` encode/decode throughput, framed
-CultNet MessagePack parse throughput, and raw snapshot application into a
-registered cache. Treat it as a local baseline, not a claim that Python matches
-the C# reference in every workload.
+CultNet MessagePack parse throughput, raw snapshot application into a
+registered cache, and public `CultCache` upsert/get throughput. The C# compare
+command also runs `packages/cultcache-py/tools/GameCult.Caching.Benchmark` and
+reports Python-to-C# ratios for the shared public cache operations. Treat those
+numbers as a local baseline, not a claim that Python matches the C# reference in
+every workload.

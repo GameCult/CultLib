@@ -28,6 +28,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python package health:
   `cultcache-py-verify --json` checks public exports, `py.typed` markers, and
   benchmark sanity for Python-owned hot paths.
+- Python/C# public cache baseline:
+  `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
+  benchmarks with the same operation names and reports Python-to-C# ratios.
 
 ## Local Python Gates
 
@@ -36,6 +39,7 @@ $env:PYTHONPATH="$PWD\packages\cultcache-py\src"
 python -m unittest discover -s packages\cultcache-py\tests
 python -m cultcache_py.verify --json
 python -m cultcache_py.benchmark --records 1000 --json
+python -m cultcache_py.compare_csharp --records 1000 --json
 python -m pip wheel --no-deps -w $env:TEMP packages\cultcache-py
 ```
 
@@ -49,8 +53,9 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 
 ## Still Not Claimed
 
-- Python does not match the C# runtime for raw throughput. It has a measured
-  baseline, not a performance victory certificate.
+- Python does not claim to match the C# runtime for raw throughput. It has a
+  measured local baseline plus a shared public `CultCache` upsert/get comparison
+  harness, not a performance victory certificate.
 - Python does not own LiteNetLib security/session behavior; it speaks the
   schema-v0 interop lane used by the package harness.
 - Python does not implement the full C# daemon/server stack. Its current role is

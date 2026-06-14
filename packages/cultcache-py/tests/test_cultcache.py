@@ -211,8 +211,26 @@ class CultCacheTests(unittest.TestCase):
             "database_entry_decode",
             "cultnet_frame_parse",
             "raw_snapshot_apply",
+            "cache_upsert",
+            "cache_get",
         })
         self.assertTrue(all(metric["opsPerSecond"] > 0 for metric in result["metrics"]))
+
+    def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
+        document = define_database_entry_type(
+            "bench.memory_item",
+            [
+                ("name", 0),
+                ("value", 1, 0),
+            ],
+        )
+        cache = CultCache()
+        cache.register_document_type(document)
+
+        cache.put(document, "item:one", {"name": "one", "value": 1})
+
+        self.assertEqual(cache.get(document, "item:one"), {"name": "one", "value": 1})
+        self.assertEqual(cache.get_required_envelope(document, "item:one").key, "item:one")
 
     def test_verify_reports_python_runtime_surface_health(self) -> None:
         result = verify(records=4)
