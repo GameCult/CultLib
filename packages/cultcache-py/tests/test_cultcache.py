@@ -8,6 +8,7 @@ import unittest
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from cultcache_py import (
     CultCache,
@@ -20,6 +21,7 @@ from cultcache_py.benchmark import run_benchmark
 from cultcache_py.compare_csharp import _median_result
 from cultcache_py.interop import read_note, write_note
 from cultcache_py.verify import verify
+from cultnet_py.interop_peer import append_shard_log_put, build_state, raw_snapshot_response
 from cultnet_py import (
     compute_simulation_claim_hash,
     CultNetDatabaseChange,
@@ -1311,6 +1313,59 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(response.shard_id, "notes")
         self.assertEqual(response.shard_epoch, 2)
         self.assertEqual([record.record_key for record in response.documents], ["note:notes"])
+
+    def test_python_interop_peer_filters_shard_snapshot_by_logged_membership(self) -> None:
+        runtime_id = f"python-interop-test-{uuid4().hex}"
+        state = build_state(
+            runtime_id=runtime_id,
+            runtime_kind="python",
+            display_name="Python Interop Test",
+            agent_id="python-interop-test-agent",
+            schema_path=str(Path("packages/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json")),
+        )
+        binding = state.bindings["note"]
+        logged_value = {
+            "schemaVersion": "cultnet.interop_note.v0",
+            "documentId": "note:logged",
+            "authorRuntimeId": runtime_id,
+            "title": "Logged",
+            "body": "This record belongs to the shard log.",
+            "tags": ["interop", "logged"],
+        }
+        unlogged_value = {
+            **logged_value,
+            "documentId": "note:unlogged",
+            "title": "Unlogged",
+            "body": "This record is in cache but not in the shard log.",
+        }
+        state.cache.put(binding.document, "note:logged", logged_value)
+        state.cache.put(binding.document, "note:unlogged", unlogged_value)
+        logged_record = {
+            "schemaId": state.note_schema_id,
+            "recordKey": "note:logged",
+            "storedAt": "2026-06-14T00:00:00Z",
+            "payloadEncoding": "messagepack",
+            "payload": binding.document.encode_payload(logged_value),
+        }
+        append_shard_log_put(
+            state,
+            {"messageId": "logged-put"},
+            logged_record,
+        )
+
+        response = raw_snapshot_response(
+            state,
+            {
+                "schemaVersion": "cultnet.snapshot_request.v0",
+                "messageId": "interop-shard-snapshot",
+                "schemaIds": [state.note_schema_id],
+                "shardId": state.shard_id,
+            },
+        )
+
+        self.assertEqual(response["shardId"], state.shard_id)
+        self.assertEqual(response["shardLogSequence"], 1)
+        self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:logged"])
 
     def test_cultmesh_database_creates_shard_log_response_from_raw_mutations(self) -> None:
         document = define_database_entry_type(

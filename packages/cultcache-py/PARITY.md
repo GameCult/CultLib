@@ -11,6 +11,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - CultNet schema-v0 live interop:
   `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` runs a live
   TS/Rust/C#/Python peer ring.
+  The Python interop peer filters shard-scoped raw snapshots by its live
+  shard-log membership before stamping shard cursor metadata.
 - Python CultNet raw client:
   Fetches schema catalogs, raw snapshots, shard catalogs, shard logs, and live
   database subscription changes.

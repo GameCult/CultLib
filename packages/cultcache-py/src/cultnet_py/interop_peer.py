@@ -861,6 +861,10 @@ def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any
 def raw_snapshot_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
     schema_ids = set(request.get("schemaIds") or [])
     record_keys = set(request.get("recordKeys") or [])
+    requested_shard_id = request.get("shardId")
+    shard_record_keys: set[tuple[str, str]] | None = None
+    if requested_shard_id == state.shard_id:
+        shard_record_keys = live_shard_record_keys(state)
     documents = []
     for envelope in state.cache.snapshot_envelopes():
         binding = state.bindings_by_document_type.get(envelope.type)
@@ -871,14 +875,36 @@ def raw_snapshot_response(state: PeerState, request: dict[str, Any]) -> dict[str
             continue
         if record_keys and envelope.key not in record_keys:
             continue
+        if shard_record_keys is not None and (schema_id, envelope.key) not in shard_record_keys:
+            continue
         documents.append(raw_record_from_envelope(envelope, schema_id))
     response: dict[str, Any] = {"schemaVersion": "cultnet.snapshot_response_raw.v0", "messageId": request.get("messageId", ""), "documents": documents}
-    if request.get("shardId") == state.shard_id:
+    if requested_shard_id == state.shard_id:
         with state.shard_log_lock:
             response["shardId"] = state.shard_id
             response["shardEpoch"] = state.shard_epoch
             response["shardLogSequence"] = len(state.shard_log)
     return response
+
+
+def live_shard_record_keys(state: PeerState) -> set[tuple[str, str]]:
+    records: set[tuple[str, str]] = set()
+    with state.shard_log_lock:
+        for entry in state.shard_log:
+            put = entry.get("put")
+            if isinstance(put, dict) and isinstance(put.get("document"), dict):
+                document = put["document"]
+                schema_id = document.get("schemaId")
+                record_key = document.get("recordKey")
+                if schema_id and record_key:
+                    records.add((str(schema_id), str(record_key)))
+            delete = entry.get("delete")
+            if isinstance(delete, dict):
+                schema_id = delete.get("schemaId")
+                record_key = delete.get("recordKey")
+                if schema_id and record_key:
+                    records.discard((str(schema_id), str(record_key)))
+    return records
 
 
 def raw_document_put(binding: Binding, message_id: str, key: str, value: dict[str, Any], state: PeerState) -> dict[str, Any]:
