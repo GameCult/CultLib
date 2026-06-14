@@ -16,6 +16,9 @@ use cultnet_rs::CultNetRudpPacketType;
 use cultnet_rs::CultNetRudpSendOptions;
 use cultnet_rs::CultNetRudpSession;
 use cultnet_rs::CultNetRudpSessionOptions;
+use cultnet_rs::CultNetRudpSocketMode;
+use cultnet_rs::CultNetRudpSocketTransportConnection;
+use cultnet_rs::CultNetRudpSocketTransportOptions;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
@@ -23,6 +26,7 @@ use cultnet_rs::CultNetServerSecurityOptions;
 use cultnet_rs::CultNetTransportChannel;
 use cultnet_rs::CultNetTransportDelivery;
 use cultnet_rs::CultNetTransportDescriptor;
+use cultnet_rs::CultNetTransportFrame;
 use cultnet_rs::CultNetTransportOrdering;
 use cultnet_rs::CultNetTransportProfile;
 use cultnet_rs::CultNetTransportProtocol;
@@ -40,9 +44,46 @@ use cultnet_rs::encode_cultnet_message_to_vec;
 use cultnet_rs::encode_frame;
 use cultnet_rs::encode_rudp_packet;
 use pretty_assertions::assert_eq;
+use std::net::UdpSocket;
+use std::thread;
+use std::time::Duration as StdDuration;
 
 const TS_HELLO_FRAME: &[u8] = include_bytes!("fixtures/cultnet-ts-hello.frame");
 const TS_LEGACY_LOGIN_FRAME: &[u8] = include_bytes!("fixtures/cultnet-ts-legacy-login.frame");
+
+fn bind_udp_socket() -> Result<UdpSocket> {
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    socket.set_read_timeout(Some(StdDuration::from_millis(20)))?;
+    Ok(socket)
+}
+
+fn pump_rudp_handshake(
+    client: &mut CultNetRudpSocketTransportConnection,
+    server: &mut CultNetRudpSocketTransportConnection,
+) -> Result<()> {
+    for _ in 0..20 {
+        let _ = server.receive_once()?;
+        let _ = client.receive_once()?;
+        let _ = server.receive_once()?;
+        if client.connected() && server.connected() {
+            return Ok(());
+        }
+        thread::sleep(StdDuration::from_millis(5));
+    }
+    anyhow::bail!("RUDP socket handshake did not complete");
+}
+
+fn receive_rudp_frame(
+    transport: &mut CultNetRudpSocketTransportConnection,
+) -> Result<CultNetTransportFrame> {
+    for _ in 0..20 {
+        if let Some(frame) = transport.receive_once()? {
+            return Ok(frame);
+        }
+        thread::sleep(StdDuration::from_millis(5));
+    }
+    anyhow::bail!("RUDP socket frame was not delivered")
+}
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
 #[cultcache(
@@ -527,6 +568,63 @@ fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_
             .collect::<Vec<_>>(),
         vec!["second", "third"]
     );
+    Ok(())
+}
+
+#[test]
+fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames() -> Result<()> {
+    let server_socket = bind_udp_socket()?;
+    let client_socket = bind_udp_socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let connection_id = 0x1020_3040;
+    let mut server =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-server".to_string(),
+            socket: server_socket,
+            mode: CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id,
+            initial_sequence: 100,
+            resend_delay_ms: 25,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+        })?;
+    let mut client =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-client".to_string(),
+            socket: client_socket,
+            mode: CultNetRudpSocketMode::Client,
+            remote_addr: Some(server_addr),
+            connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: 25,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+        })?;
+
+    client.connect(b"join".to_vec())?;
+    pump_rudp_handshake(&mut client, &mut server)?;
+    assert!(client.connected());
+    assert!(server.connected());
+
+    client.send("schema", b"client-state".to_vec())?;
+    let server_frame = receive_rudp_frame(&mut server)?;
+    assert_eq!(server_frame.channel_id, "schema");
+    assert_eq!(server_frame.payload, b"client-state");
+
+    server.send("schema", b"server-state".to_vec())?;
+    let client_frame = receive_rudp_frame(&mut client)?;
+    assert_eq!(client_frame.channel_id, "schema");
+    assert_eq!(client_frame.payload, b"server-state");
+    assert_eq!(
+        server.profile.transports[0].protocol,
+        CultNetTransportProtocol::Rudp
+    );
+    assert_eq!(client.stats().frames_sent, 1);
+    assert_eq!(server.stats().frames_received, 1);
+
     Ok(())
 }
 

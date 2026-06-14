@@ -2,13 +2,21 @@ use anyhow::Result;
 use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::io::ErrorKind;
+use std::net::SocketAddr;
+use std::net::UdpSocket;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
 use crate::CultNetTransportDescriptor;
+use crate::CultNetTransportFrame;
 use crate::CultNetTransportOrdering;
 use crate::CultNetTransportProfile;
 use crate::CultNetTransportProtocol;
+use crate::CultNetTransportStats;
 
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
@@ -436,6 +444,201 @@ impl CultNetRudpSession {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CultNetRudpSocketMode {
+    Client,
+    Server,
+}
+
+pub struct CultNetRudpSocketTransportOptions {
+    pub runtime_id: String,
+    pub socket: UdpSocket,
+    pub mode: CultNetRudpSocketMode,
+    pub remote_addr: Option<SocketAddr>,
+    pub connection_id: u32,
+    pub initial_sequence: u32,
+    pub resend_delay_ms: u64,
+    pub transport_id: Option<String>,
+    pub max_payload_bytes: Option<u32>,
+    pub max_fragment_bytes: Option<u32>,
+}
+
+impl CultNetRudpSocketTransportOptions {
+    pub fn client(
+        runtime_id: impl Into<String>,
+        socket: UdpSocket,
+        remote_addr: SocketAddr,
+        connection_id: u32,
+    ) -> Self {
+        Self {
+            runtime_id: runtime_id.into(),
+            socket,
+            mode: CultNetRudpSocketMode::Client,
+            remote_addr: Some(remote_addr),
+            connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: 250,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+        }
+    }
+
+    pub fn server(runtime_id: impl Into<String>, socket: UdpSocket, connection_id: u32) -> Self {
+        Self {
+            runtime_id: runtime_id.into(),
+            socket,
+            mode: CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: 250,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+        }
+    }
+}
+
+pub struct CultNetRudpSocketTransportConnection {
+    socket: UdpSocket,
+    session: CultNetRudpSession,
+    mode: CultNetRudpSocketMode,
+    remote_addr: Option<SocketAddr>,
+    pub profile: CultNetTransportProfile,
+    stats: CultNetTransportStats,
+    delivered_frames: VecDeque<CultNetTransportFrame>,
+}
+
+impl CultNetRudpSocketTransportConnection {
+    pub fn new(options: CultNetRudpSocketTransportOptions) -> Result<Self> {
+        let local_addr = options.socket.local_addr()?;
+        let profile = create_rudp_transport_profile(
+            options.runtime_id,
+            RudpTransportProfileOptions {
+                transport_id: options.transport_id,
+                host: Some(local_addr.ip().to_string()),
+                port: Some(local_addr.port()),
+                max_payload_bytes: options.max_payload_bytes,
+                max_fragment_bytes: options.max_fragment_bytes,
+            },
+        );
+        Ok(Self {
+            socket: options.socket,
+            session: CultNetRudpSession::new(CultNetRudpSessionOptions {
+                connection_id: options.connection_id,
+                initial_sequence: options.initial_sequence,
+                resend_delay_ms: options.resend_delay_ms,
+            }),
+            mode: options.mode,
+            remote_addr: options.remote_addr,
+            profile,
+            stats: CultNetTransportStats::default(),
+            delivered_frames: VecDeque::new(),
+        })
+    }
+
+    pub fn connected(&self) -> bool {
+        self.session.connected()
+    }
+
+    pub fn stats(&self) -> CultNetTransportStats {
+        self.stats.clone()
+    }
+
+    pub fn connect(&mut self, payload: Vec<u8>) -> Result<()> {
+        if self.mode != CultNetRudpSocketMode::Client {
+            return Err(anyhow!(
+                "Only a client RUDP socket transport can initiate connect"
+            ));
+        }
+        let packet = self.session.create_connect(now_ms(), payload);
+        self.send_packet(&packet)
+    }
+
+    pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
+        let options = channel_send_options(channel_id, now_ms());
+        let packet = self.session.send(channel_id, payload, options)?;
+        self.send_packet(&packet)?;
+        self.stats.frames_sent += 1;
+        Ok(())
+    }
+
+    pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
+        if let Some(frame) = self.delivered_frames.pop_front() {
+            return Ok(Some(frame));
+        }
+
+        let mut wire = vec![0_u8; 65_535];
+        let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
+            Ok(value) => value,
+            Err(error)
+                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        wire.truncate(received);
+        self.stats.bytes_received += received as u64;
+
+        if let Some(expected) = self.remote_addr {
+            if expected != remote_addr {
+                return Ok(None);
+            }
+        } else {
+            self.remote_addr = Some(remote_addr);
+        }
+
+        let packet = decode_rudp_packet(&wire)?;
+        if self.mode == CultNetRudpSocketMode::Server
+            && packet.packet_type == CultNetRudpPacketType::Connect
+        {
+            let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
+            self.send_packet(&accept)?;
+            return Ok(None);
+        }
+
+        let result = self.session.receive(&packet, now_ms())?;
+        if let Some(reply) = result.reply {
+            self.send_packet(&reply)?;
+        }
+
+        for frame in result.delivered {
+            self.delivered_frames.push_back(CultNetTransportFrame {
+                channel_id: frame.channel_id,
+                payload: frame.payload,
+            });
+            self.stats.frames_received += 1;
+        }
+        let frame = self.delivered_frames.pop_front();
+        if packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some() {
+            let ack = self.session.create_ack();
+            self.send_packet(&ack)?;
+        }
+        Ok(frame)
+    }
+
+    pub fn poll_resends(&mut self) -> Result<()> {
+        for packet in self.session.due_resends(now_ms()) {
+            self.send_packet(&packet)?;
+        }
+        Ok(())
+    }
+
+    fn send_packet(&mut self, packet: &CultNetRudpPacket) -> Result<()> {
+        let Some(remote_addr) = self.remote_addr else {
+            return Err(anyhow!(
+                "RUDP socket transport does not have a remote endpoint"
+            ));
+        };
+        let wire = encode_rudp_packet(packet)?;
+        let sent = self.socket.send_to(&wire, remote_addr)?;
+        self.stats.bytes_sent += sent as u64;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RudpTransportProfileOptions {
     pub transport_id: Option<String>,
@@ -587,6 +790,36 @@ fn packet_type_to_code(packet_type: CultNetRudpPacketType) -> u8 {
         CultNetRudpPacketType::Pong => 6,
         CultNetRudpPacketType::Disconnect => 7,
     }
+}
+
+fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions {
+    match channel_id {
+        "schema" => CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            sequenced: false,
+            now_ms,
+        },
+        "latest" => CultNetRudpSendOptions {
+            reliable: false,
+            ordered: false,
+            sequenced: true,
+            now_ms,
+        },
+        _ => CultNetRudpSendOptions {
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            now_ms,
+        },
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn packet_type_from_code(code: u8) -> Result<CultNetRudpPacketType> {
