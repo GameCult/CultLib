@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -183,6 +183,19 @@ class CultNetSimulationObservationHub:
 
     def __post_init__(self) -> None:
         self._consensus = CultNetSimulationConsensus(self.options)
+        self._candidate_subscribers: list[Callable[[CultNetSimulationConsensusCandidate], None]] = []
+
+    def watch_candidates(
+        self,
+        callback: Callable[[CultNetSimulationConsensusCandidate], None],
+    ) -> Callable[[], None]:
+        self._candidate_subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._candidate_subscribers:
+                self._candidate_subscribers.remove(callback)
+
+        return unsubscribe
 
     def submit_candidate_objects(
         self,
@@ -190,11 +203,15 @@ class CultNetSimulationObservationHub:
     ) -> list[CultNetSimulationConsensusCandidate]:
         observation = _observation_wire(observation_or_message)
         self.observations.append(observation)
-        return [
+        candidates = [
             candidate
             for candidate in self._consensus.build_candidate_objects(self.observations)
             if _candidate_matches_observation(candidate.to_wire(), observation)
         ]
+        for candidate in candidates:
+            for callback in list(self._candidate_subscribers):
+                callback(candidate)
+        return candidates
 
     def submit(self, observation_or_message: dict[str, Any] | CultNetSimulationObservation) -> list[dict[str, Any]]:
         return [candidate.to_wire() for candidate in self.submit_candidate_objects(observation_or_message)]

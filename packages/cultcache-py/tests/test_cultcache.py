@@ -1678,16 +1678,26 @@ class CultCacheTests(unittest.TestCase):
                     consensus_options=CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
                 ),
             )
+            seen_candidates: list[CultNetSimulationConsensusCandidate] = []
+            seen_facts: list[CultMeshDatabaseChange] = []
+            unsubscribe_candidates = session.watch_candidates(seen_candidates.append)
+            unsubscribe_facts = session.watch_simulation_facts(seen_facts.append)
 
             self.assertEqual(session.submit_and_commit(CultNetSimulationObservation.from_wire(first)), [])
             typed_candidates = session.submit_observation_candidates(CultNetSimulationObservation.from_wire(second))
             commits = session.commit_quorum_candidate_objects(typed_candidates)
             replay = session.commit_quorum_candidates(session.submit_observation(second))
+            unsubscribe_candidates()
+            unsubscribe_facts()
 
             self.assertEqual(len(typed_candidates), 1)
             self.assertTrue(typed_candidates[0].has_quorum)
             self.assertEqual(len(commits), 1)
             self.assertEqual(replay, [])
+            self.assertEqual([candidate.claim_hash for candidate in seen_candidates], [claim_hash, claim_hash, claim_hash])
+            self.assertEqual(len(seen_facts), 1)
+            self.assertEqual(seen_facts[0].change_kind, "added")
+            self.assertEqual(seen_facts[0].value.claim_hash, claim_hash)
             stored = node.get_required(simulation_fact_document, commits[0].key)
             self.assertEqual(stored.claim_hash, claim_hash)
             self.assertEqual(stored.witness_count, 2)

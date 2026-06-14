@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from cultcache_py.documents import DocumentDefinition
 from cultnet_py import (
@@ -16,6 +16,7 @@ from cultnet_py import (
 )
 
 from .node import CultMeshNode
+from .node import CultMeshDatabaseChange
 from .simulation import (
     CultMeshSimulationFact,
     CultMeshSimulationFactCommit,
@@ -78,6 +79,18 @@ class CultMeshGameSession:
         self.node.put(document, key, value)
         self._predicted_keys.add((schema_id, key))
         return CultMeshPrediction(key=key, schema_id=schema_id, document=document, value=value)
+
+    def watch_candidates(
+        self,
+        callback: Callable[[CultNetSimulationConsensusCandidate], None],
+    ) -> Callable[[], None]:
+        return self.observation_hub.watch_candidates(callback)
+
+    def watch_simulation_facts(
+        self,
+        callback: Callable[[CultMeshDatabaseChange], None],
+    ) -> Callable[[], None]:
+        return self.node.database.watch(callback, document=simulation_fact_document)
 
     def apply_shard_log_response(
         self,

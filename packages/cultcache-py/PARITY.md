@@ -124,6 +124,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   The live interop harness runs a Python CultMesh session client, writes a local
   prediction, pulls the live Python peer shard log, applies the authoritative
   entry, and verifies the session reports the record as reconciled.
+- Python CultMesh session watches:
+  `CultMeshGameSession.watch_candidates(...)` and
+  `watch_simulation_facts(...)` expose the same gameplay-facing observation and
+  committed-fact watch points as the C# session facade.
 - Python package health:
   `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
   export surface, `py.typed` markers, a live local CultMesh framed-wire smoke
