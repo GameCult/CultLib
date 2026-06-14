@@ -23,6 +23,13 @@ from .snapshot import CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
 
 
+class CultNetPeerError(RuntimeError):
+    def __init__(self, response: dict[str, Any]) -> None:
+        self.response = dict(response)
+        self.peer_error = str(response.get("error") or "CultNet peer returned an error")
+        super().__init__(self.peer_error)
+
+
 @dataclass(frozen=True)
 class CultNetRawClient:
     host: str
@@ -49,8 +56,7 @@ class CultNetRawClient:
             raise ValueError("CultNet response must be a MessagePack map")
         schema_version = response.get("schemaVersion")
         if schema_version != expected_schema_version:
-            if schema_version == "cultnet.error.v0":
-                raise ValueError(str(response.get("error") or "CultNet peer returned an error"))
+            _raise_peer_error(response)
             raise ValueError(f"Expected {expected_schema_version}, received {schema_version!r}")
         return response
 
@@ -296,6 +302,7 @@ class CultNetDatabaseSubscription:
         if not isinstance(response, dict):
             raise ValueError("CultNet subscription response must be a MessagePack map")
         schema_version = response.get("schemaVersion")
+        _raise_peer_error(response)
         if schema_version not in {"cultnet.snapshot_response_raw.v0", "cultnet.database_change_raw.v0"}:
             raise ValueError(f"Unexpected CultNet subscription message {schema_version!r}")
         return response
@@ -325,3 +332,8 @@ class CultNetDatabaseSubscription:
         while max_messages is None or received < max_messages:
             yield self.read_next_change()
             received += 1
+
+
+def _raise_peer_error(response: dict[str, Any]) -> None:
+    if response.get("schemaVersion") == "cultnet.error.v0":
+        raise CultNetPeerError(response)

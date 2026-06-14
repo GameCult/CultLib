@@ -49,6 +49,7 @@ from cultnet_py import (
     CultNetSchemaWriteForwarder,
     CultNetSchemaShardLogFetcher,
     CultNetSchemaShardSnapshotFetcher,
+    CultNetPeerError,
     CultNetShardReplicator,
     CultNetShardReplicatorOptions,
     CultNetShardMutationLogStore,
@@ -621,6 +622,43 @@ class CultCacheTests(unittest.TestCase):
             "cultnet.shard_log_request.v0",
         ])
 
+    def test_cultnet_raw_client_raises_typed_peer_error_response(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        ready = threading.Event()
+        port_holder: list[int] = []
+
+        def serve_error() -> None:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(("127.0.0.1", 0))
+                port_holder.append(server.getsockname()[1])
+                server.listen(1)
+                ready.set()
+                connection, _ = server.accept()
+                with connection:
+                    stream = connection.makefile("rwb")
+                    read_frame(stream)
+                    write_frame(stream, msgpack.packb({
+                        "schemaVersion": "cultnet.error.v0",
+                        "messageId": "error-1",
+                        "error": "Snapshot document limit exceeded",
+                    }, use_bin_type=True))
+                    stream.flush()
+
+        thread = threading.Thread(target=serve_error, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:
+            client.fetch_snapshot()
+
+        self.assertEqual(raised.exception.peer_error, "Snapshot document limit exceeded")
+        self.assertEqual(raised.exception.response["schemaVersion"], "cultnet.error.v0")
+        thread.join(2.0)
+
     def test_cultnet_database_subscription_reads_snapshot_and_change(self) -> None:
         import msgpack  # type: ignore
         from cultnet_py import read_frame, write_frame
@@ -712,6 +750,42 @@ class CultCacheTests(unittest.TestCase):
             "cultnet.document_put_raw.v0",
             "cultnet.database_unsubscribe.v0",
         ])
+
+    def test_cultnet_database_subscription_raises_typed_peer_error(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        ready = threading.Event()
+        port_holder: list[int] = []
+
+        def serve_subscription_error() -> None:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(("127.0.0.1", 0))
+                port_holder.append(server.getsockname()[1])
+                server.listen(1)
+                ready.set()
+                connection, _ = server.accept()
+                with connection:
+                    stream = connection.makefile("rwb")
+                    read_frame(stream)
+                    write_frame(stream, msgpack.packb({
+                        "schemaVersion": "cultnet.error.v0",
+                        "messageId": "subscription-error",
+                        "error": "subscription rejected",
+                    }, use_bin_type=True))
+                    stream.flush()
+
+        thread = threading.Thread(target=serve_subscription_error, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        with client.subscribe_database(subscription_id="sub-error") as subscription:
+            with self.assertRaisesRegex(CultNetPeerError, "subscription rejected") as raised:
+                subscription.read_next()
+        self.assertEqual(raised.exception.response["messageId"], "subscription-error")
+        thread.join(2.0)
 
     def test_cultnet_replication_helpers_apply_raw_snapshot_and_shard_log(self) -> None:
         document = define_database_entry_type(
@@ -3076,7 +3150,7 @@ class CultCacheTests(unittest.TestCase):
                 snapshot_request(schema_ids=["mesh.snapshot_limit_note.v1"]),
                 expected_schema_version="cultnet.error.v0",
             )
-            with self.assertRaisesRegex(ValueError, "Snapshot document limit exceeded"):
+            with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded"):
                 raw_client.fetch_snapshot(schema_ids=["mesh.snapshot_limit_note.v1"])
         finally:
             server.stop()

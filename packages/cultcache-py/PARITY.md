@@ -15,7 +15,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   shard-log membership before stamping shard cursor metadata.
 - Python CultNet raw client:
   Fetches schema catalogs, raw snapshots, shard catalogs, shard logs, and live
-  database subscription changes.
+  database subscription changes. Request-response reads and database
+  subscription streams raise typed `CultNetPeerError` values for
+  `cultnet.error.v0` peer responses while preserving the raw error document for
+  callers that need the wire evidence.
 - Python CultNet raw snapshot:
   Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
   helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting

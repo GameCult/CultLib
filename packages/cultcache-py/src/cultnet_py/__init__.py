@@ -1,4 +1,4 @@
-from .client import CultNetDatabaseSubscription, CultNetRawClient
+from .client import CultNetDatabaseSubscription, CultNetPeerError, CultNetRawClient
 from .framing import decode_frame, encode_frame, read_frame, write_frame
 from .messages import (
     CultNetMessage,
@@ -68,6 +68,7 @@ __all__ = [
     "CultNetWitnessArtifactBundle",
     "CultNetDatabaseSubscription",
     "CultNetDatabaseChange",
+    "CultNetPeerError",
     "CultNetRawClient",
     "CultNetSchemaCatalog",
     "CultNetSchemaDescriptor",
