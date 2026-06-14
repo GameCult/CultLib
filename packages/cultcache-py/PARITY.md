@@ -174,8 +174,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python package health:
   `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
   export surface, `py.typed` markers, a live local CultMesh framed-wire smoke
-  over hello/schema/snapshot/shard catalog/shard log, peer-advertised mutation
-  contracts, payload schema wire contracts, and benchmark sanity for
+  over hello/schema/snapshot/shard catalog/shard log, typed peer-error export
+  availability, peer-advertised mutation contracts, payload schema wire
+  contracts, and benchmark sanity for
   Python-owned hot paths.
 - Python/C# public cache baseline:
   `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
