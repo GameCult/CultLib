@@ -322,6 +322,132 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_HandshakeAcksReliableConnectAndAcceptPackets()
+        {
+            var client = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 0x0a0b0c0d,
+                InitialSequence = 1,
+                ResendDelayMs = 50
+            });
+            var server = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 0x0a0b0c0d,
+                InitialSequence = 100,
+                ResendDelayMs = 50
+            });
+
+            var connect = client.CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            Assert.That(connect.PacketType, Is.EqualTo(CultNetRudpPacketType.Connect));
+            Assert.That(connect.Sequence, Is.EqualTo(1));
+            Assert.That(client.PendingReliableSequences, Is.EqualTo(new uint[] { 1 }));
+
+            var accept = server.AcceptConnect(connect, 10, Encoding.UTF8.GetBytes("ok"));
+            Assert.That(accept.PacketType, Is.EqualTo(CultNetRudpPacketType.Accept));
+            Assert.That(accept.Ack, Is.EqualTo(1));
+            Assert.That(server.Connected, Is.True);
+            Assert.That(server.PendingReliableSequences, Is.EqualTo(new uint[] { 100 }));
+
+            client.Receive(accept, 20);
+            Assert.That(client.Connected, Is.True);
+            Assert.That(client.PendingReliableSequences, Is.Empty);
+
+            var ack = client.CreateAck();
+            Assert.That(ack.Ack, Is.EqualTo(100));
+            server.Receive(ack, 30);
+            Assert.That(server.PendingReliableSequences, Is.Empty);
+        }
+
+        [Test]
+        public void RudpSession_ComputesAckMasksAndClearsPendingReliablePackets()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 7,
+                InitialSequence = 10,
+                ResendDelayMs = 100
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 7,
+                InitialSequence = 200,
+                ResendDelayMs = 100
+            });
+            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 7, Sequence = 1, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 7, Sequence = 2, ChannelId = "control" });
+
+            var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            var third = sender.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 10, 11, 12 }));
+
+            receiver.Receive(first);
+            receiver.Receive(third);
+            var ackWithGap = receiver.CreateAck();
+            Assert.That(ackWithGap.Ack, Is.EqualTo(12));
+            Assert.That(ackWithGap.AckMask, Is.EqualTo(0b10u | (1u << 9)));
+            sender.Receive(ackWithGap);
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 11 }));
+
+            receiver.Receive(second);
+            var fullAck = receiver.CreateAck();
+            Assert.That(fullAck.Ack, Is.EqualTo(12));
+            Assert.That(fullAck.AckMask, Is.EqualTo(0b11u | (1u << 9)));
+            sender.Receive(fullAck);
+            Assert.That(sender.PendingReliableSequences, Is.Empty);
+        }
+
+        [Test]
+        public void RudpSession_SchedulesReliableResendsUntilAcked()
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 99,
+                InitialSequence = 1,
+                ResendDelayMs = 100
+            });
+            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 99, Sequence = 50, ChannelId = "control" });
+            var sent = session.Send("schema", Encoding.UTF8.GetBytes("payload"), new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 10 });
+
+            Assert.That(session.DueResends(90), Is.Empty);
+            Assert.That(session.DueResends(110).Select(packet => packet.Sequence).ToArray(), Is.EqualTo(new[] { sent.Sequence }));
+            Assert.That(session.DueResends(150), Is.Empty);
+
+            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Ack, ConnectionId = 99, Sequence = 51, Ack = sent.Sequence, ChannelId = "control" });
+            Assert.That(session.DueResends(250), Is.Empty);
+        }
+
+        [Test]
+        public void RudpSession_SuppressesDuplicatesAndDeliversReliableOrderedPayloadsInSequence()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 123,
+                InitialSequence = 1
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 123,
+                InitialSequence = 100
+            });
+            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 90, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 91, ChannelId = "control" });
+
+            var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            var third = sender.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+
+            Assert.That(
+                receiver.Receive(first).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "first" }));
+            Assert.That(receiver.Receive(third).Delivered, Is.Empty);
+            Assert.That(receiver.Receive(first).Delivered, Is.Empty);
+            Assert.That(
+                receiver.Receive(second).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "second", "third" }));
+        }
+
+        [Test]
         public void CultNetSchemaMessageSerialization_RoundTrips_RawSnapshotResponse()
         {
             var message = new CultNetSnapshotResponseRawMessage
