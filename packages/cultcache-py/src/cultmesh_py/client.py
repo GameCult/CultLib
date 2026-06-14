@@ -492,6 +492,9 @@ class CultMeshPeerHealth:
     checked_at: datetime
     is_reachable: bool
     runtime_id: str | None = None
+    runtime_kind: str | None = None
+    display_name: str | None = None
+    supported_message_versions: tuple[str, ...] = ()
     error: str | None = None
 
 
@@ -589,6 +592,13 @@ class CultMeshPeerHealthMonitor:
                 checked_at=checked_at,
                 is_reachable=True,
                 runtime_id=str(response.get("runtimeId") or ""),
+                runtime_kind=_optional_string(response.get("runtimeKind")),
+                display_name=_optional_string(response.get("displayName")),
+                supported_message_versions=tuple(
+                    str(value)
+                    for value in response.get("supportedMessageVersions") or ()
+                    if value is not None
+                ),
             )
         except Exception as error:
             return CultMeshPeerHealth(
@@ -625,3 +635,10 @@ def _distinct_non_empty(values: list[str]) -> list[str]:
         clean.append(value)
         seen.add(value)
     return clean
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None

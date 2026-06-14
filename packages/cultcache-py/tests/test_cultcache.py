@@ -2930,7 +2930,13 @@ class CultCacheTests(unittest.TestCase):
         by_peer = {result.peer_id: result for result in results}
         self.assertTrue(by_peer["health-peer"].is_reachable)
         self.assertEqual(by_peer["health-peer"].runtime_id, "health-peer")
+        self.assertEqual(by_peer["health-peer"].runtime_kind, "python")
+        self.assertEqual(by_peer["health-peer"].display_name, "health-peer")
+        self.assertIn("cultnet.hello.v0", by_peer["health-peer"].supported_message_versions)
+        self.assertIn("cultnet.error.v0", by_peer["health-peer"].supported_message_versions)
         self.assertFalse(by_peer["closed-peer"].is_reachable)
+        self.assertIsNone(by_peer["closed-peer"].runtime_kind)
+        self.assertEqual(by_peer["closed-peer"].supported_message_versions, ())
         self.assertTrue(by_peer["closed-peer"].error)
         self.assertEqual({peer_id for peer_id, _ in seen}, {"health-peer", "closed-peer"})
         self.assertEqual(len(monitor.latest()), 2)
