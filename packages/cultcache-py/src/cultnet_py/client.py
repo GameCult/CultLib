@@ -49,6 +49,8 @@ class CultNetRawClient:
             raise ValueError("CultNet response must be a MessagePack map")
         schema_version = response.get("schemaVersion")
         if schema_version != expected_schema_version:
+            if schema_version == "cultnet.error.v0":
+                raise ValueError(str(response.get("error") or "CultNet peer returned an error"))
             raise ValueError(f"Expected {expected_schema_version}, received {schema_version!r}")
         return response
 

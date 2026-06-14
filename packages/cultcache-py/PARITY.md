@@ -107,6 +107,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Its shard catalog advertises the database-owned shard ids, schema ids, and
   latest shard epochs so discovery and shard-log catch-up agree on the same
   authority.
+  Public mesh edges can set snapshot document and encoded-byte limits; oversized
+  snapshot responses are rejected as `cultnet.error.v0` before the payload is
+  sent.
 - Python CultMesh reactive catalogs:
   Verse and peer catalogs expose sorted local views, `get(...)`, response
   application, and `watch(...)` callbacks for local discovery updates. Verse

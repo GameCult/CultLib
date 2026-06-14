@@ -107,6 +107,8 @@ class CultMesh:
         host: str = "127.0.0.1",
         port: int = 0,
         display_name: str | None = None,
+        max_snapshot_documents: int | None = None,
+        max_snapshot_bytes: int | None = None,
     ) -> CultMeshLocalServer:
         return CultMeshLocalServer(
             node=node,
@@ -116,6 +118,8 @@ class CultMesh:
             host=host,
             port=port,
             display_name=display_name,
+            max_snapshot_documents=max_snapshot_documents,
+            max_snapshot_bytes=max_snapshot_bytes,
         ).start()
 
     @staticmethod

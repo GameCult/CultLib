@@ -43,9 +43,17 @@ class CultMeshLocalServer:
     port: int = 0
     display_name: str | None = None
     runtime_kind: str = "python"
+    max_snapshot_documents: int | None = None
+    max_snapshot_bytes: int | None = None
     _socket: socket.socket | None = field(default=None, init=False, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
+            raise ValueError("max_snapshot_documents must be non-negative")
+        if self.max_snapshot_bytes is not None and self.max_snapshot_bytes < 0:
+            raise ValueError("max_snapshot_bytes must be non-negative")
 
     def start(self) -> "CultMeshLocalServer":
         if self._socket is not None:
@@ -87,13 +95,7 @@ class CultMeshLocalServer:
         if schema_version == "cultnet.schema_catalog_request.v0":
             return self._schema_catalog_response(message)
         if schema_version == "cultnet.snapshot_request.v0":
-            return self.node.database.create_snapshot_response(
-                message_id=str(message.get("messageId") or ""),
-                schema_ids=[str(value) for value in message.get("schemaIds") or []],
-                record_keys=[str(value) for value in message.get("recordKeys") or []],
-                shard_id=message.get("shardId"),
-                shard_epoch=message.get("shardEpoch"),
-            )
+            return self._snapshot_response(message)
         if schema_version == "cultnet.shard_catalog_request.v0":
             return self._shard_catalog_response(message)
         if schema_version == "cultnet.shard_log_request.v0":
@@ -159,13 +161,12 @@ class CultMeshLocalServer:
             )
             if message.get("includeSnapshot", True) is False:
                 return []
-            return [
-                self.node.database.create_snapshot_response(
-                    message_id=str(message.get("messageId") or ""),
-                    schema_ids=list(subscriptions[subscription_id].schema_ids),
-                    record_keys=list(subscriptions[subscription_id].record_keys),
-                )
-            ]
+            snapshot_request = {
+                "messageId": str(message.get("messageId") or ""),
+                "schemaIds": list(subscriptions[subscription_id].schema_ids),
+                "recordKeys": list(subscriptions[subscription_id].record_keys),
+            }
+            return [self._snapshot_response(snapshot_request)]
         if schema_version == "cultnet.database_unsubscribe.v0":
             subscriptions.pop(str(message.get("subscriptionId") or ""), None)
             return []
@@ -281,6 +282,37 @@ class CultMeshLocalServer:
                 PEER_EXCHANGE_REQUEST,
             ],
             "supportsSchemaCatalog": True,
+        }
+
+    def _snapshot_response(self, request: dict[str, Any]) -> dict[str, Any]:
+        response = self.node.database.create_snapshot_response(
+            message_id=str(request.get("messageId") or ""),
+            schema_ids=[str(value) for value in request.get("schemaIds") or []],
+            record_keys=[str(value) for value in request.get("recordKeys") or []],
+            shard_id=request.get("shardId"),
+            shard_epoch=request.get("shardEpoch"),
+        )
+        return self._enforce_snapshot_limits(response)
+
+    def _enforce_snapshot_limits(self, response: dict[str, Any]) -> dict[str, Any]:
+        document_count = len(response.get("documents") or [])
+        if self.max_snapshot_documents is not None and document_count > self.max_snapshot_documents:
+            return self._error_response(
+                f"Snapshot document limit exceeded: {document_count} > {self.max_snapshot_documents}."
+            )
+        if self.max_snapshot_bytes is not None:
+            response_bytes = len(msgpack.packb(response, use_bin_type=True))
+            if response_bytes > self.max_snapshot_bytes:
+                return self._error_response(
+                    f"Snapshot byte limit exceeded: {response_bytes} > {self.max_snapshot_bytes}."
+                )
+        return response
+
+    @staticmethod
+    def _error_response(error: str) -> dict[str, Any]:
+        return {
+            "schemaVersion": "cultnet.error.v0",
+            "error": error,
         }
 
     def _candidate_responses(self, message: dict[str, Any]) -> list[dict[str, Any]]:

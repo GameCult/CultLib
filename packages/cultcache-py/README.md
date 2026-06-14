@@ -275,7 +275,14 @@ session = CultMesh.create_game_session(
         ),
     ),
 )
-server = CultMesh.serve_node(node, peer_catalog=peers, observation_hub=session.observation_hub, port=3075)
+server = CultMesh.serve_node(
+    node,
+    peer_catalog=peers,
+    observation_hub=session.observation_hub,
+    port=3075,
+    max_snapshot_documents=1000,
+    max_snapshot_bytes=4 * 1024 * 1024,
+)
 
 client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")

@@ -2566,6 +2566,35 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(subscription_delete.raw_document)
         self.assertIsNone(node.database.get(document, "note:2"))
 
+    def test_cultmesh_local_server_rejects_oversized_snapshot_responses(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_limit_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_limit_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-snapshot-limits")
+        node.database.register_document(document)
+        node.database.put_raw_message(document, "note:1", {"body": "first"})
+        node.database.put_raw_message(document, "note:2", {"body": "second"})
+
+        server = CultMesh.serve_node(node, max_snapshot_documents=1)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            filtered_snapshot = raw_client.fetch_snapshot(record_keys=["note:1"])
+            error = raw_client.request(
+                snapshot_request(schema_ids=["mesh.snapshot_limit_note.v1"]),
+                expected_schema_version="cultnet.error.v0",
+            )
+            with self.assertRaisesRegex(ValueError, "Snapshot document limit exceeded"):
+                raw_client.fetch_snapshot(schema_ids=["mesh.snapshot_limit_note.v1"])
+        finally:
+            server.stop()
+
+        self.assertEqual(filtered_snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([document["recordKey"] for document in filtered_snapshot["documents"]], ["note:1"])
+        self.assertEqual(error["schemaVersion"], "cultnet.error.v0")
+        self.assertIn("Snapshot document limit exceeded", error["error"])
+
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(
             peer_id="voidbot-local",
