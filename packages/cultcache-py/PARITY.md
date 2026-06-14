@@ -21,6 +21,11 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
   raw CultNet client construction, local nodes, catalogs, sessions, streams,
   authority leases, and simulation fact commits.
+- Python CultMesh reactive catalogs:
+  Verse and peer catalogs expose sorted local views, `get(...)`, response
+  application, and `watch(...)` callbacks for local discovery updates. Verse
+  descriptors can evaluate transfer compatibility with the same transport/rules
+  shape as the C# reference surface.
 - Python CultMesh database facade:
   `node.database` owns the local typed document read/write/snapshot/sync surface
   so Python callers do not need to reach through the node composition wrapper.

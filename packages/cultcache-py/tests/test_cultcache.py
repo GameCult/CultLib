@@ -1342,6 +1342,58 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(decoded["verses"][0]["verseId"], "aetheria-main")
         self.assertEqual(decoded["verses"][0]["compatibility"]["requiredPluginIds"], ["core"])
 
+    def test_cultmesh_verse_catalog_watches_updates_and_finds_transfer_targets(self) -> None:
+        source = CultMeshVerseDescriptor(
+            verse_id="aetheria-main",
+            display_name="Aetheria",
+            authority_model="federated",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-main",
+            ),
+        )
+        compatible = CultMeshVerseDescriptor(
+            verse_id="aetheria-modded",
+            display_name="Aetheria Modded",
+            authority_model="federated",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-modded",
+                compatible_verse_ids=("aetheria-main",),
+            ),
+        )
+        incompatible = CultMeshVerseDescriptor(
+            verse_id="old-world",
+            display_name="Old World",
+            authority_model="solo",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-old",
+            ),
+        )
+        catalog = CultMeshVerseCatalog()
+        seen: list[str] = []
+        unsubscribe = catalog.watch(lambda verse: seen.append(verse.verse_id))
+
+        catalog.upsert(source)
+        catalog.apply_response({
+            "schemaVersion": "cultmesh.verse_catalog_response.v0",
+            "messageId": "verses-watch",
+            "verses": [compatible.to_wire(), incompatible.to_wire()],
+        })
+        unsubscribe()
+        catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="after-unsubscribe",
+            display_name="After",
+            authority_model="none",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules-after"),
+        ))
+
+        self.assertEqual(seen, ["aetheria-main", "aetheria-modded", "old-world"])
+        self.assertEqual([verse.verse_id for verse in catalog.verses], ["aetheria-main", "aetheria-modded", "after-unsubscribe", "old-world"])
+        self.assertEqual(catalog.get("aetheria-modded"), compatible)
+        self.assertEqual([verse.verse_id for verse in catalog.find_transfer_targets(source)], ["aetheria-modded"])
+
     def test_cultmesh_peer_exchange_response_matches_schema_v0_wire_shape(self) -> None:
         import msgpack  # type: ignore
 
@@ -1369,6 +1421,43 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(decoded["peers"][0]["peerId"], "peer-a")
         self.assertIn("read-replica", decoded["peers"][0]["roles"])
         self.assertEqual(decoded["peers"][0]["authorityLeaseId"], "lease-1")
+
+    def test_cultmesh_peer_catalog_watches_updates_and_gets_peers(self) -> None:
+        first = CultMeshPeerCard(
+            peer_id="peer-a",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-a.example.test:3075",),
+            roles=("discovery", "read-replica"),
+        )
+        second = CultMeshPeerCard(
+            peer_id="peer-b",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-b.example.test:3075",),
+            roles=("shard-primary",),
+        )
+        catalog = CultMeshPeerCatalog()
+        seen: list[str] = []
+        unsubscribe = catalog.watch(lambda peer: seen.append(peer.peer_id))
+
+        catalog.upsert(first)
+        catalog.apply_response({
+            "schemaVersion": "cultmesh.peer_exchange_response.v0",
+            "messageId": "peers-watch",
+            "peers": [second.to_wire()],
+        })
+        unsubscribe()
+        catalog.upsert(CultMeshPeerCard(
+            peer_id="peer-c",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-c.example.test:3075",),
+            roles=("read-replica",),
+        ))
+
+        self.assertEqual(seen, ["peer-a", "peer-b"])
+        self.assertTrue(first.has_role("read-replica"))
+        self.assertEqual([peer.peer_id for peer in catalog.peers], ["peer-a", "peer-b", "peer-c"])
+        self.assertEqual(catalog.get("peer-b"), second)
+        self.assertEqual([peer.peer_id for peer in catalog.find("aetheria-main", role="read-replica")], ["peer-a", "peer-c"])
 
     def test_cultmesh_discovery_client_fetches_typed_catalogs_over_cultnet_frames(self) -> None:
         import msgpack  # type: ignore

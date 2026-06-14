@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 
 VERSE_CATALOG_REQUEST = "cultmesh.verse_catalog_request.v0"
@@ -52,6 +52,15 @@ class CultMeshVerseDescriptor:
             "description": self.description,
         }
 
+    def can_transfer_from(self, source: "CultMeshVerseDescriptor") -> bool:
+        return (
+            self.compatibility.transport_version == source.compatibility.transport_version
+            and (
+                self.compatibility.rules_hash == source.compatibility.rules_hash
+                or source.verse_id in self.compatibility.compatible_verse_ids
+            )
+        )
+
 
 @dataclass(frozen=True)
 class CultMeshPeerCard:
@@ -78,14 +87,33 @@ class CultMeshPeerCard:
             "signature": self.signature,
         }
 
+    def has_role(self, role: str) -> bool:
+        require_non_empty(role, "role")
+        return role in self.roles
+
 
 @dataclass
 class CultMeshVerseCatalog:
     _verses: dict[str, CultMeshVerseDescriptor] = field(default_factory=dict)
+    _subscribers: list[Callable[[CultMeshVerseDescriptor], None]] = field(default_factory=list)
+
+    @property
+    def verses(self) -> list[CultMeshVerseDescriptor]:
+        return [self._verses[key] for key in sorted(self._verses)]
+
+    def watch(self, callback: Callable[[CultMeshVerseDescriptor], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
 
     def upsert(self, verse: CultMeshVerseDescriptor) -> None:
         require_non_empty(verse.verse_id, "verse.verse_id")
         self._verses[verse.verse_id] = verse
+        self._publish(verse)
 
     def create_response(self, request: dict[str, Any]) -> dict[str, Any]:
         requested = set(request.get("verseIds") or [])
@@ -111,15 +139,45 @@ class CultMeshVerseCatalog:
             self.upsert(verse)
         return applied
 
+    def get(self, verse_id: str) -> CultMeshVerseDescriptor | None:
+        require_non_empty(verse_id, "verse_id")
+        return self._verses.get(verse_id)
+
+    def find_transfer_targets(self, source: CultMeshVerseDescriptor) -> list[CultMeshVerseDescriptor]:
+        return [
+            verse
+            for verse in self.verses
+            if verse.verse_id != source.verse_id and verse.can_transfer_from(source)
+        ]
+
+    def _publish(self, verse: CultMeshVerseDescriptor) -> None:
+        for callback in list(self._subscribers):
+            callback(verse)
+
 
 @dataclass
 class CultMeshPeerCatalog:
     _peers: dict[str, CultMeshPeerCard] = field(default_factory=dict)
+    _subscribers: list[Callable[[CultMeshPeerCard], None]] = field(default_factory=list)
+
+    @property
+    def peers(self) -> list[CultMeshPeerCard]:
+        return [self._peers[key] for key in sorted(self._peers)]
+
+    def watch(self, callback: Callable[[CultMeshPeerCard], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
 
     def upsert(self, peer: CultMeshPeerCard) -> None:
         require_non_empty(peer.peer_id, "peer.peer_id")
         require_non_empty(peer.verse_id, "peer.verse_id")
         self._peers[peer.peer_id] = peer
+        self._publish(peer)
 
     def create_response(self, request: dict[str, Any]) -> dict[str, Any]:
         verse_id = request.get("verseId", "")
@@ -155,9 +213,17 @@ class CultMeshPeerCatalog:
         require_non_empty(verse_id, "verse_id")
         return [
             peer
-            for peer in sorted(self._peers.values(), key=lambda item: item.peer_id)
-            if peer.verse_id == verse_id and (role is None or role in peer.roles)
+            for peer in self.peers
+            if peer.verse_id == verse_id and (role is None or peer.has_role(role))
         ]
+
+    def get(self, peer_id: str) -> CultMeshPeerCard | None:
+        require_non_empty(peer_id, "peer_id")
+        return self._peers.get(peer_id)
+
+    def _publish(self, peer: CultMeshPeerCard) -> None:
+        for callback in list(self._subscribers):
+            callback(peer)
 
 
 @dataclass(frozen=True)
