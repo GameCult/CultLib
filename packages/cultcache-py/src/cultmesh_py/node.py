@@ -360,6 +360,50 @@ class CultMeshDatabase:
         self._append_shard_log_delete(message)
         return message
 
+    def apply_raw_put_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
+        document_record = message.get("document")
+        if not isinstance(document_record, dict):
+            return None
+        schema_id = str(document_record.get("schemaId") or "")
+        document = self._document_for_schema(schema_id)
+        if document is None:
+            return None
+        record_key = str(document_record["recordKey"])
+        previous = self.cache.get(document, record_key)
+        envelope = CultCacheEnvelope(
+            key=record_key,
+            type=document.type,
+            schema_id=schema_id,
+            payload=bytes(document_record["payload"]),
+            stored_at=str(document_record.get("storedAt") or ""),
+            catalog_entry=document.catalog_entry(),
+        )
+        value = self.cache.put_envelope(document, envelope)
+        change_kind = "added" if previous is None else "updated"
+        change = self._publish_local_change(document, record_key, change_kind, value, previous)
+        self._append_shard_log_put(CultNetMessage(
+            "cultnet.document_put_raw.v0",
+            {key: value for key, value in message.items() if key != "schemaVersion"},
+        ), change_kind)
+        return change
+
+    def apply_raw_delete_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
+        schema_id = str(message.get("schemaId") or "")
+        record_key = str(message.get("recordKey") or "")
+        document = self._document_for_schema(schema_id)
+        if document is None or not record_key:
+            return None
+        previous = self.cache.get(document, record_key)
+        if previous is None:
+            return None
+        self.cache.delete(document, record_key)
+        change = self._publish_local_change(document, record_key, "removed", None, previous)
+        self._append_shard_log_delete(CultNetMessage(
+            "cultnet.document_delete.v0",
+            {key: value for key, value in message.items() if key != "schemaVersion"},
+        ))
+        return change
+
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return self.cache.snapshot()
 
@@ -494,15 +538,17 @@ class CultMeshDatabase:
         change_kind: str,
         value: Any | None,
         previous: Any | None,
-    ) -> None:
-        self._publish(CultMeshDatabaseChange(
+    ) -> CultMeshDatabaseChange:
+        change = CultMeshDatabaseChange(
             document=document,
             schema_id=document.catalog_entry().schema_id,
             record_key=key,
             change_kind=change_kind,
             value=value,
             previous_value=previous,
-        ))
+        )
+        self._publish(change)
+        return change
 
     def _publish_applied_records(
         self,
@@ -576,6 +622,13 @@ class CultMeshDatabase:
             delete = entry.get("delete")
             if isinstance(delete, dict) and isinstance(delete.get("shardEpoch"), int):
                 return delete["shardEpoch"]
+        return None
+
+    def _document_for_schema(self, schema_id: str) -> DocumentDefinition[Any] | None:
+        for document in self.documents:
+            entry = document.catalog_entry()
+            if schema_id == entry.schema_id or schema_id in entry.compatible_schema_ids:
+                return document
         return None
 
     def _change_matches_extractor(

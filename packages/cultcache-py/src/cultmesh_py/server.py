@@ -7,8 +7,7 @@ from typing import Any
 
 import msgpack
 
-from cultcache_py import CultCacheEnvelope
-from cultnet_py import CultNetMessage, read_frame, write_frame
+from cultnet_py import read_frame, write_frame
 
 from .node import CultMeshNode
 from .wire import (
@@ -181,19 +180,10 @@ class CultMeshLocalServer:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
             return []
-        schema_id = str(document_record.get("schemaId") or "")
-        document = self._document_for_schema(schema_id)
-        if document is None:
+        change = self.node.database.apply_raw_put_message(message)
+        if change is None:
             return []
-        record_key = str(document_record["recordKey"])
-        previous = self.node.cache.get(document, record_key)
-        value = self.node.cache.put_envelope(document, self._envelope_from_raw_record(document, document_record))
-        change_kind = "added" if previous is None else "updated"
-        self.node.database._publish_local_change(document, record_key, change_kind, value, previous)
-        self.node.database._append_shard_log_put(CultNetMessage("cultnet.document_put_raw.v0", {
-            key: value for key, value in message.items() if key != "schemaVersion"
-        }), change_kind)
-        return self._database_change_notifications(message, document_record, change_kind, subscriptions)
+        return self._database_change_notifications(message, document_record, change.change_kind, subscriptions)
 
     def _handle_raw_delete(
         self,
@@ -202,13 +192,11 @@ class CultMeshLocalServer:
     ) -> list[dict[str, Any]]:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
-        document = self._document_for_schema(schema_id)
-        if document is None or not record_key:
+        if not schema_id or not record_key:
             return []
-        self.node.database.delete(document, record_key)
-        self.node.database._append_shard_log_delete(CultNetMessage("cultnet.document_delete.v0", {
-            key: value for key, value in message.items() if key != "schemaVersion"
-        }))
+        change = self.node.database.apply_raw_delete_message(message)
+        if change is None:
+            return []
         return self._database_delete_notifications(message, subscriptions)
 
     def _database_change_notifications(
@@ -331,20 +319,3 @@ class CultMeshLocalServer:
             "messageId": request.get("messageId", ""),
             "shards": shards,
         }
-
-    def _document_for_schema(self, schema_id: str) -> Any:
-        for document in self.node.documents:
-            entry = document.catalog_entry()
-            if schema_id == entry.schema_id or schema_id in entry.compatible_schema_ids:
-                return document
-        return None
-
-    def _envelope_from_raw_record(self, document: Any, record: dict[str, Any]) -> Any:
-        return CultCacheEnvelope(
-            key=str(record["recordKey"]),
-            type=document.type,
-            schema_id=str(record["schemaId"]),
-            payload=bytes(record["payload"]),
-            stored_at=str(record.get("storedAt") or ""),
-            catalog_entry=document.catalog_entry(),
-        )
