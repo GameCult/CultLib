@@ -1,4 +1,4 @@
-from .client import CultMeshDiscoveryClient
+from .client import CultMeshDiscoveryClient, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .facade import CultMesh
 from .node import CultMeshNode, create_node
 from .session import (
@@ -53,6 +53,8 @@ __all__ = [
     "CultMeshAuthorityLease",
     "CultMeshAuthorityLeaseCatalog",
     "CultMeshDiscoveryClient",
+    "CultMeshPeerExchangeClient",
+    "CultMeshVerseDiscoveryClient",
     "CultMeshStreamCatalog",
     "CultMeshStreamConsumerProfile",
     "CultMeshStreamDescriptor",

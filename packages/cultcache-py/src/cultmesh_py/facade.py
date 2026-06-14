@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from cultnet_py import CultNetRawClient
+
+from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import CultMeshNode, create_node
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
@@ -39,6 +42,24 @@ class CultMesh:
         return CultMeshStreamCatalog()
 
     @staticmethod
+    def create_verse_discovery_client(
+        host: str = "localhost",
+        port: int = 3075,
+        *,
+        timeout_seconds: float = 4.0,
+    ) -> CultMeshVerseDiscoveryClient:
+        return CultMeshVerseDiscoveryClient(host, port, timeout_seconds)
+
+    @staticmethod
+    def create_peer_exchange_client(
+        host: str = "localhost",
+        port: int = 3075,
+        *,
+        timeout_seconds: float = 4.0,
+    ) -> CultMeshPeerExchangeClient:
+        return CultMeshPeerExchangeClient(host, port, timeout_seconds)
+
+    @staticmethod
     def create_simulation_fact_committer(node: CultMeshNode) -> CultMeshSimulationFactCommitter:
         return CultMeshSimulationFactCommitter(node)
 
@@ -48,3 +69,21 @@ class CultMesh:
         options: CultMeshGameSessionOptions | None = None,
     ) -> CultMeshGameSession:
         return CultMeshGameSession(node, options)
+
+    @staticmethod
+    def create_client(
+        host: str = "localhost",
+        port: int = 3075,
+        *,
+        timeout_seconds: float = 4.0,
+    ) -> CultNetRawClient:
+        return CultNetRawClient(host, port, timeout_seconds)
+
+    @staticmethod
+    def connect_client(
+        host: str = "localhost",
+        port: int = 3075,
+        *,
+        timeout_seconds: float = 4.0,
+    ) -> CultNetRawClient:
+        return CultNetRawClient(host, port, timeout_seconds)

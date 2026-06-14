@@ -114,3 +114,11 @@ class CultMeshDiscoveryClient:
             limit=limit,
         )
         return catalog.apply_response(response)
+
+
+class CultMeshVerseDiscoveryClient(CultMeshDiscoveryClient):
+    pass
+
+
+class CultMeshPeerExchangeClient(CultMeshDiscoveryClient):
+    pass

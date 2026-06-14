@@ -17,6 +17,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from the live Python
   endpoint over CultNet frames.
+- Python CultMesh facade:
+  Exposes C#-matching client entrypoints for Verse discovery, peer exchange,
+  raw CultNet client construction, local nodes, catalogs, sessions, streams,
+  authority leases, and simulation fact commits.
 - Python CultMesh committed simulation facts:
   The live interop harness sends Python a simulation observation, receives a
   consensus candidate, then requests the committed `gamecult.mesh.simulation_fact`

@@ -219,7 +219,7 @@ local prediction reconciliation:
 ```python
 from cultcache_py import define_database_entry_type
 from cultnet_py import CultNetClientAuthorityScope, CultNetRawClient
-from cultmesh_py import CultMesh, CultMeshDiscoveryClient, CultMeshGameSessionOptions, peer_exchange_request
+from cultmesh_py import CultMesh, CultMeshGameSessionOptions, peer_exchange_request
 
 note_doc = define_database_entry_type("mesh.note", [("body", 0)])
 node = CultMesh.start_node("mesh.cc", runtime_id="python-runtime")
@@ -232,7 +232,7 @@ delete_message = node.delete_raw_message(note_doc, "note:2", shard_id="interop",
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
 
-client = CultMeshDiscoveryClient("127.0.0.1", 3075)
+client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
 verses = client.fetch_verses(transport_version="cultmesh.v0")
 mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
 client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])

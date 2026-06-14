@@ -54,6 +54,7 @@ from cultmesh_py import (
     CultMeshAuthorityLease,
     CultMeshAuthorityLeaseCatalog,
     CultMeshDiscoveryClient,
+    CultMeshPeerExchangeClient,
     CultMeshStreamCatalog,
     CultMeshStreamConsumerProfile,
     CultMeshStreamDescriptor,
@@ -61,6 +62,7 @@ from cultmesh_py import (
     CultMeshVerseCatalog,
     CultMeshVerseCompatibility,
     CultMeshVerseDescriptor,
+    CultMeshVerseDiscoveryClient,
     peer_exchange_request,
     simulation_fact_document,
     verse_catalog_request,
@@ -884,6 +886,20 @@ class CultCacheTests(unittest.TestCase):
             self.assertIsInstance(CultMesh.create_peer_catalog(), CultMeshPeerCatalog)
             self.assertIsInstance(CultMesh.create_authority_lease_catalog(), CultMeshAuthorityLeaseCatalog)
             self.assertIsInstance(CultMesh.create_stream_catalog(), CultMeshStreamCatalog)
+            verse_client = CultMesh.create_verse_discovery_client("127.0.0.1", 4010, timeout_seconds=1.5)
+            peer_client = CultMesh.create_peer_exchange_client("127.0.0.1", 4011, timeout_seconds=1.5)
+            raw_client = CultMesh.create_client("127.0.0.1", 4012, timeout_seconds=1.5)
+            connected_client = CultMesh.connect_client("127.0.0.1", 4013, timeout_seconds=1.5)
+            self.assertIsInstance(verse_client, CultMeshVerseDiscoveryClient)
+            self.assertIsInstance(peer_client, CultMeshPeerExchangeClient)
+            self.assertIsInstance(verse_client, CultMeshDiscoveryClient)
+            self.assertIsInstance(peer_client, CultMeshDiscoveryClient)
+            self.assertIsInstance(raw_client, CultNetRawClient)
+            self.assertIsInstance(connected_client, CultNetRawClient)
+            self.assertEqual((verse_client.host, verse_client.port, verse_client.timeout_seconds), ("127.0.0.1", 4010, 1.5))
+            self.assertEqual((peer_client.host, peer_client.port, peer_client.timeout_seconds), ("127.0.0.1", 4011, 1.5))
+            self.assertEqual((raw_client.host, raw_client.port, raw_client.timeout_seconds), ("127.0.0.1", 4012, 1.5))
+            self.assertEqual((connected_client.host, connected_client.port, connected_client.timeout_seconds), ("127.0.0.1", 4013, 1.5))
 
     def test_cultmesh_simulation_fact_uses_csharp_slot_contract(self) -> None:
         import msgpack  # type: ignore

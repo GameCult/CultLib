@@ -30,8 +30,10 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
     "cultmesh_py": (
         "CultMesh",
         "CultMeshGameSession",
+        "CultMeshPeerExchangeClient",
         "CultMeshSimulationFact",
         "CultMeshStreamCatalog",
+        "CultMeshVerseDiscoveryClient",
         "simulation_fact_document",
     ),
 }
