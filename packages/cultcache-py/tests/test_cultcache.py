@@ -3606,6 +3606,8 @@ class CultCacheTests(unittest.TestCase):
                     "2",
                     "--simulation-quorum-ratio",
                     "1.0",
+                    "--verse-id",
+                    "simulation-verse",
                     "--ready-file",
                     str(ready_path),
                 ],
@@ -3624,6 +3626,11 @@ class CultCacheTests(unittest.TestCase):
                     expected_schema_version="cultnet.hello.v0",
                 )
                 self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                peers = discovery_client.fetch_peers(verse_id="simulation-verse", roles=["simulation-observer"])
+                self.assertEqual(peers[0].peer_id, "simulation-daemon-peer")
+                self.assertIn("simulation-observer", peers[0].roles)
+                self.assertIn("read-replica", peers[0].roles)
 
                 claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
                 first = client.request(

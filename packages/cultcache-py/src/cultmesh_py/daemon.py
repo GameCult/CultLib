@@ -124,7 +124,9 @@ def advertise_self(
         return
     endpoint = f"cultnet://{server.host}:{server.port}"
     shard_ids = tuple(server.node.database.shard_ids())
-    roles = tuple(args.roles or ("read-replica",))
+    roles = list(args.roles or ("read-replica",))
+    if server.observation_hub is not None and "simulation-observer" not in roles:
+        roles.append("simulation-observer")
     verse_catalog.upsert(CultMeshVerseDescriptor(
         verse_id=verse_id,
         display_name=args.verse_display_name or verse_id,
@@ -140,7 +142,7 @@ def advertise_self(
         peer_id=server.node.runtime_id,
         verse_id=verse_id,
         endpoints=(endpoint,),
-        roles=roles,
+        roles=tuple(roles),
         shard_ids=shard_ids,
     ))
 

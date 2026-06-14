@@ -122,7 +122,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   instead of silently looking empty. Simulation observation serving is opt-in:
   the daemon only advertises `cultnet.simulation_observation.v0` when an
   observation hub is attached, and an opt-in launched daemon answers witness
-  observations with schema-v0 consensus candidates.
+  observations with schema-v0 consensus candidates. When such a daemon
+  self-advertises into a Verse, its peer card includes the `simulation-observer`
+  role so discovery clients can find the peer by the capability it actually
+  serves.
   The daemon CLI snapshot document/byte limits feed the same public server edge;
   oversized daemon snapshot responses are returned as structured
   `cultnet.error.v0` peer errors rather than partial payloads.
