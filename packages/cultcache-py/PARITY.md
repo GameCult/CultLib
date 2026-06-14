@@ -39,7 +39,9 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultNet shard log:
   Provides typed `CultNetShardLogResponse` and `CultNetShardLogEntry` helpers
   for inspecting mutation-log entries, resync pressure, and sequence cursors,
-  while cache mutation remains owned by the existing replication helpers.
+  including typed put-document and delete identity projections on individual
+  entries while cache mutation remains owned by the existing replication
+  helpers.
   `apply_shard_log_response(...)`, `CultMeshDatabase`, and
   `CultMeshGameSession` can consume typed shard-log responses directly for
   database sync and prediction reconciliation.

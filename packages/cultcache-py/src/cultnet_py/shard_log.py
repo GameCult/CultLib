@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .snapshot import CultNetRawDocumentRecord
+
 
 @dataclass(frozen=True)
 class CultNetShardLogEntry:
@@ -10,6 +12,9 @@ class CultNetShardLogEntry:
     change_kind: str
     put: dict[str, Any] | None = None
     delete: dict[str, Any] | None = None
+    raw_document: CultNetRawDocumentRecord | None = None
+    delete_schema_id: str | None = None
+    delete_record_key: str | None = None
     committed_at: str | None = None
 
     @classmethod
@@ -22,11 +27,21 @@ class CultNetShardLogEntry:
             raise ValueError(f"unsupported shard log changeKind {change_kind!r}")
         put = value.get("put")
         delete = value.get("delete")
+        put_document = put.get("document") if isinstance(put, dict) else None
+        raw_document = (
+            CultNetRawDocumentRecord.from_wire(put_document)
+            if isinstance(put_document, dict)
+            else None
+        )
+        delete_record = dict(delete) if isinstance(delete, dict) else None
         return cls(
             sequence=sequence,
             change_kind=change_kind,
             put=dict(put) if isinstance(put, dict) else None,
-            delete=dict(delete) if isinstance(delete, dict) else None,
+            delete=delete_record,
+            raw_document=raw_document,
+            delete_schema_id=_optional_string(delete_record.get("schemaId")) if delete_record is not None else None,
+            delete_record_key=_optional_string(delete_record.get("recordKey")) if delete_record is not None else None,
             committed_at=_optional_string(value.get("committedAt")),
         )
 
