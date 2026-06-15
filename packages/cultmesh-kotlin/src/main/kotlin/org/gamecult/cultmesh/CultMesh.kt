@@ -155,6 +155,8 @@ data class CultNetRudpDeliveredFrame(val channelId: String, val payload: ByteArr
 data class CultNetRudpReceiveResult(
     val delivered: List<CultNetRudpDeliveredFrame> = emptyList(),
     val reply: CultNetRudpPacket? = null,
+    val disconnected: Boolean = false,
+    val disconnectReason: ByteArray = ByteArray(0),
 )
 
 data class CultNetRudpSessionOptions(
@@ -271,6 +273,11 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
                 rememberReceived(packet.sequence)
                 return CultNetRudpReceiveResult()
             }
+            CultNetRudpPacketType.Disconnect -> {
+                rememberReceived(packet.sequence)
+                connected = false
+                return CultNetRudpReceiveResult(disconnected = true, disconnectReason = packet.payload.copyOf())
+            }
             CultNetRudpPacketType.Data -> Unit
             else -> return CultNetRudpReceiveResult()
         }
@@ -283,6 +290,11 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     }
 
     fun createAck(): CultNetRudpPacket = createPacket(CultNetRudpPacketType.Ack, "control", ByteArray(0))
+
+    fun createDisconnect(reason: ByteArray = ByteArray(0)): CultNetRudpPacket {
+        connected = false
+        return createPacket(CultNetRudpPacketType.Disconnect, "control", reason)
+    }
 
     fun dueResends(nowMs: Long): List<CultNetRudpPacket> =
         pendingReliable.values
@@ -425,6 +437,8 @@ class CultNetRudpSocketTransportConnection(
     private var bytesSent = 0L
     private var framesReceived = 0L
     private var framesSent = 0L
+    var disconnectReason: ByteArray? = null
+        private set
 
     val profile: CultNetTransportProfile = createRudpTransportProfile(
         runtimeId = runtimeId,
@@ -443,6 +457,10 @@ class CultNetRudpSocketTransportConnection(
     fun send(channelId: String, payload: ByteArray) {
         session.sendMany(channelId, payload, channelSendOptions(channelId, nowMs()), maxFragmentBytes).forEach { sendPacket(it) }
         framesSent += 1
+    }
+
+    fun disconnect(reason: ByteArray = ByteArray(0)) {
+        sendPacket(session.createDisconnect(reason))
     }
 
     fun receiveOnce(): CultNetTransportFrame? {
@@ -468,6 +486,10 @@ class CultNetRudpSocketTransportConnection(
         }
         val result = session.receive(packet, nowMs())
         result.reply?.let { sendPacket(it) }
+        if (result.disconnected) {
+            disconnectReason = result.disconnectReason.copyOf()
+            return null
+        }
         result.delivered.forEach {
             delivered.add(CultNetTransportFrame(it.channelId, it.payload))
             framesReceived += 1
@@ -600,6 +622,7 @@ private fun rudpServeOnce(options: Map<String, String>) {
     val expectedClientPayload = (options["client-payload"] ?: "ts-kotlin-client-state").toByteArray(StandardCharsets.UTF_8)
     val serverPayload = (options["server-payload"] ?: "kotlin-server-state").toByteArray(StandardCharsets.UTF_8)
     val serverExtraPayload = options["server-extra-payload"]?.toByteArray(StandardCharsets.UTF_8)
+    val disconnectReason = options["disconnect-reason"]?.toByteArray(StandardCharsets.UTF_8)
     val maxFragmentBytes = options["max-fragment-bytes"]?.toInt()
     val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
     CultNetRudpSocketTransportConnection(
@@ -620,6 +643,9 @@ private fun rudpServeOnce(options: Map<String, String>) {
                 transport.send("schema", serverPayload)
                 if (serverExtraPayload != null) {
                     transport.send("schema", serverExtraPayload)
+                }
+                if (disconnectReason != null) {
+                    transport.disconnect(disconnectReason)
                 }
                 pollRudpAfterSend(transport, 250)
                 println("""{"status":"ok"}""")

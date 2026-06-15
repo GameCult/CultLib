@@ -82,6 +82,7 @@ interface RudpServerSpawnOptions {
   clientPayload?: string;
   serverPayload?: string;
   serverExtraPayload?: string;
+  disconnectReason?: string;
   maxFragmentBytes?: number;
 }
 
@@ -141,6 +142,8 @@ expected_client_payload = os.environ.get("RUDP_CLIENT_PAYLOAD", "client-state").
 server_payload = os.environ.get("RUDP_SERVER_PAYLOAD", "python-state").encode()
 server_extra_payload_raw = os.environ.get("RUDP_SERVER_EXTRA_PAYLOAD")
 server_extra_payload = server_extra_payload_raw.encode() if server_extra_payload_raw else None
+disconnect_reason_raw = os.environ.get("RUDP_DISCONNECT_REASON")
+disconnect_reason = disconnect_reason_raw.encode() if disconnect_reason_raw else None
 max_fragment_bytes_raw = os.environ.get("RUDP_MAX_FRAGMENT_BYTES")
 max_fragment_bytes = int(max_fragment_bytes_raw) if max_fragment_bytes_raw else None
 
@@ -171,6 +174,8 @@ while time.time() < deadline:
     transport.send("schema", server_payload)
     if server_extra_payload is not None:
         transport.send("schema", server_extra_payload)
+    if disconnect_reason is not None:
+        transport.disconnect(disconnect_reason)
     print("OK", flush=True)
     ack_deadline = time.time() + 0.25
     while time.time() < ack_deadline:
@@ -1340,6 +1345,57 @@ test("CultNet RUDP fragmented schema frames cross runtime boundaries", async () 
   }
 });
 
+test("CultNet RUDP disconnect reasons cross runtime boundaries", async () => {
+  for (const peer of rudpServerInteropPeers()) {
+    await peer.build();
+    const disconnectReason = `${peer.name.toLowerCase()}-done`;
+    const serverPeer = peer.spawn({ disconnectReason });
+    const clientSocket = await bindUdpSocket();
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-disconnect-${peer.name.replace(/\W/g, "").toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: await serverPeer.ready,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+      });
+
+      const receivedFrame = once(client, "frame");
+      const disconnected = once(client, "disconnect");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} disconnect handshake`);
+      client.send("schema", Buffer.from(peer.clientPayload));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} RUDP response frame before disconnect`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(peer.expectedPayload));
+
+      const [disconnect] = await withTimeout(disconnected, 2_000, `${peer.name} RUDP disconnect reason`);
+      assert.deepEqual(Buffer.from(disconnect.reason), Buffer.from(disconnectReason));
+      assert.equal(client.connected, false);
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after disconnect`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
   await buildCSharpInteropPeer();
@@ -1501,6 +1557,7 @@ function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPytho
       ...(options.clientPayload ? { RUDP_CLIENT_PAYLOAD: options.clientPayload } : {}),
       ...(options.serverPayload ? { RUDP_SERVER_PAYLOAD: options.serverPayload } : {}),
       ...(options.serverExtraPayload ? { RUDP_SERVER_EXTRA_PAYLOAD: options.serverExtraPayload } : {}),
+      ...(options.disconnectReason ? { RUDP_DISCONNECT_REASON: options.disconnectReason } : {}),
       ...(options.maxFragmentBytes ? { RUDP_MAX_FRAGMENT_BYTES: String(options.maxFragmentBytes) } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1554,6 +1611,7 @@ function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPytho
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
     ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
+    ...(options.disconnectReason ? ["--disconnect-reason", options.disconnectReason] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultnetRsRoot,
@@ -1612,6 +1670,7 @@ function spawnCSharpRudpServer(options: RudpServerSpawnOptions = {}): RunningPyt
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
     ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
+    ...(options.disconnectReason ? ["--disconnect-reason", options.disconnectReason] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultLibRoot,
@@ -1671,6 +1730,7 @@ function spawnKotlinRudpServer(options: RudpServerSpawnOptions = {}): RunningPyt
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
     ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
+    ...(options.disconnectReason ? ["--disconnect-reason", options.disconnectReason] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultLibRoot,

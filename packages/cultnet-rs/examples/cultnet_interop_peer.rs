@@ -469,6 +469,9 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
     let server_extra_payload = options
         .get("server-extra-payload")
         .map(|value| value.as_bytes().to_vec());
+    let disconnect_reason = options
+        .get("disconnect-reason")
+        .map(|value| value.as_bytes().to_vec());
     let max_fragment_bytes = options
         .get("max-fragment-bytes")
         .map(|value| value.parse::<u32>())
@@ -503,6 +506,9 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
             transport.send("schema", server_payload.clone())?;
             if let Some(extra_payload) = &server_extra_payload {
                 transport.send("schema", extra_payload.clone())?;
+            }
+            if let Some(reason) = &disconnect_reason {
+                transport.disconnect(reason.clone())?;
             }
             poll_rudp_after_send(&mut transport, Duration::from_millis(250))?;
             print_json(&serde_json::json!({ "status": "ok" }))?;

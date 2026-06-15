@@ -61,6 +61,8 @@ pub struct CultNetRudpDeliveredFrame {
 pub struct CultNetRudpReceiveResult {
     pub delivered: Vec<CultNetRudpDeliveredFrame>,
     pub reply: Option<CultNetRudpPacket>,
+    pub disconnected: bool,
+    pub disconnect_reason: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +290,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                disconnected: false,
+                disconnect_reason: Vec::new(),
             });
         }
 
@@ -303,6 +307,8 @@ impl CultNetRudpSession {
                     false,
                     false,
                 )),
+                disconnected: false,
+                disconnect_reason: Vec::new(),
             });
         }
 
@@ -313,6 +319,19 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                disconnected: false,
+                disconnect_reason: Vec::new(),
+            });
+        }
+
+        if packet.packet_type == CultNetRudpPacketType::Disconnect {
+            self.remember_received(packet.sequence);
+            self.connected = false;
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+                disconnected: true,
+                disconnect_reason: packet.payload.clone(),
             });
         }
 
@@ -320,6 +339,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                disconnected: false,
+                disconnect_reason: Vec::new(),
             });
         }
 
@@ -329,6 +350,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                disconnected: false,
+                disconnect_reason: Vec::new(),
             });
         }
 
@@ -336,6 +359,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                disconnected: false,
+                disconnect_reason: Vec::new(),
             });
         };
         let delivered = if ordered {
@@ -346,6 +371,8 @@ impl CultNetRudpSession {
         Ok(CultNetRudpReceiveResult {
             delivered,
             reply: None,
+            disconnected: false,
+            disconnect_reason: Vec::new(),
         })
     }
 
@@ -354,6 +381,18 @@ impl CultNetRudpSession {
             CultNetRudpPacketType::Ack,
             "control",
             Vec::new(),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn create_disconnect(&mut self, reason: Vec<u8>) -> CultNetRudpPacket {
+        self.connected = false;
+        self.create_packet(
+            CultNetRudpPacketType::Disconnect,
+            "control",
+            reason,
             false,
             false,
             false,
@@ -700,6 +739,7 @@ pub struct CultNetRudpSocketTransportConnection {
     stats: CultNetTransportStats,
     delivered_frames: VecDeque<CultNetTransportFrame>,
     max_fragment_bytes: Option<usize>,
+    disconnect_reason: Option<Vec<u8>>,
 }
 
 impl CultNetRudpSocketTransportConnection {
@@ -728,6 +768,7 @@ impl CultNetRudpSocketTransportConnection {
             stats: CultNetTransportStats::default(),
             delivered_frames: VecDeque::new(),
             max_fragment_bytes: options.max_fragment_bytes.map(|value| value as usize),
+            disconnect_reason: None,
         })
     }
 
@@ -737,6 +778,10 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn stats(&self) -> CultNetTransportStats {
         self.stats.clone()
+    }
+
+    pub fn disconnect_reason(&self) -> Option<&[u8]> {
+        self.disconnect_reason.as_deref()
     }
 
     pub fn connect(&mut self, payload: Vec<u8>) -> Result<()> {
@@ -759,6 +804,11 @@ impl CultNetRudpSocketTransportConnection {
         }
         self.stats.frames_sent += 1;
         Ok(())
+    }
+
+    pub fn disconnect(&mut self, reason: Vec<u8>) -> Result<()> {
+        let packet = self.session.create_disconnect(reason);
+        self.send_packet(&packet)
     }
 
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
@@ -799,6 +849,10 @@ impl CultNetRudpSocketTransportConnection {
         let result = self.session.receive(&packet, now_ms())?;
         if let Some(reply) = result.reply {
             self.send_packet(&reply)?;
+        }
+        if result.disconnected {
+            self.disconnect_reason = Some(result.disconnect_reason);
+            return Ok(None);
         }
 
         for frame in result.delivered {

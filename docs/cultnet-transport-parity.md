@@ -193,10 +193,15 @@ Current progress:
 - The TypeScript interop harness now proves fragmented reliable ordered
   `schema` frames in both request and response direction between TypeScript and
   C#/Kotlin/Python/Rust one-shot UDP peers.
+- TypeScript, C#, Rust, Python, and Kotlin now share a transport-level RUDP
+  disconnect primitive: sessions create and consume `disconnect` packets with
+  raw reason bytes, socket transports surface the remote reason, and the
+  TypeScript interop harness proves reason propagation from C#/Kotlin/Python/Rust
+  one-shot UDP peers.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into reconnect, backpressure, and the wider
-  schema-message matrix.
+  ports, then broaden RUDP interop into reconnect, timeout detection,
+  backpressure, and the wider schema-message matrix.
 
 ## RUDP Packet Contract V0
 

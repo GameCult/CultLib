@@ -444,6 +444,14 @@ namespace GameCult.Networking
         /// Gets or sets an optional immediate reply packet.
         /// </summary>
         public CultNetRudpPacket? Reply { get; set; }
+        /// <summary>
+        /// Gets or sets whether the remote peer sent a disconnect packet.
+        /// </summary>
+        public bool Disconnected { get; set; }
+        /// <summary>
+        /// Gets or sets the remote disconnect reason bytes.
+        /// </summary>
+        public byte[] DisconnectReason { get; set; } = Array.Empty<byte>();
     }
 
     /// <summary>
@@ -756,6 +764,17 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult();
             }
 
+            if (packet.PacketType == CultNetRudpPacketType.Disconnect)
+            {
+                RememberReceived(packet.Sequence);
+                _connected = false;
+                return new CultNetRudpReceiveResult
+                {
+                    Disconnected = true,
+                    DisconnectReason = packet.Payload ?? Array.Empty<byte>()
+                };
+            }
+
             if (packet.PacketType != CultNetRudpPacketType.Data)
             {
                 return new CultNetRudpReceiveResult();
@@ -788,6 +807,15 @@ namespace GameCult.Networking
         public CultNetRudpPacket CreateAck()
         {
             return CreatePacket(CultNetRudpPacketType.Ack, "control", Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
+        }
+
+        /// <summary>
+        /// Creates a packet carrying a transport-level disconnect reason.
+        /// </summary>
+        public CultNetRudpPacket CreateDisconnect(byte[]? reason = null)
+        {
+            _connected = false;
+            return CreatePacket(CultNetRudpPacketType.Disconnect, "control", reason ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
         }
 
         /// <summary>
@@ -1126,6 +1154,11 @@ namespace GameCult.Networking
         public CultNetTransportStats Stats => _stats.Snapshot();
 
         /// <summary>
+        /// Gets the last transport-level remote disconnect reason, if one was received.
+        /// </summary>
+        public byte[]? DisconnectReason { get; private set; }
+
+        /// <summary>
         /// Sends the client connect packet.
         /// </summary>
         public void Connect(byte[]? payload = null)
@@ -1148,6 +1181,14 @@ namespace GameCult.Networking
                 SendPacket(packet);
             }
             _stats.FramesSent++;
+        }
+
+        /// <summary>
+        /// Sends a transport-level disconnect packet.
+        /// </summary>
+        public void Disconnect(byte[]? reason = null)
+        {
+            SendPacket(_session.CreateDisconnect(reason ?? Array.Empty<byte>()));
         }
 
         /// <summary>
@@ -1197,6 +1238,11 @@ namespace GameCult.Networking
             if (result.Reply != null)
             {
                 SendPacket(result.Reply);
+            }
+            if (result.Disconnected)
+            {
+                DisconnectReason = result.DisconnectReason;
+                return null;
             }
 
             foreach (var frame in result.Delivered)

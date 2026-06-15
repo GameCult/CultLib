@@ -49,6 +49,8 @@ export interface CultNetRudpSessionOptions {
 export interface CultNetRudpReceiveResult {
   delivered: CultNetRudpDeliveredFrame[];
   reply?: CultNetRudpPacket;
+  disconnected?: boolean;
+  disconnectReason?: Uint8Array;
 }
 
 type PendingReliablePacket = {
@@ -267,6 +269,16 @@ export class CultNetRudpSession {
       return { delivered: [] };
     }
 
+    if (packet.packetType === "disconnect") {
+      this.#rememberReceived(packet.sequence);
+      this.#connected = false;
+      return {
+        delivered: [],
+        disconnected: true,
+        disconnectReason: packet.payload ?? new Uint8Array(),
+      };
+    }
+
     if (packet.packetType !== "data") {
       return { delivered: [] };
     }
@@ -293,6 +305,15 @@ export class CultNetRudpSession {
     return this.#createPacket({
       packetType: "ack",
       channelId: "control",
+    });
+  }
+
+  createDisconnect(reason = new Uint8Array()): CultNetRudpPacket {
+    this.#connected = false;
+    return this.#createPacket({
+      packetType: "disconnect",
+      channelId: "control",
+      payload: reason,
     });
   }
 
@@ -637,6 +658,11 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
           channelId: frame.channelId,
           payload: frame.payload,
         } satisfies CultNetTransportFrame);
+      }
+      if (result.disconnected) {
+        this.emit("disconnect", { reason: result.disconnectReason ?? new Uint8Array() });
+        this.emit("close");
+        return;
       }
       if (packet.packetType === "accept" || result.delivered.length > 0) {
         this.#sendPacket(this.#session.createAck());

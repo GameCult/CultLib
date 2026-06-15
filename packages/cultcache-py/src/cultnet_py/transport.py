@@ -104,6 +104,8 @@ class CultNetRudpDeliveredFrame:
 class CultNetRudpReceiveResult:
     delivered: tuple[CultNetRudpDeliveredFrame, ...] = field(default_factory=tuple)
     reply: CultNetRudpPacket | None = None
+    disconnected: bool = False
+    disconnect_reason: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,14 @@ class CultNetRudpSession:
             self._remember_received(packet.sequence)
             return CultNetRudpReceiveResult()
 
+        if packet.packet_type == CultNetRudpPacketType.DISCONNECT:
+            self._remember_received(packet.sequence)
+            self._connected = False
+            return CultNetRudpReceiveResult(
+                disconnected=True,
+                disconnect_reason=bytes(packet.payload),
+            )
+
         if packet.packet_type != CultNetRudpPacketType.DATA:
             return CultNetRudpReceiveResult()
 
@@ -363,6 +373,10 @@ class CultNetRudpSession:
 
     def create_ack(self) -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
+
+    def create_disconnect(self, reason: bytes = b"") -> CultNetRudpPacket:
+        self._connected = False
+        return self._create_packet(CultNetRudpPacketType.DISCONNECT, "control", reason)
 
     def due_resends(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
         due: list[CultNetRudpPacket] = []
@@ -558,6 +572,7 @@ class CultNetRudpSocketTransportConnection:
         self._frames_sent = 0
         self._delivered_frames: deque[CultNetTransportFrame] = deque()
         self._closed = False
+        self.disconnect_reason: bytes | None = None
 
     @property
     def connected(self) -> bool:
@@ -613,6 +628,9 @@ class CultNetRudpSocketTransportConnection:
         result = self.session.receive(packet, _now_ms())
         if result.reply is not None:
             self._send_packet(result.reply)
+        if result.disconnected:
+            self.disconnect_reason = result.disconnect_reason
+            return None
 
         for frame in result.delivered:
             self._delivered_frames.append(
@@ -624,6 +642,9 @@ class CultNetRudpSocketTransportConnection:
         if packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
             self._send_packet(self.session.create_ack())
         return frame
+
+    def disconnect(self, reason: bytes = b"") -> None:
+        self._send_packet(self.session.create_disconnect(reason))
 
     def poll_resends(self) -> None:
         for packet in self.session.due_resends(_now_ms()):

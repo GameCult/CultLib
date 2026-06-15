@@ -592,6 +592,9 @@ static void RudpServeOnce(Dictionary<string, string> options)
     var serverExtraPayload = options.TryGetValue("server-extra-payload", out var configuredServerExtraPayload)
         ? Ascii(configuredServerExtraPayload)
         : null;
+    var disconnectReason = options.TryGetValue("disconnect-reason", out var configuredDisconnectReason)
+        ? Ascii(configuredDisconnectReason)
+        : null;
     var maxFragmentBytes = options.TryGetValue("max-fragment-bytes", out var configuredMaxFragmentBytes)
         ? int.Parse(configuredMaxFragmentBytes, CultureInfo.InvariantCulture)
         : (int?)null;
@@ -628,6 +631,10 @@ static void RudpServeOnce(Dictionary<string, string> options)
             if (serverExtraPayload != null)
             {
                 transport.Send("schema", serverExtraPayload);
+            }
+            if (disconnectReason != null)
+            {
+                transport.Disconnect(disconnectReason);
             }
             PollRudpAfterSend(transport, TimeSpan.FromMilliseconds(250));
             WriteJsonLine(new { status = "ok" });
