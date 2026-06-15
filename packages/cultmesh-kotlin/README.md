@@ -212,6 +212,36 @@ val peerResponse = peers.createResponse(
 instances, so catalog discovery can ride the same MessagePack schema-v0 lane as
 RUDP schema traffic.
 
+Peer cards are contact hints, not trust. Kotlin now mirrors the C#/TS/Python
+lease gate so local clients can keep discovery and authority separate:
+
+```kotlin
+val peer = CultMeshPeerCard(
+    peerId = "kotlin-peer",
+    verseId = "public",
+    endpoints = listOf("rudp://127.0.0.1:4100"),
+    roles = listOf("shard-primary"),
+    shardIds = listOf("players"),
+    authorityLeaseId = "lease:kotlin-peer",
+)
+
+val leases = createAuthorityLeaseCatalog()
+leases.upsert(
+    CultMeshAuthorityLease(
+        leaseId = "lease:kotlin-peer",
+        verseId = "public",
+        peerId = "kotlin-peer",
+        roles = listOf("shard-primary"),
+        shardIds = listOf("players"),
+        issuerRuntimeId = "odin",
+        validFrom = Instant.parse("2026-06-15T00:00:00Z"),
+        expiresAt = Instant.parse("2026-06-15T01:00:00Z"),
+    ),
+)
+
+check(leases.isAuthorized(peer, "shard-primary", "players"))
+```
+
 `EveMediaObservationDocument` carries byte-backed device streams such as camera
 luma frames and microphone PCM blocks. The document is observation transport,
 not synchronization authority: the device owns capture and local timestamps,

@@ -212,6 +212,10 @@ Current progress:
   connect, accept, single-packet sends, or fragmented sends enqueue anything;
   TCP-framed profiles do not publish the field because they do not own the RUDP
   pending-reliable queue.
+- Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
+  peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
+  owns role/shard/time authorization so discovery contact cannot impersonate
+  trust.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into reconnect policy and the wider

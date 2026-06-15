@@ -715,6 +715,64 @@ data class CultMeshPeerCard(
     }
 }
 
+data class CultMeshAuthorityLease(
+    val leaseId: String,
+    val verseId: String,
+    val peerId: String,
+    val roles: List<String>,
+    val validFrom: Instant,
+    val expiresAt: Instant,
+    val shardIds: List<String> = emptyList(),
+    val issuerRuntimeId: String,
+    val signature: String? = null,
+) {
+    init {
+        requireNonBlank(leaseId, "leaseId")
+        requireNonBlank(verseId, "verseId")
+        requireNonBlank(peerId, "peerId")
+        requireNonBlank(issuerRuntimeId, "issuerRuntimeId")
+        if (!expiresAt.isAfter(validFrom)) throw IOException("CultMesh authority lease expiry must be after validFrom")
+    }
+
+    fun isValidAt(at: Instant): Boolean = !at.isBefore(validFrom) && at.isBefore(expiresAt)
+
+    fun covers(peer: CultMeshPeerCard, role: String, shardId: String? = null, at: Instant = Instant.now()): Boolean {
+        requireNonBlank(role, "role")
+        return isValidAt(at) &&
+            verseId == peer.verseId &&
+            peerId == peer.peerId &&
+            leaseId == peer.authorityLeaseId &&
+            role in roles &&
+            peer.hasRole(role) &&
+            (shardId.isNullOrBlank() || shardIds.isEmpty() || shardId in shardIds)
+    }
+}
+
+class CultMeshAuthorityLeaseCatalog {
+    private val knownLeases = linkedMapOf<String, CultMeshAuthorityLease>()
+
+    val leases: List<CultMeshAuthorityLease>
+        get() = knownLeases.toSortedMap().values.toList()
+
+    fun upsert(lease: CultMeshAuthorityLease) {
+        knownLeases[lease.leaseId] = lease
+    }
+
+    fun get(leaseId: String): CultMeshAuthorityLease? {
+        requireNonBlank(leaseId, "leaseId")
+        return knownLeases[leaseId]
+    }
+
+    fun isAuthorized(peer: CultMeshPeerCard, role: String, shardId: String? = null, at: Instant = Instant.now()): Boolean {
+        requireNonBlank(role, "role")
+        val leaseId = peer.authorityLeaseId ?: return false
+        val lease = knownLeases[leaseId] ?: return false
+        return lease.covers(peer, role, shardId, at)
+    }
+}
+
+fun createAuthorityLeaseCatalog(): CultMeshAuthorityLeaseCatalog = CultMeshAuthorityLeaseCatalog()
+
 class CultMeshVerseCatalog {
     private val knownVerses = linkedMapOf<String, CultMeshVerseDescriptor>()
     private val subscribers = mutableListOf<(CultMeshVerseDescriptor) -> Unit>()
@@ -1981,6 +2039,7 @@ fun main(args: Array<String>) {
         cultNetSchemaMessagesUseMessagePackMaps()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
+        cultMeshAuthorityLeasesGatePeerTrust()
         cultNetShardCatalogsAndLogsRoundTrip()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
@@ -2264,6 +2323,42 @@ private fun cultMeshCatalogsRoundTripDiscoveryMessages() {
     val appliedPeers = appliedPeerCatalog.applyResponse(peerResponse)
     check(appliedPeers.single().peerId == "peer-a")
     check(appliedPeerCatalog.get("peer-a")?.hasRole("schema") == true)
+}
+
+private fun cultMeshAuthorityLeasesGatePeerTrust() {
+    val peer = CultMeshPeerCard(
+        peerId = "peer-authority",
+        verseId = "public",
+        endpoints = listOf("rudp://127.0.0.1:4100"),
+        roles = listOf("shard-primary", "schema"),
+        shardIds = listOf("players"),
+        authorityLeaseId = "lease:peer-authority",
+    )
+    val leases = createAuthorityLeaseCatalog()
+    val validFrom = Instant.parse("2026-06-15T00:00:00Z")
+    val expiresAt = Instant.parse("2026-06-15T01:00:00Z")
+    val duringLease = Instant.parse("2026-06-15T00:30:00Z")
+
+    check(!leases.isAuthorized(peer, "shard-primary", "players", duringLease))
+    leases.upsert(
+        CultMeshAuthorityLease(
+            leaseId = "lease:peer-authority",
+            verseId = "public",
+            peerId = "peer-authority",
+            roles = listOf("shard-primary"),
+            shardIds = listOf("players"),
+            issuerRuntimeId = "kotlin-authority",
+            validFrom = validFrom,
+            expiresAt = expiresAt,
+        ),
+    )
+
+    check(leases.get("lease:peer-authority")?.issuerRuntimeId == "kotlin-authority")
+    check(leases.leases.map { it.leaseId } == listOf("lease:peer-authority"))
+    check(leases.isAuthorized(peer, "shard-primary", "players", duringLease))
+    check(!leases.isAuthorized(peer, "schema", "players", duringLease))
+    check(!leases.isAuthorized(peer, "shard-primary", "inventory", duringLease))
+    check(!leases.isAuthorized(peer, "shard-primary", "players", expiresAt))
 }
 
 private fun cultNetShardCatalogsAndLogsRoundTrip() {
