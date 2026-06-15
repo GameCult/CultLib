@@ -495,6 +495,42 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_FragmentsAndReassemblesReliableOrderedPayloads()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 456,
+                InitialSequence = 1
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 456,
+                InitialSequence = 100
+            });
+            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 456, Sequence = 90, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 456, Sequence = 91, ChannelId = "control" });
+
+            var packets = sender.SendMany(
+                "schema",
+                Encoding.UTF8.GetBytes("fragment-me-please"),
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 10 },
+                maxFragmentBytes: 5).ToArray();
+
+            Assert.That(packets, Has.Length.EqualTo(4));
+            Assert.That(packets.Select(packet => packet.FragmentCount).ToArray(), Is.EqualTo(new ushort[] { 4, 4, 4, 4 }));
+            Assert.That(packets.Select(packet => packet.FragmentIndex).ToArray(), Is.EqualTo(new ushort[] { 0, 1, 2, 3 }));
+            Assert.That(packets.All(packet => packet.FragmentId == packets[0].FragmentId), Is.True);
+
+            Assert.That(receiver.Receive(packets[0]).Delivered, Is.Empty);
+            Assert.That(receiver.Receive(packets[1]).Delivered, Is.Empty);
+            Assert.That(receiver.Receive(packets[2]).Delivered, Is.Empty);
+            var delivered = receiver.Receive(packets[3]).Delivered.ToArray();
+            Assert.That(delivered, Has.Length.EqualTo(1));
+            Assert.That(Encoding.UTF8.GetString(delivered[0].Payload), Is.EqualTo("fragment-me-please"));
+            Assert.That(delivered[0].Sequence, Is.EqualTo(packets[0].Sequence));
+        }
+
+        [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {
             using var serverSocket = BindUdpSocket();
@@ -536,6 +572,46 @@ namespace GameCult.Networking.Tests
             Assert.That(clientFrame.ChannelId, Is.EqualTo("schema"));
             Assert.That(Encoding.UTF8.GetString(clientFrame.Payload), Is.EqualTo("server-state"));
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(client.Stats.FramesSent, Is.EqualTo(1));
+            Assert.That(server.Stats.FramesReceived, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpSocketTransport_CarriesFragmentedReliableOrderedSchemaFrames()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203041;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-fragment-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 8
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-fragment-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 8
+            });
+
+            var payload = Encoding.UTF8.GetBytes("this-schema-frame-is-larger-than-one-rudp-fragment");
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+            client.Send("schema", payload);
+            var serverFrame = ReceiveRudpFrame(server);
+            Assert.That(serverFrame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(serverFrame.Payload, Is.EqualTo(payload));
             Assert.That(client.Stats.FramesSent, Is.EqualTo(1));
             Assert.That(server.Stats.FramesReceived, Is.EqualTo(1));
         }

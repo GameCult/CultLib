@@ -561,14 +561,31 @@ namespace GameCult.Networking
             public long LastSentAtMs { get; set; }
         }
 
+        private sealed class PendingOrderedFrame
+        {
+            public CultNetRudpDeliveredFrame Frame { get; set; } = new CultNetRudpDeliveredFrame();
+            public uint NextSequence { get; set; }
+        }
+
+        private sealed class FragmentBuffer
+        {
+            public string ChannelId { get; set; } = string.Empty;
+            public bool Ordered { get; set; }
+            public ushort FragmentCount { get; set; }
+            public Dictionary<ushort, byte[]> Payloads { get; } = new Dictionary<ushort, byte[]>();
+            public Dictionary<ushort, uint> Sequences { get; } = new Dictionary<ushort, uint>();
+        }
+
         private uint _nextSequence;
+        private ushort _nextFragmentId = 1;
         private bool _connected;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Dictionary<string, uint> _orderedNextSequenceByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
-        private readonly Dictionary<string, SortedDictionary<uint, CultNetRudpDeliveredFrame>> _orderedBuffers =
-            new Dictionary<string, SortedDictionary<uint, CultNetRudpDeliveredFrame>>(StringComparer.Ordinal);
+        private readonly Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>> _orderedBuffers =
+            new Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>>(StringComparer.Ordinal);
+        private readonly Dictionary<string, FragmentBuffer> _fragmentBuffers = new Dictionary<string, FragmentBuffer>(StringComparer.Ordinal);
 
         /// <summary>
         /// Initializes a RUDP reliability session.
@@ -631,12 +648,61 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket Send(string channelId, byte[] payload, CultNetRudpSendOptions? options = null)
         {
+            return SendMany(channelId, payload, options).First();
+        }
+
+        /// <summary>
+        /// Creates one or more data packets, fragmenting when requested.
+        /// </summary>
+        public IReadOnlyList<CultNetRudpPacket> SendMany(string channelId, byte[] payload, CultNetRudpSendOptions? options = null, int? maxFragmentBytes = null)
+        {
             if (!_connected)
             {
                 throw new InvalidOperationException("Cannot send RUDP data before the session is connected.");
             }
 
             options ??= new CultNetRudpSendOptions();
+            payload ??= Array.Empty<byte>();
+            if (maxFragmentBytes.HasValue && maxFragmentBytes.Value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxFragmentBytes), "RUDP maxFragmentBytes must be greater than zero.");
+            }
+
+            if (maxFragmentBytes.HasValue && payload.Length > maxFragmentBytes.Value)
+            {
+                var fragmentCount = (payload.Length + maxFragmentBytes.Value - 1) / maxFragmentBytes.Value;
+                if (fragmentCount > ushort.MaxValue)
+                {
+                    throw new InvalidOperationException("RUDP payload requires more than 65535 fragments.");
+                }
+
+                var fragmentId = AllocateFragmentId();
+                var packets = new List<CultNetRudpPacket>();
+                for (var index = 0; index < fragmentCount; index++)
+                {
+                    var start = index * maxFragmentBytes.Value;
+                    var length = Math.Min(maxFragmentBytes.Value, payload.Length - start);
+                    var chunk = new byte[length];
+                    Array.Copy(payload, start, chunk, 0, length);
+                    var fragmentPacket = CreatePacket(
+                        CultNetRudpPacketType.Data,
+                        channelId,
+                        chunk,
+                        options.Reliable,
+                        options.Ordered,
+                        options.Sequenced,
+                        fragmentId,
+                        (ushort)index,
+                        (ushort)fragmentCount);
+                    if (fragmentPacket.Reliable)
+                    {
+                        TrackReliable(fragmentPacket, options.NowMs);
+                    }
+                    packets.Add(fragmentPacket);
+                }
+                return packets;
+            }
+
             var packet = CreatePacket(
                 CultNetRudpPacketType.Data,
                 channelId,
@@ -648,7 +714,7 @@ namespace GameCult.Networking
             {
                 TrackReliable(packet, options.NowMs);
             }
-            return packet;
+            return new[] { packet };
         }
 
         /// <summary>
@@ -699,16 +765,17 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult();
             }
 
-            var frame = new CultNetRudpDeliveredFrame
+            var reassembled = Reassemble(packet);
+            if (reassembled == null)
             {
-                ChannelId = packet.ChannelId,
-                Payload = packet.Payload ?? Array.Empty<byte>(),
-                Sequence = packet.Sequence
-            };
+                return new CultNetRudpReceiveResult();
+            }
 
             return new CultNetRudpReceiveResult
             {
-                Delivered = packet.Ordered ? DeliverOrdered(frame) : new[] { frame }
+                Delivered = reassembled.Ordered
+                    ? DeliverOrdered(reassembled.Frame, reassembled.NextSequence)
+                    : new[] { reassembled.Frame }
             };
         }
 
@@ -746,6 +813,20 @@ namespace GameCult.Networking
             bool ordered,
             bool sequenced)
         {
+            return CreatePacket(packetType, channelId, payload, reliable, ordered, sequenced, 0, 0, 0);
+        }
+
+        private CultNetRudpPacket CreatePacket(
+            CultNetRudpPacketType packetType,
+            string channelId,
+            byte[] payload,
+            bool reliable,
+            bool ordered,
+            bool sequenced,
+            ushort fragmentId,
+            ushort fragmentIndex,
+            ushort fragmentCount)
+        {
             var sequence = _nextSequence;
             _nextSequence = checked(_nextSequence + 1);
             var (ack, ackMask) = AckState();
@@ -760,6 +841,9 @@ namespace GameCult.Networking
                 Reliable = reliable,
                 Ordered = ordered,
                 Sequenced = sequenced,
+                FragmentId = fragmentId,
+                FragmentIndex = fragmentIndex,
+                FragmentCount = fragmentCount,
                 Payload = payload ?? Array.Empty<byte>()
             };
         }
@@ -809,11 +893,90 @@ namespace GameCult.Networking
             return (ack, ackMask);
         }
 
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(CultNetRudpDeliveredFrame frame)
+        private sealed class ReassembledFrame
+        {
+            public CultNetRudpDeliveredFrame Frame { get; set; } = new CultNetRudpDeliveredFrame();
+            public bool Ordered { get; set; }
+            public uint NextSequence { get; set; }
+        }
+
+        private ReassembledFrame? Reassemble(CultNetRudpPacket packet)
+        {
+            if (packet.FragmentCount == 0)
+            {
+                return new ReassembledFrame
+                {
+                    Frame = new CultNetRudpDeliveredFrame
+                    {
+                        ChannelId = packet.ChannelId,
+                        Payload = packet.Payload ?? Array.Empty<byte>(),
+                        Sequence = packet.Sequence
+                    },
+                    Ordered = packet.Ordered,
+                    NextSequence = packet.Sequence + 1
+                };
+            }
+            if (packet.FragmentId == 0)
+            {
+                throw new InvalidOperationException("RUDP fragmented packet must have a non-zero fragment id.");
+            }
+            if (packet.FragmentIndex >= packet.FragmentCount)
+            {
+                throw new InvalidOperationException("RUDP fragment index must be lower than fragment count.");
+            }
+
+            var key = $"{packet.ChannelId}\0{packet.FragmentId}";
+            if (!_fragmentBuffers.TryGetValue(key, out var buffer))
+            {
+                buffer = new FragmentBuffer
+                {
+                    ChannelId = packet.ChannelId,
+                    Ordered = packet.Ordered,
+                    FragmentCount = packet.FragmentCount
+                };
+                _fragmentBuffers[key] = buffer;
+            }
+            if (buffer.FragmentCount != packet.FragmentCount || buffer.Ordered != packet.Ordered)
+            {
+                throw new InvalidOperationException("RUDP fragment metadata changed within a fragment set.");
+            }
+
+            buffer.Payloads[packet.FragmentIndex] = packet.Payload?.ToArray() ?? Array.Empty<byte>();
+            buffer.Sequences[packet.FragmentIndex] = packet.Sequence;
+            if (buffer.Payloads.Count < packet.FragmentCount)
+            {
+                return null;
+            }
+
+            var payloadLength = buffer.Payloads.Values.Sum(chunk => chunk.Length);
+            var payload = new byte[payloadLength];
+            var offset = 0;
+            for (ushort index = 0; index < packet.FragmentCount; index++)
+            {
+                var chunk = buffer.Payloads[index];
+                Array.Copy(chunk, 0, payload, offset, chunk.Length);
+                offset += chunk.Length;
+            }
+            var sequences = buffer.Sequences.Values.ToArray();
+            _fragmentBuffers.Remove(key);
+            return new ReassembledFrame
+            {
+                Frame = new CultNetRudpDeliveredFrame
+                {
+                    ChannelId = buffer.ChannelId,
+                    Payload = payload,
+                    Sequence = sequences.Min()
+                },
+                Ordered = buffer.Ordered,
+                NextSequence = sequences.Max() + 1
+            };
+        }
+
+        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(CultNetRudpDeliveredFrame frame, uint nextSequenceAfterFrame)
         {
             if (!_orderedNextSequenceByChannel.TryGetValue(frame.ChannelId, out var next))
             {
-                _orderedNextSequenceByChannel[frame.ChannelId] = frame.Sequence + 1;
+                _orderedNextSequenceByChannel[frame.ChannelId] = nextSequenceAfterFrame;
                 return new[] { frame }.Concat(DrainOrdered(frame.ChannelId)).ToArray();
             }
 
@@ -826,15 +989,15 @@ namespace GameCult.Networking
             {
                 if (!_orderedBuffers.TryGetValue(frame.ChannelId, out var buffer))
                 {
-                    buffer = new SortedDictionary<uint, CultNetRudpDeliveredFrame>();
+                    buffer = new SortedDictionary<uint, PendingOrderedFrame>();
                     _orderedBuffers[frame.ChannelId] = buffer;
                 }
 
-                buffer[frame.Sequence] = frame;
+                buffer[frame.Sequence] = new PendingOrderedFrame { Frame = frame, NextSequence = nextSequenceAfterFrame };
                 return Array.Empty<CultNetRudpDeliveredFrame>();
             }
 
-            _orderedNextSequenceByChannel[frame.ChannelId] = next + 1;
+            _orderedNextSequenceByChannel[frame.ChannelId] = nextSequenceAfterFrame;
             return new[] { frame }.Concat(DrainOrdered(frame.ChannelId)).ToArray();
         }
 
@@ -846,14 +1009,25 @@ namespace GameCult.Networking
                 return delivered;
             }
 
-            while (_orderedNextSequenceByChannel.TryGetValue(channelId, out var next) && buffer.TryGetValue(next, out var frame))
+            while (_orderedNextSequenceByChannel.TryGetValue(channelId, out var next) && buffer.TryGetValue(next, out var pending))
             {
                 buffer.Remove(next);
-                delivered.Add(frame);
-                _orderedNextSequenceByChannel[channelId] = next + 1;
+                delivered.Add(pending.Frame);
+                _orderedNextSequenceByChannel[channelId] = pending.NextSequence;
             }
 
             return delivered;
+        }
+
+        private ushort AllocateFragmentId()
+        {
+            var fragmentId = _nextFragmentId;
+            _nextFragmentId++;
+            if (_nextFragmentId == 0)
+            {
+                _nextFragmentId = 1;
+            }
+            return fragmentId;
         }
 
         private void RequireConnection(CultNetRudpPacket packet)
@@ -893,6 +1067,7 @@ namespace GameCult.Networking
         private readonly Socket _socket;
         private readonly CultNetRudpSession _session;
         private readonly CultNetRudpSocketMode _mode;
+        private readonly int? _maxFragmentBytes;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
         private readonly Queue<CultNetTransportFrame> _deliveredFrames = new Queue<CultNetTransportFrame>();
         private EndPoint? _remoteEndPoint;
@@ -908,6 +1083,7 @@ namespace GameCult.Networking
             _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
             _mode = options.Mode;
             _remoteEndPoint = options.RemoteEndPoint;
+            _maxFragmentBytes = options.MaxFragmentBytes;
             _session = new CultNetRudpSession(new CultNetRudpSessionOptions
             {
                 ConnectionId = options.ConnectionId,
@@ -961,8 +1137,10 @@ namespace GameCult.Networking
         /// </summary>
         public void Send(string channelId, byte[] payload)
         {
-            var packet = _session.Send(channelId, payload, ChannelSendOptions(channelId));
-            SendPacket(packet);
+            foreach (var packet in _session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes))
+            {
+                SendPacket(packet);
+            }
             _stats.FramesSent++;
         }
 

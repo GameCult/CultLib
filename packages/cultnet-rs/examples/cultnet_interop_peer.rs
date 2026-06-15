@@ -458,6 +458,19 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
         .transpose()
         .with_context(|| "argument --bind-port must be a u16")?
         .unwrap_or(0);
+    let expected_client_payload = options
+        .get("client-payload")
+        .map(|value| value.as_bytes().to_vec())
+        .unwrap_or_else(|| b"ts-rust-client-state".to_vec());
+    let server_payload = options
+        .get("server-payload")
+        .map(|value| value.as_bytes().to_vec())
+        .unwrap_or_else(|| b"rust-server-state".to_vec());
+    let max_fragment_bytes = options
+        .get("max-fragment-bytes")
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .with_context(|| "argument --max-fragment-bytes must be a u32")?;
     let socket = UdpSocket::bind((bind_host.as_str(), bind_port))
         .with_context(|| format!("failed to bind RUDP server on {bind_host}:{bind_port}"))?;
     socket.set_read_timeout(Some(Duration::from_millis(20)))?;
@@ -466,6 +479,7 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
         CultNetRudpSocketTransportOptions::server("rust-rudp-interop", socket, 0x22446688);
     transport_options.initial_sequence = 100;
     transport_options.resend_delay_ms = 25;
+    transport_options.max_fragment_bytes = max_fragment_bytes;
     let mut transport = CultNetRudpSocketTransportConnection::new(transport_options)?;
 
     print_json(&serde_json::json!({
@@ -476,14 +490,14 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if let Some(frame) = transport.receive_once()? {
-            if frame.channel_id != "schema" || frame.payload != b"ts-rust-client-state" {
+            if frame.channel_id != "schema" || frame.payload != expected_client_payload {
                 return Err(anyhow!(
                     "unexpected RUDP frame: channel={} payload={:?}",
                     frame.channel_id,
                     frame.payload
                 ));
             }
-            transport.send("schema", b"rust-server-state".to_vec())?;
+            transport.send("schema", server_payload.clone())?;
             poll_rudp_after_send(&mut transport, Duration::from_millis(250))?;
             print_json(&serde_json::json!({ "status": "ok" }))?;
             return Ok(());

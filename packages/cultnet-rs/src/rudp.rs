@@ -94,16 +94,33 @@ struct PendingReliablePacket {
     last_sent_at_ms: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingOrderedFrame {
+    frame: CultNetRudpDeliveredFrame,
+    next_sequence: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FragmentBuffer {
+    channel_id: String,
+    ordered: bool,
+    fragment_count: u16,
+    payloads: BTreeMap<u16, Vec<u8>>,
+    sequences: BTreeMap<u16, u32>,
+}
+
 pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
     next_sequence: u32,
+    next_fragment_id: u16,
     connected: bool,
     highest_received_sequence: Option<u32>,
     received_sequences: BTreeSet<u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
-    ordered_buffers: BTreeMap<String, BTreeMap<u32, CultNetRudpDeliveredFrame>>,
+    ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
+    fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
 }
 
 impl CultNetRudpSession {
@@ -112,12 +129,14 @@ impl CultNetRudpSession {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             next_sequence: options.initial_sequence,
+            next_fragment_id: 1,
             connected: false,
             highest_received_sequence: None,
             received_sequences: BTreeSet::new(),
             pending_reliable: BTreeMap::new(),
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
+            fragment_buffers: BTreeMap::new(),
         }
     }
 
@@ -184,10 +203,57 @@ impl CultNetRudpSession {
         payload: Vec<u8>,
         options: CultNetRudpSendOptions,
     ) -> Result<CultNetRudpPacket> {
+        self.send_many(channel_id, payload, options, None)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("RUDP send produced no packets"))
+    }
+
+    pub fn send_many(
+        &mut self,
+        channel_id: &str,
+        payload: Vec<u8>,
+        options: CultNetRudpSendOptions,
+        max_fragment_bytes: Option<usize>,
+    ) -> Result<Vec<CultNetRudpPacket>> {
         if !self.connected {
             return Err(anyhow!(
                 "Cannot send RUDP data before the session is connected"
             ));
+        }
+
+        if let Some(max_fragment_bytes) = max_fragment_bytes {
+            if max_fragment_bytes == 0 {
+                return Err(anyhow!("RUDP max_fragment_bytes must be greater than zero"));
+            }
+            if payload.len() > max_fragment_bytes {
+                let fragment_count = payload.len().div_ceil(max_fragment_bytes);
+                if fragment_count > u16::MAX as usize {
+                    return Err(anyhow!("RUDP payload requires more than 65535 fragments"));
+                }
+                let fragment_id = self.allocate_fragment_id();
+                let mut packets = Vec::new();
+                for index in 0..fragment_count {
+                    let start = index * max_fragment_bytes;
+                    let end = (start + max_fragment_bytes).min(payload.len());
+                    let packet = self.create_packet_with_fragments(
+                        CultNetRudpPacketType::Data,
+                        channel_id,
+                        payload[start..end].to_vec(),
+                        options.reliable,
+                        options.ordered,
+                        options.sequenced,
+                        fragment_id,
+                        index as u16,
+                        fragment_count as u16,
+                    );
+                    if packet.reliable {
+                        self.track_reliable(packet.clone(), options.now_ms);
+                    }
+                    packets.push(packet);
+                }
+                return Ok(packets);
+            }
         }
 
         let packet = self.create_packet(
@@ -201,7 +267,7 @@ impl CultNetRudpSession {
         if packet.reliable {
             self.track_reliable(packet.clone(), options.now_ms);
         }
-        Ok(packet)
+        Ok(vec![packet])
     }
 
     pub fn receive(
@@ -262,13 +328,14 @@ impl CultNetRudpSession {
             });
         }
 
-        let frame = CultNetRudpDeliveredFrame {
-            channel_id: packet.channel_id.clone(),
-            payload: packet.payload.clone(),
-            sequence: packet.sequence,
+        let Some((frame, ordered, next_sequence)) = self.reassemble(packet)? else {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+            });
         };
-        let delivered = if packet.ordered {
-            self.deliver_ordered(frame)
+        let delivered = if ordered {
+            self.deliver_ordered(frame, next_sequence)
         } else {
             vec![frame]
         };
@@ -310,6 +377,32 @@ impl CultNetRudpSession {
         ordered: bool,
         sequenced: bool,
     ) -> CultNetRudpPacket {
+        self.create_packet_with_fragments(
+            packet_type,
+            channel_id,
+            payload,
+            reliable,
+            ordered,
+            sequenced,
+            0,
+            0,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_packet_with_fragments(
+        &mut self,
+        packet_type: CultNetRudpPacketType,
+        channel_id: &str,
+        payload: Vec<u8>,
+        reliable: bool,
+        ordered: bool,
+        sequenced: bool,
+        fragment_id: u16,
+        fragment_index: u16,
+        fragment_count: u16,
+    ) -> CultNetRudpPacket {
         let sequence = self.next_sequence;
         self.next_sequence = self
             .next_sequence
@@ -326,9 +419,9 @@ impl CultNetRudpSession {
             reliable,
             ordered,
             sequenced,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
+            fragment_id,
+            fragment_index,
+            fragment_count,
             payload,
         }
     }
@@ -373,9 +466,88 @@ impl CultNetRudpSession {
         (ack, ack_mask)
     }
 
+    fn reassemble(
+        &mut self,
+        packet: &CultNetRudpPacket,
+    ) -> Result<Option<(CultNetRudpDeliveredFrame, bool, u32)>> {
+        if packet.fragment_count == 0 {
+            return Ok(Some((
+                CultNetRudpDeliveredFrame {
+                    channel_id: packet.channel_id.clone(),
+                    payload: packet.payload.clone(),
+                    sequence: packet.sequence,
+                },
+                packet.ordered,
+                packet.sequence + 1,
+            )));
+        }
+        if packet.fragment_id == 0 {
+            return Err(anyhow!(
+                "RUDP fragmented packet must have a non-zero fragment id"
+            ));
+        }
+        if packet.fragment_index >= packet.fragment_count {
+            return Err(anyhow!(
+                "RUDP fragment index must be lower than fragment count"
+            ));
+        }
+
+        let key = (packet.channel_id.clone(), packet.fragment_id);
+        let buffer = self
+            .fragment_buffers
+            .entry(key.clone())
+            .or_insert_with(|| FragmentBuffer {
+                channel_id: packet.channel_id.clone(),
+                ordered: packet.ordered,
+                fragment_count: packet.fragment_count,
+                payloads: BTreeMap::new(),
+                sequences: BTreeMap::new(),
+            });
+        if buffer.fragment_count != packet.fragment_count || buffer.ordered != packet.ordered {
+            return Err(anyhow!(
+                "RUDP fragment metadata changed within a fragment set"
+            ));
+        }
+        buffer
+            .payloads
+            .insert(packet.fragment_index, packet.payload.clone());
+        buffer
+            .sequences
+            .insert(packet.fragment_index, packet.sequence);
+        if buffer.payloads.len() < packet.fragment_count as usize {
+            return Ok(None);
+        }
+
+        let mut payload = Vec::new();
+        let mut sequences = Vec::new();
+        for index in 0..packet.fragment_count {
+            let Some(chunk) = buffer.payloads.get(&index) else {
+                return Ok(None);
+            };
+            let Some(sequence) = buffer.sequences.get(&index) else {
+                return Ok(None);
+            };
+            payload.extend_from_slice(chunk);
+            sequences.push(*sequence);
+        }
+        let channel_id = buffer.channel_id.clone();
+        let ordered = buffer.ordered;
+        self.fragment_buffers.remove(&key);
+        Ok(Some((
+            CultNetRudpDeliveredFrame {
+                channel_id,
+                payload,
+                sequence: *sequences.iter().min().unwrap(),
+            },
+            ordered,
+            sequences.iter().max().unwrap() + 1,
+        )))
+    }
+
     fn deliver_ordered(
         &mut self,
         frame: CultNetRudpDeliveredFrame,
+        next_sequence_after_frame: u32,
     ) -> Vec<CultNetRudpDeliveredFrame> {
         let channel_id = frame.channel_id.clone();
         let Some(next) = self
@@ -384,7 +556,7 @@ impl CultNetRudpSession {
             .copied()
         else {
             self.ordered_next_sequence_by_channel
-                .insert(channel_id.clone(), frame.sequence + 1);
+                .insert(channel_id.clone(), next_sequence_after_frame);
             let mut delivered = vec![frame];
             delivered.extend(self.drain_ordered(&channel_id));
             return delivered;
@@ -395,15 +567,18 @@ impl CultNetRudpSession {
         }
 
         if frame.sequence > next {
-            self.ordered_buffers
-                .entry(channel_id)
-                .or_default()
-                .insert(frame.sequence, frame);
+            self.ordered_buffers.entry(channel_id).or_default().insert(
+                frame.sequence,
+                PendingOrderedFrame {
+                    frame,
+                    next_sequence: next_sequence_after_frame,
+                },
+            );
             return Vec::new();
         }
 
         self.ordered_next_sequence_by_channel
-            .insert(channel_id.clone(), next + 1);
+            .insert(channel_id.clone(), next_sequence_after_frame);
         let mut delivered = vec![frame];
         delivered.extend(self.drain_ordered(&channel_id));
         delivered
@@ -422,14 +597,23 @@ impl CultNetRudpSession {
             let Some(buffer) = self.ordered_buffers.get_mut(channel_id) else {
                 break;
             };
-            let Some(frame) = buffer.remove(&next) else {
+            let Some(pending) = buffer.remove(&next) else {
                 break;
             };
-            delivered.push(frame);
+            delivered.push(pending.frame);
             self.ordered_next_sequence_by_channel
-                .insert(channel_id.to_string(), next + 1);
+                .insert(channel_id.to_string(), pending.next_sequence);
         }
         delivered
+    }
+
+    fn allocate_fragment_id(&mut self) -> u16 {
+        let fragment_id = self.next_fragment_id;
+        self.next_fragment_id = self.next_fragment_id.saturating_add(1);
+        if self.next_fragment_id == 0 {
+            self.next_fragment_id = 1;
+        }
+        fragment_id
     }
 
     fn require_connection(&self, packet: &CultNetRudpPacket) -> Result<()> {
@@ -508,6 +692,7 @@ pub struct CultNetRudpSocketTransportConnection {
     pub profile: CultNetTransportProfile,
     stats: CultNetTransportStats,
     delivered_frames: VecDeque<CultNetTransportFrame>,
+    max_fragment_bytes: Option<usize>,
 }
 
 impl CultNetRudpSocketTransportConnection {
@@ -535,6 +720,7 @@ impl CultNetRudpSocketTransportConnection {
             profile,
             stats: CultNetTransportStats::default(),
             delivered_frames: VecDeque::new(),
+            max_fragment_bytes: options.max_fragment_bytes.map(|value| value as usize),
         })
     }
 
@@ -558,8 +744,12 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
         let options = channel_send_options(channel_id, now_ms());
-        let packet = self.session.send(channel_id, payload, options)?;
-        self.send_packet(&packet)?;
+        let packets =
+            self.session
+                .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
+        for packet in packets {
+            self.send_packet(&packet)?;
+        }
         self.stats.frames_sent += 1;
         Ok(())
     }

@@ -583,6 +583,15 @@ static void RudpServeOnce(Dictionary<string, string> options)
     var bindPort = options.TryGetValue("bind-port", out var configuredBindPort)
         ? int.Parse(configuredBindPort, CultureInfo.InvariantCulture)
         : 0;
+    var expectedClientPayload = Ascii(options.TryGetValue("client-payload", out var configuredClientPayload)
+        ? configuredClientPayload
+        : "ts-csharp-client-state");
+    var serverPayload = Ascii(options.TryGetValue("server-payload", out var configuredServerPayload)
+        ? configuredServerPayload
+        : "csharp-server-state");
+    var maxFragmentBytes = options.TryGetValue("max-fragment-bytes", out var configuredMaxFragmentBytes)
+        ? int.Parse(configuredMaxFragmentBytes, CultureInfo.InvariantCulture)
+        : (int?)null;
 
     using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
     socket.Bind(new IPEndPoint(IPAddress.Parse(bindHost), bindPort));
@@ -595,7 +604,8 @@ static void RudpServeOnce(Dictionary<string, string> options)
         Mode = CultNetRudpSocketMode.Server,
         ConnectionId = 0x33557799,
         InitialSequence = 100,
-        ResendDelayMs = 25
+        ResendDelayMs = 25,
+        MaxFragmentBytes = maxFragmentBytes
     });
 
     WriteJsonLine(new
@@ -610,8 +620,8 @@ static void RudpServeOnce(Dictionary<string, string> options)
         var frame = transport.ReceiveOnce();
         if (frame != null)
         {
-            RequireRudpFrame(frame, "schema", "ts-csharp-client-state");
-            transport.Send("schema", Ascii("csharp-server-state"));
+            RequireRudpFrameBytes(frame, "schema", expectedClientPayload);
+            transport.Send("schema", serverPayload);
             PollRudpAfterSend(transport, TimeSpan.FromMilliseconds(250));
             WriteJsonLine(new { status = "ok" });
             return;
@@ -681,8 +691,13 @@ static void PollRudpAfterSend(CultNetRudpSocketTransportConnection transport, Ti
 
 static void RequireRudpFrame(CultNetTransportFrame frame, string expectedChannelId, string expectedPayload)
 {
+    RequireRudpFrameBytes(frame, expectedChannelId, Ascii(expectedPayload));
+}
+
+static void RequireRudpFrameBytes(CultNetTransportFrame frame, string expectedChannelId, byte[] expectedPayload)
+{
     if (!string.Equals(frame.ChannelId, expectedChannelId, StringComparison.Ordinal)
-        || !frame.Payload.SequenceEqual(Ascii(expectedPayload)))
+        || !frame.Payload.SequenceEqual(expectedPayload))
     {
         throw new InvalidOperationException(
             $"Unexpected RUDP frame: channel={frame.ChannelId}, payload={Convert.ToHexString(frame.Payload)}.");

@@ -72,10 +72,16 @@ interface RudpServerInteropPeerSpec {
   name: string;
   connectionId: number;
   build: () => Promise<void>;
-  spawn: () => RunningPythonRudpPeer;
+  spawn: (options?: RudpServerSpawnOptions) => RunningPythonRudpPeer;
   joinPayload: string;
   clientPayload: string;
   expectedPayload: string;
+}
+
+interface RudpServerSpawnOptions {
+  clientPayload?: string;
+  serverPayload?: string;
+  maxFragmentBytes?: number;
 }
 
 function rudpServerInteropPeers(): RudpServerInteropPeerSpec[] {
@@ -120,6 +126,7 @@ function rudpServerInteropPeers(): RudpServerInteropPeerSpec[] {
 }
 
 const pythonRudpPeerScript = String.raw`
+import os
 import socket
 import time
 
@@ -128,6 +135,11 @@ from cultnet_py import (
     CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions,
 )
+
+expected_client_payload = os.environ.get("RUDP_CLIENT_PAYLOAD", "client-state").encode()
+server_payload = os.environ.get("RUDP_SERVER_PAYLOAD", "python-state").encode()
+max_fragment_bytes_raw = os.environ.get("RUDP_MAX_FRAGMENT_BYTES")
+max_fragment_bytes = int(max_fragment_bytes_raw) if max_fragment_bytes_raw else None
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("127.0.0.1", 0))
@@ -139,6 +151,7 @@ transport = CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptio
     connection_id=0x55667788,
     initial_sequence=100,
     resend_delay_ms=25,
+    max_fragment_bytes=max_fragment_bytes,
 ))
 print(f"PORT {sock.getsockname()[1]}", flush=True)
 
@@ -149,10 +162,10 @@ while time.time() < deadline:
     if frame is None:
         time.sleep(0.005)
         continue
-    if frame.channel_id != "schema" or frame.payload != b"client-state":
+    if frame.channel_id != "schema" or frame.payload != expected_client_payload:
         transport.close()
         raise SystemExit(f"unexpected RUDP frame: {frame.channel_id!r} {frame.payload!r}")
-    transport.send("schema", b"python-state")
+    transport.send("schema", server_payload)
     print("OK", flush=True)
     ack_deadline = time.time() + 0.25
     while time.time() < ack_deadline:
@@ -1153,6 +1166,58 @@ test("CultNet RUDP reliable schema response survives one dropped server data pac
   }
 });
 
+test("CultNet RUDP fragmented schema frames cross runtime boundaries", async () => {
+  for (const peer of rudpServerInteropPeers()) {
+    await peer.build();
+    const clientPayload = `${peer.clientPayload}:fragmented:${"x".repeat(96)}`;
+    const serverPayload = `${peer.expectedPayload}:fragmented:${"y".repeat(96)}`;
+    const serverPeer = peer.spawn({
+      clientPayload,
+      serverPayload,
+      maxFragmentBytes: 16,
+    });
+    const clientSocket = await bindUdpSocket();
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-fragmented-${peer.name.replace(/\W/g, "").toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: await serverPeer.ready,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 16,
+      });
+
+      const receivedFrame = once(client, "frame");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} fragmented handshake`);
+      client.send("schema", Buffer.from(clientPayload));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} fragmented RUDP response frame`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(serverPayload));
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after fragmented exchange`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
   await buildCSharpInteropPeer();
@@ -1305,10 +1370,16 @@ interface RunningPythonRudpPeer {
   stderr: string[];
 }
 
-function spawnPythonRudpPeer(): RunningPythonRudpPeer {
+function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
   const child = spawn(pythonCommand, ["-c", pythonRudpPeerScript], {
     cwd: cultcachePyRoot,
-    env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    env: {
+      ...process.env,
+      PYTHONPATH: cultcachePySrc,
+      ...(options.clientPayload ? { RUDP_CLIENT_PAYLOAD: options.clientPayload } : {}),
+      ...(options.serverPayload ? { RUDP_SERVER_PAYLOAD: options.serverPayload } : {}),
+      ...(options.maxFragmentBytes ? { RUDP_MAX_FRAGMENT_BYTES: String(options.maxFragmentBytes) } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];
@@ -1353,8 +1424,14 @@ function spawnPythonRudpPeer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
-function spawnRustRudpServer(): RunningPythonRudpPeer {
-  const child = spawn(rustBinaryPath, ["rudp-serve-once", "--bind-host", "127.0.0.1"], {
+function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
+  const child = spawn(rustBinaryPath, [
+    "rudp-serve-once",
+    "--bind-host", "127.0.0.1",
+    ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
+    ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
+  ], {
     cwd: cultnetRsRoot,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1403,8 +1480,15 @@ function spawnRustRudpServer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
-function spawnCSharpRudpServer(): RunningPythonRudpPeer {
-  const child = spawn(dotnetCommand, [csharpDllPath, "rudp-serve-once", "--bind-host", "127.0.0.1"], {
+function spawnCSharpRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
+  const child = spawn(dotnetCommand, [
+    csharpDllPath,
+    "rudp-serve-once",
+    "--bind-host", "127.0.0.1",
+    ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
+    ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
+  ], {
     cwd: cultLibRoot,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1453,12 +1537,15 @@ function spawnCSharpRudpServer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
-function spawnKotlinRudpServer(): RunningPythonRudpPeer {
+function spawnKotlinRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
   const child = spawn(kotlinJavaCommand, [
     "-cp", kotlinClasspath,
     "org.gamecult.cultmesh.CultMeshKt",
     "rudp-serve-once",
     "--bind-host", "127.0.0.1",
+    ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
+    ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultLibRoot,
     env: process.env,
