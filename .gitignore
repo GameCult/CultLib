@@ -356,6 +356,9 @@ paket-files/
 __pycache__/
 *.pyc
 
+# Rust build output
+target/
+
 # Cake - Uncomment if you are using it
 # tools/**
 # !tools/packages.config
