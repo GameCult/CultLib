@@ -525,6 +525,7 @@ private fun rudpServeOnce(options: Map<String, String>) {
             if (frame != null) {
                 requireRudpFrame(frame, "schema", "ts-kotlin-client-state")
                 transport.send("schema", "kotlin-server-state".toByteArray(StandardCharsets.UTF_8))
+                pollRudpAfterSend(transport, 250)
                 println("""{"status":"ok"}""")
                 return
             }
@@ -568,6 +569,15 @@ private fun rudpDialOnce(options: Map<String, String>) {
         }
     }
     error("Timed out waiting for TypeScript RUDP response")
+}
+
+private fun pollRudpAfterSend(transport: CultNetRudpSocketTransportConnection, durationMs: Long) {
+    val deadline = System.nanoTime() + durationMs * 1_000_000L
+    while (System.nanoTime() < deadline) {
+        transport.receiveOnce()
+        transport.pollResends()
+        Thread.sleep(5)
+    }
 }
 
 private fun requireRudpFrame(frame: CultNetTransportFrame, expectedChannelId: String, expectedPayload: String) {

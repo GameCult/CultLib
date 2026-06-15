@@ -612,6 +612,7 @@ static void RudpServeOnce(Dictionary<string, string> options)
         {
             RequireRudpFrame(frame, "schema", "ts-csharp-client-state");
             transport.Send("schema", Ascii("csharp-server-state"));
+            PollRudpAfterSend(transport, TimeSpan.FromMilliseconds(250));
             WriteJsonLine(new { status = "ok" });
             return;
         }
@@ -665,6 +666,17 @@ static void RudpDialOnce(Dictionary<string, string> options)
     }
 
     throw new TimeoutException("Timed out waiting for TypeScript RUDP response.");
+}
+
+static void PollRudpAfterSend(CultNetRudpSocketTransportConnection transport, TimeSpan duration)
+{
+    var deadline = DateTimeOffset.UtcNow.Add(duration);
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        _ = transport.ReceiveOnce();
+        transport.PollResends();
+        Thread.Sleep(5);
+    }
 }
 
 static void RequireRudpFrame(CultNetTransportFrame frame, string expectedChannelId, string expectedPayload)

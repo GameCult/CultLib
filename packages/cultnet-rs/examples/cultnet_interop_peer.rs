@@ -484,6 +484,7 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
                 ));
             }
             transport.send("schema", b"rust-server-state".to_vec())?;
+            poll_rudp_after_send(&mut transport, Duration::from_millis(250))?;
             print_json(&serde_json::json!({ "status": "ok" }))?;
             return Ok(());
         }
@@ -537,6 +538,19 @@ fn rudp_dial_once(options: &BTreeMap<String, String>) -> Result<()> {
     }
 
     Err(anyhow!("timed out waiting for TypeScript RUDP response"))
+}
+
+fn poll_rudp_after_send(
+    transport: &mut CultNetRudpSocketTransportConnection,
+    duration: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        let _ = transport.receive_once()?;
+        transport.poll_resends()?;
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 fn mutate_remote_note(
