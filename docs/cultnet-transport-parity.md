@@ -216,6 +216,10 @@ Current progress:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate
   trust.
+- TypeScript CultMesh local catalogs now expose the same practical discovery
+  ergonomics as the other runtimes: sorted local views, direct `get(...)`
+  lookup, unsubscribe-able `watch(...)` callbacks for Verse and peer catalogs,
+  plus lease listing and lookup beside the authority check.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into reconnect policy and the wider

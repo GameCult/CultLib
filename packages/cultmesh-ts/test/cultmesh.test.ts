@@ -44,6 +44,10 @@ test("CultMesh TS opens a durable local node and registers document bindings", a
 test("CultMesh TS local authority leases do not trust peer cards by contact alone", () => {
   const peers = CultMesh.createPeerCatalog();
   const leases = CultMesh.createAuthorityLeaseCatalog();
+  const peerUpdates: string[] = [];
+  const unsubscribePeer = peers.watch((peerCard) => {
+    peerUpdates.push(peerCard.peerId);
+  });
   const peer = {
     peerId: "voidbot-local",
     verseId: "local",
@@ -53,7 +57,16 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
   };
 
   peers.upsert(peer);
+  unsubscribePeer();
+  peers.upsert({
+    peerId: "unused-peer",
+    verseId: "local",
+    endpoints: ["cultmesh://unused"],
+  });
 
+  assert.deepEqual(peerUpdates, ["voidbot-local"]);
+  assert.equal(peers.get("voidbot-local"), peer);
+  assert.deepEqual(peers.find("local", "shard-primary"), [peer]);
   assert.equal(leases.isAuthorized(peer, "shard-primary"), false);
 
   leases.upsert({
@@ -65,7 +78,33 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
     expiresAt: new Date(Date.now() + 1000),
   });
 
+  assert.equal(leases.get("lease:voidbot-local")?.peerId, "voidbot-local");
+  assert.deepEqual(leases.leases.map((lease) => lease.leaseId), [
+    "lease:voidbot-local",
+  ]);
   assert.equal(leases.isAuthorized(peer, "shard-primary"), true);
+});
+
+test("CultMesh TS local Verse catalog exposes sorted views and watch ergonomics", () => {
+  const verses = CultMesh.createVerseCatalog<{ verseId: string; label: string }>();
+  const updates: string[] = [];
+  const unsubscribe = verses.watch((verse) => {
+    updates.push(verse.verseId);
+  });
+
+  const publicVerse = { verseId: "public", label: "Public Verse" };
+  const privateVerse = { verseId: "private", label: "Private Verse" };
+  verses.upsert(publicVerse.verseId, publicVerse);
+  verses.upsert(privateVerse.verseId, privateVerse);
+  unsubscribe();
+  verses.upsert("scratch", { verseId: "scratch", label: "Scratch" });
+
+  assert.deepEqual(updates, ["public", "private"]);
+  assert.equal(verses.get("public"), publicVerse);
+  assert.deepEqual(
+    verses.verses.map((verse) => verse.verseId),
+    ["private", "public", "scratch"],
+  );
 });
 
 test("CultMesh TS negotiates streaming frame body transports explicitly", () => {

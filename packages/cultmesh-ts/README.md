@@ -6,6 +6,33 @@ native CultMesh stream implementation used by Mimir and Fensalir; this package
 mirrors the typed declaration and negotiation shapes without owning the hot
 frame body path.
 
+## Local Catalogs
+
+The TypeScript projection keeps the same local catalog ergonomics as the other
+runtimes: sorted views, direct lookup, and unsubscribe-able watches.
+
+```ts
+import { CultMesh } from "cultmesh-ts";
+
+const verses = CultMesh.createVerseCatalog<{ verseId: string; label: string }>();
+const stopWatching = verses.watch((verse) => {
+  console.log("updated", verse.verseId);
+});
+
+verses.upsert("public", { verseId: "public", label: "Public Verse" });
+stopWatching();
+
+const peers = CultMesh.createPeerCatalog();
+peers.upsert({
+  peerId: "ts-peer",
+  verseId: "public",
+  endpoints: ["rudp://127.0.0.1:4100"],
+  roles: ["read-replica"],
+});
+
+const readReplicas = peers.find("public", "read-replica");
+```
+
 ## Streaming Mode
 
 CultMesh streaming mode is for audio, video, tensor, and opaque byte frames that

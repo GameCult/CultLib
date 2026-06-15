@@ -61,14 +61,27 @@ export class CultMeshNode {
 
 export class CultMeshVerseCatalog<TVerse = unknown> {
   readonly #verses = new Map<string, TVerse>();
+  readonly #subscribers = new Set<(verse: TVerse) => void>();
 
   public get verses(): readonly TVerse[] {
-    return [...this.#verses.values()];
+    return [...this.#verses.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, verse]) => verse);
+  }
+
+  public watch(callback: (verse: TVerse) => void): () => void {
+    this.#subscribers.add(callback);
+    return () => {
+      this.#subscribers.delete(callback);
+    };
   }
 
   public upsert(verseId: string, verse: TVerse): void {
     requireNonEmpty(verseId, "verseId");
     this.#verses.set(verseId, verse);
+    for (const subscriber of [...this.#subscribers]) {
+      subscriber(verse);
+    }
   }
 
   public get(verseId: string): TVerse | undefined {
@@ -88,6 +101,7 @@ export interface CultMeshPeerCard {
 
 export class CultMeshPeerCatalog {
   readonly #peers = new Map<string, CultMeshPeerCard>();
+  readonly #subscribers = new Set<(peer: CultMeshPeerCard) => void>();
 
   public get peers(): readonly CultMeshPeerCard[] {
     return [...this.#peers.values()].sort((left, right) =>
@@ -95,10 +109,25 @@ export class CultMeshPeerCatalog {
     );
   }
 
+  public watch(callback: (peer: CultMeshPeerCard) => void): () => void {
+    this.#subscribers.add(callback);
+    return () => {
+      this.#subscribers.delete(callback);
+    };
+  }
+
   public upsert(peer: CultMeshPeerCard): void {
     requireNonEmpty(peer.peerId, "peer.peerId");
     requireNonEmpty(peer.verseId, "peer.verseId");
     this.#peers.set(peer.peerId, peer);
+    for (const subscriber of [...this.#subscribers]) {
+      subscriber(peer);
+    }
+  }
+
+  public get(peerId: string): CultMeshPeerCard | undefined {
+    requireNonEmpty(peerId, "peerId");
+    return this.#peers.get(peerId);
   }
 
   public find(verseId: string, role?: string): readonly CultMeshPeerCard[] {
@@ -124,6 +153,12 @@ export interface CultMeshAuthorityLease {
 export class CultMeshAuthorityLeaseCatalog {
   readonly #leases = new Map<string, CultMeshAuthorityLease>();
 
+  public get leases(): readonly CultMeshAuthorityLease[] {
+    return [...this.#leases.values()].sort((left, right) =>
+      left.leaseId.localeCompare(right.leaseId),
+    );
+  }
+
   public upsert(lease: CultMeshAuthorityLease): void {
     requireNonEmpty(lease.leaseId, "lease.leaseId");
     requireNonEmpty(lease.verseId, "lease.verseId");
@@ -133,6 +168,11 @@ export class CultMeshAuthorityLeaseCatalog {
     }
 
     this.#leases.set(lease.leaseId, lease);
+  }
+
+  public get(leaseId: string): CultMeshAuthorityLease | undefined {
+    requireNonEmpty(leaseId, "leaseId");
+    return this.#leases.get(leaseId);
   }
 
   public isAuthorized(
