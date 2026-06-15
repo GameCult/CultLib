@@ -264,6 +264,8 @@ class CultMeshNode(
     fun applyRawSnapshotResponse(response: CultNetMessage): List<Any> = cache.applyRawSnapshotResponse(response)
 
     fun applyDocumentDelete(message: CultNetMessage): Boolean = cache.applyDocumentDelete(message)
+
+    fun applyShardLogResponse(response: CultNetMessage): List<Any?> = cache.applyShardLogResponse(response)
 }
 
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
@@ -391,6 +393,114 @@ data class CultNetSchemaDescriptor(
     }
 }
 
+data class CultNetShardDescriptor(
+    val shardId: String,
+    val ownerRuntimeId: String,
+    val epoch: Long = 0,
+    val isPrimary: Boolean = false,
+    val schemaIds: List<String> = emptyList(),
+    val keyPrefix: String? = null,
+    val primaryEndpoints: List<String> = emptyList(),
+    val replicaEndpoints: List<String> = emptyList(),
+    val readReplicaEndpoints: List<String> = emptyList(),
+    val region: String? = null,
+    val authorityLeaseId: String? = null,
+) {
+    fun serves(schemaId: String? = null, recordKey: String? = null): Boolean =
+        (schemaId == null || schemaIds.isEmpty() || schemaId in schemaIds) &&
+            (recordKey == null || keyPrefix.isNullOrBlank() || recordKey.startsWith(keyPrefix))
+
+    fun toWireMap(): Map<String, Any?> {
+        val wire = linkedMapOf<String, Any?>(
+            "shardId" to shardId,
+            "ownerRuntimeId" to ownerRuntimeId,
+            "epoch" to epoch,
+            "isPrimary" to isPrimary,
+            "schemaIds" to schemaIds,
+            "primaryEndpoints" to primaryEndpoints,
+            "replicaEndpoints" to replicaEndpoints,
+            "readReplicaEndpoints" to readReplicaEndpoints,
+        )
+        if (!keyPrefix.isNullOrBlank()) wire["keyPrefix"] = keyPrefix
+        if (!region.isNullOrBlank()) wire["region"] = region
+        if (!authorityLeaseId.isNullOrBlank()) wire["authorityLeaseId"] = authorityLeaseId
+        return wire
+    }
+}
+
+data class CultNetShardLogEntry(
+    val sequence: Long,
+    val changeKind: String,
+    val put: CultNetMessage? = null,
+    val delete: CultNetMessage? = null,
+    val committedAt: String? = null,
+) {
+    fun toWireMap(): Map<String, Any?> {
+        if (sequence <= 0) throw IOException("shard log entry sequence must be positive")
+        if (changeKind !in setOf("added", "updated", "removed")) throw IOException("unsupported shard log changeKind $changeKind")
+        val wire = linkedMapOf<String, Any?>(
+            "sequence" to sequence,
+            "changeKind" to changeKind,
+        )
+        if (put != null) wire["put"] = put.toWireMap()
+        if (delete != null) wire["delete"] = delete.toWireMap()
+        if (!committedAt.isNullOrBlank()) wire["committedAt"] = committedAt
+        return wire
+    }
+}
+
+data class CultNetShardLogResponse(
+    val messageId: String,
+    val shardId: String,
+    val shardEpoch: Long,
+    val entries: List<CultNetShardLogEntry>,
+    val resyncRequired: Boolean = false,
+    val reason: String? = null,
+    val compactedThrough: Long? = null,
+) {
+    val lastSequence: Long
+        get() = entries.maxOfOrNull { it.sequence } ?: compactedThrough ?: 0
+
+    fun requireUsable(): CultNetShardLogResponse {
+        if (resyncRequired) throw IOException("Shard log response requires resync: ${reason ?: "unspecified"}")
+        return this
+    }
+
+    fun toMessage(): CultNetMessage {
+        val body = linkedMapOf<String, Any?>(
+            "messageId" to messageId,
+            "shardId" to shardId,
+            "shardEpoch" to shardEpoch,
+            "entries" to entries.map { it.toWireMap() },
+            "resyncRequired" to resyncRequired,
+        )
+        if (!reason.isNullOrBlank()) body["reason"] = reason
+        if (compactedThrough != null) body["compactedThrough"] = compactedThrough
+        return CultNetMessage("cultnet.shard_log_response.v0", body)
+    }
+}
+
+data class CultNetShardReplicaCursor(
+    val shardId: String,
+    val shardEpoch: Long,
+    val lastAppliedSequence: Long,
+    val updatedAt: String,
+)
+
+class CultNetInMemoryShardReplicaCursorStore {
+    private val cursors = linkedMapOf<String, CultNetShardReplicaCursor>()
+
+    fun read(shardId: String): CultNetShardReplicaCursor? {
+        requireNonBlank(shardId, "shardId")
+        return cursors[shardId]
+    }
+
+    fun write(cursor: CultNetShardReplicaCursor) {
+        requireNonBlank(cursor.shardId, "cursor.shardId")
+        cursors[cursor.shardId] = cursor
+    }
+}
+
 class CultNetSchemaCatalog {
     private val descriptorsBySchemaId = linkedMapOf<String, CultNetSchemaDescriptor>()
     private val subscribers = mutableListOf<(CultNetSchemaDescriptor) -> Unit>()
@@ -453,6 +563,62 @@ class CultNetSchemaCatalog {
             "Expected cultnet.schema_catalog_response.v0, received ${response.schemaVersion}"
         }
         val applied = mapList(response.body["schemas"]).map { schemaDescriptorFromWire(it) }
+        applied.forEach { upsert(it) }
+        return applied
+    }
+}
+
+class CultNetShardCatalog {
+    private val shardsById = linkedMapOf<String, CultNetShardDescriptor>()
+    private val subscribers = mutableListOf<(CultNetShardDescriptor) -> Unit>()
+
+    val shards: List<CultNetShardDescriptor>
+        get() = shardsById.toSortedMap().values.toList()
+
+    fun watch(callback: (CultNetShardDescriptor) -> Unit): () -> Unit {
+        subscribers.add(callback)
+        return { subscribers.remove(callback) }
+    }
+
+    fun upsert(descriptor: CultNetShardDescriptor): CultNetShardDescriptor {
+        requireNonBlank(descriptor.shardId, "shard.shardId")
+        requireNonBlank(descriptor.ownerRuntimeId, "shard.ownerRuntimeId")
+        shardsById[descriptor.shardId] = descriptor
+        subscribers.toList().forEach { it(descriptor) }
+        return descriptor
+    }
+
+    fun get(shardId: String): CultNetShardDescriptor? {
+        requireNonBlank(shardId, "shardId")
+        return shardsById[shardId]
+    }
+
+    fun list(schemaIds: List<String> = emptyList(), recordKeys: List<String> = emptyList()): List<CultNetShardDescriptor> {
+        val requestedSchemas = schemaIds.toSet()
+        return shards.filter { shard ->
+            (requestedSchemas.isEmpty() || requestedSchemas.any { shard.serves(schemaId = it) }) &&
+                (recordKeys.isEmpty() || recordKeys.any { shard.serves(recordKey = it) })
+        }
+    }
+
+    fun createResponse(request: CultNetMessage): CultNetMessage {
+        require(request.schemaVersion == "cultnet.shard_catalog_request.v0") {
+            "Expected cultnet.shard_catalog_request.v0, received ${request.schemaVersion}"
+        }
+        return cultNetShardCatalogResponse(
+            messageId = request.body["messageId"] as? String ?: "",
+            shards = list(
+                schemaIds = stringList(request.body["schemaIds"]),
+                recordKeys = stringList(request.body["recordKeys"]),
+            ),
+        )
+    }
+
+    fun applyResponse(response: CultNetMessage): List<CultNetShardDescriptor> {
+        require(response.schemaVersion == "cultnet.shard_catalog_response.v0") {
+            "Expected cultnet.shard_catalog_response.v0, received ${response.schemaVersion}"
+        }
+        val applied = mapList(response.body["shards"]).map { shardDescriptorFromWire(it) }
         applied.forEach { upsert(it) }
         return applied
     }
@@ -776,6 +942,65 @@ fun cultNetSnapshotResponseRaw(
     return CultNetMessage("cultnet.snapshot_response_raw.v0", body)
 }
 
+fun cultNetShardCatalogRequest(
+    messageId: String,
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+): CultNetMessage = CultNetMessage(
+    "cultnet.shard_catalog_request.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "schemaIds" to schemaIds,
+        "recordKeys" to recordKeys,
+    ),
+)
+
+fun cultNetShardCatalogResponse(
+    messageId: String,
+    shards: List<CultNetShardDescriptor>,
+): CultNetMessage = CultNetMessage(
+    "cultnet.shard_catalog_response.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "shards" to shards.map { it.toWireMap() },
+    ),
+)
+
+fun cultNetShardLogRequest(
+    messageId: String,
+    shardId: String,
+    shardEpoch: Long? = null,
+    afterSequence: Long = 0,
+    limit: Int? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "shardId" to shardId,
+        "afterSequence" to afterSequence,
+    )
+    if (shardEpoch != null) body["shardEpoch"] = shardEpoch
+    if (limit != null) body["limit"] = limit.toLong()
+    return CultNetMessage("cultnet.shard_log_request.v0", body)
+}
+
+fun cultNetShardLogResponse(
+    messageId: String,
+    shardId: String,
+    shardEpoch: Long,
+    entries: List<CultNetShardLogEntry>,
+    resyncRequired: Boolean = false,
+    reason: String? = null,
+    compactedThrough: Long? = null,
+): CultNetMessage = CultNetShardLogResponse(
+    messageId = messageId,
+    shardId = shardId,
+    shardEpoch = shardEpoch,
+    entries = entries,
+    resyncRequired = resyncRequired,
+    reason = reason,
+    compactedThrough = compactedThrough,
+).toMessage()
+
 fun CultCache.createRawSnapshotResponse(
     request: CultNetMessage,
     storedAt: String = Instant.now().toString(),
@@ -829,6 +1054,20 @@ fun CultCache.applyDocumentDelete(message: CultNetMessage): Boolean {
     val schemaId = requireWireString(message.body, "schemaId")
     val recordKey = requireWireString(message.body, "recordKey")
     return deleteBySchema(schemaId, recordKey)
+}
+
+fun CultCache.applyShardLogResponse(response: CultNetMessage): List<Any?> {
+    val shardLog = shardLogResponseFromMessage(response).requireUsable()
+    return shardLog.entries.map { entry ->
+        when (entry.changeKind) {
+            "added", "updated" -> entry.put?.let { applyRawDocumentPut(it) }
+            "removed" -> {
+                entry.delete?.let { applyDocumentDelete(it) }
+                null
+            }
+            else -> throw IOException("unsupported shard log changeKind ${entry.changeKind}")
+        }
+    }
 }
 
 private fun CultCache.applyRawDocumentRecord(document: CultNetRawDocumentRecord): Any {
@@ -959,6 +1198,54 @@ fun schemaDescriptorFromWire(wire: Map<String, Any?>): CultNetSchemaDescriptor =
     contentHash = requireWireString(wire, "contentHash"),
     schemaJson = wire["schemaJson"] as? String,
 )
+
+fun shardDescriptorFromWire(wire: Map<String, Any?>): CultNetShardDescriptor = CultNetShardDescriptor(
+    shardId = requireWireString(wire, "shardId"),
+    ownerRuntimeId = requireWireString(wire, "ownerRuntimeId"),
+    epoch = (wire["epoch"] as? Number)?.toLong() ?: 0,
+    isPrimary = wire["isPrimary"] == true,
+    schemaIds = stringList(wire["schemaIds"]),
+    keyPrefix = wire["keyPrefix"] as? String,
+    primaryEndpoints = stringList(wire["primaryEndpoints"]),
+    replicaEndpoints = stringList(wire["replicaEndpoints"]),
+    readReplicaEndpoints = stringList(wire["readReplicaEndpoints"]),
+    region = wire["region"] as? String,
+    authorityLeaseId = wire["authorityLeaseId"] as? String,
+)
+
+fun shardLogEntryFromWire(wire: Map<String, Any?>): CultNetShardLogEntry {
+    val sequence = (wire["sequence"] as? Number)?.toLong() ?: 0
+    val changeKind = requireWireString(wire, "changeKind")
+    if (sequence <= 0) throw IOException("shard log entry sequence must be positive")
+    if (changeKind !in setOf("added", "updated", "removed")) throw IOException("unsupported shard log changeKind $changeKind")
+    return CultNetShardLogEntry(
+        sequence = sequence,
+        changeKind = changeKind,
+        put = (wire["put"] as? Map<*, *>)?.let { messageFromWireMap(mapValue(it)) },
+        delete = (wire["delete"] as? Map<*, *>)?.let { messageFromWireMap(mapValue(it)) },
+        committedAt = wire["committedAt"] as? String,
+    )
+}
+
+fun shardLogResponseFromMessage(message: CultNetMessage): CultNetShardLogResponse {
+    require(message.schemaVersion == "cultnet.shard_log_response.v0") {
+        "Expected cultnet.shard_log_response.v0, received ${message.schemaVersion}"
+    }
+    return CultNetShardLogResponse(
+        messageId = message.body["messageId"] as? String ?: "",
+        shardId = requireWireString(message.body, "shardId"),
+        shardEpoch = (message.body["shardEpoch"] as? Number)?.toLong() ?: 0,
+        entries = mapList(message.body["entries"]).map { shardLogEntryFromWire(it) },
+        resyncRequired = message.body["resyncRequired"] == true,
+        reason = message.body["reason"] as? String,
+        compactedThrough = (message.body["compactedThrough"] as? Number)?.toLong(),
+    )
+}
+
+private fun messageFromWireMap(wire: Map<String, Any?>): CultNetMessage {
+    val schemaVersion = requireWireString(wire, "schemaVersion")
+    return CultNetMessage(schemaVersion, wire.filterKeys { it != "schemaVersion" })
+}
 
 private fun requireNonBlank(value: String, fieldName: String) {
     if (value.isBlank()) throw IOException("$fieldName must not be blank")
@@ -1694,6 +1981,7 @@ fun main(args: Array<String>) {
         cultNetSchemaMessagesUseMessagePackMaps()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
+        cultNetShardCatalogsAndLogsRoundTrip()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
@@ -1976,6 +2264,106 @@ private fun cultMeshCatalogsRoundTripDiscoveryMessages() {
     val appliedPeers = appliedPeerCatalog.applyResponse(peerResponse)
     check(appliedPeers.single().peerId == "peer-a")
     check(appliedPeerCatalog.get("peer-a")?.hasRole("schema") == true)
+}
+
+private fun cultNetShardCatalogsAndLogsRoundTrip() {
+    val notes = stringDocument("kotlin.note", "kotlin.note.v1")
+    val cache = CultCache()
+    cache.register(notes)
+
+    val shardCatalog = CultNetShardCatalog()
+    var watchedShard: CultNetShardDescriptor? = null
+    val unsubscribeShard = shardCatalog.watch { watchedShard = it }
+    shardCatalog.upsert(
+        CultNetShardDescriptor(
+            shardId = "notes-a",
+            ownerRuntimeId = "kotlin-owner",
+            epoch = 7,
+            isPrimary = true,
+            schemaIds = listOf(notes.schemaVersion),
+            keyPrefix = "note:",
+            primaryEndpoints = listOf("rudp://127.0.0.1:5000"),
+            readReplicaEndpoints = listOf("rudp://127.0.0.1:5001"),
+            region = "local",
+        ),
+    )
+    shardCatalog.upsert(
+        CultNetShardDescriptor(
+            shardId = "other",
+            ownerRuntimeId = "kotlin-owner",
+            epoch = 1,
+            schemaIds = listOf("other.v1"),
+            keyPrefix = "other:",
+        ),
+    )
+    unsubscribeShard()
+    check(watchedShard?.shardId == "other")
+    val catalogResponse = parseCultNetMessage(
+        shardCatalog.createResponse(
+            cultNetShardCatalogRequest(
+                messageId = "shards",
+                schemaIds = listOf(notes.schemaVersion),
+                recordKeys = listOf("note:1"),
+            ),
+        ).toBytes(),
+    )
+    val appliedShardCatalog = CultNetShardCatalog()
+    val appliedShards = appliedShardCatalog.applyResponse(catalogResponse)
+    check(appliedShards.single().shardId == "notes-a")
+    check(appliedShardCatalog.get("notes-a")?.serves(schemaId = notes.schemaVersion, recordKey = "note:2") == true)
+
+    val put = cultNetDocumentPutRaw(
+        messageId = "put-note",
+        document = CultNetRawDocumentRecord(
+            schemaId = notes.schemaVersion,
+            recordKey = "note:1",
+            storedAt = "2026-06-15T00:00:00Z",
+            payload = notes.codec.encode("hello"),
+        ),
+        shardId = "notes-a",
+        shardEpoch = 7,
+    )
+    val delete = cultNetDocumentDelete(
+        messageId = "delete-note",
+        schemaId = notes.schemaVersion,
+        recordKey = "note:1",
+        shardId = "notes-a",
+        shardEpoch = 7,
+    )
+    val response = parseCultNetMessage(
+        cultNetShardLogResponse(
+            messageId = "log",
+            shardId = "notes-a",
+            shardEpoch = 7,
+            entries = listOf(
+                CultNetShardLogEntry(1, "added", put = put, committedAt = "2026-06-15T00:00:01Z"),
+                CultNetShardLogEntry(2, "removed", delete = delete, committedAt = "2026-06-15T00:00:02Z"),
+            ),
+        ).toBytes(),
+    )
+    val parsedLog = shardLogResponseFromMessage(response)
+    check(parsedLog.lastSequence == 2L)
+    val applied = cache.applyShardLogResponse(response)
+    check(applied == listOf("hello", null))
+    check(cache.get(notes, "note:1") == null)
+
+    val resync = shardLogResponseFromMessage(
+        cultNetShardLogResponse(
+            messageId = "log-resync",
+            shardId = "notes-a",
+            shardEpoch = 7,
+            entries = emptyList(),
+            resyncRequired = true,
+            reason = "compacted_history",
+            compactedThrough = 4,
+        ),
+    )
+    check(resync.lastSequence == 4L)
+    check(runCatching { resync.requireUsable() }.exceptionOrNull() is IOException)
+
+    val cursors = CultNetInMemoryShardReplicaCursorStore()
+    cursors.write(CultNetShardReplicaCursor("notes-a", 7, parsedLog.lastSequence, "2026-06-15T00:00:03Z"))
+    check(cursors.read("notes-a")?.lastAppliedSequence == 2L)
 }
 
 private fun rudpServeOnce(options: Map<String, String>) {

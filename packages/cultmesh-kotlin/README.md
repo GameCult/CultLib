@@ -86,6 +86,43 @@ val response = catalog.createResponse(
 `cultnet.schema_catalog_response.v0` descriptors from other runtimes and keeps
 their content hashes, wire contracts, schema ids, and optional schema JSON.
 
+Shard catalogs and shard-log responses use the same schema-v0 lane:
+
+```kotlin
+val shards = CultNetShardCatalog()
+shards.upsert(
+    CultNetShardDescriptor(
+        shardId = "notes-a",
+        ownerRuntimeId = "kotlin-owner",
+        epoch = 7,
+        isPrimary = true,
+        schemaIds = listOf(notes.schemaVersion),
+        keyPrefix = "note:",
+        primaryEndpoints = listOf("rudp://127.0.0.1:5000"),
+    ),
+)
+
+val shardResponse = shards.createResponse(
+    cultNetShardCatalogRequest(
+        messageId = "discover-shards",
+        schemaIds = listOf(notes.schemaVersion),
+        recordKeys = listOf("note:1"),
+    ),
+)
+
+val logRequest = cultNetShardLogRequest(
+    messageId = "pull-notes",
+    shardId = "notes-a",
+    shardEpoch = 7,
+    afterSequence = 12,
+)
+```
+
+`CultCache.applyShardLogResponse(...)` applies `added` and `updated` entries
+through raw document put messages and `removed` entries through document delete
+messages. `CultNetInMemoryShardReplicaCursorStore` keeps the last applied
+sequence for lightweight Kotlin clients.
+
 ## RUDP Happy Path
 
 Kotlin exposes factory helpers around the shared RUDP transport so callers can
