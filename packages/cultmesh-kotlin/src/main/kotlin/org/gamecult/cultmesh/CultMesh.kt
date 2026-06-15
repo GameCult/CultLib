@@ -301,6 +301,188 @@ data class CultNetRawDocumentRecord(
     }
 }
 
+data class CultMeshVerseCompatibility(
+    val transportVersion: String,
+    val rulesHash: String,
+    val compatibleVerseIds: List<String> = emptyList(),
+    val requiredPluginIds: List<String> = emptyList(),
+    val optionalPluginIds: List<String> = emptyList(),
+) {
+    fun toWireMap(): Map<String, Any?> = linkedMapOf(
+        "transportVersion" to transportVersion,
+        "rulesHash" to rulesHash,
+        "compatibleVerseIds" to compatibleVerseIds,
+        "requiredPluginIds" to requiredPluginIds,
+        "optionalPluginIds" to optionalPluginIds,
+    )
+}
+
+data class CultMeshVerseDescriptor(
+    val verseId: String,
+    val displayName: String,
+    val authorityModel: String,
+    val compatibility: CultMeshVerseCompatibility,
+    val discoveryEndpoints: List<String> = emptyList(),
+    val authorityRuntimeIds: List<String> = emptyList(),
+    val parentVerseId: String? = null,
+    val description: String? = null,
+) {
+    fun toWireMap(): Map<String, Any?> = linkedMapOf(
+        "verseId" to verseId,
+        "displayName" to displayName,
+        "authorityModel" to authorityModel,
+        "compatibility" to compatibility.toWireMap(),
+        "discoveryEndpoints" to discoveryEndpoints,
+        "authorityRuntimeIds" to authorityRuntimeIds,
+        "parentVerseId" to parentVerseId,
+        "description" to description,
+    )
+
+    fun canTransferFrom(source: CultMeshVerseDescriptor): Boolean =
+        compatibility.transportVersion == source.compatibility.transportVersion &&
+            (compatibility.rulesHash == source.compatibility.rulesHash || source.verseId in compatibility.compatibleVerseIds)
+}
+
+data class CultMeshPeerCard(
+    val peerId: String,
+    val verseId: String,
+    val endpoints: List<String>,
+    val roles: List<String> = emptyList(),
+    val shardIds: List<String> = emptyList(),
+    val region: String? = null,
+    val authorityLeaseId: String? = null,
+    val expiresAt: String? = null,
+    val signature: String? = null,
+) {
+    fun toWireMap(): Map<String, Any?> = linkedMapOf(
+        "peerId" to peerId,
+        "verseId" to verseId,
+        "endpoints" to endpoints,
+        "roles" to roles,
+        "shardIds" to shardIds,
+        "region" to region,
+        "authorityLeaseId" to authorityLeaseId,
+        "expiresAt" to expiresAt,
+        "signature" to signature,
+    )
+
+    fun hasRole(role: String): Boolean {
+        requireNonBlank(role, "role")
+        return role in roles
+    }
+}
+
+class CultMeshVerseCatalog {
+    private val knownVerses = linkedMapOf<String, CultMeshVerseDescriptor>()
+    private val subscribers = mutableListOf<(CultMeshVerseDescriptor) -> Unit>()
+
+    val verses: List<CultMeshVerseDescriptor>
+        get() = knownVerses.toSortedMap().values.toList()
+
+    fun watch(callback: (CultMeshVerseDescriptor) -> Unit): () -> Unit {
+        subscribers.add(callback)
+        return { subscribers.remove(callback) }
+    }
+
+    fun upsert(verse: CultMeshVerseDescriptor) {
+        requireNonBlank(verse.verseId, "verse.verseId")
+        knownVerses[verse.verseId] = verse
+        subscribers.toList().forEach { it(verse) }
+    }
+
+    fun get(verseId: String): CultMeshVerseDescriptor? {
+        requireNonBlank(verseId, "verseId")
+        return knownVerses[verseId]
+    }
+
+    fun findTransferTargets(source: CultMeshVerseDescriptor): List<CultMeshVerseDescriptor> =
+        verses.filter { it.verseId != source.verseId && it.canTransferFrom(source) }
+
+    fun createResponse(request: CultNetMessage): CultNetMessage {
+        require(request.schemaVersion == "cultmesh.verse_catalog_request.v0") {
+            "Expected cultmesh.verse_catalog_request.v0, received ${request.schemaVersion}"
+        }
+        val requested = stringList(request.body["verseIds"]).toSet()
+        val transportVersion = request.body["transportVersion"] as? String
+        val filtered = verses.filter { verse ->
+            (requested.isEmpty() || verse.verseId in requested) &&
+                (transportVersion.isNullOrBlank() || verse.compatibility.transportVersion == transportVersion)
+        }
+        return cultMeshVerseCatalogResponse(
+            messageId = request.body["messageId"] as? String ?: "",
+            verses = filtered,
+        )
+    }
+
+    fun applyResponse(response: CultNetMessage): List<CultMeshVerseDescriptor> {
+        require(response.schemaVersion == "cultmesh.verse_catalog_response.v0") {
+            "Expected cultmesh.verse_catalog_response.v0, received ${response.schemaVersion}"
+        }
+        val applied = mapList(response.body["verses"]).map { verseFromWire(it) }
+        applied.forEach { upsert(it) }
+        return applied
+    }
+}
+
+class CultMeshPeerCatalog {
+    private val knownPeers = linkedMapOf<String, CultMeshPeerCard>()
+    private val subscribers = mutableListOf<(CultMeshPeerCard) -> Unit>()
+
+    val peers: List<CultMeshPeerCard>
+        get() = knownPeers.toSortedMap().values.toList()
+
+    fun watch(callback: (CultMeshPeerCard) -> Unit): () -> Unit {
+        subscribers.add(callback)
+        return { subscribers.remove(callback) }
+    }
+
+    fun upsert(peer: CultMeshPeerCard) {
+        requireNonBlank(peer.peerId, "peer.peerId")
+        requireNonBlank(peer.verseId, "peer.verseId")
+        knownPeers[peer.peerId] = peer
+        subscribers.toList().forEach { it(peer) }
+    }
+
+    fun get(peerId: String): CultMeshPeerCard? {
+        requireNonBlank(peerId, "peerId")
+        return knownPeers[peerId]
+    }
+
+    fun find(verseId: String, role: String? = null): List<CultMeshPeerCard> {
+        requireNonBlank(verseId, "verseId")
+        return peers.filter { peer -> peer.verseId == verseId && (role == null || peer.hasRole(role)) }
+    }
+
+    fun createResponse(request: CultNetMessage): CultNetMessage {
+        require(request.schemaVersion == "cultmesh.peer_exchange_request.v0") {
+            "Expected cultmesh.peer_exchange_request.v0, received ${request.schemaVersion}"
+        }
+        val verseId = request.body["verseId"] as? String ?: ""
+        val roles = stringList(request.body["roles"]).toSet()
+        val knownPeerIds = stringList(request.body["knownPeerIds"]).toSet()
+        val limit = (request.body["limit"] as? Number)?.toInt()
+        val filtered = peers.asSequence()
+            .filter { it.verseId == verseId }
+            .filter { it.peerId !in knownPeerIds }
+            .filter { peer -> roles.isEmpty() || peer.roles.any { it in roles } }
+            .let { sequence -> if (limit != null) sequence.take(limit) else sequence }
+            .toList()
+        return cultMeshPeerExchangeResponse(
+            messageId = request.body["messageId"] as? String ?: "",
+            peers = filtered,
+        )
+    }
+
+    fun applyResponse(response: CultNetMessage): List<CultMeshPeerCard> {
+        require(response.schemaVersion == "cultmesh.peer_exchange_response.v0") {
+            "Expected cultmesh.peer_exchange_response.v0, received ${response.schemaVersion}"
+        }
+        val applied = mapList(response.body["peers"]).map { peerFromWire(it) }
+        applied.forEach { upsert(it) }
+        return applied
+    }
+}
+
 fun cultNetHello(
     runtimeId: String,
     runtimeKind: String = "kotlin",
@@ -388,6 +570,58 @@ fun cultNetSnapshotRequest(
     return CultNetMessage("cultnet.snapshot_request.v0", body)
 }
 
+fun cultMeshVerseCatalogRequest(
+    messageId: String,
+    verseIds: List<String> = emptyList(),
+    transportVersion: String? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "verseIds" to verseIds,
+    )
+    if (!transportVersion.isNullOrBlank()) body["transportVersion"] = transportVersion
+    return CultNetMessage("cultmesh.verse_catalog_request.v0", body)
+}
+
+fun cultMeshVerseCatalogResponse(
+    messageId: String,
+    verses: List<CultMeshVerseDescriptor>,
+): CultNetMessage = CultNetMessage(
+    "cultmesh.verse_catalog_response.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "verses" to verses.map { it.toWireMap() },
+    ),
+)
+
+fun cultMeshPeerExchangeRequest(
+    messageId: String,
+    verseId: String,
+    roles: List<String> = emptyList(),
+    knownPeerIds: List<String> = emptyList(),
+    limit: Int? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "verseId" to verseId,
+        "roles" to roles,
+        "knownPeerIds" to knownPeerIds,
+    )
+    if (limit != null) body["limit"] = limit.toLong()
+    return CultNetMessage("cultmesh.peer_exchange_request.v0", body)
+}
+
+fun cultMeshPeerExchangeResponse(
+    messageId: String,
+    peers: List<CultMeshPeerCard>,
+): CultNetMessage = CultNetMessage(
+    "cultmesh.peer_exchange_response.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "peers" to peers.map { it.toWireMap() },
+    ),
+)
+
 fun encodeCultNetMessage(message: CultNetMessage): ByteArray =
     MessagePackWriter().value(message.toWireMap()).toByteArray()
 
@@ -404,6 +638,72 @@ fun parseCultNetMessage(payload: ByteArray): CultNetMessage {
         if (key != "schemaVersion") body[key] = value
     }
     return CultNetMessage(schemaVersion, body)
+}
+
+fun verseFromWire(wire: Map<String, Any?>): CultMeshVerseDescriptor = CultMeshVerseDescriptor(
+    verseId = requireWireString(wire, "verseId"),
+    displayName = wire["displayName"] as? String ?: "",
+    authorityModel = wire["authorityModel"] as? String ?: "",
+    compatibility = compatibilityFromWire(mapValue(wire["compatibility"])),
+    discoveryEndpoints = stringList(wire["discoveryEndpoints"]),
+    authorityRuntimeIds = stringList(wire["authorityRuntimeIds"]),
+    parentVerseId = wire["parentVerseId"] as? String,
+    description = wire["description"] as? String,
+)
+
+fun compatibilityFromWire(wire: Map<String, Any?>): CultMeshVerseCompatibility = CultMeshVerseCompatibility(
+    transportVersion = requireWireString(wire, "transportVersion"),
+    rulesHash = requireWireString(wire, "rulesHash"),
+    compatibleVerseIds = stringList(wire["compatibleVerseIds"]),
+    requiredPluginIds = stringList(wire["requiredPluginIds"]),
+    optionalPluginIds = stringList(wire["optionalPluginIds"]),
+)
+
+fun peerFromWire(wire: Map<String, Any?>): CultMeshPeerCard = CultMeshPeerCard(
+    peerId = requireWireString(wire, "peerId"),
+    verseId = requireWireString(wire, "verseId"),
+    endpoints = stringList(wire["endpoints"]),
+    roles = stringList(wire["roles"]),
+    shardIds = stringList(wire["shardIds"]),
+    region = wire["region"] as? String,
+    authorityLeaseId = wire["authorityLeaseId"] as? String,
+    expiresAt = wire["expiresAt"] as? String,
+    signature = wire["signature"] as? String,
+)
+
+private fun requireNonBlank(value: String, fieldName: String) {
+    if (value.isBlank()) throw IOException("$fieldName must not be blank")
+}
+
+private fun requireWireString(wire: Map<String, Any?>, fieldName: String): String {
+    val value = wire[fieldName]
+    if (value !is String || value.isBlank()) throw IOException("$fieldName must be a non-empty string")
+    return value
+}
+
+private fun stringList(value: Any?): List<String> = when (value) {
+    null -> emptyList()
+    is Iterable<*> -> value.mapNotNull { it as? String }
+    is Array<*> -> value.mapNotNull { it as? String }
+    else -> throw IOException("Expected string array")
+}
+
+private fun mapList(value: Any?): List<Map<String, Any?>> = when (value) {
+    null -> emptyList()
+    is Iterable<*> -> value.map { mapValue(it) }
+    is Array<*> -> value.map { mapValue(it) }
+    else -> throw IOException("Expected map array")
+}
+
+@Suppress("UNCHECKED_CAST")
+private fun mapValue(value: Any?): Map<String, Any?> {
+    if (value !is Map<*, *>) throw IOException("Expected map")
+    val map = linkedMapOf<String, Any?>()
+    for ((key, nested) in value) {
+        if (key !is String) throw IOException("Expected string map keys")
+        map[key] = nested
+    }
+    return map
 }
 
 fun CultNetTransportProfile.toWireMap(): Map<String, Any?> = linkedMapOf(
@@ -1097,6 +1397,7 @@ fun main(args: Array<String>) {
     if (args.isEmpty()) {
         cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
         cultNetSchemaMessagesUseMessagePackMaps()
+        cultMeshCatalogsRoundTripDiscoveryMessages()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
@@ -1183,6 +1484,91 @@ private fun cultNetSchemaMessagesUseMessagePackMaps() {
     val document = parsedPut.body["document"] as Map<*, *>
     check(document["payloadEncoding"] == "messagepack")
     check((document["payload"] as ByteArray).contentEquals(payload))
+}
+
+private fun cultMeshCatalogsRoundTripDiscoveryMessages() {
+    val sourceVerse = CultMeshVerseDescriptor(
+        verseId = "public",
+        displayName = "Public Verse",
+        authorityModel = "federated",
+        compatibility = CultMeshVerseCompatibility(
+            transportVersion = "cultmesh.v0",
+            rulesHash = "rules-a",
+        ),
+        discoveryEndpoints = listOf("rudp://127.0.0.1:4000"),
+        authorityRuntimeIds = listOf("kotlin-authority"),
+    )
+    val targetVerse = CultMeshVerseDescriptor(
+        verseId = "private",
+        displayName = "Private Verse",
+        authorityModel = "coordinator",
+        compatibility = CultMeshVerseCompatibility(
+            transportVersion = "cultmesh.v0",
+            rulesHash = "rules-b",
+            compatibleVerseIds = listOf("public"),
+        ),
+    )
+    val verseCatalog = CultMeshVerseCatalog()
+    var watchedVerse: CultMeshVerseDescriptor? = null
+    val unsubscribeVerse = verseCatalog.watch { watchedVerse = it }
+    verseCatalog.upsert(sourceVerse)
+    verseCatalog.upsert(targetVerse)
+    unsubscribeVerse()
+    check(watchedVerse?.verseId == "private")
+    check(verseCatalog.findTransferTargets(sourceVerse).map { it.verseId } == listOf("private"))
+
+    val verseRequest = cultMeshVerseCatalogRequest(
+        messageId = "verse-request",
+        transportVersion = "cultmesh.v0",
+    )
+    val verseResponse = parseCultNetMessage(verseCatalog.createResponse(verseRequest).toBytes())
+    check(verseResponse.schemaVersion == "cultmesh.verse_catalog_response.v0")
+
+    val appliedVerseCatalog = CultMeshVerseCatalog()
+    val appliedVerses = appliedVerseCatalog.applyResponse(verseResponse)
+    check(appliedVerses.map { it.verseId } == listOf("private", "public"))
+    check(appliedVerseCatalog.get("public")?.displayName == "Public Verse")
+
+    val peerCatalog = CultMeshPeerCatalog()
+    var watchedPeer: CultMeshPeerCard? = null
+    val unsubscribePeer = peerCatalog.watch { watchedPeer = it }
+    peerCatalog.upsert(
+        CultMeshPeerCard(
+            peerId = "peer-a",
+            verseId = "public",
+            endpoints = listOf("rudp://127.0.0.1:4100"),
+            roles = listOf("read-replica", "schema"),
+            shardIds = listOf("shard-a"),
+            region = "local",
+        ),
+    )
+    peerCatalog.upsert(
+        CultMeshPeerCard(
+            peerId = "peer-b",
+            verseId = "public",
+            endpoints = listOf("rudp://127.0.0.1:4200"),
+            roles = listOf("writer"),
+        ),
+    )
+    unsubscribePeer()
+    check(watchedPeer?.peerId == "peer-b")
+    check(peerCatalog.find("public", "read-replica").single().peerId == "peer-a")
+
+    val peerResponse = parseCultNetMessage(
+        peerCatalog.createResponse(
+            cultMeshPeerExchangeRequest(
+                messageId = "peer-request",
+                verseId = "public",
+                roles = listOf("writer", "schema"),
+                knownPeerIds = listOf("peer-b"),
+                limit = 1,
+            ),
+        ).toBytes(),
+    )
+    val appliedPeerCatalog = CultMeshPeerCatalog()
+    val appliedPeers = appliedPeerCatalog.applyResponse(peerResponse)
+    check(appliedPeers.single().peerId == "peer-a")
+    check(appliedPeerCatalog.get("peer-a")?.hasRole("schema") == true)
 }
 
 private fun rudpServeOnce(options: Map<String, String>) {

@@ -70,6 +70,56 @@ sides through the handshake.
 references, and the flat `nodes` projection remains a compatibility and binding
 surface for selection, commands, and fallback rendering.
 
+## Discovery Catalogs
+
+Kotlin can model and exchange the same CultMesh discovery documents as the
+other runtimes:
+
+```kotlin
+val verses = CultMeshVerseCatalog()
+verses.upsert(
+    CultMeshVerseDescriptor(
+        verseId = "public",
+        displayName = "Public Verse",
+        authorityModel = "federated",
+        compatibility = CultMeshVerseCompatibility(
+            transportVersion = "cultmesh.v0",
+            rulesHash = "rules-a",
+        ),
+        discoveryEndpoints = listOf("rudp://127.0.0.1:4000"),
+    ),
+)
+
+val response = verses.createResponse(
+    cultMeshVerseCatalogRequest(
+        messageId = "discover-verses",
+        transportVersion = "cultmesh.v0",
+    ),
+)
+
+val peers = CultMeshPeerCatalog()
+peers.upsert(
+    CultMeshPeerCard(
+        peerId = "kotlin-peer",
+        verseId = "public",
+        endpoints = listOf("rudp://127.0.0.1:4100"),
+        roles = listOf("read-replica", "schema"),
+    ),
+)
+
+val peerResponse = peers.createResponse(
+    cultMeshPeerExchangeRequest(
+        messageId = "discover-peers",
+        verseId = "public",
+        roles = listOf("schema"),
+    ),
+)
+```
+
+`createResponse(...)` and `applyResponse(...)` operate on `CultNetMessage`
+instances, so catalog discovery can ride the same MessagePack schema-v0 lane as
+RUDP schema traffic.
+
 `EveMediaObservationDocument` carries byte-backed device streams such as camera
 luma frames and microphone PCM blocks. The document is observation transport,
 not synchronization authority: the device owns capture and local timestamps,
