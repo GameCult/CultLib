@@ -349,6 +349,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum fragment bytes.
         /// </summary>
         [Key("maxFragmentBytes")] public int? MaxFragmentBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum pending reliable packet count.
+        /// </summary>
+        [Key("maxPendingReliablePackets")] public int? MaxPendingReliablePackets { get; set; }
     }
 
     /// <summary>

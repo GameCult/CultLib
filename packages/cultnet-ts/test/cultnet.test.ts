@@ -360,6 +360,27 @@ test("rudp session pings and detects receive timeout", () => {
   assert.equal(client.connected, false);
 });
 
+test("rudp session bounds pending reliable packets before enqueue", () => {
+  const session = new CultNetRudpSession({ connectionId: 102, initialSequence: 1, maxPendingReliablePackets: 2 });
+  session.receive({ packetType: "accept", connectionId: 102, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+
+  session.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
+  session.send("schema", Buffer.from("second"), { reliable: true, ordered: true });
+  assert.throws(
+    () => session.send("schema", Buffer.from("third"), { reliable: true, ordered: true }),
+    /reliable send queue is full/,
+  );
+  assert.deepEqual(session.pendingReliableSequences, [1, 2]);
+
+  const fragmented = new CultNetRudpSession({ connectionId: 103, initialSequence: 1, maxPendingReliablePackets: 3 });
+  fragmented.receive({ packetType: "accept", connectionId: 103, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  assert.throws(
+    () => fragmented.sendMany("schema", Buffer.from("fragment-me"), { reliable: true, ordered: true, maxFragmentBytes: 3 }),
+    /reliable send queue is full/,
+  );
+  assert.deepEqual(fragmented.pendingReliableSequences, []);
+});
+
 test("rudp session suppresses duplicates and delivers reliable ordered payloads in sequence", () => {
   const sender = new CultNetRudpSession({ connectionId: 123, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 123, initialSequence: 100 });

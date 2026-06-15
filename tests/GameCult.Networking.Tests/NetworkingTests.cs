@@ -354,7 +354,8 @@ namespace GameCult.Networking.Tests
                     Host = "127.0.0.1",
                     Port = 7777,
                     MaxPayloadBytes = 1200,
-                    MaxFragmentBytes = 1000
+                    MaxFragmentBytes = 1000,
+                    MaxPendingReliablePackets = 64
                 });
 
             Assert.That(profile.Transports[0].Protocol, Is.EqualTo("rudp"));
@@ -366,6 +367,9 @@ namespace GameCult.Networking.Tests
                     "latest:unreliable:sequenced",
                     "realtime:unreliable:unordered"
                 }));
+            Assert.That(
+                profile.Transports[0].Channels.Select(channel => channel.MaxPendingReliablePackets).ToArray(),
+                Is.EqualTo(new int?[] { 64, 64, 64 }));
         }
 
         [Test]
@@ -492,6 +496,42 @@ namespace GameCult.Networking.Tests
             Assert.That(client.CheckTimeout(90, 50), Is.False);
             Assert.That(client.CheckTimeout(91, 50), Is.True);
             Assert.That(client.Connected, Is.False);
+        }
+
+        [Test]
+        public void RudpSession_BoundsPendingReliablePacketsBeforeEnqueue()
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 102,
+                InitialSequence = 1,
+                MaxPendingReliablePackets = 2
+            });
+            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 102, Sequence = 50, ChannelId = "control" });
+            session.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            session.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+
+            var error = Assert.Throws<InvalidOperationException>(() =>
+                session.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true }));
+            Assert.That(error!.Message, Does.Contain("reliable send queue is full"));
+            Assert.That(session.PendingReliableSequences, Is.EqualTo(new uint[] { 1, 2 }));
+
+            var fragmented = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 103,
+                InitialSequence = 1,
+                MaxPendingReliablePackets = 3
+            });
+            fragmented.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 103, Sequence = 50, ChannelId = "control" });
+
+            error = Assert.Throws<InvalidOperationException>(() =>
+                fragmented.SendMany(
+                    "schema",
+                    Encoding.UTF8.GetBytes("fragment-me"),
+                    new CultNetRudpSendOptions { Reliable = true, Ordered = true },
+                    maxFragmentBytes: 3));
+            Assert.That(error!.Message, Does.Contain("reliable send queue is full"));
+            Assert.That(fragmented.PendingReliableSequences, Is.Empty);
         }
 
         [Test]

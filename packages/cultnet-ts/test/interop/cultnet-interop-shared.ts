@@ -249,6 +249,7 @@ export const discoveryTransportProfileSchema = z.object({
       ordering: z.enum(["ordered", "unordered", "sequenced"]),
       maxPayloadBytes: z.number().int().min(1).nullable().optional(),
       maxFragmentBytes: z.number().int().min(1).nullable().optional(),
+      maxPendingReliablePackets: z.number().int().min(1).nullable().optional(),
     })),
   })),
 });

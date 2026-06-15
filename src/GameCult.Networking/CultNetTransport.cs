@@ -112,6 +112,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum fragment size for RUDP channels.
         /// </summary>
         public int? MaxFragmentBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum pending reliable packet count for RUDP channels.
+        /// </summary>
+        public int? MaxPendingReliablePackets { get; set; }
     }
 
     /// <summary>
@@ -189,7 +193,8 @@ namespace GameCult.Networking
                                 Delivery = "reliable",
                                 Ordering = "ordered",
                                 MaxPayloadBytes = options.MaxPayloadBytes,
-                                MaxFragmentBytes = options.MaxFragmentBytes
+                                MaxFragmentBytes = options.MaxFragmentBytes,
+                                MaxPendingReliablePackets = options.MaxPendingReliablePackets
                             },
                             new CultNetTransportChannel
                             {
@@ -197,7 +202,8 @@ namespace GameCult.Networking
                                 Delivery = "unreliable",
                                 Ordering = "sequenced",
                                 MaxPayloadBytes = options.MaxPayloadBytes,
-                                MaxFragmentBytes = options.MaxFragmentBytes
+                                MaxFragmentBytes = options.MaxFragmentBytes,
+                                MaxPendingReliablePackets = options.MaxPendingReliablePackets
                             },
                             new CultNetTransportChannel
                             {
@@ -205,7 +211,8 @@ namespace GameCult.Networking
                                 Delivery = "unreliable",
                                 Ordering = "unordered",
                                 MaxPayloadBytes = options.MaxPayloadBytes,
-                                MaxFragmentBytes = options.MaxFragmentBytes
+                                MaxFragmentBytes = options.MaxFragmentBytes,
+                                MaxPendingReliablePackets = options.MaxPendingReliablePackets
                             }
                         ]
                     }
@@ -479,6 +486,10 @@ namespace GameCult.Networking
         /// Gets or sets the resend delay in milliseconds.
         /// </summary>
         public long ResendDelayMs { get; set; } = 250;
+        /// <summary>
+        /// Gets or sets the maximum pending reliable packet count.
+        /// </summary>
+        public int? MaxPendingReliablePackets { get; set; }
     }
 
     /// <summary>
@@ -564,6 +575,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum fragment size for RUDP channels.
         /// </summary>
         public int? MaxFragmentBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum pending reliable packet count for RUDP channels.
+        /// </summary>
+        public int? MaxPendingReliablePackets { get; set; }
     }
 
     /// <summary>
@@ -594,6 +609,7 @@ namespace GameCult.Networking
 
         private uint _nextSequence;
         private ushort _nextFragmentId = 1;
+        private readonly int? _maxPendingReliablePackets;
         private bool _connected;
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
@@ -610,9 +626,15 @@ namespace GameCult.Networking
         public CultNetRudpSession(CultNetRudpSessionOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
+            if (options.MaxPendingReliablePackets.HasValue && options.MaxPendingReliablePackets.Value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), "RUDP MaxPendingReliablePackets must be greater than zero.");
+            }
+
             ConnectionId = options.ConnectionId;
             _nextSequence = options.InitialSequence;
             ResendDelayMs = options.ResendDelayMs;
+            _maxPendingReliablePackets = options.MaxPendingReliablePackets;
         }
 
         /// <summary>
@@ -641,6 +663,7 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateConnect(long nowMs = 0, byte[]? payload = null)
         {
+            EnsureReliableCapacity(1);
             var packet = CreatePacket(CultNetRudpPacketType.Connect, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
             TrackReliable(packet, nowMs);
             return packet;
@@ -657,6 +680,7 @@ namespace GameCult.Networking
                 throw new InvalidOperationException($"Expected RUDP connect packet, got {packet.PacketType}.");
             }
 
+            EnsureReliableCapacity(1);
             RememberReceived(packet.Sequence);
             _connected = true;
             var response = CreatePacket(CultNetRudpPacketType.Accept, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
@@ -697,6 +721,7 @@ namespace GameCult.Networking
                     throw new InvalidOperationException("RUDP payload requires more than 65535 fragments.");
                 }
 
+                EnsureReliableCapacity(options.Reliable ? fragmentCount : 0);
                 var fragmentId = AllocateFragmentId();
                 var packets = new List<CultNetRudpPacket>();
                 for (var index = 0; index < fragmentCount; index++)
@@ -724,6 +749,7 @@ namespace GameCult.Networking
                 return packets;
             }
 
+            EnsureReliableCapacity(options.Reliable ? 1 : 0);
             var packet = CreatePacket(
                 CultNetRudpPacketType.Data,
                 channelId,
@@ -931,6 +957,19 @@ namespace GameCult.Networking
                 Packet = ClonePacket(packet),
                 LastSentAtMs = nowMs
             };
+        }
+
+        private void EnsureReliableCapacity(int packetCount)
+        {
+            if (packetCount == 0 || !_maxPendingReliablePackets.HasValue)
+            {
+                return;
+            }
+
+            if (_pendingReliable.Count + packetCount > _maxPendingReliablePackets.Value)
+            {
+                throw new InvalidOperationException("RUDP reliable send queue is full.");
+            }
         }
 
         private void ApplyAcknowledgements(CultNetRudpPacket packet)
@@ -1168,7 +1207,8 @@ namespace GameCult.Networking
             {
                 ConnectionId = options.ConnectionId,
                 InitialSequence = options.InitialSequence,
-                ResendDelayMs = options.ResendDelayMs
+                ResendDelayMs = options.ResendDelayMs,
+                MaxPendingReliablePackets = options.MaxPendingReliablePackets
             });
 
             var local = _socket.LocalEndPoint as IPEndPoint;
@@ -1180,7 +1220,8 @@ namespace GameCult.Networking
                     Host = local?.Address.ToString(),
                     Port = local?.Port,
                     MaxPayloadBytes = options.MaxPayloadBytes,
-                    MaxFragmentBytes = options.MaxFragmentBytes
+                    MaxFragmentBytes = options.MaxFragmentBytes,
+                    MaxPendingReliablePackets = options.MaxPendingReliablePackets
                 });
         }
 

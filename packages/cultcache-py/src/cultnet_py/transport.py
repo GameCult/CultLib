@@ -115,6 +115,7 @@ class CultNetRudpSessionOptions:
     connection_id: int
     initial_sequence: int = 1
     resend_delay_ms: int = 250
+    max_pending_reliable_packets: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class CultNetRudpSocketTransportOptions:
     transport_id: str = "rudp"
     max_payload_bytes: int | None = None
     max_fragment_bytes: int | None = None
+    max_pending_reliable_packets: int | None = None
 
 
 @dataclass
@@ -170,6 +172,7 @@ def create_rudp_transport_profile(
     port: int | None = None,
     max_payload_bytes: int | None = None,
     max_fragment_bytes: int | None = None,
+    max_pending_reliable_packets: int | None = None,
 ) -> dict[str, Any]:
     def channel(channel_id: str, delivery: str, ordering: str) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -181,6 +184,8 @@ def create_rudp_transport_profile(
             value["maxPayloadBytes"] = max_payload_bytes
         if max_fragment_bytes is not None:
             value["maxFragmentBytes"] = max_fragment_bytes
+        if max_pending_reliable_packets is not None:
+            value["maxPendingReliablePackets"] = max_pending_reliable_packets
         return value
 
     transport: dict[str, Any] = {
@@ -209,6 +214,9 @@ class CultNetRudpSession:
     def __init__(self, options: CultNetRudpSessionOptions) -> None:
         self.connection_id = _uint32(options.connection_id, "connection_id")
         self.resend_delay_ms = options.resend_delay_ms
+        if options.max_pending_reliable_packets is not None and options.max_pending_reliable_packets <= 0:
+            raise ValueError("RUDP max_pending_reliable_packets must be greater than zero")
+        self.max_pending_reliable_packets = options.max_pending_reliable_packets
         self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
         self._next_fragment_id = 1
         self._connected = False
@@ -233,6 +241,7 @@ class CultNetRudpSession:
         return tuple(sorted(self._pending_reliable))
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
+        self._ensure_reliable_capacity(1)
         packet = self._create_packet(
             CultNetRudpPacketType.CONNECT,
             "control",
@@ -253,6 +262,7 @@ class CultNetRudpSession:
         if packet.packet_type != CultNetRudpPacketType.CONNECT:
             raise ValueError(f"Expected RUDP connect packet, got {packet.packet_type.value}")
 
+        self._ensure_reliable_capacity(1)
         self._remember_received(packet.sequence)
         self._connected = True
         response = self._create_packet(
@@ -289,6 +299,7 @@ class CultNetRudpSession:
             raise ValueError("RUDP max_fragment_bytes must be greater than zero")
 
         if max_fragment_bytes is None or len(payload) <= max_fragment_bytes:
+            self._ensure_reliable_capacity(1 if options.reliable else 0)
             packet = self._create_packet(
                 CultNetRudpPacketType.DATA,
                 channel_id,
@@ -304,6 +315,7 @@ class CultNetRudpSession:
         fragment_count = (len(payload) + max_fragment_bytes - 1) // max_fragment_bytes
         if fragment_count > 0xFFFF:
             raise ValueError("RUDP payload requires more than 65535 fragments")
+        self._ensure_reliable_capacity(fragment_count if options.reliable else 0)
 
         fragment_id = self._allocate_fragment_id()
         packets: list[CultNetRudpPacket] = []
@@ -459,6 +471,12 @@ class CultNetRudpSession:
             last_sent_at_ms=now_ms,
         )
 
+    def _ensure_reliable_capacity(self, packet_count: int) -> None:
+        if packet_count == 0 or self.max_pending_reliable_packets is None:
+            return
+        if len(self._pending_reliable) + packet_count > self.max_pending_reliable_packets:
+            raise ValueError("RUDP reliable send queue is full")
+
     def _apply_acknowledgements(self, packet: CultNetRudpPacket) -> None:
         self._pending_reliable.pop(packet.ack, None)
         for bit in range(32):
@@ -576,6 +594,7 @@ class CultNetRudpSocketTransportConnection:
                 connection_id=options.connection_id,
                 initial_sequence=options.initial_sequence,
                 resend_delay_ms=options.resend_delay_ms,
+                max_pending_reliable_packets=options.max_pending_reliable_packets,
             )
         )
         host, port = self.socket.getsockname()[:2]
@@ -586,6 +605,7 @@ class CultNetRudpSocketTransportConnection:
             port=port,
             max_payload_bytes=options.max_payload_bytes,
             max_fragment_bytes=options.max_fragment_bytes,
+            max_pending_reliable_packets=options.max_pending_reliable_packets,
         )
         self._bytes_received = 0
         self._bytes_sent = 0

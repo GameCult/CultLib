@@ -795,6 +795,30 @@ class CultCacheTests(unittest.TestCase):
         self.assertTrue(client.check_timeout(91, 50))
         self.assertFalse(client.connected)
 
+    def test_cultnet_rudp_session_bounds_pending_reliable_packets_before_enqueue(self) -> None:
+        session = CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=102, initial_sequence=1, max_pending_reliable_packets=2)
+        )
+        session.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 102, 50, 0, 0, "control"))
+        session.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
+        session.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))
+        with self.assertRaisesRegex(ValueError, "reliable send queue is full"):
+            session.send("schema", b"third", CultNetRudpSendOptions(reliable=True, ordered=True))
+        self.assertEqual(session.pending_reliable_sequences, (1, 2))
+
+        fragmented = CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=103, initial_sequence=1, max_pending_reliable_packets=3)
+        )
+        fragmented.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 103, 50, 0, 0, "control"))
+        with self.assertRaisesRegex(ValueError, "reliable send queue is full"):
+            fragmented.send_many(
+                "schema",
+                b"fragment-me",
+                CultNetRudpSendOptions(reliable=True, ordered=True),
+                max_fragment_bytes=3,
+            )
+        self.assertEqual(fragmented.pending_reliable_sequences, ())
+
     def test_cultnet_rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=100))

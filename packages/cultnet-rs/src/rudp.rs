@@ -72,6 +72,7 @@ pub struct CultNetRudpSessionOptions {
     pub connection_id: u32,
     pub initial_sequence: u32,
     pub resend_delay_ms: u64,
+    pub max_pending_reliable_packets: Option<usize>,
 }
 
 impl Default for CultNetRudpSessionOptions {
@@ -80,6 +81,7 @@ impl Default for CultNetRudpSessionOptions {
             connection_id: 0,
             initial_sequence: 1,
             resend_delay_ms: 250,
+            max_pending_reliable_packets: None,
         }
     }
 }
@@ -116,6 +118,7 @@ struct FragmentBuffer {
 pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
+    max_pending_reliable_packets: Option<usize>,
     next_sequence: u32,
     next_fragment_id: u16,
     connected: bool,
@@ -133,6 +136,7 @@ impl CultNetRudpSession {
         Self {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
+            max_pending_reliable_packets: options.max_pending_reliable_packets,
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
             connected: false,
@@ -166,7 +170,8 @@ impl CultNetRudpSession {
         self.last_received_at_ms
     }
 
-    pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> CultNetRudpPacket {
+    pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
+        self.ensure_reliable_capacity(1)?;
         let packet = self.create_packet(
             CultNetRudpPacketType::Connect,
             "control",
@@ -176,7 +181,7 @@ impl CultNetRudpSession {
             false,
         );
         self.track_reliable(packet.clone(), now_ms);
-        packet
+        Ok(packet)
     }
 
     pub fn accept_connect(
@@ -193,6 +198,7 @@ impl CultNetRudpSession {
             ));
         }
 
+        self.ensure_reliable_capacity(1)?;
         self.remember_received(packet.sequence);
         self.connected = true;
         let response = self.create_packet(
@@ -241,6 +247,7 @@ impl CultNetRudpSession {
                 if fragment_count > u16::MAX as usize {
                     return Err(anyhow!("RUDP payload requires more than 65535 fragments"));
                 }
+                self.ensure_reliable_capacity(if options.reliable { fragment_count } else { 0 })?;
                 let fragment_id = self.allocate_fragment_id();
                 let mut packets = Vec::new();
                 for index in 0..fragment_count {
@@ -266,6 +273,7 @@ impl CultNetRudpSession {
             }
         }
 
+        self.ensure_reliable_capacity(if options.reliable { 1 } else { 0 })?;
         let packet = self.create_packet(
             CultNetRudpPacketType::Data,
             channel_id,
@@ -533,6 +541,18 @@ impl CultNetRudpSession {
         );
     }
 
+    fn ensure_reliable_capacity(&self, packet_count: usize) -> Result<()> {
+        if packet_count == 0 {
+            return Ok(());
+        }
+        if let Some(limit) = self.max_pending_reliable_packets {
+            if self.pending_reliable.len() + packet_count > limit {
+                return Err(anyhow!("RUDP reliable send queue is full"));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_acknowledgements(&mut self, packet: &CultNetRudpPacket) {
         self.pending_reliable.remove(&packet.ack);
         for bit in 0..32 {
@@ -745,6 +765,7 @@ pub struct CultNetRudpSocketTransportOptions {
     pub transport_id: Option<String>,
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
+    pub max_pending_reliable_packets: Option<u32>,
 }
 
 impl CultNetRudpSocketTransportOptions {
@@ -765,6 +786,7 @@ impl CultNetRudpSocketTransportOptions {
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
         }
     }
 
@@ -780,6 +802,7 @@ impl CultNetRudpSocketTransportOptions {
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
         }
     }
 }
@@ -808,14 +831,19 @@ impl CultNetRudpSocketTransportConnection {
                 port: Some(local_addr.port()),
                 max_payload_bytes: options.max_payload_bytes,
                 max_fragment_bytes: options.max_fragment_bytes,
+                max_pending_reliable_packets: options.max_pending_reliable_packets,
             },
         );
+        let max_pending_reliable_packets = options
+            .max_pending_reliable_packets
+            .map(|value| value as usize);
         Ok(Self {
             socket: options.socket,
             session: CultNetRudpSession::new(CultNetRudpSessionOptions {
                 connection_id: options.connection_id,
                 initial_sequence: options.initial_sequence,
                 resend_delay_ms: options.resend_delay_ms,
+                max_pending_reliable_packets,
             }),
             mode: options.mode,
             remote_addr: options.remote_addr,
@@ -850,7 +878,7 @@ impl CultNetRudpSocketTransportConnection {
                 "Only a client RUDP socket transport can initiate connect"
             ));
         }
-        let packet = self.session.create_connect(now_ms(), payload);
+        let packet = self.session.create_connect(now_ms(), payload)?;
         self.send_packet(&packet)
     }
 
@@ -969,6 +997,7 @@ pub struct RudpTransportProfileOptions {
     pub port: Option<u16>,
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
+    pub max_pending_reliable_packets: Option<u32>,
 }
 
 pub fn create_rudp_transport_profile(
@@ -993,6 +1022,7 @@ pub fn create_rudp_transport_profile(
                     ordering: CultNetTransportOrdering::Ordered,
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
+                    max_pending_reliable_packets: options.max_pending_reliable_packets,
                 },
                 CultNetTransportChannel {
                     channel_id: "latest".to_string(),
@@ -1000,6 +1030,7 @@ pub fn create_rudp_transport_profile(
                     ordering: CultNetTransportOrdering::Sequenced,
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
+                    max_pending_reliable_packets: options.max_pending_reliable_packets,
                 },
                 CultNetTransportChannel {
                     channel_id: "realtime".to_string(),
@@ -1007,6 +1038,7 @@ pub fn create_rudp_transport_profile(
                     ordering: CultNetTransportOrdering::Unordered,
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
+                    max_pending_reliable_packets: options.max_pending_reliable_packets,
                 },
             ],
         }],

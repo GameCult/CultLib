@@ -79,6 +79,7 @@ export interface CultNetTransportChannel {
   ordering: "ordered" | "unordered" | "sequenced";
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
+  maxPendingReliablePackets?: number;
 }
 
 export interface CultNetDocumentRecord<TPayload = unknown> {

@@ -204,10 +204,16 @@ Current progress:
   silent receive window. The TypeScript interop harness proves ping/pong payload
   echo against C#/Kotlin/Python/Rust UDP peers; local runtime tests prove timeout
   state transitions.
+- TypeScript, C#, Rust, Python, and Kotlin now share bounded reliable-send
+  backpressure for RUDP sessions. `maxPendingReliablePackets` is advertised on
+  RUDP transport-profile channels and enforced by the session before reliable
+  connect, accept, single-packet sends, or fragmented sends enqueue anything;
+  TCP-framed profiles do not publish the field because they do not own the RUDP
+  pending-reliable queue.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into reconnect policy, backpressure, and the
-  wider schema-message matrix.
+  ports, then broaden RUDP interop into reconnect policy and the wider
+  schema-message matrix.
 
 ## RUDP Packet Contract V0
 

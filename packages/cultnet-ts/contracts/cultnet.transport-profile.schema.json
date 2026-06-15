@@ -69,7 +69,8 @@
                   ]
                 },
                 "maxPayloadBytes": { "type": "integer", "minimum": 1 },
-                "maxFragmentBytes": { "type": "integer", "minimum": 1 }
+                "maxFragmentBytes": { "type": "integer", "minimum": 1 },
+                "maxPendingReliablePackets": { "type": "integer", "minimum": 1 }
               }
             }
           }

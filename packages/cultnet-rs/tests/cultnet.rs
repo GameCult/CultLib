@@ -164,6 +164,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
                     ordering: CultNetTransportOrdering::Ordered,
                     max_payload_bytes: None,
                     max_fragment_bytes: None,
+                    max_pending_reliable_packets: None,
                 }],
             }],
         }]),
@@ -269,6 +270,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             port: Some(7777),
             max_payload_bytes: Some(1200),
             max_fragment_bytes: Some(1000),
+            max_pending_reliable_packets: Some(64),
         },
     );
 
@@ -284,6 +286,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 channel.channel_id.as_str(),
                 channel.delivery,
                 channel.ordering,
+                channel.max_pending_reliable_packets,
             )
         })
         .collect::<Vec<_>>();
@@ -293,17 +296,20 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             (
                 "schema",
                 CultNetTransportDelivery::Reliable,
-                CultNetTransportOrdering::Ordered
+                CultNetTransportOrdering::Ordered,
+                Some(64)
             ),
             (
                 "latest",
                 CultNetTransportDelivery::Unreliable,
-                CultNetTransportOrdering::Sequenced
+                CultNetTransportOrdering::Sequenced,
+                Some(64)
             ),
             (
                 "realtime",
                 CultNetTransportDelivery::Unreliable,
-                CultNetTransportOrdering::Unordered
+                CultNetTransportOrdering::Unordered,
+                Some(64)
             ),
         ]
     );
@@ -315,14 +321,16 @@ fn rudp_session_handshake_acks_reliable_connect_and_accept_packets() -> Result<(
         connection_id: 0x0a0b0c0d,
         initial_sequence: 1,
         resend_delay_ms: 50,
+        ..CultNetRudpSessionOptions::default()
     });
     let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 0x0a0b0c0d,
         initial_sequence: 100,
         resend_delay_ms: 50,
+        ..CultNetRudpSessionOptions::default()
     });
 
-    let connect = client.create_connect(0, b"join".to_vec());
+    let connect = client.create_connect(0, b"join".to_vec())?;
     assert_eq!(connect.packet_type, CultNetRudpPacketType::Connect);
     assert_eq!(connect.sequence, 1);
     assert_eq!(client.pending_reliable_sequences(), vec![1]);
@@ -350,11 +358,13 @@ fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Resu
         connection_id: 7,
         initial_sequence: 10,
         resend_delay_ms: 100,
+        ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 7,
         initial_sequence: 200,
         resend_delay_ms: 100,
+        ..CultNetRudpSessionOptions::default()
     });
     sender.receive(
         &CultNetRudpPacket {
@@ -426,6 +436,7 @@ fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
         connection_id: 99,
         initial_sequence: 1,
         resend_delay_ms: 100,
+        ..CultNetRudpSessionOptions::default()
     });
     session.receive(
         &CultNetRudpPacket {
@@ -501,7 +512,7 @@ fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
         initial_sequence: 100,
         ..CultNetRudpSessionOptions::default()
     });
-    let connect = client.create_connect(0, b"join".to_vec());
+    let connect = client.create_connect(0, b"join".to_vec())?;
     let accept = server.accept_connect(&connect, 10, Vec::new())?;
     client.receive(&accept, 20)?;
 
@@ -517,6 +528,105 @@ fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
     assert!(!client.check_timeout(90, 50));
     assert!(client.check_timeout(91, 50));
     assert!(!client.connected());
+    Ok(())
+}
+
+#[test]
+fn rudp_session_bounds_pending_reliable_packets_before_enqueue() -> Result<()> {
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 102,
+        initial_sequence: 1,
+        max_pending_reliable_packets: Some(2),
+        ..CultNetRudpSessionOptions::default()
+    });
+    session.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 102,
+            sequence: 50,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    session.send(
+        "schema",
+        b"first".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    session.send(
+        "schema",
+        b"second".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    let error = session
+        .send(
+            "schema",
+            b"third".to_vec(),
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                ..CultNetRudpSendOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("reliable send queue is full"));
+    assert_eq!(session.pending_reliable_sequences(), vec![1, 2]);
+
+    let mut fragmented = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 103,
+        initial_sequence: 1,
+        max_pending_reliable_packets: Some(3),
+        ..CultNetRudpSessionOptions::default()
+    });
+    fragmented.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 103,
+            sequence: 50,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    let error = fragmented
+        .send_many(
+            "schema",
+            b"fragment-me".to_vec(),
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                ..CultNetRudpSendOptions::default()
+            },
+            Some(3),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("reliable send queue is full"));
+    assert!(fragmented.pending_reliable_sequences().is_empty());
     Ok(())
 }
 
@@ -711,6 +821,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -724,6 +835,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -768,6 +880,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
+            max_pending_reliable_packets: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -781,6 +894,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             transport_id: None,
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
+            max_pending_reliable_packets: None,
         })?;
 
     client.connect(b"join".to_vec())?;

@@ -242,6 +242,7 @@ def shared_contract_schema_json(schema_id: str, title: str, schema_version: str)
                                     "ordering": {"type": "string", "enum": ["ordered", "unordered", "sequenced"]},
                                     "maxPayloadBytes": {"type": "integer", "minimum": 1},
                                     "maxFragmentBytes": {"type": "integer", "minimum": 1},
+                                    "maxPendingReliablePackets": {"type": "integer", "minimum": 1},
                                 },
                             },
                         },

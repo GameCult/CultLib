@@ -44,6 +44,7 @@ export interface CultNetRudpSessionOptions {
   connectionId: number;
   initialSequence?: number;
   resendDelayMs?: number;
+  maxPendingReliablePackets?: number;
 }
 
 export interface CultNetRudpReceiveResult {
@@ -81,6 +82,7 @@ export interface RudpTransportProfileOptions {
   port?: number;
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
+  maxPendingReliablePackets?: number;
 }
 
 export interface CultNetRudpSocketTransportOptions {
@@ -96,6 +98,7 @@ export interface CultNetRudpSocketTransportOptions {
   transportId?: string;
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
+  maxPendingReliablePackets?: number;
 }
 
 const packetTypeToCode: Record<CultNetRudpPacketType, number> = {
@@ -118,6 +121,7 @@ export class CultNetRudpSession {
   #nextSequence: number;
   #nextFragmentId = 1;
   #connected = false;
+  readonly #maxPendingReliablePackets: number | undefined;
   #lastReceivedAtMs: number | undefined;
   #highestReceivedSequence: number | undefined;
   readonly #receivedSequences = new Set<number>();
@@ -130,6 +134,10 @@ export class CultNetRudpSession {
     this.connectionId = toUint32(options.connectionId, "connectionId");
     this.#nextSequence = toUint32(options.initialSequence ?? 1, "initialSequence");
     this.resendDelayMs = options.resendDelayMs ?? 250;
+    if (options.maxPendingReliablePackets !== undefined && options.maxPendingReliablePackets <= 0) {
+      throw new Error("RUDP maxPendingReliablePackets must be greater than zero.");
+    }
+    this.#maxPendingReliablePackets = options.maxPendingReliablePackets;
   }
 
   get connected(): boolean {
@@ -145,6 +153,7 @@ export class CultNetRudpSession {
   }
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
+    this.#ensureReliableCapacity(1);
     const packet = this.#createPacket({
       packetType: "connect",
       channelId: "control",
@@ -162,6 +171,7 @@ export class CultNetRudpSession {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
+    this.#ensureReliableCapacity(1);
     this.#rememberReceived(packet.sequence);
     this.#connected = true;
     const response = this.#createPacket({
@@ -204,6 +214,7 @@ export class CultNetRudpSession {
     }
 
     if (maxFragmentBytes === undefined || payload.byteLength <= maxFragmentBytes) {
+      this.#ensureReliableCapacity(options.reliable ? 1 : 0);
       const packet = this.#createPacket({
         packetType: "data",
         channelId,
@@ -222,6 +233,7 @@ export class CultNetRudpSession {
     if (fragmentCount > 0xffff) {
       throw new Error("RUDP payload requires more than 65535 fragments.");
     }
+    this.#ensureReliableCapacity(options.reliable ? fragmentCount : 0);
 
     const fragmentId = this.#allocateFragmentId();
     const packets: CultNetRudpPacket[] = [];
@@ -395,6 +407,15 @@ export class CultNetRudpSession {
       packet: { ...packet, payload: packet.payload ? new Uint8Array(packet.payload) : new Uint8Array() },
       lastSentAtMs: nowMs,
     });
+  }
+
+  #ensureReliableCapacity(packetCount: number): void {
+    if (packetCount === 0 || this.#maxPendingReliablePackets === undefined) {
+      return;
+    }
+    if (this.#pendingReliable.size + packetCount > this.#maxPendingReliablePackets) {
+      throw new Error("RUDP reliable send queue is full.");
+    }
   }
 
   #applyAcknowledgements(packet: CultNetRudpPacket): void {
@@ -598,6 +619,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       connectionId: options.connectionId,
       initialSequence: options.initialSequence,
       resendDelayMs: options.resendDelayMs,
+      maxPendingReliablePackets: options.maxPendingReliablePackets,
     });
     const address = this.#socket.address();
     const localPort = typeof address === "string" ? undefined : address.port;
@@ -608,6 +630,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       port: localPort,
       maxPayloadBytes: options.maxPayloadBytes,
       maxFragmentBytes: options.maxFragmentBytes,
+      maxPendingReliablePackets: options.maxPendingReliablePackets,
     });
 
     this.#socket.on("message", (wire, remote) => this.#receiveDatagram(wire, remote));
@@ -754,6 +777,9 @@ export function createRudpTransportProfile(
     }
     if (options.maxFragmentBytes !== undefined) {
       value.maxFragmentBytes = options.maxFragmentBytes;
+    }
+    if (options.maxPendingReliablePackets !== undefined) {
+      value.maxPendingReliablePackets = options.maxPendingReliablePackets;
     }
     return value;
   };
