@@ -459,6 +459,74 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
 
 enum class CultNetRudpSocketMode { Client, Server }
 
+data class CultNetRudpSocketTuning(
+    val initialSequence: Long = 1,
+    val resendDelayMs: Long = 250,
+    val maxFragmentBytes: Int? = null,
+    val maxPendingReliablePackets: Int? = null,
+)
+
+fun cultNetRudpServer(
+    runtimeId: String,
+    connectionId: Long,
+    bindHost: String = "127.0.0.1",
+    bindPort: Int = 0,
+    tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(initialSequence = 100),
+): CultNetRudpSocketTransportConnection {
+    val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
+    return CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Server,
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        initialSequence = tuning.initialSequence,
+        resendDelayMs = tuning.resendDelayMs,
+        maxFragmentBytes = tuning.maxFragmentBytes,
+        maxPendingReliablePackets = tuning.maxPendingReliablePackets,
+    )
+}
+
+fun cultNetRudpClient(
+    runtimeId: String,
+    connectionId: Long,
+    remoteHost: String,
+    remotePort: Int,
+    bindHost: String = "127.0.0.1",
+    bindPort: Int = 0,
+    tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+): CultNetRudpSocketTransportConnection {
+    val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
+    return CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Client,
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        remoteAddress = InetSocketAddress(InetAddress.getByName(remoteHost), remotePort),
+        initialSequence = tuning.initialSequence,
+        resendDelayMs = tuning.resendDelayMs,
+        maxFragmentBytes = tuning.maxFragmentBytes,
+        maxPendingReliablePackets = tuning.maxPendingReliablePackets,
+    )
+}
+
+fun pumpRudpPairUntilConnected(
+    first: CultNetRudpSocketTransportConnection,
+    second: CultNetRudpSocketTransportConnection,
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): Boolean {
+    val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+    while (System.nanoTime() < deadline) {
+        first.receiveOnce()
+        second.receiveOnce()
+        first.pollResends()
+        second.pollResends()
+        if (first.connected && second.connected) return true
+        Thread.sleep(pollIntervalMs)
+    }
+    return first.connected && second.connected
+}
+
 class CultNetRudpSocketTransportConnection(
     private val socket: DatagramSocket,
     private val mode: CultNetRudpSocketMode,
@@ -489,6 +557,7 @@ class CultNetRudpSocketTransportConnection(
         maxPendingReliablePackets = maxPendingReliablePackets,
     )
     val connected: Boolean get() = session.connected
+    val localPort: Int get() = socket.localPort
     val stats: CultNetTransportStats get() = CultNetTransportStats(bytesReceived, bytesSent, framesReceived, framesSent)
 
     fun connect(payload: ByteArray = ByteArray(0)) {
@@ -496,22 +565,75 @@ class CultNetRudpSocketTransportConnection(
         sendPacket(session.createConnect(nowMs(), payload))
     }
 
+    fun connect(payload: String) = connect(payload.toByteArray(StandardCharsets.UTF_8))
+
+    fun connectAndWait(payload: ByteArray = ByteArray(0), timeoutMs: Long = 1_000, pollIntervalMs: Long = 5): Boolean {
+        connect(payload)
+        return awaitConnected(timeoutMs, pollIntervalMs)
+    }
+
+    fun connectAndWait(payload: String, timeoutMs: Long = 1_000, pollIntervalMs: Long = 5): Boolean =
+        connectAndWait(payload.toByteArray(StandardCharsets.UTF_8), timeoutMs, pollIntervalMs)
+
+    fun awaitConnected(timeoutMs: Long = 1_000, pollIntervalMs: Long = 5): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            receiveOnce()
+            pollResends()
+            if (connected) return true
+            Thread.sleep(pollIntervalMs)
+        }
+        return connected
+    }
+
     fun send(channelId: String, payload: ByteArray) {
         session.sendMany(channelId, payload, channelSendOptions(channelId, nowMs()), maxFragmentBytes).forEach { sendPacket(it) }
         framesSent += 1
     }
 
+    fun send(channelId: String, payload: String) = send(channelId, payload.toByteArray(StandardCharsets.UTF_8))
+
+    fun sendSchema(payload: ByteArray) = send("schema", payload)
+
+    fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
+
+    fun sendLatest(payload: ByteArray) = send("latest", payload)
+
+    fun sendLatest(payload: String) = sendLatest(payload.toByteArray(StandardCharsets.UTF_8))
+
+    fun sendRealtime(payload: ByteArray) = send("realtime", payload)
+
+    fun sendRealtime(payload: String) = sendRealtime(payload.toByteArray(StandardCharsets.UTF_8))
+
     fun disconnect(reason: ByteArray = ByteArray(0)) {
         sendPacket(session.createDisconnect(reason))
     }
+
+    fun disconnect(reason: String) = disconnect(reason.toByteArray(StandardCharsets.UTF_8))
 
     fun ping(payload: ByteArray = ByteArray(0)) {
         sendPacket(session.createPing(payload))
     }
 
+    fun ping(payload: String) = ping(payload.toByteArray(StandardCharsets.UTF_8))
+
     fun pollPongPayload(): ByteArray? = if (pongPayloads.isEmpty()) null else pongPayloads.removeFirst()
 
     fun checkTimeout(timeoutMs: Long): Boolean = session.checkTimeout(nowMs(), timeoutMs)
+
+    fun receiveUntil(timeoutMs: Long, pollIntervalMs: Long = 5, predicate: (CultNetTransportFrame) -> Boolean = { true }): CultNetTransportFrame? {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            val frame = receiveOnce()
+            if (frame != null && predicate(frame)) return frame
+            pollResends()
+            Thread.sleep(pollIntervalMs)
+        }
+        return null
+    }
+
+    fun receiveSchema(timeoutMs: Long, pollIntervalMs: Long = 5): ByteArray? =
+        receiveUntil(timeoutMs, pollIntervalMs) { it.channelId == "schema" }?.payload
 
     fun receiveOnce(): CultNetTransportFrame? {
         if (!delivered.isEmpty()) return delivered.removeFirst()
@@ -658,6 +780,7 @@ fun main(args: Array<String>) {
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
         rudpSessionFragmentsAndReassemblesReliableOrderedPayloads()
+        rudpSocketTransportErgonomicFactoriesCarrySchemaFrames()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
         return
@@ -888,6 +1011,30 @@ private fun rudpSessionFragmentsAndReassemblesReliableOrderedPayloads() {
     check(delivered.size == 1)
     check(String(delivered.first().payload, StandardCharsets.UTF_8) == "fragment-me-please")
     check(delivered.first().sequence == packets.first().sequence)
+}
+
+private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
+    val connectionId = 0x10203042L
+    cultNetRudpServer(
+        runtimeId = "kotlin-rudp-sugar-server",
+        connectionId = connectionId,
+        tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
+    ).use { server ->
+        cultNetRudpClient(
+            runtimeId = "kotlin-rudp-sugar-client",
+            connectionId = connectionId,
+            remoteHost = "127.0.0.1",
+            remotePort = server.localPort,
+            tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
+        ).use { client ->
+            client.connect("join")
+            check(pumpRudpPairUntilConnected(client, server))
+            client.sendSchema("client-state")
+            check(String(server.receiveSchema(1_000) ?: error("Server did not receive schema frame"), StandardCharsets.UTF_8) == "client-state")
+            server.sendSchema("server-state")
+            check(String(client.receiveSchema(1_000) ?: error("Client did not receive schema frame"), StandardCharsets.UTF_8) == "server-state")
+        }
+    }
 }
 
 private fun rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames() {
