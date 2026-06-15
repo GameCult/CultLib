@@ -58,6 +58,34 @@ val note = target.require(notes, "note:1")
 raw bytes re-enter the typed cache through the same document definitions that
 local Kotlin callers use.
 
+Schema catalogs are also first-class, so Kotlin peers can publish and consume
+descriptor responses instead of hand-assembling maps:
+
+```kotlin
+val catalog = CultNetSchemaCatalog()
+catalog.upsert(
+    defineCultNetSchemaDescriptor(
+        schemaId = "kotlin.note.v1",
+        kind = "document_payload",
+        documentType = "kotlin.note",
+        title = "Kotlin Note",
+        schemaJson = """{"type":"object","properties":{"body":{"type":"string"}}}""",
+    ),
+)
+
+val response = catalog.createResponse(
+    cultNetSchemaCatalogRequest(
+        messageId = "schema-catalog",
+        includeSchemaJson = true,
+        kinds = listOf("document_payload"),
+    ),
+)
+```
+
+`CultNetSchemaCatalog.applyResponse(...)` imports
+`cultnet.schema_catalog_response.v0` descriptors from other runtimes and keeps
+their content hashes, wire contracts, schema ids, and optional schema JSON.
+
 ## RUDP Happy Path
 
 Kotlin exposes factory helpers around the shared RUDP transport so callers can

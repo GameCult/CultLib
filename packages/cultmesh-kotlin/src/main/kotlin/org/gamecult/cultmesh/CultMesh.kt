@@ -17,6 +17,7 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.ArrayDeque
 import java.util.Base64
@@ -365,6 +366,118 @@ data class CultNetRawDocumentRecord(
     }
 }
 
+data class CultNetSchemaDescriptor(
+    val schemaId: String,
+    val kind: String,
+    val schemaVersion: String? = null,
+    val documentType: String? = null,
+    val title: String? = null,
+    val wireContracts: List<String> = listOf("cultnet.schema.v0"),
+    val contentHash: String,
+    val schemaJson: String? = null,
+) {
+    fun toWireMap(includeSchemaJson: Boolean = schemaJson != null): Map<String, Any?> {
+        val wire = linkedMapOf<String, Any?>(
+            "schemaId" to schemaId,
+            "kind" to kind,
+            "wireContracts" to wireContracts,
+            "contentHash" to contentHash,
+        )
+        if (!schemaVersion.isNullOrBlank()) wire["schemaVersion"] = schemaVersion
+        if (!documentType.isNullOrBlank()) wire["documentType"] = documentType
+        if (!title.isNullOrBlank()) wire["title"] = title
+        if (includeSchemaJson && schemaJson != null) wire["schemaJson"] = schemaJson
+        return wire
+    }
+}
+
+class CultNetSchemaCatalog {
+    private val descriptorsBySchemaId = linkedMapOf<String, CultNetSchemaDescriptor>()
+    private val subscribers = mutableListOf<(CultNetSchemaDescriptor) -> Unit>()
+
+    val schemas: List<CultNetSchemaDescriptor>
+        get() = descriptorsBySchemaId.toSortedMap().values.toList()
+
+    fun watch(callback: (CultNetSchemaDescriptor) -> Unit): () -> Unit {
+        subscribers.add(callback)
+        return { subscribers.remove(callback) }
+    }
+
+    fun upsert(descriptor: CultNetSchemaDescriptor): CultNetSchemaDescriptor {
+        requireNonBlank(descriptor.schemaId, "schema.schemaId")
+        requireNonBlank(descriptor.kind, "schema.kind")
+        if (descriptor.wireContracts.isEmpty()) throw IOException("schema.wireContracts must not be empty")
+        descriptorsBySchemaId[descriptor.schemaId] = descriptor
+        subscribers.toList().forEach { it(descriptor) }
+        return descriptor
+    }
+
+    fun get(schemaId: String): CultNetSchemaDescriptor? {
+        requireNonBlank(schemaId, "schemaId")
+        return descriptorsBySchemaId[schemaId]
+    }
+
+    fun list(
+        schemaIds: List<String> = emptyList(),
+        kinds: List<String> = emptyList(),
+        includeSchemaJson: Boolean = false,
+    ): List<CultNetSchemaDescriptor> {
+        val requestedIds = schemaIds.toSet()
+        val requestedKinds = kinds.toSet()
+        return schemas.filter { descriptor ->
+            (requestedIds.isEmpty() || descriptor.schemaId in requestedIds) &&
+                (requestedKinds.isEmpty() || descriptor.kind in requestedKinds)
+        }.map { descriptor ->
+            if (includeSchemaJson) descriptor else descriptor.copy(schemaJson = null)
+        }
+    }
+
+    fun createResponse(request: CultNetMessage): CultNetMessage {
+        require(request.schemaVersion == "cultnet.schema_catalog_request.v0") {
+            "Expected cultnet.schema_catalog_request.v0, received ${request.schemaVersion}"
+        }
+        val includeSchemaJson = request.body["includeSchemaJson"] as? Boolean ?: false
+        return cultNetSchemaCatalogResponse(
+            messageId = request.body["messageId"] as? String ?: "",
+            schemas = list(
+                schemaIds = stringList(request.body["schemaIds"]),
+                kinds = stringList(request.body["kinds"]),
+                includeSchemaJson = includeSchemaJson,
+            ),
+            includeSchemaJson = includeSchemaJson,
+        )
+    }
+
+    fun applyResponse(response: CultNetMessage): List<CultNetSchemaDescriptor> {
+        require(response.schemaVersion == "cultnet.schema_catalog_response.v0") {
+            "Expected cultnet.schema_catalog_response.v0, received ${response.schemaVersion}"
+        }
+        val applied = mapList(response.body["schemas"]).map { schemaDescriptorFromWire(it) }
+        applied.forEach { upsert(it) }
+        return applied
+    }
+}
+
+fun defineCultNetSchemaDescriptor(
+    schemaId: String,
+    kind: String,
+    schemaVersion: String? = null,
+    documentType: String? = null,
+    title: String? = null,
+    wireContracts: List<String> = listOf("cultnet.schema.v0"),
+    schemaJson: String? = null,
+    contentHash: String? = null,
+): CultNetSchemaDescriptor = CultNetSchemaDescriptor(
+    schemaId = schemaId,
+    kind = kind,
+    schemaVersion = schemaVersion,
+    documentType = documentType,
+    title = title,
+    wireContracts = wireContracts,
+    contentHash = contentHash ?: sha256Hex(schemaJson ?: schemaId),
+    schemaJson = schemaJson,
+)
+
 data class CultMeshVerseCompatibility(
     val transportVersion: String,
     val rulesHash: String,
@@ -582,6 +695,18 @@ fun cultNetSchemaCatalogRequest(
         "includeSchemaJson" to includeSchemaJson,
         "schemaIds" to schemaIds,
         "kinds" to kinds,
+    ),
+)
+
+fun cultNetSchemaCatalogResponse(
+    messageId: String,
+    schemas: List<CultNetSchemaDescriptor>,
+    includeSchemaJson: Boolean = true,
+): CultNetMessage = CultNetMessage(
+    "cultnet.schema_catalog_response.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "schemas" to schemas.map { it.toWireMap(includeSchemaJson) },
     ),
 )
 
@@ -824,6 +949,17 @@ fun rawDocumentRecordFromWire(wire: Map<String, Any?>): CultNetRawDocumentRecord
     tags = stringList(wire["tags"]),
 )
 
+fun schemaDescriptorFromWire(wire: Map<String, Any?>): CultNetSchemaDescriptor = CultNetSchemaDescriptor(
+    schemaId = requireWireString(wire, "schemaId"),
+    kind = requireWireString(wire, "kind"),
+    schemaVersion = wire["schemaVersion"] as? String,
+    documentType = wire["documentType"] as? String,
+    title = wire["title"] as? String,
+    wireContracts = stringList(wire["wireContracts"]),
+    contentHash = requireWireString(wire, "contentHash"),
+    schemaJson = wire["schemaJson"] as? String,
+)
+
 private fun requireNonBlank(value: String, fieldName: String) {
     if (value.isBlank()) throw IOException("$fieldName must not be blank")
 }
@@ -857,6 +993,11 @@ private fun mapValue(value: Any?): Map<String, Any?> {
         map[key] = nested
     }
     return map
+}
+
+private fun sha256Hex(value: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(StandardCharsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
 fun CultNetTransportProfile.toWireMap(): Map<String, Any?> = linkedMapOf(
@@ -1551,6 +1692,7 @@ fun main(args: Array<String>) {
         cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
         cultCacheRawSnapshotsRoundTripThroughCultNetMessages()
         cultNetSchemaMessagesUseMessagePackMaps()
+        cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
@@ -1695,6 +1837,60 @@ private fun cultNetSchemaMessagesUseMessagePackMaps() {
     val document = parsedPut.body["document"] as Map<*, *>
     check(document["payloadEncoding"] == "messagepack")
     check((document["payload"] as ByteArray).contentEquals(payload))
+}
+
+private fun cultNetSchemaCatalogsRoundTripDescriptors() {
+    val catalog = CultNetSchemaCatalog()
+    var watched: CultNetSchemaDescriptor? = null
+    val unsubscribe = catalog.watch { watched = it }
+    val wireSchemaJson = """{"type":"object","properties":{"schemaVersion":{"const":"kotlin.note.v1"}}}"""
+    val wireDescriptor = defineCultNetSchemaDescriptor(
+        schemaId = "kotlin.note.v1",
+        kind = "wire_message",
+        schemaVersion = "kotlin.note.v1",
+        title = "Kotlin Note",
+        wireContracts = listOf("cultnet.schema.v0"),
+        schemaJson = wireSchemaJson,
+    )
+    val documentDescriptor = defineCultNetSchemaDescriptor(
+        schemaId = "kotlin.document.v1",
+        kind = "document_payload",
+        documentType = "kotlin.document",
+        title = "Kotlin Document",
+        wireContracts = listOf("cultnet.schema.v0"),
+        schemaJson = """{"type":"object","properties":{"body":{"type":"string"}}}""",
+    )
+    catalog.upsert(wireDescriptor)
+    catalog.upsert(documentDescriptor)
+    unsubscribe()
+    check(watched?.schemaId == "kotlin.document.v1")
+    check(catalog.get("kotlin.note.v1")?.contentHash == sha256Hex(wireSchemaJson))
+
+    val withoutJson = catalog.createResponse(
+        cultNetSchemaCatalogRequest(
+            messageId = "schema-without-json",
+            includeSchemaJson = false,
+            kinds = listOf("wire_message"),
+        ),
+    )
+    val parsedWithoutJson = parseCultNetMessage(withoutJson.toBytes())
+    val schemasWithoutJson = mapList(parsedWithoutJson.body["schemas"])
+    check(schemasWithoutJson.single()["schemaId"] == "kotlin.note.v1")
+    check(!schemasWithoutJson.single().containsKey("schemaJson"))
+
+    val withJson = catalog.createResponse(
+        cultNetSchemaCatalogRequest(
+            messageId = "schema-with-json",
+            includeSchemaJson = true,
+            schemaIds = listOf("kotlin.document.v1"),
+        ),
+    )
+    val parsedWithJson = parseCultNetMessage(withJson.toBytes())
+    val appliedCatalog = CultNetSchemaCatalog()
+    val applied = appliedCatalog.applyResponse(parsedWithJson)
+    check(applied.single().schemaId == "kotlin.document.v1")
+    check(applied.single().schemaJson?.contains("body") == true)
+    check(appliedCatalog.get("kotlin.document.v1")?.kind == "document_payload")
 }
 
 private fun cultMeshCatalogsRoundTripDiscoveryMessages() {
