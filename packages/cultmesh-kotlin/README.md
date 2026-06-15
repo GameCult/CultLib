@@ -3,8 +3,8 @@
 Kotlin/JVM and Android client substrate for CultCache, CultNet, and CultMesh.
 
 It provides typed MessagePack document codecs, a tiny WebSocket CultNet lane,
-a single-peer CultNet RUDP socket transport, an in-memory CultCache, and the
-first Eve dashboard/sensor document contracts.
+a single-peer CultNet RUDP socket transport, stream catalog negotiation, an
+in-memory CultCache, and the first Eve dashboard/sensor document contracts.
 
 ## CultCache Happy Path
 
@@ -240,6 +240,48 @@ leases.upsert(
 )
 
 check(leases.isAuthorized(peer, "shard-primary", "players"))
+```
+
+## Streaming Catalog
+
+Kotlin also mirrors the CultMesh stream declaration and negotiation surface for
+Android-adjacent media, sensor, tensor, and byte streams. The catalog owns
+stream identity, clock metadata, body transport negotiation, and latest-frame
+cursors; it does not own the frame bytes themselves.
+
+```kotlin
+val streams = createStreamCatalog()
+streams.declare(
+    CultMeshStreamDescriptor(
+        streamId = "mimir:camera",
+        verseId = "studio",
+        ownerPeerId = "android-device",
+        kind = CultMeshStreamKinds.Video,
+        clock = CultMeshStreamClock("android-elapsed-realtime"),
+        video = CultMeshVideoStreamFormat(
+            width = 1920,
+            height = 1080,
+            pixelFormat = "rgba8",
+            framesPerSecond = 60.0,
+        ),
+        preferredTransports = listOf(
+            CultMeshStreamBodyTransports.AHardwareBuffer,
+            CultMeshStreamBodyTransports.SharedMemory,
+            CultMeshStreamBodyTransports.CultCachePage,
+        ),
+    ),
+)
+
+val lane = streams.negotiate(
+    "mimir:camera",
+    CultMeshStreamConsumerProfile(
+        peerId = "fensalir",
+        verseId = "studio",
+        supportedTransports = listOf(CultMeshStreamBodyTransports.AHardwareBuffer),
+        acceptedKinds = listOf(CultMeshStreamKinds.Video),
+        maxInFlightFrames = 2,
+    ),
+)
 ```
 
 `EveMediaObservationDocument` carries byte-backed device streams such as camera

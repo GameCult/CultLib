@@ -220,6 +220,10 @@ Current progress:
   ergonomics as the other runtimes: sorted local views, direct `get(...)`
   lookup, unsubscribe-able `watch(...)` callbacks for Verse and peer catalogs,
   plus lease listing and lookup beside the authority check.
+- Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
+  media, sensor, tensor, and byte streams: stream declaration, clock metadata,
+  preferred body transports, consumer negotiation, copy-budget classification,
+  max in-flight frame pressure, and latest-frame cursors.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into reconnect policy and the wider

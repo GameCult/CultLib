@@ -773,6 +773,207 @@ class CultMeshAuthorityLeaseCatalog {
 
 fun createAuthorityLeaseCatalog(): CultMeshAuthorityLeaseCatalog = CultMeshAuthorityLeaseCatalog()
 
+object CultMeshStreamKinds {
+    const val Audio = "audio"
+    const val Video = "video"
+    const val Tensor = "tensor"
+    const val Bytes = "bytes"
+}
+
+object CultMeshStreamBodyTransports {
+    const val SharedMemory = "shared-memory"
+    const val SharedD3D12Texture = "shared-d3d12-texture"
+    const val SharedD3D11Texture = "shared-d3d11-texture"
+    const val DmaBuf = "dma-buf"
+    const val IOSurface = "iosurface"
+    const val AHardwareBuffer = "ahardwarebuffer"
+    const val CultCachePage = "cultcache-page"
+    const val InlineBytes = "inline-bytes"
+}
+
+data class CultMeshStreamClock(
+    val clockDomainId: String,
+    val sourceId: String? = null,
+    val sampleRate: Int? = null,
+    val offsetToVerseTimeNs: Long? = null,
+    val confidence: Double? = null,
+    val evidenceKind: String? = null,
+) {
+    init {
+        requireNonBlank(clockDomainId, "clock.clockDomainId")
+    }
+}
+
+data class CultMeshAudioStreamFormat(
+    val sampleRate: Int,
+    val channels: Int,
+    val sampleFormat: String,
+    val framesPerPacket: Int? = null,
+) {
+    init {
+        if (sampleRate <= 0) throw IOException("audio.sampleRate must be greater than zero")
+        if (channels <= 0) throw IOException("audio.channels must be greater than zero")
+        requireNonBlank(sampleFormat, "audio.sampleFormat")
+    }
+}
+
+data class CultMeshVideoStreamFormat(
+    val width: Int,
+    val height: Int,
+    val pixelFormat: String,
+    val framesPerSecond: Double? = null,
+    val planeCount: Int? = null,
+) {
+    init {
+        if (width <= 0) throw IOException("video.width must be greater than zero")
+        if (height <= 0) throw IOException("video.height must be greater than zero")
+        if (planeCount != null && planeCount <= 0) throw IOException("video.planeCount must be greater than zero")
+        requireNonBlank(pixelFormat, "video.pixelFormat")
+    }
+}
+
+data class CultMeshStreamDescriptor(
+    val streamId: String,
+    val verseId: String,
+    val ownerPeerId: String,
+    val kind: String,
+    val clock: CultMeshStreamClock,
+    val preferredTransports: List<String>,
+    val label: String? = null,
+    val audio: CultMeshAudioStreamFormat? = null,
+    val video: CultMeshVideoStreamFormat? = null,
+    val requiredAccess: String = "read",
+    val maxInFlightFrames: Int? = null,
+    val metadataSchemaId: String? = null,
+) {
+    init {
+        requireNonBlank(streamId, "stream.streamId")
+        requireNonBlank(verseId, "stream.verseId")
+        requireNonBlank(ownerPeerId, "stream.ownerPeerId")
+        requireNonBlank(kind, "stream.kind")
+        if (preferredTransports.isEmpty()) throw IOException("stream.preferredTransports must not be empty")
+        if (maxInFlightFrames != null && maxInFlightFrames <= 0) throw IOException("stream.maxInFlightFrames must be greater than zero")
+    }
+}
+
+data class CultMeshStreamConsumerProfile(
+    val peerId: String,
+    val verseId: String,
+    val supportedTransports: List<String>,
+    val acceptedKinds: List<String> = emptyList(),
+    val canImportGpuHandles: Boolean = false,
+    val canMapSharedMemory: Boolean = false,
+    val maxInFlightFrames: Int? = null,
+) {
+    init {
+        requireNonBlank(peerId, "consumer.peerId")
+        requireNonBlank(verseId, "consumer.verseId")
+        if (supportedTransports.isEmpty()) throw IOException("consumer.supportedTransports must not be empty")
+        if (maxInFlightFrames != null && maxInFlightFrames <= 0) throw IOException("consumer.maxInFlightFrames must be greater than zero")
+    }
+}
+
+data class CultMeshStreamNegotiation(
+    val streamId: String,
+    val producerPeerId: String,
+    val consumerPeerId: String,
+    val transport: String,
+    val access: String,
+    val maxInFlightFrames: Int,
+    val copyBudget: String,
+)
+
+data class CultMeshStreamFrameHandle(
+    val streamId: String,
+    val sequence: Long,
+    val timestampNs: Long,
+    val transport: String,
+    val durationNs: Long? = null,
+    val byteLength: Int? = null,
+    val nativeHandle: String? = null,
+    val resourceKey: String? = null,
+    val pageRef: String? = null,
+    val fenceHandle: String? = null,
+    val fenceValue: Long? = null,
+    val unavoidableCopyCount: Int? = null,
+    val metadata: Map<String, Any?> = emptyMap(),
+) {
+    init {
+        requireNonBlank(streamId, "frame.streamId")
+        requireNonBlank(transport, "frame.transport")
+        if (sequence < 0) throw IOException("frame.sequence must not be negative")
+        if (timestampNs < 0) throw IOException("frame.timestampNs must not be negative")
+    }
+}
+
+class CultMeshStreamCatalog {
+    private val knownStreams = linkedMapOf<String, CultMeshStreamDescriptor>()
+    private val latestFrames = linkedMapOf<String, CultMeshStreamFrameHandle>()
+
+    val streams: List<CultMeshStreamDescriptor>
+        get() = knownStreams.toSortedMap().values.toList()
+
+    fun declare(stream: CultMeshStreamDescriptor): CultMeshStreamDescriptor {
+        knownStreams[stream.streamId] = stream
+        return stream
+    }
+
+    fun get(streamId: String): CultMeshStreamDescriptor? {
+        requireNonBlank(streamId, "streamId")
+        return knownStreams[streamId]
+    }
+
+    fun find(verseId: String, kind: String? = null): List<CultMeshStreamDescriptor> {
+        requireNonBlank(verseId, "verseId")
+        return streams.filter { stream -> stream.verseId == verseId && (kind == null || stream.kind == kind) }
+    }
+
+    fun negotiate(streamId: String, consumer: CultMeshStreamConsumerProfile): CultMeshStreamNegotiation {
+        val stream = get(streamId) ?: throw IOException("Unknown CultMesh stream '$streamId'")
+        if (consumer.verseId != stream.verseId) throw IOException("stream and consumer must belong to the same Verse")
+        if (consumer.acceptedKinds.isNotEmpty() && stream.kind !in consumer.acceptedKinds) {
+            throw IOException("consumer does not accept ${stream.kind} streams")
+        }
+        val transport = stream.preferredTransports.firstOrNull { it in consumer.supportedTransports }
+            ?: throw IOException("stream and consumer have no compatible body transport")
+        val streamMax = stream.maxInFlightFrames ?: Int.MAX_VALUE
+        val consumerMax = consumer.maxInFlightFrames ?: Int.MAX_VALUE
+        return CultMeshStreamNegotiation(
+            streamId = stream.streamId,
+            producerPeerId = stream.ownerPeerId,
+            consumerPeerId = consumer.peerId,
+            transport = transport,
+            access = stream.requiredAccess,
+            maxInFlightFrames = minOf(streamMax, consumerMax),
+            copyBudget = copyBudgetForStreamTransport(transport),
+        )
+    }
+
+    fun publishFrame(frame: CultMeshStreamFrameHandle): CultMeshStreamFrameHandle {
+        if (frame.streamId !in knownStreams) throw IOException("Unknown CultMesh stream '${frame.streamId}'")
+        latestFrames[frame.streamId] = frame
+        return frame
+    }
+
+    fun latestFrame(streamId: String): CultMeshStreamFrameHandle? {
+        requireNonBlank(streamId, "streamId")
+        return latestFrames[streamId]
+    }
+}
+
+fun createStreamCatalog(): CultMeshStreamCatalog = CultMeshStreamCatalog()
+
+private fun copyBudgetForStreamTransport(transport: String): String = when (transport) {
+    CultMeshStreamBodyTransports.SharedMemory,
+    CultMeshStreamBodyTransports.SharedD3D12Texture,
+    CultMeshStreamBodyTransports.SharedD3D11Texture,
+    CultMeshStreamBodyTransports.DmaBuf,
+    CultMeshStreamBodyTransports.IOSurface,
+    CultMeshStreamBodyTransports.AHardwareBuffer -> "zero-copy-target"
+    CultMeshStreamBodyTransports.CultCachePage -> "one-copy-fallback"
+    else -> "opaque-runtime"
+}
+
 class CultMeshVerseCatalog {
     private val knownVerses = linkedMapOf<String, CultMeshVerseDescriptor>()
     private val subscribers = mutableListOf<(CultMeshVerseDescriptor) -> Unit>()
@@ -2040,6 +2241,7 @@ fun main(args: Array<String>) {
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         cultMeshAuthorityLeasesGatePeerTrust()
+        cultMeshStreamCatalogNegotiatesBodyTransports()
         cultNetShardCatalogsAndLogsRoundTrip()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
@@ -2359,6 +2561,75 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
     check(!leases.isAuthorized(peer, "schema", "players", duringLease))
     check(!leases.isAuthorized(peer, "shard-primary", "inventory", duringLease))
     check(!leases.isAuthorized(peer, "shard-primary", "players", expiresAt))
+}
+
+private fun cultMeshStreamCatalogNegotiatesBodyTransports() {
+    val streams = createStreamCatalog()
+    streams.declare(
+        CultMeshStreamDescriptor(
+            streamId = "mimir:kiyo-pro",
+            verseId = "studio",
+            ownerPeerId = "starfire",
+            kind = CultMeshStreamKinds.Video,
+            label = "Kiyo Pro",
+            clock = CultMeshStreamClock(
+                clockDomainId = "starfire-qpc",
+                confidence = 0.25,
+                evidenceKind = "provisional-clock-domain-edge-fit",
+            ),
+            video = CultMeshVideoStreamFormat(
+                width = 1920,
+                height = 1080,
+                pixelFormat = "YUY2",
+                framesPerSecond = 30.0,
+            ),
+            preferredTransports = listOf(
+                CultMeshStreamBodyTransports.SharedD3D12Texture,
+                CultMeshStreamBodyTransports.SharedMemory,
+                CultMeshStreamBodyTransports.CultCachePage,
+            ),
+            maxInFlightFrames = 3,
+        ),
+    )
+
+    val negotiation = streams.negotiate(
+        "mimir:kiyo-pro",
+        CultMeshStreamConsumerProfile(
+            peerId = "fensalir",
+            verseId = "studio",
+            supportedTransports = listOf(
+                CultMeshStreamBodyTransports.SharedD3D12Texture,
+                CultMeshStreamBodyTransports.CultCachePage,
+            ),
+            acceptedKinds = listOf(CultMeshStreamKinds.Video),
+            canImportGpuHandles = true,
+            maxInFlightFrames = 2,
+        ),
+    )
+
+    check(negotiation.streamId == "mimir:kiyo-pro")
+    check(negotiation.producerPeerId == "starfire")
+    check(negotiation.consumerPeerId == "fensalir")
+    check(negotiation.transport == CultMeshStreamBodyTransports.SharedD3D12Texture)
+    check(negotiation.access == "read")
+    check(negotiation.maxInFlightFrames == 2)
+    check(negotiation.copyBudget == "zero-copy-target")
+    check(streams.find("studio", CultMeshStreamKinds.Video).single().streamId == "mimir:kiyo-pro")
+
+    streams.publishFrame(
+        CultMeshStreamFrameHandle(
+            streamId = "mimir:kiyo-pro",
+            sequence = 42,
+            timestampNs = 1_000_000_000,
+            durationNs = 33_333_334,
+            transport = negotiation.transport,
+            nativeHandle = "0xfeed",
+            fenceHandle = "0xbeef",
+            fenceValue = 7,
+            unavoidableCopyCount = 0,
+        ),
+    )
+    check(streams.latestFrame("mimir:kiyo-pro")?.sequence == 42L)
 }
 
 private fun cultNetShardCatalogsAndLogsRoundTrip() {
