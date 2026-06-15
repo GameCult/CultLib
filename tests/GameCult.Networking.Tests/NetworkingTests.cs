@@ -66,6 +66,24 @@ namespace GameCult.Networking.Tests
             throw new InvalidOperationException("Unreachable.");
         }
 
+        private static TMessage ReceiveRudpSchemaMessage<TMessage>(CultNetRudpSocketTransportConnection transport)
+            where TMessage : class, ICultNetSchemaMessage
+        {
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                var message = transport.ReceiveSchemaMessageOnce<TMessage>();
+                if (message != null)
+                {
+                    return message;
+                }
+
+                Task.Delay(5).GetAwaiter().GetResult();
+            }
+
+            Assert.Fail($"RUDP schema message {typeof(TMessage).Name} was not delivered.");
+            throw new InvalidOperationException("Unreachable.");
+        }
+
         [Test]
         public void EncryptDecrypt_Roundtrip()
         {
@@ -644,6 +662,63 @@ namespace GameCult.Networking.Tests
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
             Assert.That(client.Stats.FramesSent, Is.EqualTo(1));
             Assert.That(server.Stats.FramesReceived, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpSocketTransport_CarriesCultNetSchemaMessages()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203043;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-schema-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-schema-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25
+            });
+
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+
+            client.SendSchemaMessage(new CultNetSchemaCatalogRequestMessage
+            {
+                MessageId = "schema-request",
+                IncludeSchemaJson = true,
+                Kinds = ["wire_message"]
+            });
+            var request = ReceiveRudpSchemaMessage<CultNetSchemaCatalogRequestMessage>(server);
+            Assert.That(request.MessageId, Is.EqualTo("schema-request"));
+            Assert.That(request.IncludeSchemaJson, Is.True);
+            Assert.That(request.Kinds, Is.EqualTo(new[] { "wire_message" }));
+
+            server.SendSchemaMessage(new CultNetHelloMessage
+            {
+                RuntimeId = "csharp-rudp-schema-server",
+                RuntimeKind = "csharp",
+                DisplayName = "C# RUDP Schema Server",
+                SupportsSchemaCatalog = true,
+                TransportProfiles = [server.Profile]
+            });
+            var hello = ReceiveRudpSchemaMessage<CultNetHelloMessage>(client);
+            Assert.That(hello.RuntimeId, Is.EqualTo("csharp-rudp-schema-server"));
+            Assert.That(hello.SupportsSchemaCatalog, Is.True);
+            Assert.That(hello.TransportProfiles, Is.Not.Null);
+            var profile = hello.TransportProfiles!.Single();
+            Assert.That(profile.Transports[0].Protocol, Is.EqualTo("rudp"));
         }
 
         [Test]

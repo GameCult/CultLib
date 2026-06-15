@@ -1285,6 +1285,47 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends a CultNet schema-v0 message on the reliable ordered schema channel.
+        /// </summary>
+        public void SendSchemaMessage<TMessage>(TMessage message)
+            where TMessage : ICultNetSchemaMessage
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            Send("schema", CultNetSchemaMessageSerialization.Serialize(message));
+        }
+
+        /// <summary>
+        /// Attempts to receive the next CultNet schema-v0 message.
+        /// </summary>
+        public ICultNetSchemaMessage? ReceiveSchemaMessageOnce()
+        {
+            while (true)
+            {
+                var frame = ReceiveOnce();
+                if (frame == null)
+                {
+                    return null;
+                }
+
+                if (!string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                return CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
+            }
+        }
+
+        /// <summary>
+        /// Attempts to receive the next CultNet schema-v0 message of the requested type.
+        /// </summary>
+        public TMessage? ReceiveSchemaMessageOnce<TMessage>()
+            where TMessage : class, ICultNetSchemaMessage
+        {
+            return ReceiveSchemaMessageOnce() as TMessage;
+        }
+
+        /// <summary>
         /// Sends a transport-level disconnect packet.
         /// </summary>
         public void Disconnect(byte[]? reason = null)
