@@ -722,6 +722,65 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSocketTransport_ErgonomicHelpersCarryNamedChannels()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203044;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-helper-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-helper-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25
+            });
+
+            client.Connect("join");
+            PumpRudpHandshake(client, server);
+
+            client.SendSchema("client-state");
+            var schemaPayload = server.ReceiveSchema(TimeSpan.FromSeconds(1));
+            Assert.That(schemaPayload, Is.Not.Null);
+            Assert.That(Encoding.UTF8.GetString(schemaPayload!), Is.EqualTo("client-state"));
+
+            server.SendSchemaMessage(new CultNetHelloMessage
+            {
+                RuntimeId = "csharp-rudp-helper-server",
+                RuntimeKind = "csharp"
+            });
+            var hello = client.ReceiveSchemaMessage<CultNetHelloMessage>(TimeSpan.FromSeconds(1));
+            Assert.That(hello, Is.Not.Null);
+            Assert.That(hello!.RuntimeId, Is.EqualTo("csharp-rudp-helper-server"));
+
+            client.SendLatest("latest-state");
+            var latest = server.ReceiveUntil(
+                TimeSpan.FromSeconds(1),
+                frame => string.Equals(frame.ChannelId, "latest", StringComparison.Ordinal));
+            Assert.That(latest, Is.Not.Null);
+            Assert.That(Encoding.UTF8.GetString(latest!.Payload), Is.EqualTo("latest-state"));
+
+            client.SendRealtime("tick");
+            var realtime = server.ReceiveUntil(
+                TimeSpan.FromSeconds(1),
+                frame => string.Equals(frame.ChannelId, "realtime", StringComparison.Ordinal));
+            Assert.That(realtime, Is.Not.Null);
+            Assert.That(Encoding.UTF8.GetString(realtime!.Payload), Is.EqualTo("tick"));
+        }
+
+        [Test]
         public void RudpSocketTransport_CarriesFragmentedReliableOrderedSchemaFrames()
         {
             using var serverSocket = BindUdpSocket();

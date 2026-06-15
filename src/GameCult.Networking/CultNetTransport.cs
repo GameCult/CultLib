@@ -1273,6 +1273,59 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends the client connect packet with a UTF-8 payload.
+        /// </summary>
+        public void Connect(string payload)
+        {
+            Connect(Encoding.UTF8.GetBytes(payload ?? string.Empty));
+        }
+
+        /// <summary>
+        /// Sends the client connect packet and polls until the handshake completes or times out.
+        /// </summary>
+        public bool ConnectAndWait(
+            byte[]? payload = null,
+            TimeSpan? timeout = null,
+            TimeSpan? pollInterval = null)
+        {
+            Connect(payload);
+            return AwaitConnected(timeout, pollInterval);
+        }
+
+        /// <summary>
+        /// Sends the client connect packet with a UTF-8 payload and polls until the handshake completes or times out.
+        /// </summary>
+        public bool ConnectAndWait(
+            string payload,
+            TimeSpan? timeout = null,
+            TimeSpan? pollInterval = null)
+        {
+            return ConnectAndWait(Encoding.UTF8.GetBytes(payload ?? string.Empty), timeout, pollInterval);
+        }
+
+        /// <summary>
+        /// Polls the transport until the RUDP handshake completes or times out.
+        /// </summary>
+        public bool AwaitConnected(TimeSpan? timeout = null, TimeSpan? pollInterval = null)
+        {
+            var deadline = DateTimeOffset.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(1));
+            var interval = pollInterval ?? TimeSpan.FromMilliseconds(5);
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                _ = ReceiveOnce();
+                PollResends();
+                if (Connected)
+                {
+                    return true;
+                }
+
+                Thread.Sleep(interval);
+            }
+
+            return Connected;
+        }
+
+        /// <summary>
         /// Sends a logical transport frame through the RUDP session.
         /// </summary>
         public void Send(string channelId, byte[] payload)
@@ -1285,6 +1338,22 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends a reliable ordered schema-channel payload.
+        /// </summary>
+        public void SendSchema(byte[] payload)
+        {
+            Send("schema", payload);
+        }
+
+        /// <summary>
+        /// Sends a reliable ordered schema-channel UTF-8 payload.
+        /// </summary>
+        public void SendSchema(string payload)
+        {
+            SendSchema(Encoding.UTF8.GetBytes(payload ?? string.Empty));
+        }
+
+        /// <summary>
         /// Sends a CultNet schema-v0 message on the reliable ordered schema channel.
         /// </summary>
         public void SendSchemaMessage<TMessage>(TMessage message)
@@ -1292,6 +1361,38 @@ namespace GameCult.Networking
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
             Send("schema", CultNetSchemaMessageSerialization.Serialize(message));
+        }
+
+        /// <summary>
+        /// Sends an unreliable sequenced latest-state payload.
+        /// </summary>
+        public void SendLatest(byte[] payload)
+        {
+            Send("latest", payload);
+        }
+
+        /// <summary>
+        /// Sends an unreliable sequenced latest-state UTF-8 payload.
+        /// </summary>
+        public void SendLatest(string payload)
+        {
+            SendLatest(Encoding.UTF8.GetBytes(payload ?? string.Empty));
+        }
+
+        /// <summary>
+        /// Sends an unreliable unordered realtime payload.
+        /// </summary>
+        public void SendRealtime(byte[] payload)
+        {
+            Send("realtime", payload);
+        }
+
+        /// <summary>
+        /// Sends an unreliable unordered realtime UTF-8 payload.
+        /// </summary>
+        public void SendRealtime(string payload)
+        {
+            SendRealtime(Encoding.UTF8.GetBytes(payload ?? string.Empty));
         }
 
         /// <summary>
@@ -1323,6 +1424,61 @@ namespace GameCult.Networking
             where TMessage : class, ICultNetSchemaMessage
         {
             return ReceiveSchemaMessageOnce() as TMessage;
+        }
+
+        /// <summary>
+        /// Polls until a delivered transport frame matches the predicate or the timeout expires.
+        /// </summary>
+        public CultNetTransportFrame? ReceiveUntil(
+            TimeSpan timeout,
+            Func<CultNetTransportFrame, bool>? predicate = null,
+            TimeSpan? pollInterval = null)
+        {
+            var deadline = DateTimeOffset.UtcNow.Add(timeout);
+            var interval = pollInterval ?? TimeSpan.FromMilliseconds(5);
+            predicate ??= _ => true;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                var frame = ReceiveOnce();
+                if (frame != null && predicate(frame))
+                {
+                    return frame;
+                }
+
+                PollResends();
+                Thread.Sleep(interval);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Polls until a schema-channel payload arrives or the timeout expires.
+        /// </summary>
+        public byte[]? ReceiveSchema(TimeSpan timeout, TimeSpan? pollInterval = null)
+        {
+            return ReceiveUntil(
+                timeout,
+                frame => string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal),
+                pollInterval)?.Payload;
+        }
+
+        /// <summary>
+        /// Polls until a CultNet schema-v0 message arrives or the timeout expires.
+        /// </summary>
+        public ICultNetSchemaMessage? ReceiveSchemaMessage(TimeSpan timeout, TimeSpan? pollInterval = null)
+        {
+            var payload = ReceiveSchema(timeout, pollInterval);
+            return payload == null ? null : CultNetSchemaMessageSerialization.Deserialize(payload);
+        }
+
+        /// <summary>
+        /// Polls until a CultNet schema-v0 message of the requested type arrives or the timeout expires.
+        /// </summary>
+        public TMessage? ReceiveSchemaMessage<TMessage>(TimeSpan timeout, TimeSpan? pollInterval = null)
+            where TMessage : class, ICultNetSchemaMessage
+        {
+            return ReceiveSchemaMessage(timeout, pollInterval) as TMessage;
         }
 
         /// <summary>
