@@ -1,0 +1,31 @@
+{
+  "artifactDir": "E:\\Projects\\CultLib\\.voidbot\\birth\\terrain",
+  "mode": "scout",
+  "profileCount": 1,
+  "repoCount": 1,
+  "repos": [
+    {
+      "confidence": 1.0,
+      "dominantAxes": [
+        "contract_strictness:1.00",
+        "interface_orientation:1.00",
+        "runtime_proximity:1.00",
+        "content_canon_bias:0.90",
+        "sensory_salience:0.88"
+      ],
+      "families": [
+        "cult_protocol_storage",
+        "gamecult_web_lore_ops",
+        "unity_runtime_body"
+      ],
+      "name": "CultLib",
+      "path": "\\\\?\\E:\\Projects\\CultLib",
+      "repoId": "cultlib",
+      "warnings": []
+    }
+  ],
+  "root": "E:\\Projects\\CultLib",
+  "schemaVersion": "epiphany.repo_personality_artifacts.v0",
+  "store": "E:\\Projects\\CultLib\\.voidbot\\birth\\terrain\\baseline.msgpack",
+  "trajectoryCount": 1
+}

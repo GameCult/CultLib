@@ -740,9 +740,9 @@ test("CultNet document registry builds snapshots and applies document puts throu
       },
       agents: [
         {
-          agent_id: "epiphany.face",
+          agent_id: "epiphany.persona",
           identity: {
-            name: "Face",
+            name: "Persona",
             roles: ["public-surface"],
             origin: "test",
             public_description: "test",
@@ -770,14 +770,14 @@ test("CultNet document registry builds snapshots and applies document puts throu
       scenes: [],
     });
 
-    await originCache.put(documentDefinition, "epiphany.face", payload);
+    await originCache.put(documentDefinition, "epiphany.persona", payload);
     const snapshot = registry.createSnapshotResponse(originCache, "snapshot-1");
     await registry.applySnapshotResponse(targetCache, snapshot);
 
-    const roundTrip = targetCache.get(documentDefinition, "epiphany.face");
+    const roundTrip = targetCache.get(documentDefinition, "epiphany.persona");
     assert.ok(roundTrip);
     assert.equal(roundTrip?.schema_version, "ghostlight.agent_state.v0");
-    assert.equal(roundTrip?.agents[0]?.agent_id, "epiphany.face");
+    assert.equal(roundTrip?.agents[0]?.agent_id, "epiphany.persona");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -828,9 +828,9 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
       },
       agents: [
         {
-          agent_id: "epiphany.face",
+          agent_id: "epiphany.persona",
           identity: {
-            name: "Face",
+            name: "Persona",
             roles: ["public-surface"],
             origin: "test",
             public_description: "test",
@@ -858,16 +858,16 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
       scenes: [],
     });
 
-    await originCache.put(documentDefinition, "epiphany.face", payload);
+    await originCache.put(documentDefinition, "epiphany.persona", payload);
     const rawSnapshot = registry.createRawSnapshotResponse(originCache, "raw-snapshot-1");
     assert.equal(rawSnapshot.documents[0]?.schemaId, cultNetSchemas.ghostlightAgentStateSchema.$id);
-    assert.equal(rawSnapshot.documents[0]?.recordKey, "epiphany.face");
+    assert.equal(rawSnapshot.documents[0]?.recordKey, "epiphany.persona");
     await registry.applyRawSnapshotResponse(targetCache, rawSnapshot);
 
-    const sourceEnvelope = originCache.getRequiredEnvelope(documentDefinition, "epiphany.face");
-    const targetEnvelope = targetCache.getRequiredEnvelope(documentDefinition, "epiphany.face");
+    const sourceEnvelope = originCache.getRequiredEnvelope(documentDefinition, "epiphany.persona");
+    const targetEnvelope = targetCache.getRequiredEnvelope(documentDefinition, "epiphany.persona");
     assert.deepEqual(targetEnvelope.payload, sourceEnvelope.payload);
-    assert.equal(targetCache.getRequired(documentDefinition, "epiphany.face").schema_version, "ghostlight.agent_state.v0");
+    assert.equal(targetCache.getRequired(documentDefinition, "epiphany.persona").schema_version, "ghostlight.agent_state.v0");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -906,7 +906,7 @@ test("Ghostlight contract mirror rejects nested payloads that violate the canoni
       agents: [
         {
           identity: {
-            name: "Face",
+            name: "Persona",
             roles: ["public-surface"],
             origin: "test",
             public_description: "test",

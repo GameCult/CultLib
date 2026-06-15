@@ -1,0 +1,7 @@
+{
+  "status": "starting",
+  "startedAt": "2026-06-14T19:46:12.715Z",
+  "stateFile": "E:\\Projects\\CultLib\\.voidbot\\state\\libby.cc",
+  "launcher": "repo_face_heartbeat",
+  "reason": "repo_face_stale_short_term_memory"
+}

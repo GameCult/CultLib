@@ -243,11 +243,13 @@ namespace GameCult.Networking
             {
                 if (!await TryForwardPutAsync(ex, message).ConfigureAwait(false))
                 {
+                    _server.Logger.LogError($"CultNet raw put authority failed: {ex.Message}");
                     peer.SendCultNet(CreateRoutingError(ex));
                 }
             }
             catch (Exception ex)
             {
+                _server.Logger.LogError($"CultNet raw put failed: {ex.Message}");
                 peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
         }

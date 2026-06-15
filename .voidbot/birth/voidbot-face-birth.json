@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "identityId": "libby",
+  "repoPath": "E:\\Projects\\CultLib",
+  "artifactDir": "E:\\Projects\\CultLib\\.voidbot\\birth",
+  "scoutDir": "E:\\Projects\\CultLib\\.voidbot\\birth\\terrain",
+  "runnerDir": "E:\\Projects\\CultLib\\.voidbot\\birth\\runner",
+  "summaryPath": "E:\\Projects\\CultLib\\.voidbot\\birth\\runner\\birth-runner-summary.json",
+  "logPath": "E:\\Projects\\CultLib\\.voidbot\\logs\\voidbot-face-birth.log",
+  "startedAt": "2026-06-14T18:14:12.579Z",
+  "completedAt": "2026-06-14T18:16:58.498Z",
+  "updatedAt": "2026-06-14T18:16:58.498Z"
+}

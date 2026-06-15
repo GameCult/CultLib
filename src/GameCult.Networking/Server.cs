@@ -410,7 +410,13 @@ namespace GameCult.Networking
 
         private static bool CanProcessBeforeVerification(ICultNetSchemaMessage message)
         {
-            return message is CultNetHelloMessage or CultNetSchemaCatalogRequestMessage;
+            return message is CultNetHelloMessage
+                or CultNetSchemaCatalogRequestMessage
+                or CultNetDocumentPutRawMessage
+                or CultNetDocumentDeleteMessage
+                or CultNetDatabaseSubscribeMessage
+                or CultNetDatabaseUnsubscribeMessage
+                or CultNetSnapshotRequestMessage;
         }
 
         private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
