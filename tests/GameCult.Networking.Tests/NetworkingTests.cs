@@ -465,6 +465,36 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_PingsAndDetectsReceiveTimeout()
+        {
+            var client = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 101,
+                InitialSequence = 1
+            });
+            var server = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 101,
+                InitialSequence = 100
+            });
+            var connect = client.CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            var accept = server.AcceptConnect(connect, 10);
+            client.Receive(accept, 20);
+
+            var ping = client.CreatePing(Encoding.UTF8.GetBytes("pulse"));
+            var pingResult = server.Receive(ping, 30);
+            Assert.That(pingResult.Reply?.PacketType, Is.EqualTo(CultNetRudpPacketType.Pong));
+            Assert.That(pingResult.Reply?.Payload, Is.EqualTo(Encoding.UTF8.GetBytes("pulse")));
+
+            var pongResult = client.Receive(pingResult.Reply!, 40);
+            Assert.That(pongResult.Pong, Is.True);
+            Assert.That(pongResult.PongPayload, Is.EqualTo(Encoding.UTF8.GetBytes("pulse")));
+            Assert.That(client.CheckTimeout(90, 50), Is.False);
+            Assert.That(client.CheckTimeout(91, 50), Is.True);
+            Assert.That(client.Connected, Is.False);
+        }
+
+        [Test]
         public void RudpSession_SuppressesDuplicatesAndDeliversReliableOrderedPayloadsInSequence()
         {
             var sender = new CultNetRudpSession(new CultNetRudpSessionOptions

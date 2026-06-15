@@ -340,6 +340,26 @@ test("rudp session schedules reliable resends until acked", () => {
   assert.deepEqual(session.dueResends(250), []);
 });
 
+test("rudp session pings and detects receive timeout", () => {
+  const client = new CultNetRudpSession({ connectionId: 101, initialSequence: 1 });
+  const server = new CultNetRudpSession({ connectionId: 101, initialSequence: 100 });
+  const connect = client.createConnect(0, Buffer.from("join"));
+  const accept = server.acceptConnect(connect, 10);
+  client.receive(accept, 20);
+
+  const ping = client.createPing(Buffer.from("pulse"));
+  const pingResult = server.receive(ping, 30);
+  assert.equal(pingResult.reply?.packetType, "pong");
+  assert.deepEqual(Buffer.from(pingResult.reply?.payload ?? []), Buffer.from("pulse"));
+
+  const pongResult = client.receive(pingResult.reply!, 40);
+  assert.equal(pongResult.pong, true);
+  assert.deepEqual(Buffer.from(pongResult.pongPayload ?? []), Buffer.from("pulse"));
+  assert.equal(client.checkTimeout(90, 50), false);
+  assert.equal(client.checkTimeout(91, 50), true);
+  assert.equal(client.connected, false);
+});
+
 test("rudp session suppresses duplicates and delivers reliable ordered payloads in sequence", () => {
   const sender = new CultNetRudpSession({ connectionId: 123, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 123, initialSequence: 100 });

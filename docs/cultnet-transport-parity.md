@@ -198,10 +198,16 @@ Current progress:
   raw reason bytes, socket transports surface the remote reason, and the
   TypeScript interop harness proves reason propagation from C#/Kotlin/Python/Rust
   one-shot UDP peers.
+- TypeScript, C#, Rust, Python, and Kotlin now share transport-level ping/pong
+  and receive-timeout state: sessions create pings, answer pings with pongs,
+  expose pong payloads, and mark themselves disconnected after a configured
+  silent receive window. The TypeScript interop harness proves ping/pong payload
+  echo against C#/Kotlin/Python/Rust UDP peers; local runtime tests prove timeout
+  state transitions.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into reconnect, timeout detection,
-  backpressure, and the wider schema-message matrix.
+  ports, then broaden RUDP interop into reconnect policy, backpressure, and the
+  wider schema-message matrix.
 
 ## RUDP Packet Contract V0
 

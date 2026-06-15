@@ -445,6 +445,14 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket? Reply { get; set; }
         /// <summary>
+        /// Gets or sets whether the packet was a pong response.
+        /// </summary>
+        public bool Pong { get; set; }
+        /// <summary>
+        /// Gets or sets the pong payload bytes.
+        /// </summary>
+        public byte[] PongPayload { get; set; } = Array.Empty<byte>();
+        /// <summary>
         /// Gets or sets whether the remote peer sent a disconnect packet.
         /// </summary>
         public bool Disconnected { get; set; }
@@ -587,6 +595,7 @@ namespace GameCult.Networking
         private uint _nextSequence;
         private ushort _nextFragmentId = 1;
         private bool _connected;
+        private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
@@ -618,6 +627,10 @@ namespace GameCult.Networking
         /// Gets whether the session has completed the connect/accept handshake.
         /// </summary>
         public bool Connected => _connected;
+        /// <summary>
+        /// Gets the logical time of the last received packet.
+        /// </summary>
+        public long? LastReceivedAtMs => _lastReceivedAtMs;
         /// <summary>
         /// Gets reliable packet sequences awaiting acknowledgement.
         /// </summary>
@@ -732,6 +745,7 @@ namespace GameCult.Networking
         {
             RequireConnection(packet);
             ApplyAcknowledgements(packet);
+            _lastReceivedAtMs = nowMs;
             var expectedSequenceIfUninitialized = _highestReceivedSequence.HasValue
                 ? _highestReceivedSequence.Value + 1
                 : packet.Sequence;
@@ -761,7 +775,13 @@ namespace GameCult.Networking
             if (packet.PacketType == CultNetRudpPacketType.Ack || packet.PacketType == CultNetRudpPacketType.Pong)
             {
                 RememberReceived(packet.Sequence);
-                return new CultNetRudpReceiveResult();
+                return new CultNetRudpReceiveResult
+                {
+                    Pong = packet.PacketType == CultNetRudpPacketType.Pong,
+                    PongPayload = packet.PacketType == CultNetRudpPacketType.Pong
+                        ? packet.Payload ?? Array.Empty<byte>()
+                        : Array.Empty<byte>()
+                };
             }
 
             if (packet.PacketType == CultNetRudpPacketType.Disconnect)
@@ -810,12 +830,37 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Creates a packet carrying a keepalive ping payload.
+        /// </summary>
+        public CultNetRudpPacket CreatePing(byte[]? payload = null)
+        {
+            return CreatePacket(CultNetRudpPacketType.Ping, "control", payload ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
+        }
+
+        /// <summary>
         /// Creates a packet carrying a transport-level disconnect reason.
         /// </summary>
         public CultNetRudpPacket CreateDisconnect(byte[]? reason = null)
         {
             _connected = false;
             return CreatePacket(CultNetRudpPacketType.Disconnect, "control", reason ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
+        }
+
+        /// <summary>
+        /// Marks the session disconnected when no packet has arrived within the timeout window.
+        /// </summary>
+        public bool CheckTimeout(long nowMs, long timeoutMs)
+        {
+            if (!_connected || !_lastReceivedAtMs.HasValue)
+            {
+                return false;
+            }
+            if (nowMs - _lastReceivedAtMs.Value <= timeoutMs)
+            {
+                return false;
+            }
+            _connected = false;
+            return true;
         }
 
         /// <summary>
@@ -1104,6 +1149,7 @@ namespace GameCult.Networking
         private readonly int? _maxFragmentBytes;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
         private readonly Queue<CultNetTransportFrame> _deliveredFrames = new Queue<CultNetTransportFrame>();
+        private readonly Queue<byte[]> _pongPayloads = new Queue<byte[]>();
         private EndPoint? _remoteEndPoint;
         private bool _disposed;
 
@@ -1159,6 +1205,20 @@ namespace GameCult.Networking
         public byte[]? DisconnectReason { get; private set; }
 
         /// <summary>
+        /// Attempts to dequeue the next received pong payload.
+        /// </summary>
+        public bool TryDequeuePongPayload(out byte[] payload)
+        {
+            if (_pongPayloads.Count > 0)
+            {
+                payload = _pongPayloads.Dequeue();
+                return true;
+            }
+            payload = Array.Empty<byte>();
+            return false;
+        }
+
+        /// <summary>
         /// Sends the client connect packet.
         /// </summary>
         public void Connect(byte[]? payload = null)
@@ -1189,6 +1249,22 @@ namespace GameCult.Networking
         public void Disconnect(byte[]? reason = null)
         {
             SendPacket(_session.CreateDisconnect(reason ?? Array.Empty<byte>()));
+        }
+
+        /// <summary>
+        /// Sends a transport-level ping packet.
+        /// </summary>
+        public void Ping(byte[]? payload = null)
+        {
+            SendPacket(_session.CreatePing(payload ?? Array.Empty<byte>()));
+        }
+
+        /// <summary>
+        /// Checks whether the session has exceeded the receive timeout.
+        /// </summary>
+        public bool CheckTimeout(long timeoutMs)
+        {
+            return _session.CheckTimeout(NowMs(), timeoutMs);
         }
 
         /// <summary>
@@ -1238,6 +1314,10 @@ namespace GameCult.Networking
             if (result.Reply != null)
             {
                 SendPacket(result.Reply);
+            }
+            if (result.Pong)
+            {
+                _pongPayloads.Enqueue(result.PongPayload);
             }
             if (result.Disconnected)
             {

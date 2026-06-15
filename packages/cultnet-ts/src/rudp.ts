@@ -49,6 +49,8 @@ export interface CultNetRudpSessionOptions {
 export interface CultNetRudpReceiveResult {
   delivered: CultNetRudpDeliveredFrame[];
   reply?: CultNetRudpPacket;
+  pong?: boolean;
+  pongPayload?: Uint8Array;
   disconnected?: boolean;
   disconnectReason?: Uint8Array;
 }
@@ -116,6 +118,7 @@ export class CultNetRudpSession {
   #nextSequence: number;
   #nextFragmentId = 1;
   #connected = false;
+  #lastReceivedAtMs: number | undefined;
   #highestReceivedSequence: number | undefined;
   readonly #receivedSequences = new Set<number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
@@ -135,6 +138,10 @@ export class CultNetRudpSession {
 
   get pendingReliableSequences(): number[] {
     return [...this.#pendingReliable.keys()].sort((left, right) => left - right);
+  }
+
+  get lastReceivedAtMs(): number | undefined {
+    return this.#lastReceivedAtMs;
   }
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
@@ -242,6 +249,7 @@ export class CultNetRudpSession {
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
     this.#requireConnection(packet);
     this.#applyAcknowledgements(packet);
+    this.#lastReceivedAtMs = nowMs;
     const expectedSequenceIfUninitialized = this.#highestReceivedSequence === undefined
       ? packet.sequence
       : this.#highestReceivedSequence + 1;
@@ -266,7 +274,11 @@ export class CultNetRudpSession {
 
     if (packet.packetType === "ack" || packet.packetType === "pong") {
       this.#rememberReceived(packet.sequence);
-      return { delivered: [] };
+      return {
+        delivered: [],
+        pong: packet.packetType === "pong",
+        pongPayload: packet.packetType === "pong" ? packet.payload ?? new Uint8Array() : undefined,
+      };
     }
 
     if (packet.packetType === "disconnect") {
@@ -308,6 +320,14 @@ export class CultNetRudpSession {
     });
   }
 
+  createPing(payload = new Uint8Array()): CultNetRudpPacket {
+    return this.#createPacket({
+      packetType: "ping",
+      channelId: "control",
+      payload,
+    });
+  }
+
   createDisconnect(reason = new Uint8Array()): CultNetRudpPacket {
     this.#connected = false;
     return this.#createPacket({
@@ -315,6 +335,17 @@ export class CultNetRudpSession {
       channelId: "control",
       payload: reason,
     });
+  }
+
+  checkTimeout(nowMs: number, timeoutMs: number): boolean {
+    if (!this.#connected || this.#lastReceivedAtMs === undefined) {
+      return false;
+    }
+    if (nowMs - this.#lastReceivedAtMs <= timeoutMs) {
+      return false;
+    }
+    this.#connected = false;
+    return true;
   }
 
   dueResends(nowMs: number): CultNetRudpPacket[] {
@@ -617,6 +648,19 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     this.#stats.framesSent += 1;
   }
 
+  ping(payload = new Uint8Array()): void {
+    this.#sendPacket(this.#session.createPing(payload));
+  }
+
+  checkTimeout(timeoutMs: number, nowMs = Date.now()): boolean {
+    const timedOut = this.#session.checkTimeout(nowMs, timeoutMs);
+    if (timedOut) {
+      this.emit("timeout");
+      this.emit("close");
+    }
+    return timedOut;
+  }
+
   close(): void {
     clearInterval(this.#resendTimer);
     if (!this.#closed) {
@@ -651,6 +695,9 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       const result = this.#session.receive(packet, Date.now());
       if (result.reply) {
         this.#sendPacket(result.reply);
+      }
+      if (result.pong) {
+        this.emit("pong", { payload: result.pongPayload ?? new Uint8Array() });
       }
       for (const frame of result.delivered) {
         this.#stats.framesReceived += 1;

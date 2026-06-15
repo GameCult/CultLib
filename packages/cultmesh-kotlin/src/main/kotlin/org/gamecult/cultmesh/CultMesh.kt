@@ -155,6 +155,8 @@ data class CultNetRudpDeliveredFrame(val channelId: String, val payload: ByteArr
 data class CultNetRudpReceiveResult(
     val delivered: List<CultNetRudpDeliveredFrame> = emptyList(),
     val reply: CultNetRudpPacket? = null,
+    val pong: Boolean = false,
+    val pongPayload: ByteArray = ByteArray(0),
     val disconnected: Boolean = false,
     val disconnectReason: ByteArray = ByteArray(0),
 )
@@ -188,6 +190,8 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     private var nextSequence = uint32(options.initialSequence, "initialSequence")
     private var nextFragmentId = 1
     var connected: Boolean = false
+        private set
+    var lastReceivedAtMs: Long? = null
         private set
     private var highestReceivedSequence: Long? = null
     private val receivedSequences = linkedSetOf<Long>()
@@ -258,6 +262,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         val ignoredNow = nowMs
         requireConnection(packet)
         applyAcknowledgements(packet)
+        lastReceivedAtMs = nowMs
         val expectedSequenceIfUninitialized = (highestReceivedSequence ?: (packet.sequence - 1)) + 1
         when (packet.packetType) {
             CultNetRudpPacketType.Accept -> {
@@ -271,7 +276,10 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
             }
             CultNetRudpPacketType.Ack, CultNetRudpPacketType.Pong -> {
                 rememberReceived(packet.sequence)
-                return CultNetRudpReceiveResult()
+                return CultNetRudpReceiveResult(
+                    pong = packet.packetType == CultNetRudpPacketType.Pong,
+                    pongPayload = if (packet.packetType == CultNetRudpPacketType.Pong) packet.payload.copyOf() else ByteArray(0),
+                )
             }
             CultNetRudpPacketType.Disconnect -> {
                 rememberReceived(packet.sequence)
@@ -291,9 +299,19 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
 
     fun createAck(): CultNetRudpPacket = createPacket(CultNetRudpPacketType.Ack, "control", ByteArray(0))
 
+    fun createPing(payload: ByteArray = ByteArray(0)): CultNetRudpPacket =
+        createPacket(CultNetRudpPacketType.Ping, "control", payload)
+
     fun createDisconnect(reason: ByteArray = ByteArray(0)): CultNetRudpPacket {
         connected = false
         return createPacket(CultNetRudpPacketType.Disconnect, "control", reason)
+    }
+
+    fun checkTimeout(nowMs: Long, timeoutMs: Long): Boolean {
+        val lastReceived = lastReceivedAtMs ?: return false
+        if (!connected || nowMs - lastReceived <= timeoutMs) return false
+        connected = false
+        return true
     }
 
     fun dueResends(nowMs: Long): List<CultNetRudpPacket> =
@@ -433,6 +451,7 @@ class CultNetRudpSocketTransportConnection(
     private val session = CultNetRudpSession(CultNetRudpSessionOptions(connectionId, initialSequence, resendDelayMs))
     private var remote = remoteAddress
     private val delivered = ArrayDeque<CultNetTransportFrame>()
+    private val pongPayloads = ArrayDeque<ByteArray>()
     private var bytesReceived = 0L
     private var bytesSent = 0L
     private var framesReceived = 0L
@@ -463,6 +482,14 @@ class CultNetRudpSocketTransportConnection(
         sendPacket(session.createDisconnect(reason))
     }
 
+    fun ping(payload: ByteArray = ByteArray(0)) {
+        sendPacket(session.createPing(payload))
+    }
+
+    fun pollPongPayload(): ByteArray? = if (pongPayloads.isEmpty()) null else pongPayloads.removeFirst()
+
+    fun checkTimeout(timeoutMs: Long): Boolean = session.checkTimeout(nowMs(), timeoutMs)
+
     fun receiveOnce(): CultNetTransportFrame? {
         if (!delivered.isEmpty()) return delivered.removeFirst()
         val buffer = ByteArray(65535)
@@ -486,6 +513,9 @@ class CultNetRudpSocketTransportConnection(
         }
         val result = session.receive(packet, nowMs())
         result.reply?.let { sendPacket(it) }
+        if (result.pong) {
+            pongPayloads.add(result.pongPayload.copyOf())
+        }
         if (result.disconnected) {
             disconnectReason = result.disconnectReason.copyOf()
             return null
@@ -602,6 +632,7 @@ private fun nowMs(): Long = Instant.now().toEpochMilli()
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
+        rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionFragmentsAndReassemblesReliableOrderedPayloads()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
@@ -760,6 +791,27 @@ private fun rudpPacketCodecUsesDeterministicReliableOrderedFixture() {
     check(decoded.fragmentIndex == 1)
     check(decoded.fragmentCount == 3)
     check(String(decoded.payload, StandardCharsets.UTF_8) == "hello")
+}
+
+private fun rudpSessionPingsAndDetectsReceiveTimeout() {
+    val client = CultNetRudpSession(CultNetRudpSessionOptions(connectionId = 101, initialSequence = 1))
+    val server = CultNetRudpSession(CultNetRudpSessionOptions(connectionId = 101, initialSequence = 100))
+    val connect = client.createConnect(0, "join".toByteArray(StandardCharsets.UTF_8))
+    val accept = server.acceptConnect(connect, 10)
+    client.receive(accept, 20)
+
+    val ping = client.createPing("pulse".toByteArray(StandardCharsets.UTF_8))
+    val pingResult = server.receive(ping, 30)
+    val pong = pingResult.reply ?: error("Ping did not produce a pong")
+    check(pong.packetType == CultNetRudpPacketType.Pong)
+    check(String(pong.payload, StandardCharsets.UTF_8) == "pulse")
+
+    val pongResult = client.receive(pong, 40)
+    check(pongResult.pong)
+    check(String(pongResult.pongPayload, StandardCharsets.UTF_8) == "pulse")
+    check(!client.checkTimeout(90, 50))
+    check(client.checkTimeout(91, 50))
+    check(!client.connected)
 }
 
 private fun rudpSessionFragmentsAndReassemblesReliableOrderedPayloads() {

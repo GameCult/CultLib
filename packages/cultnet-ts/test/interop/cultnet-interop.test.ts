@@ -1396,6 +1396,59 @@ test("CultNet RUDP disconnect reasons cross runtime boundaries", async () => {
   }
 });
 
+test("CultNet RUDP ping/pong keepalive crosses runtime boundaries", async () => {
+  for (const peer of rudpServerInteropPeers()) {
+    await peer.build();
+    const serverPeer = peer.spawn();
+    const clientSocket = await bindUdpSocket();
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-ping-${peer.name.replace(/\W/g, "").toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: await serverPeer.ready,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+      });
+
+      const receivedPong = once(client, "pong");
+      const receivedFrame = once(client, "frame");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} ping handshake`);
+
+      const pingPayload = Buffer.from(`${peer.name.toLowerCase()}-ping`);
+      client.ping(pingPayload);
+      const [pong] = await withTimeout(receivedPong, 2_000, `${peer.name} RUDP pong`);
+      assert.deepEqual(Buffer.from(pong.payload), pingPayload);
+
+      assert.equal(client.checkTimeout(1_000), false);
+      client.send("schema", Buffer.from(peer.clientPayload));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} RUDP response frame after ping`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(peer.expectedPayload));
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after ping`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
   await buildCSharpInteropPeer();

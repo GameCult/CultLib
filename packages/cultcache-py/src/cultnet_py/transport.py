@@ -104,6 +104,8 @@ class CultNetRudpDeliveredFrame:
 class CultNetRudpReceiveResult:
     delivered: tuple[CultNetRudpDeliveredFrame, ...] = field(default_factory=tuple)
     reply: CultNetRudpPacket | None = None
+    pong: bool = False
+    pong_payload: bytes = b""
     disconnected: bool = False
     disconnect_reason: bytes = b""
 
@@ -210,6 +212,7 @@ class CultNetRudpSession:
         self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
         self._next_fragment_id = 1
         self._connected = False
+        self._last_received_at_ms: int | None = None
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
@@ -220,6 +223,10 @@ class CultNetRudpSession:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def last_received_at_ms(self) -> int | None:
+        return self._last_received_at_ms
 
     @property
     def pending_reliable_sequences(self) -> tuple[int, ...]:
@@ -319,9 +326,9 @@ class CultNetRudpSession:
         return tuple(packets)
 
     def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
-        del now_ms
         self._require_connection(packet)
         self._apply_acknowledgements(packet)
+        self._last_received_at_ms = now_ms
         expected_sequence_if_uninitialized = (
             packet.sequence
             if self._highest_received_sequence is None
@@ -341,7 +348,10 @@ class CultNetRudpSession:
 
         if packet.packet_type in (CultNetRudpPacketType.ACK, CultNetRudpPacketType.PONG):
             self._remember_received(packet.sequence)
-            return CultNetRudpReceiveResult()
+            return CultNetRudpReceiveResult(
+                pong=packet.packet_type == CultNetRudpPacketType.PONG,
+                pong_payload=bytes(packet.payload) if packet.packet_type == CultNetRudpPacketType.PONG else b"",
+            )
 
         if packet.packet_type == CultNetRudpPacketType.DISCONNECT:
             self._remember_received(packet.sequence)
@@ -374,9 +384,20 @@ class CultNetRudpSession:
     def create_ack(self) -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
 
+    def create_ping(self, payload: bytes = b"") -> CultNetRudpPacket:
+        return self._create_packet(CultNetRudpPacketType.PING, "control", payload)
+
     def create_disconnect(self, reason: bytes = b"") -> CultNetRudpPacket:
         self._connected = False
         return self._create_packet(CultNetRudpPacketType.DISCONNECT, "control", reason)
+
+    def check_timeout(self, now_ms: int, timeout_ms: int) -> bool:
+        if not self._connected or self._last_received_at_ms is None:
+            return False
+        if now_ms - self._last_received_at_ms <= timeout_ms:
+            return False
+        self._connected = False
+        return True
 
     def due_resends(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
         due: list[CultNetRudpPacket] = []
@@ -573,6 +594,7 @@ class CultNetRudpSocketTransportConnection:
         self._delivered_frames: deque[CultNetTransportFrame] = deque()
         self._closed = False
         self.disconnect_reason: bytes | None = None
+        self.pong_payloads: deque[bytes] = deque()
 
     @property
     def connected(self) -> bool:
@@ -628,6 +650,8 @@ class CultNetRudpSocketTransportConnection:
         result = self.session.receive(packet, _now_ms())
         if result.reply is not None:
             self._send_packet(result.reply)
+        if result.pong:
+            self.pong_payloads.append(result.pong_payload)
         if result.disconnected:
             self.disconnect_reason = result.disconnect_reason
             return None
@@ -645,6 +669,12 @@ class CultNetRudpSocketTransportConnection:
 
     def disconnect(self, reason: bytes = b"") -> None:
         self._send_packet(self.session.create_disconnect(reason))
+
+    def ping(self, payload: bytes = b"") -> None:
+        self._send_packet(self.session.create_ping(payload))
+
+    def check_timeout(self, timeout_ms: int, now_ms: int | None = None) -> bool:
+        return self.session.check_timeout(_now_ms() if now_ms is None else now_ms, timeout_ms)
 
     def poll_resends(self) -> None:
         for packet in self.session.due_resends(_now_ms()):

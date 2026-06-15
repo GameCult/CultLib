@@ -490,6 +490,37 @@ fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
 }
 
 #[test]
+fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 101,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 101,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = client.create_connect(0, b"join".to_vec());
+    let accept = server.accept_connect(&connect, 10, Vec::new())?;
+    client.receive(&accept, 20)?;
+
+    let ping = client.create_ping(b"pulse".to_vec());
+    let ping_result = server.receive(&ping, 30)?;
+    let pong = ping_result.reply.expect("ping should produce pong");
+    assert_eq!(pong.packet_type, CultNetRudpPacketType::Pong);
+    assert_eq!(pong.payload, b"pulse");
+
+    let pong_result = client.receive(&pong, 40)?;
+    assert!(pong_result.pong);
+    assert_eq!(pong_result.pong_payload, b"pulse");
+    assert!(!client.check_timeout(90, 50));
+    assert!(client.check_timeout(91, 50));
+    assert!(!client.connected());
+    Ok(())
+}
+
+#[test]
 fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_sequence()
 -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {

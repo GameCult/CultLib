@@ -775,6 +775,26 @@ class CultCacheTests(unittest.TestCase):
         )
         self.assertEqual(session.due_resends(250), ())
 
+    def test_cultnet_rudp_session_pings_and_detects_receive_timeout(self) -> None:
+        client = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=101, initial_sequence=1))
+        server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=101, initial_sequence=100))
+        connect = client.create_connect(0, b"join")
+        accept = server.accept_connect(connect, 10)
+        client.receive(accept, 20)
+
+        ping = client.create_ping(b"pulse")
+        ping_result = server.receive(ping, 30)
+        self.assertIsNotNone(ping_result.reply)
+        self.assertEqual(ping_result.reply.packet_type, CultNetRudpPacketType.PONG)
+        self.assertEqual(ping_result.reply.payload, b"pulse")
+
+        pong_result = client.receive(ping_result.reply, 40)
+        self.assertTrue(pong_result.pong)
+        self.assertEqual(pong_result.pong_payload, b"pulse")
+        self.assertFalse(client.check_timeout(90, 50))
+        self.assertTrue(client.check_timeout(91, 50))
+        self.assertFalse(client.connected)
+
     def test_cultnet_rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=100))

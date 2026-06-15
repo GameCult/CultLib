@@ -61,6 +61,8 @@ pub struct CultNetRudpDeliveredFrame {
 pub struct CultNetRudpReceiveResult {
     pub delivered: Vec<CultNetRudpDeliveredFrame>,
     pub reply: Option<CultNetRudpPacket>,
+    pub pong: bool,
+    pub pong_payload: Vec<u8>,
     pub disconnected: bool,
     pub disconnect_reason: Vec<u8>,
 }
@@ -117,6 +119,7 @@ pub struct CultNetRudpSession {
     next_sequence: u32,
     next_fragment_id: u16,
     connected: bool,
+    last_received_at_ms: Option<u64>,
     highest_received_sequence: Option<u32>,
     received_sequences: BTreeSet<u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
@@ -133,6 +136,7 @@ impl CultNetRudpSession {
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
             connected: false,
+            last_received_at_ms: None,
             highest_received_sequence: None,
             received_sequences: BTreeSet::new(),
             pending_reliable: BTreeMap::new(),
@@ -156,6 +160,10 @@ impl CultNetRudpSession {
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
         self.pending_reliable.keys().copied().collect()
+    }
+
+    pub fn last_received_at_ms(&self) -> Option<u64> {
+        self.last_received_at_ms
     }
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> CultNetRudpPacket {
@@ -275,10 +283,11 @@ impl CultNetRudpSession {
     pub fn receive(
         &mut self,
         packet: &CultNetRudpPacket,
-        _now_ms: u64,
+        now_ms: u64,
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
         self.apply_acknowledgements(packet);
+        self.last_received_at_ms = Some(now_ms);
         let expected_sequence_if_uninitialized = self
             .highest_received_sequence
             .map(|sequence| sequence + 1)
@@ -290,6 +299,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -307,6 +318,8 @@ impl CultNetRudpSession {
                     false,
                     false,
                 )),
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -319,6 +332,12 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: packet.packet_type == CultNetRudpPacketType::Pong,
+                pong_payload: if packet.packet_type == CultNetRudpPacketType::Pong {
+                    packet.payload.clone()
+                } else {
+                    Vec::new()
+                },
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -330,6 +349,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: true,
                 disconnect_reason: packet.payload.clone(),
             });
@@ -339,6 +360,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -350,6 +373,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -359,6 +384,8 @@ impl CultNetRudpSession {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
                 disconnected: false,
                 disconnect_reason: Vec::new(),
             });
@@ -371,6 +398,8 @@ impl CultNetRudpSession {
         Ok(CultNetRudpReceiveResult {
             delivered,
             reply: None,
+            pong: false,
+            pong_payload: Vec::new(),
             disconnected: false,
             disconnect_reason: Vec::new(),
         })
@@ -387,6 +416,17 @@ impl CultNetRudpSession {
         )
     }
 
+    pub fn create_ping(&mut self, payload: Vec<u8>) -> CultNetRudpPacket {
+        self.create_packet(
+            CultNetRudpPacketType::Ping,
+            "control",
+            payload,
+            false,
+            false,
+            false,
+        )
+    }
+
     pub fn create_disconnect(&mut self, reason: Vec<u8>) -> CultNetRudpPacket {
         self.connected = false;
         self.create_packet(
@@ -397,6 +437,20 @@ impl CultNetRudpSession {
             false,
             false,
         )
+    }
+
+    pub fn check_timeout(&mut self, now_ms: u64, timeout_ms: u64) -> bool {
+        if !self.connected {
+            return false;
+        }
+        let Some(last_received_at_ms) = self.last_received_at_ms else {
+            return false;
+        };
+        if now_ms.saturating_sub(last_received_at_ms) <= timeout_ms {
+            return false;
+        }
+        self.connected = false;
+        true
     }
 
     pub fn due_resends(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
@@ -740,6 +794,7 @@ pub struct CultNetRudpSocketTransportConnection {
     delivered_frames: VecDeque<CultNetTransportFrame>,
     max_fragment_bytes: Option<usize>,
     disconnect_reason: Option<Vec<u8>>,
+    pong_payloads: VecDeque<Vec<u8>>,
 }
 
 impl CultNetRudpSocketTransportConnection {
@@ -769,6 +824,7 @@ impl CultNetRudpSocketTransportConnection {
             delivered_frames: VecDeque::new(),
             max_fragment_bytes: options.max_fragment_bytes.map(|value| value as usize),
             disconnect_reason: None,
+            pong_payloads: VecDeque::new(),
         })
     }
 
@@ -782,6 +838,10 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn disconnect_reason(&self) -> Option<&[u8]> {
         self.disconnect_reason.as_deref()
+    }
+
+    pub fn pop_pong_payload(&mut self) -> Option<Vec<u8>> {
+        self.pong_payloads.pop_front()
     }
 
     pub fn connect(&mut self, payload: Vec<u8>) -> Result<()> {
@@ -809,6 +869,15 @@ impl CultNetRudpSocketTransportConnection {
     pub fn disconnect(&mut self, reason: Vec<u8>) -> Result<()> {
         let packet = self.session.create_disconnect(reason);
         self.send_packet(&packet)
+    }
+
+    pub fn ping(&mut self, payload: Vec<u8>) -> Result<()> {
+        let packet = self.session.create_ping(payload);
+        self.send_packet(&packet)
+    }
+
+    pub fn check_timeout(&mut self, timeout_ms: u64) -> bool {
+        self.session.check_timeout(now_ms(), timeout_ms)
     }
 
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
@@ -849,6 +918,9 @@ impl CultNetRudpSocketTransportConnection {
         let result = self.session.receive(&packet, now_ms())?;
         if let Some(reply) = result.reply {
             self.send_packet(&reply)?;
+        }
+        if result.pong {
+            self.pong_payloads.push_back(result.pong_payload);
         }
         if result.disconnected {
             self.disconnect_reason = Some(result.disconnect_reason);
