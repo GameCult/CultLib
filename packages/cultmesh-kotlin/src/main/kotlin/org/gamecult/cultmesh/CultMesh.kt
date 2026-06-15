@@ -268,6 +268,52 @@ class CultMeshNode(
     fun applyShardLogResponse(response: CultNetMessage): List<Any?> = cache.applyShardLogResponse(response)
 }
 
+object CultMesh {
+    fun createNode(cache: CultCache = CultCache()): CultMeshNode = CultMeshNode(cache)
+
+    fun startNode(cache: CultCache = CultCache()): CultMeshNode = createNode(cache)
+
+    fun createVerseCatalog(): CultMeshVerseCatalog = CultMeshVerseCatalog()
+
+    fun createPeerCatalog(): CultMeshPeerCatalog = CultMeshPeerCatalog()
+
+    fun createAuthorityLeaseCatalog(): CultMeshAuthorityLeaseCatalog = CultMeshAuthorityLeaseCatalog()
+
+    fun createStreamCatalog(): CultMeshStreamCatalog = CultMeshStreamCatalog()
+
+    fun createRudpServer(
+        runtimeId: String,
+        connectionId: Long,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection = cultNetRudpServer(
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        bindHost = bindHost,
+        bindPort = bindPort,
+        tuning = tuning,
+    )
+
+    fun createRudpClient(
+        runtimeId: String,
+        connectionId: Long,
+        remoteHost: String,
+        remotePort: Int,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection = cultNetRudpClient(
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        remoteHost = remoteHost,
+        remotePort = remotePort,
+        bindHost = bindHost,
+        bindPort = bindPort,
+        tuning = tuning,
+    )
+}
+
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
 
 data class CultNetTransportStats(
@@ -2236,6 +2282,7 @@ private fun nowMs(): Long = Instant.now().toEpochMilli()
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
         cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
+        cultMeshFacadeRoutesErgonomicEntrypoints()
         cultCacheRawSnapshotsRoundTripThroughCultNetMessages()
         cultNetSchemaMessagesUseMessagePackMaps()
         cultNetSchemaCatalogsRoundTripDescriptors()
@@ -2292,6 +2339,36 @@ private fun cultCacheErgonomicsCoverTypedDocumentsAndGlobals() {
     node.remember(notes, "node-note", "remembered")
     check(node.require(notes, "node-note") == "remembered")
     check(node.forget(notes, "node-note"))
+}
+
+private fun cultMeshFacadeRoutesErgonomicEntrypoints() {
+    val notes = stringDocument("kotlin.facade_note", "kotlin.facade_note.v1")
+    val cache = CultCache()
+    cache.register(notes)
+    val node = CultMesh.startNode(cache)
+    node.remember(notes, "note:facade", "facade")
+    check(node.require(notes, "note:facade") == "facade")
+
+    val verses = CultMesh.createVerseCatalog()
+    verses.upsert(
+        CultMeshVerseDescriptor(
+            verseId = "facade",
+            displayName = "Facade Verse",
+            authorityModel = "federated",
+            compatibility = CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+        ),
+    )
+    check(verses.get("facade")?.displayName == "Facade Verse")
+
+    val peers = CultMesh.createPeerCatalog()
+    peers.upsert(CultMeshPeerCard("facade-peer", "facade", listOf("rudp://127.0.0.1:4100"), roles = listOf("schema")))
+    check(peers.find("facade", "schema").single().peerId == "facade-peer")
+
+    val leases = CultMesh.createAuthorityLeaseCatalog()
+    check(leases.leases.isEmpty())
+
+    val streams = CultMesh.createStreamCatalog()
+    check(streams.streams.isEmpty())
 }
 
 private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
@@ -3036,12 +3113,12 @@ private fun rudpSessionFragmentsAndReassemblesReliableOrderedPayloads() {
 
 private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
     val connectionId = 0x10203042L
-    cultNetRudpServer(
+    CultMesh.createRudpServer(
         runtimeId = "kotlin-rudp-sugar-server",
         connectionId = connectionId,
         tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
     ).use { server ->
-        cultNetRudpClient(
+        CultMesh.createRudpClient(
             runtimeId = "kotlin-rudp-sugar-client",
             connectionId = connectionId,
             remoteHost = "127.0.0.1",

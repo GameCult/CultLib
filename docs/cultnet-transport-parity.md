@@ -224,6 +224,11 @@ Current progress:
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
   preferred body transports, consumer negotiation, copy-budget classification,
   max in-flight frame pressure, and latest-frame cursors.
+- Kotlin now has a branded `CultMesh` facade matching the C#/TypeScript/Python
+  entrypoint pattern for local nodes, Verse catalogs, peer catalogs, authority
+  lease catalogs, stream catalogs, and RUDP client/server construction. The
+  facade delegates to the same owners as the top-level helpers instead of
+  creating a second authority path.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into reconnect policy and the wider

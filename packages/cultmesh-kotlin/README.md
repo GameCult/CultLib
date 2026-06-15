@@ -6,6 +6,16 @@ It provides typed MessagePack document codecs, a tiny WebSocket CultNet lane,
 a single-peer CultNet RUDP socket transport, stream catalog negotiation, an
 in-memory CultCache, and the first Eve dashboard/sensor document contracts.
 
+The branded entrypoint mirrors C#/TypeScript/Python:
+
+```kotlin
+val node = CultMesh.startNode()
+val verses = CultMesh.createVerseCatalog()
+val peers = CultMesh.createPeerCatalog()
+val leases = CultMesh.createAuthorityLeaseCatalog()
+val streams = CultMesh.createStreamCatalog()
+```
+
 ## CultCache Happy Path
 
 Kotlin keeps the cache small but typed: document definitions wrap codecs,
@@ -130,12 +140,12 @@ write client/server code without hand-binding sockets or repeating channel
 strings:
 
 ```kotlin
-cultNetRudpServer(
+CultMesh.createRudpServer(
     runtimeId = "kotlin-server",
     connectionId = 0x10203040,
     tuning = CultNetRudpSocketTuning(maxFragmentBytes = 1024),
 ).use { server ->
-    cultNetRudpClient(
+    CultMesh.createRudpClient(
         runtimeId = "kotlin-client",
         connectionId = 0x10203040,
         remoteHost = "127.0.0.1",
@@ -225,7 +235,7 @@ val peer = CultMeshPeerCard(
     authorityLeaseId = "lease:kotlin-peer",
 )
 
-val leases = createAuthorityLeaseCatalog()
+val leases = CultMesh.createAuthorityLeaseCatalog()
 leases.upsert(
     CultMeshAuthorityLease(
         leaseId = "lease:kotlin-peer",
@@ -250,7 +260,7 @@ stream identity, clock metadata, body transport negotiation, and latest-frame
 cursors; it does not own the frame bytes themselves.
 
 ```kotlin
-val streams = createStreamCatalog()
+val streams = CultMesh.createStreamCatalog()
 streams.declare(
     CultMeshStreamDescriptor(
         streamId = "mimir:camera",
