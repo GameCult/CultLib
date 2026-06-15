@@ -29,25 +29,149 @@ interface CultDocumentCodec<T> {
     fun decode(payload: ByteArray): T
 }
 
+data class CultDocumentDefinition<T : Any>(
+    val codec: CultDocumentCodec<T>,
+    val global: Boolean = false,
+) {
+    val documentType: String get() = codec.documentType
+    val schemaVersion: String get() = codec.schemaVersion
+}
+
+data class CultCacheRecord<T : Any>(
+    val key: String,
+    val value: T,
+)
+
 class CultCache {
+    companion object {
+        const val GLOBAL_KEY = "__global__"
+    }
+
     private val codecs = linkedMapOf<String, CultDocumentCodec<*>>()
-    private val values = linkedMapOf<String, Any>()
+    private val values = linkedMapOf<String, LinkedHashMap<String, ByteArray>>()
 
     fun <T : Any> register(codec: CultDocumentCodec<T>) {
         codecs[codec.documentType] = codec
     }
 
-    fun <T : Any> put(codec: CultDocumentCodec<T>, key: String, value: T) {
-        register(codec)
-        values["${codec.documentType}\n$key"] = value
+    fun <T : Any> register(document: CultDocumentDefinition<T>) {
+        register(document.codec)
     }
 
-    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> put(codec: CultDocumentCodec<T>, key: String, value: T) {
+        register(codec)
+        values.getOrPut(codec.documentType) { linkedMapOf() }[key] = codec.encode(value)
+    }
+
+    fun <T : Any> put(document: CultDocumentDefinition<T>, key: String, value: T) {
+        if (document.global && key != GLOBAL_KEY) throw IOException("Global document ${document.documentType} must use putGlobal")
+        put(document.codec, key, value)
+    }
+
     fun <T : Any> get(codec: CultDocumentCodec<T>, key: String): T? {
         register(codec)
-        return values["${codec.documentType}\n$key"] as? T
+        return values[codec.documentType]?.get(key)?.let { codec.decode(it.copyOf()) }
     }
+
+    fun <T : Any> get(document: CultDocumentDefinition<T>, key: String): T? {
+        if (document.global && key != GLOBAL_KEY) throw IOException("Global document ${document.documentType} must use getGlobal")
+        return get(document.codec, key)
+    }
+
+    fun <T : Any> getRequired(codec: CultDocumentCodec<T>, key: String): T =
+        get(codec, key) ?: throw NoSuchElementException("No ${codec.documentType} record for key $key")
+
+    fun <T : Any> getRequired(document: CultDocumentDefinition<T>, key: String): T =
+        get(document, key) ?: throw NoSuchElementException("No ${document.documentType} record for key $key")
+
+    fun <T : Any> getAll(codec: CultDocumentCodec<T>): List<CultCacheRecord<T>> {
+        register(codec)
+        return values[codec.documentType]
+            ?.map { (key, payload) -> CultCacheRecord(key, codec.decode(payload.copyOf())) }
+            ?: emptyList()
+    }
+
+    fun <T : Any> getAll(document: CultDocumentDefinition<T>): List<CultCacheRecord<T>> = getAll(document.codec)
+
+    fun <T : Any> delete(codec: CultDocumentCodec<T>, key: String): Boolean {
+        register(codec)
+        val records = values[codec.documentType] ?: return false
+        val removed = records.remove(key) != null
+        if (records.isEmpty()) values.remove(codec.documentType)
+        return removed
+    }
+
+    fun <T : Any> delete(document: CultDocumentDefinition<T>, key: String): Boolean {
+        if (document.global && key != GLOBAL_KEY) throw IOException("Global document ${document.documentType} must use deleteGlobal")
+        return delete(document.codec, key)
+    }
+
+    fun <T : Any> putGlobal(document: CultDocumentDefinition<T>, value: T) {
+        put(document.codec, GLOBAL_KEY, value)
+    }
+
+    fun <T : Any> getGlobal(document: CultDocumentDefinition<T>): T? = get(document.codec, GLOBAL_KEY)
+
+    fun <T : Any> getRequiredGlobal(document: CultDocumentDefinition<T>): T =
+        getGlobal(document) ?: throw NoSuchElementException("No global ${document.documentType} record")
+
+    fun <T : Any> deleteGlobal(document: CultDocumentDefinition<T>): Boolean = delete(document.codec, GLOBAL_KEY)
 }
+
+fun <T : Any> cultDocument(
+    codec: CultDocumentCodec<T>,
+    global: Boolean = false,
+): CultDocumentDefinition<T> = CultDocumentDefinition(codec, global)
+
+class CultCacheDocumentHandle<T : Any>(
+    private val cache: CultCache,
+    private val document: CultDocumentDefinition<T>,
+    private val key: String,
+) {
+    fun get(): T? = cache.get(document, key)
+
+    fun require(): T = cache.getRequired(document, key)
+
+    fun put(value: T) = cache.put(document, key, value)
+
+    fun delete(): Boolean = cache.delete(document, key)
+}
+
+fun <T : Any> CultCache.document(document: CultDocumentDefinition<T>, key: String): CultCacheDocumentHandle<T> =
+    CultCacheDocumentHandle(this, document, key)
+
+fun <T : Any> CultCache.global(document: CultDocumentDefinition<T>): CultCacheDocumentHandle<T> =
+    CultCacheDocumentHandle(this, document, CultCache.GLOBAL_KEY)
+
+class StringDocumentCodec(
+    override val documentType: String,
+    override val schemaVersion: String,
+) : CultDocumentCodec<String> {
+    override fun encode(value: String): ByteArray = value.toByteArray(StandardCharsets.UTF_8)
+
+    override fun decode(payload: ByteArray): String = String(payload, StandardCharsets.UTF_8)
+}
+
+class ByteArrayDocumentCodec(
+    override val documentType: String,
+    override val schemaVersion: String,
+) : CultDocumentCodec<ByteArray> {
+    override fun encode(value: ByteArray): ByteArray = value.copyOf()
+
+    override fun decode(payload: ByteArray): ByteArray = payload.copyOf()
+}
+
+fun stringDocument(
+    documentType: String,
+    schemaVersion: String,
+    global: Boolean = false,
+): CultDocumentDefinition<String> = cultDocument(StringDocumentCodec(documentType, schemaVersion), global)
+
+fun bytesDocument(
+    documentType: String,
+    schemaVersion: String,
+    global: Boolean = false,
+): CultDocumentDefinition<ByteArray> = cultDocument(ByteArrayDocumentCodec(documentType, schemaVersion), global)
 
 class CultMeshNode(
     val cache: CultCache = CultCache(),
@@ -59,7 +183,27 @@ class CultMeshNode(
         cache.put(codec, key, value)
     }
 
+    fun <T : Any> remember(document: CultDocumentDefinition<T>, key: String, value: T) {
+        cache.put(document, key, value)
+    }
+
+    fun <T : Any> rememberGlobal(document: CultDocumentDefinition<T>, value: T) {
+        cache.putGlobal(document, value)
+    }
+
     fun <T : Any> recall(codec: CultDocumentCodec<T>, key: String): T? = cache.get(codec, key)
+
+    fun <T : Any> recall(document: CultDocumentDefinition<T>, key: String): T? = cache.get(document, key)
+
+    fun <T : Any> require(document: CultDocumentDefinition<T>, key: String): T = cache.getRequired(document, key)
+
+    fun <T : Any> recallGlobal(document: CultDocumentDefinition<T>): T? = cache.getGlobal(document)
+
+    fun <T : Any> requireGlobal(document: CultDocumentDefinition<T>): T = cache.getRequiredGlobal(document)
+
+    fun <T : Any> forget(document: CultDocumentDefinition<T>, key: String): Boolean = cache.delete(document, key)
+
+    fun <T : Any> forgetGlobal(document: CultDocumentDefinition<T>): Boolean = cache.deleteGlobal(document)
 }
 
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
@@ -776,6 +920,7 @@ private fun nowMs(): Long = Instant.now().toEpochMilli()
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
+        cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
@@ -792,6 +937,37 @@ fun main(args: Array<String>) {
         "rudp-dial-once" -> rudpDialOnce(options)
         else -> error("Unknown mode ${args[0]}")
     }
+}
+
+private fun cultCacheErgonomicsCoverTypedDocumentsAndGlobals() {
+    val notes = stringDocument("kotlin.note", "kotlin.note.v1")
+    val settings = stringDocument("kotlin.settings", "kotlin.settings.v1", global = true)
+    val blobs = bytesDocument("kotlin.blob", "kotlin.blob.v1")
+    val cache = CultCache()
+
+    cache.put(notes, "note:1", "hello")
+    check(cache.getRequired(notes, "note:1") == "hello")
+    val handle = cache.document(notes, "note:2")
+    handle.put("second")
+    check(handle.require() == "second")
+    check(cache.getAll(notes).map { it.key to it.value } == listOf("note:1" to "hello", "note:2" to "second"))
+    check(cache.delete(notes, "note:1"))
+    check(cache.get(notes, "note:1") == null)
+
+    cache.putGlobal(settings, "dark-mode")
+    check(cache.global(settings).require() == "dark-mode")
+    check(cache.deleteGlobal(settings))
+    check(cache.getGlobal(settings) == null)
+
+    val payload = byteArrayOf(1, 2, 3)
+    cache.put(blobs, "blob:1", payload)
+    payload[0] = 9
+    check(cache.getRequired(blobs, "blob:1").contentEquals(byteArrayOf(1, 2, 3)))
+
+    val node = CultMeshNode()
+    node.remember(notes, "node-note", "remembered")
+    check(node.require(notes, "node-note") == "remembered")
+    check(node.forget(notes, "node-note"))
 }
 
 private fun rudpServeOnce(options: Map<String, String>) {

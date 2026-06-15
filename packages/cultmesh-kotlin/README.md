@@ -6,6 +6,31 @@ It provides typed MessagePack document codecs, a tiny WebSocket CultNet lane,
 a single-peer CultNet RUDP socket transport, an in-memory CultCache, and the
 first Eve dashboard/sensor document contracts.
 
+## CultCache Happy Path
+
+Kotlin keeps the cache small but typed: document definitions wrap codecs,
+records are stored as encoded payload bytes, and callers work through typed
+helpers:
+
+```kotlin
+val notes = stringDocument("kotlin.note", "kotlin.note.v1")
+val cache = CultCache()
+
+cache.put(notes, "note:1", "hello")
+val note = cache.getRequired(notes, "note:1")
+
+val handle = cache.document(notes, "note:2")
+handle.put("second")
+
+val allNotes = cache.getAll(notes)
+cache.delete(notes, "note:1")
+```
+
+`CultMeshNode` exposes the same typed cache surface through `remember`,
+`recall`, `require`, and `forget`. This is not the C# SoA store; it is the
+Kotlin client/runtime cache shape needed for feature and ergonomic parity
+without pretending Android wants Unity's hot-loop memory layout.
+
 ## RUDP Happy Path
 
 Kotlin exposes factory helpers around the shared RUDP transport so callers can
