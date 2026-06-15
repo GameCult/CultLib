@@ -176,6 +176,11 @@ Current progress:
   UDP peers, C#/Kotlin/Python/Rust can dial a TypeScript UDP peer, and all sides
   exchange reliable ordered `schema` frames through the shared handshake and
   packet language.
+- The same harness now proves reliable ordered `schema` delivery survives one
+  dropped client data packet when TypeScript sends through RUDP to C#, Kotlin,
+  Python, and Rust. The drop happens below the transport connection through a
+  UDP bridge, so the recovery is RUDP resend/ack behavior, not application-level
+  retry.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into the full loss, reordering,

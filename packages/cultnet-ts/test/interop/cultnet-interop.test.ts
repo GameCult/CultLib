@@ -13,7 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { decode, encode } from "@msgpack/msgpack";
 import { encodeFrame, LengthPrefixedMessageFramer } from "../../src/framing";
-import { CultNetRudpSocketTransportConnection } from "../../src";
+import { CultNetRudpSocketTransportConnection, decodeRudpPacket } from "../../src";
 import { INTEROP_SCHEMA_VERSION } from "./cultnet-interop-shared";
 
 const execFileAsync = promisify(execFile);
@@ -988,6 +988,102 @@ test("CultNet Kotlin and TypeScript exchange schema frames when Kotlin dials a T
   }
 });
 
+test("CultNet RUDP reliable schema delivery survives one dropped client data packet across runtimes", async () => {
+  const peers = [
+    {
+      name: "Python",
+      connectionId: 0x55667788,
+      build: async () => undefined,
+      spawn: spawnPythonRudpPeer,
+      joinPayload: "ts-join",
+      clientPayload: "client-state",
+      expectedPayload: "python-state",
+    },
+    {
+      name: "Rust",
+      connectionId: 0x22446688,
+      build: buildRustInteropPeer,
+      spawn: spawnRustRudpServer,
+      joinPayload: "ts-rust-join",
+      clientPayload: "ts-rust-client-state",
+      expectedPayload: "rust-server-state",
+    },
+    {
+      name: "C#",
+      connectionId: 0x33557799,
+      build: buildCSharpInteropPeer,
+      spawn: spawnCSharpRudpServer,
+      joinPayload: "ts-csharp-join",
+      clientPayload: "ts-csharp-client-state",
+      expectedPayload: "csharp-server-state",
+    },
+    {
+      name: "Kotlin",
+      connectionId: 0x446688aa,
+      build: buildKotlinInteropPeer,
+      spawn: spawnKotlinRudpServer,
+      joinPayload: "ts-kotlin-join",
+      clientPayload: "ts-kotlin-client-state",
+      expectedPayload: "kotlin-server-state",
+    },
+  ];
+
+  for (const peer of peers) {
+    await peer.build();
+    const serverPeer = peer.spawn();
+    const clientSocket = await bindUdpSocket();
+    const lossyBridge = await createRudpLossyBridge({
+      remoteHost: "127.0.0.1",
+      remotePort: await serverPeer.ready,
+      shouldDropClientPacket: (wire) => {
+        const packet = decodeRudpPacket(wire);
+        return packet.packetType === "data"
+          && packet.channelId === "schema"
+          && Buffer.from(packet.payload ?? []).equals(Buffer.from(peer.clientPayload));
+      },
+    });
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-lossy-${peer.name.toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: lossyBridge.port,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+      });
+
+      const receivedFrame = once(client, "frame");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} handshake through lossy bridge`);
+      client.send("schema", Buffer.from(peer.clientPayload));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} RUDP response frame after dropped data packet`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(peer.expectedPayload));
+      assert.equal(lossyBridge.droppedClientPackets, 1, `${peer.name} bridge should drop exactly one client data packet`);
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after lossy delivery`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      lossyBridge.close();
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
   await buildCSharpInteropPeer();
@@ -1428,6 +1524,58 @@ async function bindUdpSocket(): Promise<Socket> {
     });
   });
   return socket;
+}
+
+interface RudpLossyBridge {
+  port: number;
+  readonly droppedClientPackets: number;
+  close(): void;
+}
+
+async function createRudpLossyBridge(options: {
+  remoteHost: string;
+  remotePort: number;
+  shouldDropClientPacket: (wire: Buffer) => boolean;
+}): Promise<RudpLossyBridge> {
+  const socket = dgram.createSocket("udp4");
+  const remote = { address: options.remoteHost, port: options.remotePort };
+  let client: { address: string; port: number } | undefined;
+  let droppedClientPackets = 0;
+
+  socket.on("message", (wire, sender) => {
+    if (sender.address === remote.address && sender.port === remote.port) {
+      if (client) {
+        socket.send(wire, client.port, client.address);
+      }
+      return;
+    }
+
+    client ??= { address: sender.address, port: sender.port };
+    if (droppedClientPackets === 0 && options.shouldDropClientPacket(wire)) {
+      droppedClientPackets += 1;
+      return;
+    }
+
+    socket.send(wire, remote.port, remote.address);
+  });
+
+  await new Promise<void>((resolveBind, rejectBind) => {
+    socket.once("error", rejectBind);
+    socket.bind(0, "127.0.0.1", () => {
+      socket.off("error", rejectBind);
+      resolveBind();
+    });
+  });
+
+  return {
+    port: udpSocketPort(socket),
+    get droppedClientPackets() {
+      return droppedClientPackets;
+    },
+    close() {
+      socket.close();
+    },
+  };
 }
 
 function udpSocketPort(socket: Socket): number {
