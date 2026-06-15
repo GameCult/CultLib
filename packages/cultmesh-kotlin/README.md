@@ -31,6 +31,33 @@ cache.delete(notes, "note:1")
 Kotlin client/runtime cache shape needed for feature and ergonomic parity
 without pretending Android wants Unity's hot-loop memory layout.
 
+Raw snapshot sync uses the same schema-v0 MessagePack documents as the other
+runtimes:
+
+```kotlin
+val notes = stringDocument("kotlin.note", "kotlin.note.v1")
+val source = CultMeshNode()
+val target = CultMeshNode()
+
+source.cache.register(notes)
+target.cache.register(notes)
+source.remember(notes, "note:1", "hello")
+
+val request = cultNetSnapshotRequest(
+    messageId = "sync-notes",
+    schemaIds = listOf(notes.schemaVersion),
+)
+val response = source.createRawSnapshotResponse(request)
+
+target.applyRawSnapshotResponse(response)
+val note = target.require(notes, "note:1")
+```
+
+`applyRawDocumentPut(...)`, `applyRawSnapshotResponse(...)`, and
+`applyDocumentDelete(...)` require matching codecs to be registered first, so
+raw bytes re-enter the typed cache through the same document definitions that
+local Kotlin callers use.
+
 ## RUDP Happy Path
 
 Kotlin exposes factory helpers around the shared RUDP transport so callers can

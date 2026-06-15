@@ -42,16 +42,26 @@ data class CultCacheRecord<T : Any>(
     val value: T,
 )
 
+data class CultCacheEnvelope(
+    val documentType: String,
+    val schemaId: String,
+    val key: String,
+    val storedAt: String,
+    val payload: ByteArray,
+)
+
 class CultCache {
     companion object {
         const val GLOBAL_KEY = "__global__"
     }
 
     private val codecs = linkedMapOf<String, CultDocumentCodec<*>>()
+    private val codecsBySchema = linkedMapOf<String, CultDocumentCodec<*>>()
     private val values = linkedMapOf<String, LinkedHashMap<String, ByteArray>>()
 
     fun <T : Any> register(codec: CultDocumentCodec<T>) {
         codecs[codec.documentType] = codec
+        codecsBySchema[codec.schemaVersion] = codec
     }
 
     fun <T : Any> register(document: CultDocumentDefinition<T>) {
@@ -93,6 +103,29 @@ class CultCache {
 
     fun <T : Any> getAll(document: CultDocumentDefinition<T>): List<CultCacheRecord<T>> = getAll(document.codec)
 
+    fun snapshotEnvelopes(storedAt: String = Instant.now().toString()): List<CultCacheEnvelope> =
+        values.toSortedMap().flatMap { (documentType, records) ->
+            val codec = codecs[documentType] ?: return@flatMap emptyList()
+            records.toSortedMap().map { (key, payload) ->
+                CultCacheEnvelope(
+                    documentType = documentType,
+                    schemaId = codec.schemaVersion,
+                    key = key,
+                    storedAt = storedAt,
+                    payload = payload.copyOf(),
+                )
+            }
+        }
+
+    fun putRaw(schemaId: String, key: String, payload: ByteArray): Any {
+        val codec = codecForSchema(schemaId)
+        values.getOrPut(codec.documentType) { linkedMapOf() }[key] = payload.copyOf()
+        return decodeRaw(codec, payload.copyOf())
+    }
+
+    fun codecForSchema(schemaId: String): CultDocumentCodec<*> =
+        codecsBySchema[schemaId] ?: codecs[schemaId] ?: throw IOException("No registered Kotlin document codec for schema $schemaId")
+
     fun <T : Any> delete(codec: CultDocumentCodec<T>, key: String): Boolean {
         register(codec)
         val records = values[codec.documentType] ?: return false
@@ -106,6 +139,9 @@ class CultCache {
         return delete(document.codec, key)
     }
 
+    fun deleteBySchema(schemaId: String, key: String): Boolean =
+        deleteRawByDocumentType(codecForSchema(schemaId).documentType, key)
+
     fun <T : Any> putGlobal(document: CultDocumentDefinition<T>, value: T) {
         put(document.codec, GLOBAL_KEY, value)
     }
@@ -116,6 +152,17 @@ class CultCache {
         getGlobal(document) ?: throw NoSuchElementException("No global ${document.documentType} record")
 
     fun <T : Any> deleteGlobal(document: CultDocumentDefinition<T>): Boolean = delete(document.codec, GLOBAL_KEY)
+
+    @Suppress("UNCHECKED_CAST")
+    private fun decodeRaw(codec: CultDocumentCodec<*>, payload: ByteArray): Any =
+        (codec as CultDocumentCodec<Any>).decode(payload)
+
+    private fun deleteRawByDocumentType(documentType: String, key: String): Boolean {
+        val records = values[documentType] ?: return false
+        val removed = records.remove(key) != null
+        if (records.isEmpty()) values.remove(documentType)
+        return removed
+    }
 }
 
 fun <T : Any> cultDocument(
@@ -204,6 +251,18 @@ class CultMeshNode(
     fun <T : Any> forget(document: CultDocumentDefinition<T>, key: String): Boolean = cache.delete(document, key)
 
     fun <T : Any> forgetGlobal(document: CultDocumentDefinition<T>): Boolean = cache.deleteGlobal(document)
+
+    fun createRawSnapshotResponse(
+        request: CultNetMessage,
+        storedAt: String = Instant.now().toString(),
+        sourceRuntimeId: String? = null,
+    ): CultNetMessage = cache.createRawSnapshotResponse(request, storedAt, sourceRuntimeId)
+
+    fun applyRawDocumentPut(message: CultNetMessage): Any = cache.applyRawDocumentPut(message)
+
+    fun applyRawSnapshotResponse(response: CultNetMessage): List<Any> = cache.applyRawSnapshotResponse(response)
+
+    fun applyDocumentDelete(message: CultNetMessage): Boolean = cache.applyDocumentDelete(message)
 }
 
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
@@ -284,7 +343,10 @@ data class CultNetRawDocumentRecord(
     val recordKey: String,
     val storedAt: String,
     val payload: ByteArray,
+    val payloadEncoding: String = "messagepack",
     val sourceRuntimeId: String? = null,
+    val sourceAgentId: String? = null,
+    val sourceRole: String? = null,
     val tags: List<String> = emptyList(),
 ) {
     fun toWireMap(): Map<String, Any?> {
@@ -292,10 +354,12 @@ data class CultNetRawDocumentRecord(
             "schemaId" to schemaId,
             "recordKey" to recordKey,
             "storedAt" to storedAt,
-            "payloadEncoding" to "messagepack",
+            "payloadEncoding" to payloadEncoding,
             "payload" to payload.copyOf(),
         )
         if (!sourceRuntimeId.isNullOrBlank()) wire["sourceRuntimeId"] = sourceRuntimeId
+        if (!sourceAgentId.isNullOrBlank()) wire["sourceAgentId"] = sourceAgentId
+        if (!sourceRole.isNullOrBlank()) wire["sourceRole"] = sourceRole
         if (tags.isNotEmpty()) wire["tags"] = tags
         return wire
     }
@@ -570,6 +634,83 @@ fun cultNetSnapshotRequest(
     return CultNetMessage("cultnet.snapshot_request.v0", body)
 }
 
+fun cultNetSnapshotResponseRaw(
+    messageId: String,
+    documents: List<CultNetRawDocumentRecord>,
+    shardId: String? = null,
+    shardEpoch: Long? = null,
+    shardLogSequence: Long? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "documents" to documents.map { it.toWireMap() },
+    )
+    if (!shardId.isNullOrBlank()) body["shardId"] = shardId
+    if (shardEpoch != null) body["shardEpoch"] = shardEpoch
+    if (shardLogSequence != null) body["shardLogSequence"] = shardLogSequence
+    return CultNetMessage("cultnet.snapshot_response_raw.v0", body)
+}
+
+fun CultCache.createRawSnapshotResponse(
+    request: CultNetMessage,
+    storedAt: String = Instant.now().toString(),
+    sourceRuntimeId: String? = null,
+): CultNetMessage {
+    require(request.schemaVersion == "cultnet.snapshot_request.v0") {
+        "Expected cultnet.snapshot_request.v0, received ${request.schemaVersion}"
+    }
+    val schemaIds = stringList(request.body["schemaIds"]).toSet()
+    val recordKeys = stringList(request.body["recordKeys"]).toSet()
+    val documents = snapshotEnvelopes(storedAt)
+        .filter { schemaIds.isEmpty() || it.schemaId in schemaIds }
+        .filter { recordKeys.isEmpty() || it.key in recordKeys }
+        .map {
+            CultNetRawDocumentRecord(
+                schemaId = it.schemaId,
+                recordKey = it.key,
+                storedAt = it.storedAt,
+                payload = it.payload,
+                sourceRuntimeId = sourceRuntimeId,
+            )
+        }
+    return cultNetSnapshotResponseRaw(
+        messageId = request.body["messageId"] as? String ?: "",
+        documents = documents,
+        shardId = request.body["shardId"] as? String,
+        shardEpoch = (request.body["shardEpoch"] as? Number)?.toLong(),
+    )
+}
+
+fun CultCache.applyRawDocumentPut(message: CultNetMessage): Any {
+    require(message.schemaVersion == "cultnet.document_put_raw.v0") {
+        "Expected cultnet.document_put_raw.v0, received ${message.schemaVersion}"
+    }
+    return applyRawDocumentRecord(rawDocumentRecordFromWire(mapValue(message.body["document"])))
+}
+
+fun CultCache.applyRawSnapshotResponse(response: CultNetMessage): List<Any> {
+    require(response.schemaVersion == "cultnet.snapshot_response_raw.v0") {
+        "Expected cultnet.snapshot_response_raw.v0, received ${response.schemaVersion}"
+    }
+    return mapList(response.body["documents"])
+        .map { rawDocumentRecordFromWire(it) }
+        .map { applyRawDocumentRecord(it) }
+}
+
+fun CultCache.applyDocumentDelete(message: CultNetMessage): Boolean {
+    require(message.schemaVersion == "cultnet.document_delete.v0") {
+        "Expected cultnet.document_delete.v0, received ${message.schemaVersion}"
+    }
+    val schemaId = requireWireString(message.body, "schemaId")
+    val recordKey = requireWireString(message.body, "recordKey")
+    return deleteBySchema(schemaId, recordKey)
+}
+
+private fun CultCache.applyRawDocumentRecord(document: CultNetRawDocumentRecord): Any {
+    if (document.payloadEncoding != "messagepack") throw IOException("Unsupported raw document payload encoding ${document.payloadEncoding}")
+    return putRaw(document.schemaId, document.recordKey, document.payload)
+}
+
 fun cultMeshVerseCatalogRequest(
     messageId: String,
     verseIds: List<String> = emptyList(),
@@ -669,6 +810,18 @@ fun peerFromWire(wire: Map<String, Any?>): CultMeshPeerCard = CultMeshPeerCard(
     authorityLeaseId = wire["authorityLeaseId"] as? String,
     expiresAt = wire["expiresAt"] as? String,
     signature = wire["signature"] as? String,
+)
+
+fun rawDocumentRecordFromWire(wire: Map<String, Any?>): CultNetRawDocumentRecord = CultNetRawDocumentRecord(
+    schemaId = requireWireString(wire, "schemaId"),
+    recordKey = requireWireString(wire, "recordKey"),
+    storedAt = wire["storedAt"] as? String ?: "",
+    payloadEncoding = wire["payloadEncoding"] as? String ?: "messagepack",
+    payload = wire["payload"] as? ByteArray ?: throw IOException("payload must be binary MessagePack bytes"),
+    sourceRuntimeId = wire["sourceRuntimeId"] as? String,
+    sourceAgentId = wire["sourceAgentId"] as? String,
+    sourceRole = wire["sourceRole"] as? String,
+    tags = stringList(wire["tags"]),
 )
 
 private fun requireNonBlank(value: String, fieldName: String) {
@@ -1396,6 +1549,7 @@ private fun nowMs(): Long = Instant.now().toEpochMilli()
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
         cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
+        cultCacheRawSnapshotsRoundTripThroughCultNetMessages()
         cultNetSchemaMessagesUseMessagePackMaps()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
@@ -1447,6 +1601,63 @@ private fun cultCacheErgonomicsCoverTypedDocumentsAndGlobals() {
     node.remember(notes, "node-note", "remembered")
     check(node.require(notes, "node-note") == "remembered")
     check(node.forget(notes, "node-note"))
+}
+
+private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
+    val notes = stringDocument("kotlin.note", "kotlin.note.v1")
+    val settings = stringDocument("kotlin.settings", "kotlin.settings.v1", global = true)
+    val source = CultMeshNode()
+    val target = CultMeshNode()
+    source.cache.register(notes)
+    source.cache.register(settings)
+    target.cache.register(notes)
+    target.cache.register(settings)
+
+    source.remember(notes, "note:1", "first")
+    source.remember(notes, "note:2", "second")
+    source.rememberGlobal(settings, "dark-mode")
+
+    val snapshotRequest = cultNetSnapshotRequest(
+        messageId = "snapshot-notes",
+        schemaIds = listOf(notes.schemaVersion),
+        recordKeys = listOf("note:2"),
+    )
+    val snapshotResponse = parseCultNetMessage(
+        source.createRawSnapshotResponse(
+            snapshotRequest,
+            storedAt = "2026-06-15T00:00:00Z",
+            sourceRuntimeId = "kotlin-source",
+        ).toBytes(),
+    )
+    check(snapshotResponse.schemaVersion == "cultnet.snapshot_response_raw.v0")
+    val applied = target.applyRawSnapshotResponse(snapshotResponse)
+    check(applied == listOf("second"))
+    check(target.recall(notes, "note:1") == null)
+    check(target.require(notes, "note:2") == "second")
+    check(target.recallGlobal(settings) == null)
+
+    val rawPut = parseCultNetMessage(
+        cultNetDocumentPutRaw(
+            messageId = "put-note",
+            document = CultNetRawDocumentRecord(
+                schemaId = notes.schemaVersion,
+                recordKey = "note:3",
+                storedAt = "2026-06-15T00:00:01Z",
+                payload = notes.codec.encode("third"),
+                sourceRuntimeId = "kotlin-source",
+            ),
+        ).toBytes(),
+    )
+    check(target.applyRawDocumentPut(rawPut) == "third")
+    check(target.require(notes, "note:3") == "third")
+
+    val delete = cultNetDocumentDelete(
+        messageId = "delete-note",
+        schemaId = notes.schemaVersion,
+        recordKey = "note:2",
+    )
+    check(target.applyDocumentDelete(delete))
+    check(target.recall(notes, "note:2") == null)
 }
 
 private fun cultNetSchemaMessagesUseMessagePackMaps() {
