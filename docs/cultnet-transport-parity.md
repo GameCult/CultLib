@@ -29,10 +29,12 @@ CultNet owns cross-runtime transport semantics:
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
 | Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client; single-peer RUDP socket transport exists in the library | Endpoint lists and CultMesh peer/Verse catalogs | UDP socket binding for the shared RUDP reliability owner |
-| Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket; single-peer RUDP socket transport exists in the library | None found in the live package | UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
+| Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket; single-peer RUDP socket transport exists in the library | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
 
-The live split is therefore: payload language is converging, transport language
-is not.
+The live split is therefore: payload language and the native RUDP packet/session
+language now converge across the targeted runtimes, while production service
+adoption still varies by runtime and older TCP/LiteNetLib/WebSocket bodies have
+not all been lowered behind the shared transport port.
 
 ## Invariants
 

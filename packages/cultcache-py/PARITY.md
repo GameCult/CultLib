@@ -40,7 +40,7 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   responses because oversized snapshots and other peer failures use that
   contract on the wire. It also advertises the shared
   `cultnet.transport_profile.v0` contract so Python peers can describe their
-  current transport honestly before the cross-runtime reliable UDP owner lands.
+  TCP-framed and RUDP transport capabilities honestly.
 - Python CultNet security/session primitives:
   `CultNetClientSecurityOptions`, `CultNetServerSecurityOptions`, and
   `CultNetSecret` mirror the C#/TS connection-key, server signing-secret,
@@ -95,6 +95,16 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   Provides typed `CultNetWitnessArtifactBundle` ownership for the C#-compatible
   8-slot witness artifact payload while preserving dict helpers for existing
   wire callers.
+- Python CultNet RUDP transport:
+  Provides the shared `cultnet.transport.rudp.v0` packet codec, deterministic
+  RUDP session state machine, socket-backed single-peer transport connection,
+  transport profile advertisement, ping/pong, disconnect reason propagation,
+  timeout state, fragmentation/reassembly, reliable ordered `schema` delivery,
+  unreliable sequenced `latest`, unreliable unordered `realtime`, resend
+  pressure, and bounded reliable-send backpressure. The TypeScript interop
+  harness proves bidirectional Python/TypeScript RUDP socket exchange,
+  packet-loss recovery, reordering recovery, fragmentation, ping/pong, and
+  disconnect reason propagation through the shared wire language.
 - Python CultMesh discovery client:
   Fetches Verse catalogs and peer exchange responses from live endpoints over
   CultNet frames. It can also parse `cultnet://host:port` endpoints, discover
@@ -269,10 +279,11 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
 - Python does not implement the full LiteNetLib client/server auth flow. It now
   owns the shared security/session primitives for helper parity, while the live
   transport harness still speaks the schema-v0 interop lane.
-- Python does not implement cross-runtime reliable UDP yet. The current
-  transport ownership map lives in `docs/cultnet-transport-parity.md`; the next
-  coherent target is a CultNet-owned transport port and `rudp` adapter shared
-  across runtimes, not a Python-only LiteNetLib imitation.
+- Python does not make RUDP the only public pipe yet. The local CultMesh server,
+  raw client, and interop peer still use the TCP-framed schema lane for many
+  service and harness flows, while `docs/cultnet-transport-parity.md` tracks the
+  remaining work to put broader server-side bodies behind the shared transport
+  port instead of cloning LiteNetLib.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.
