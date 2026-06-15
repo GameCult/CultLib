@@ -56,6 +56,21 @@ type PendingReliablePacket = {
   lastSentAtMs: number;
 };
 
+type PendingOrderedFrame = {
+  frame: CultNetRudpDeliveredFrame;
+  nextSequence: number;
+};
+
+type FragmentBuffer = {
+  channelId: string;
+  reliable: boolean;
+  ordered: boolean;
+  sequenced: boolean;
+  fragmentCount: number;
+  payloads: Map<number, Uint8Array>;
+  sequences: Map<number, number>;
+};
+
 export interface RudpTransportProfileOptions {
   transportId?: string;
   host?: string;
@@ -97,12 +112,14 @@ export class CultNetRudpSession {
   readonly connectionId: number;
   readonly resendDelayMs: number;
   #nextSequence: number;
+  #nextFragmentId = 1;
   #connected = false;
   #highestReceivedSequence: number | undefined;
   readonly #receivedSequences = new Set<number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
   readonly #orderedNextSequenceByChannel = new Map<string, number>();
-  readonly #orderedBuffers = new Map<string, Map<number, CultNetRudpDeliveredFrame>>();
+  readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
+  readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
 
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
@@ -154,22 +171,70 @@ export class CultNetRudpSession {
     payload: Uint8Array,
     options: { reliable?: boolean; ordered?: boolean; sequenced?: boolean; nowMs?: number } = {},
   ): CultNetRudpPacket {
+    return this.sendMany(channelId, payload, options)[0]!;
+  }
+
+  sendMany(
+    channelId: string,
+    payload: Uint8Array,
+    options: {
+      reliable?: boolean;
+      ordered?: boolean;
+      sequenced?: boolean;
+      nowMs?: number;
+      maxFragmentBytes?: number;
+    } = {},
+  ): CultNetRudpPacket[] {
     if (!this.#connected) {
       throw new Error("Cannot send RUDP data before the session is connected.");
     }
 
-    const packet = this.#createPacket({
-      packetType: "data",
-      channelId,
-      payload,
-      reliable: options.reliable,
-      ordered: options.ordered,
-      sequenced: options.sequenced,
-    });
-    if (packet.reliable) {
-      this.#trackReliable(packet, options.nowMs ?? 0);
+    const maxFragmentBytes = options.maxFragmentBytes;
+    if (maxFragmentBytes !== undefined && maxFragmentBytes <= 0) {
+      throw new Error("RUDP maxFragmentBytes must be greater than zero.");
     }
-    return packet;
+
+    if (maxFragmentBytes === undefined || payload.byteLength <= maxFragmentBytes) {
+      const packet = this.#createPacket({
+        packetType: "data",
+        channelId,
+        payload,
+        reliable: options.reliable,
+        ordered: options.ordered,
+        sequenced: options.sequenced,
+      });
+      if (packet.reliable) {
+        this.#trackReliable(packet, options.nowMs ?? 0);
+      }
+      return [packet];
+    }
+
+    const fragmentCount = Math.ceil(payload.byteLength / maxFragmentBytes);
+    if (fragmentCount > 0xffff) {
+      throw new Error("RUDP payload requires more than 65535 fragments.");
+    }
+
+    const fragmentId = this.#allocateFragmentId();
+    const packets: CultNetRudpPacket[] = [];
+    for (let index = 0; index < fragmentCount; index += 1) {
+      const start = index * maxFragmentBytes;
+      const packet = this.#createPacket({
+        packetType: "data",
+        channelId,
+        payload: payload.slice(start, Math.min(start + maxFragmentBytes, payload.byteLength)),
+        reliable: options.reliable,
+        ordered: options.ordered,
+        sequenced: options.sequenced,
+        fragmentId,
+        fragmentIndex: index,
+        fragmentCount,
+      });
+      if (packet.reliable) {
+        this.#trackReliable(packet, options.nowMs ?? 0);
+      }
+      packets.push(packet);
+    }
+    return packets;
   }
 
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
@@ -209,17 +274,16 @@ export class CultNetRudpSession {
       return { delivered: [] };
     }
 
-    const frame: CultNetRudpDeliveredFrame = {
-      channelId: packet.channelId,
-      payload: packet.payload ?? new Uint8Array(),
-      sequence: packet.sequence,
-    };
-
-    if (!packet.ordered) {
-      return { delivered: [frame] };
+    const reassembled = this.#reassemble(packet);
+    if (!reassembled) {
+      return { delivered: [] };
     }
 
-    return { delivered: this.#deliverOrdered(frame) };
+    if (!reassembled.ordered) {
+      return { delivered: [reassembled.frame] };
+    }
+
+    return { delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence) };
   }
 
   createAck(): CultNetRudpPacket {
@@ -247,6 +311,9 @@ export class CultNetRudpSession {
     reliable?: boolean;
     ordered?: boolean;
     sequenced?: boolean;
+    fragmentId?: number;
+    fragmentIndex?: number;
+    fragmentCount?: number;
   }): CultNetRudpPacket {
     const sequence = this.#nextSequence;
     this.#nextSequence = toUint32(this.#nextSequence + 1, "sequence");
@@ -261,6 +328,9 @@ export class CultNetRudpSession {
       reliable: packet.reliable ?? false,
       ordered: packet.ordered ?? false,
       sequenced: packet.sequenced ?? false,
+      fragmentId: packet.fragmentId ?? 0,
+      fragmentIndex: packet.fragmentIndex ?? 0,
+      fragmentCount: packet.fragmentCount ?? 0,
       payload: packet.payload ?? new Uint8Array(),
     };
   }
@@ -299,10 +369,90 @@ export class CultNetRudpSession {
     return { ack, ackMask: ackMask >>> 0 };
   }
 
-  #deliverOrdered(frame: CultNetRudpDeliveredFrame): CultNetRudpDeliveredFrame[] {
+  #reassemble(packet: CultNetRudpPacket): { frame: CultNetRudpDeliveredFrame; ordered: boolean; nextSequence: number } | undefined {
+    const payload = packet.payload ?? new Uint8Array();
+    const fragmentCount = packet.fragmentCount ?? 0;
+    if (fragmentCount === 0) {
+      return {
+        frame: {
+          channelId: packet.channelId,
+          payload,
+          sequence: packet.sequence,
+        },
+        ordered: packet.ordered ?? false,
+        nextSequence: packet.sequence + 1,
+      };
+    }
+
+    const fragmentIndex = packet.fragmentIndex ?? 0;
+    const fragmentId = packet.fragmentId ?? 0;
+    if (fragmentId === 0) {
+      throw new Error("RUDP fragmented packet must have a non-zero fragment id.");
+    }
+    if (fragmentIndex >= fragmentCount) {
+      throw new Error("RUDP fragment index must be lower than fragment count.");
+    }
+
+    const key = `${packet.channelId}\0${fragmentId}`;
+    let buffer = this.#fragmentBuffers.get(key);
+    if (!buffer) {
+      buffer = {
+        channelId: packet.channelId,
+        reliable: packet.reliable ?? false,
+        ordered: packet.ordered ?? false,
+        sequenced: packet.sequenced ?? false,
+        fragmentCount,
+        payloads: new Map(),
+        sequences: new Map(),
+      };
+      this.#fragmentBuffers.set(key, buffer);
+    }
+    if (buffer.fragmentCount !== fragmentCount || buffer.ordered !== (packet.ordered ?? false)) {
+      throw new Error("RUDP fragment metadata changed within a fragment set.");
+    }
+
+    buffer.payloads.set(fragmentIndex, payload);
+    buffer.sequences.set(fragmentIndex, packet.sequence);
+    if (buffer.payloads.size < fragmentCount) {
+      return undefined;
+    }
+
+    const chunks: Uint8Array[] = [];
+    const sequences: number[] = [];
+    let totalBytes = 0;
+    for (let index = 0; index < fragmentCount; index += 1) {
+      const chunk = buffer.payloads.get(index);
+      const sequence = buffer.sequences.get(index);
+      if (!chunk || sequence === undefined) {
+        return undefined;
+      }
+      chunks.push(chunk);
+      sequences.push(sequence);
+      totalBytes += chunk.byteLength;
+    }
+
+    const merged = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    this.#fragmentBuffers.delete(key);
+    return {
+      frame: {
+        channelId: buffer.channelId,
+        payload: merged,
+        sequence: Math.min(...sequences),
+      },
+      ordered: buffer.ordered,
+      nextSequence: Math.max(...sequences) + 1,
+    };
+  }
+
+  #deliverOrdered(frame: CultNetRudpDeliveredFrame, nextSequence: number): CultNetRudpDeliveredFrame[] {
     const next = this.#orderedNextSequenceByChannel.get(frame.channelId);
     if (next === undefined) {
-      this.#orderedNextSequenceByChannel.set(frame.channelId, frame.sequence + 1);
+      this.#orderedNextSequenceByChannel.set(frame.channelId, nextSequence);
       return [
         frame,
         ...this.#drainOrdered(frame.channelId),
@@ -319,11 +469,11 @@ export class CultNetRudpSession {
         buffer = new Map();
         this.#orderedBuffers.set(frame.channelId, buffer);
       }
-      buffer.set(frame.sequence, frame);
+      buffer.set(frame.sequence, { frame, nextSequence });
       return [];
     }
 
-    this.#orderedNextSequenceByChannel.set(frame.channelId, next + 1);
+    this.#orderedNextSequenceByChannel.set(frame.channelId, nextSequence);
     return [
       frame,
       ...this.#drainOrdered(frame.channelId),
@@ -339,13 +489,22 @@ export class CultNetRudpSession {
 
     let next = this.#orderedNextSequenceByChannel.get(channelId);
     while (next !== undefined && buffer.has(next)) {
-      const frame = buffer.get(next)!;
+      const pending = buffer.get(next)!;
       buffer.delete(next);
-      delivered.push(frame);
-      next += 1;
+      delivered.push(pending.frame);
+      next = pending.nextSequence;
       this.#orderedNextSequenceByChannel.set(channelId, next);
     }
     return delivered;
+  }
+
+  #allocateFragmentId(): number {
+    const fragmentId = this.#nextFragmentId;
+    this.#nextFragmentId += 1;
+    if (this.#nextFragmentId > 0xffff) {
+      this.#nextFragmentId = 1;
+    }
+    return fragmentId;
   }
 
   #requireConnection(packet: CultNetRudpPacket): void {
@@ -361,6 +520,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   readonly #session: CultNetRudpSession;
   readonly #mode: "client" | "server";
   readonly #resendTimer: NodeJS.Timeout;
+  readonly #maxFragmentBytes: number | undefined;
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
@@ -377,6 +537,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     this.#mode = options.mode;
     this.#remoteHost = options.remoteHost;
     this.#remotePort = options.remotePort;
+    this.#maxFragmentBytes = options.maxFragmentBytes;
     this.#session = new CultNetRudpSession({
       connectionId: options.connectionId,
       initialSequence: options.initialSequence,
@@ -420,11 +581,14 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   }
 
   send(channelId: string, payload: Uint8Array): void {
-    const packet = this.#session.send(channelId, payload, {
+    const packets = this.#session.sendMany(channelId, payload, {
       ...channelOptions(channelId),
       nowMs: Date.now(),
+      maxFragmentBytes: this.#maxFragmentBytes,
     });
-    this.#sendPacket(packet);
+    for (const packet of packets) {
+      this.#sendPacket(packet);
+    }
     this.#stats.framesSent += 1;
   }
 

@@ -180,6 +180,12 @@ Current progress:
   dropped data packet in both directions between TypeScript and C#/Kotlin/Python/Rust.
   The drops happen below the transport connection through a UDP bridge, so the
   recovery is RUDP resend/ack behavior, not application-level retry.
+- TypeScript and Python now have the first RUDP fragmentation implementation:
+  the session can split oversized reliable ordered payloads into fragment
+  packets, reassemble them before delivery, and the socket transport can carry
+  fragmented `schema` frames when `maxFragmentBytes` is configured. C#, Rust,
+  and Kotlin still need the same implementation before fragmentation can claim
+  cross-runtime parity.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
   ports, then broaden RUDP interop into the full loss, reordering,

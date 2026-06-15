@@ -797,6 +797,35 @@ class CultCacheTests(unittest.TestCase):
             ["second", "third"],
         )
 
+    def test_cultnet_rudp_session_fragments_and_reassembles_reliable_ordered_payloads(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=100))
+        sender.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 456, 90, 0, 0, "control")
+        )
+        receiver.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 456, 91, 0, 0, "control")
+        )
+
+        packets = sender.send_many(
+            "schema",
+            b"fragment-me-please",
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=10),
+            max_fragment_bytes=5,
+        )
+        self.assertEqual(len(packets), 4)
+        self.assertEqual(tuple(packet.fragment_count for packet in packets), (4, 4, 4, 4))
+        self.assertEqual(tuple(packet.fragment_index for packet in packets), (0, 1, 2, 3))
+        self.assertTrue(all(packet.fragment_id == packets[0].fragment_id for packet in packets))
+
+        self.assertEqual(receiver.receive(packets[0]).delivered, ())
+        self.assertEqual(receiver.receive(packets[1]).delivered, ())
+        self.assertEqual(receiver.receive(packets[2]).delivered, ())
+        delivered = receiver.receive(packets[3]).delivered
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0].payload, b"fragment-me-please")
+        self.assertEqual(delivered[0].sequence, packets[0].sequence)
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()
@@ -839,6 +868,48 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(client_frame.channel_id, "schema")
             self.assertEqual(client_frame.payload, b"server-state")
             self.assertEqual(server.profile["transports"][0]["protocol"], "rudp")
+            self.assertEqual(client.stats.frames_sent, 1)
+            self.assertEqual(server.stats.frames_received, 1)
+        finally:
+            client.close()
+            server.close()
+
+    def test_cultnet_rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames(self) -> None:
+        server_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        connection_id = 0x10203041
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-fragment-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+                initial_sequence=100,
+                resend_delay_ms=25,
+                max_fragment_bytes=8,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-fragment-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+                initial_sequence=1,
+                resend_delay_ms=25,
+                max_fragment_bytes=8,
+            )
+        )
+
+        try:
+            payload = b"this-schema-frame-is-larger-than-one-rudp-fragment"
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            client.send("schema", payload)
+            server_frame = receive_rudp_frame(server)
+            self.assertEqual(server_frame.channel_id, "schema")
+            self.assertEqual(server_frame.payload, payload)
             self.assertEqual(client.stats.frames_sent, 1)
             self.assertEqual(server.stats.frames_received, 1)
         finally:

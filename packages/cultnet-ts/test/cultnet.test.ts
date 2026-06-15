@@ -359,6 +359,32 @@ test("rudp session suppresses duplicates and delivers reliable ordered payloads 
   ]);
 });
 
+test("rudp session fragments and reassembles reliable ordered payloads", () => {
+  const sender = new CultNetRudpSession({ connectionId: 456, initialSequence: 1 });
+  const receiver = new CultNetRudpSession({ connectionId: 456, initialSequence: 100 });
+  sender.receive({ packetType: "accept", connectionId: 456, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId: 456, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+
+  const packets = sender.sendMany("schema", Buffer.from("fragment-me-please"), {
+    reliable: true,
+    ordered: true,
+    nowMs: 10,
+    maxFragmentBytes: 5,
+  });
+  assert.equal(packets.length, 4);
+  assert.deepEqual(packets.map((packet) => packet.fragmentCount), [4, 4, 4, 4]);
+  assert.deepEqual(packets.map((packet) => packet.fragmentIndex), [0, 1, 2, 3]);
+  assert.ok(packets.every((packet) => packet.fragmentId === packets[0]?.fragmentId));
+
+  assert.deepEqual(receiver.receive(packets[0]!).delivered, []);
+  assert.deepEqual(receiver.receive(packets[1]!).delivered, []);
+  assert.deepEqual(receiver.receive(packets[2]!).delivered, []);
+  const delivered = receiver.receive(packets[3]!).delivered;
+  assert.equal(delivered.length, 1);
+  assert.equal(Buffer.from(delivered[0]!.payload).toString("utf8"), "fragment-me-please");
+  assert.equal(delivered[0]!.sequence, packets[0]!.sequence);
+});
+
 test("rudp socket transport handshakes and carries reliable ordered schema frames over UDP", async () => {
   const serverSocket = await bindUdpSocket();
   const clientSocket = await bindUdpSocket();
@@ -408,6 +434,54 @@ test("rudp socket transport handshakes and carries reliable ordered schema frame
     assert.equal(client.stats.framesSent, 1);
     assert.equal(server.stats.framesReceived, 1);
     assert.equal(server.profile.transports[0]?.protocol, "rudp");
+  } finally {
+    client.close();
+    server.close();
+  }
+});
+
+test("rudp socket transport carries fragmented reliable ordered schema frames over UDP", async () => {
+  const serverSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const connectionId = 0x10203041;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-fragment-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+    maxFragmentBytes: 8,
+  });
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-fragment-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(serverSocket),
+    connectionId,
+    initialSequence: 1,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+    maxFragmentBytes: 8,
+  });
+
+  try {
+    const payload = Buffer.from("this-schema-frame-is-larger-than-one-rudp-fragment", "utf8");
+    const serverFrame = new Promise<{ channelId: string; payload: Uint8Array }>((resolve, reject) => {
+      server.once("frame", resolve);
+      server.once("error", reject);
+    });
+    client.connect(Buffer.from("join", "utf8"));
+    await waitFor(() => client.connected && server.connected, "fragmented RUDP socket handshake");
+    client.send("schema", payload);
+
+    const receivedByServer = await serverFrame;
+    assert.equal(receivedByServer.channelId, "schema");
+    assert.equal(Buffer.from(receivedByServer.payload).toString("utf8"), payload.toString("utf8"));
+    assert.equal(client.stats.framesSent, 1);
+    assert.equal(server.stats.framesReceived, 1);
   } finally {
     client.close();
     server.close();

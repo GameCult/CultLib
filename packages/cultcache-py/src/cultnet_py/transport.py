@@ -206,12 +206,14 @@ class CultNetRudpSession:
         self.connection_id = _uint32(options.connection_id, "connection_id")
         self.resend_delay_ms = options.resend_delay_ms
         self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
+        self._next_fragment_id = 1
         self._connected = False
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
         self._ordered_next_sequence_by_channel: dict[str, int] = {}
-        self._ordered_buffers: dict[str, dict[int, CultNetRudpDeliveredFrame]] = {}
+        self._ordered_buffers: dict[str, dict[int, tuple[CultNetRudpDeliveredFrame, int]]] = {}
+        self._fragment_buffers: dict[tuple[str, int], dict[str, Any]] = {}
 
     @property
     def connected(self) -> bool:
@@ -260,21 +262,59 @@ class CultNetRudpSession:
         payload: bytes,
         options: CultNetRudpSendOptions | None = None,
     ) -> CultNetRudpPacket:
+        return self.send_many(channel_id, payload, options)[0]
+
+    def send_many(
+        self,
+        channel_id: str,
+        payload: bytes,
+        options: CultNetRudpSendOptions | None = None,
+        *,
+        max_fragment_bytes: int | None = None,
+    ) -> tuple[CultNetRudpPacket, ...]:
         if not self._connected:
             raise ValueError("Cannot send RUDP data before the session is connected")
 
         options = options or CultNetRudpSendOptions()
-        packet = self._create_packet(
-            CultNetRudpPacketType.DATA,
-            channel_id,
-            payload,
-            reliable=options.reliable,
-            ordered=options.ordered,
-            sequenced=options.sequenced,
-        )
-        if packet.reliable:
-            self._track_reliable(packet, options.now_ms)
-        return packet
+        if max_fragment_bytes is not None and max_fragment_bytes <= 0:
+            raise ValueError("RUDP max_fragment_bytes must be greater than zero")
+
+        if max_fragment_bytes is None or len(payload) <= max_fragment_bytes:
+            packet = self._create_packet(
+                CultNetRudpPacketType.DATA,
+                channel_id,
+                payload,
+                reliable=options.reliable,
+                ordered=options.ordered,
+                sequenced=options.sequenced,
+            )
+            if packet.reliable:
+                self._track_reliable(packet, options.now_ms)
+            return (packet,)
+
+        fragment_count = (len(payload) + max_fragment_bytes - 1) // max_fragment_bytes
+        if fragment_count > 0xFFFF:
+            raise ValueError("RUDP payload requires more than 65535 fragments")
+
+        fragment_id = self._allocate_fragment_id()
+        packets: list[CultNetRudpPacket] = []
+        for index in range(fragment_count):
+            start = index * max_fragment_bytes
+            packet = self._create_packet(
+                CultNetRudpPacketType.DATA,
+                channel_id,
+                payload[start:start + max_fragment_bytes],
+                reliable=options.reliable,
+                ordered=options.ordered,
+                sequenced=options.sequenced,
+                fragment_id=fragment_id,
+                fragment_index=index,
+                fragment_count=fragment_count,
+            )
+            if packet.reliable:
+                self._track_reliable(packet, options.now_ms)
+            packets.append(packet)
+        return tuple(packets)
 
     def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
         del now_ms
@@ -304,14 +344,13 @@ class CultNetRudpSession:
         if duplicate:
             return CultNetRudpReceiveResult()
 
-        frame = CultNetRudpDeliveredFrame(
-            channel_id=packet.channel_id,
-            payload=bytes(packet.payload),
-            sequence=packet.sequence,
-        )
-        if not packet.ordered:
+        reassembled = self._reassemble(packet)
+        if reassembled is None:
+            return CultNetRudpReceiveResult()
+        frame, ordered, next_sequence = reassembled
+        if not ordered:
             return CultNetRudpReceiveResult(delivered=(frame,))
-        return CultNetRudpReceiveResult(delivered=tuple(self._deliver_ordered(frame)))
+        return CultNetRudpReceiveResult(delivered=tuple(self._deliver_ordered(frame, next_sequence)))
 
     def create_ack(self) -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
@@ -333,6 +372,9 @@ class CultNetRudpSession:
         reliable: bool = False,
         ordered: bool = False,
         sequenced: bool = False,
+        fragment_id: int = 0,
+        fragment_index: int = 0,
+        fragment_count: int = 0,
     ) -> CultNetRudpPacket:
         sequence = self._next_sequence
         self._next_sequence = _uint32(self._next_sequence + 1, "sequence")
@@ -347,6 +389,9 @@ class CultNetRudpSession:
             reliable=reliable,
             ordered=ordered,
             sequenced=sequenced,
+            fragment_id=fragment_id,
+            fragment_index=fragment_index,
+            fragment_count=fragment_count,
             payload=bytes(payload),
         )
 
@@ -389,18 +434,56 @@ class CultNetRudpSession:
                 ack_mask |= 1 << bit
         return ack, ack_mask
 
-    def _deliver_ordered(self, frame: CultNetRudpDeliveredFrame) -> list[CultNetRudpDeliveredFrame]:
+    def _reassemble(self, packet: CultNetRudpPacket) -> tuple[CultNetRudpDeliveredFrame, bool, int] | None:
+        if packet.fragment_count == 0:
+            return (
+                CultNetRudpDeliveredFrame(packet.channel_id, bytes(packet.payload), packet.sequence),
+                packet.ordered,
+                packet.sequence + 1,
+            )
+        if packet.fragment_id == 0:
+            raise ValueError("RUDP fragmented packet must have a non-zero fragment id")
+        if packet.fragment_index >= packet.fragment_count:
+            raise ValueError("RUDP fragment index must be lower than fragment count")
+
+        key = (packet.channel_id, packet.fragment_id)
+        buffer = self._fragment_buffers.setdefault(
+            key,
+            {
+                "fragment_count": packet.fragment_count,
+                "ordered": packet.ordered,
+                "payloads": {},
+                "sequences": {},
+            },
+        )
+        if buffer["fragment_count"] != packet.fragment_count or buffer["ordered"] != packet.ordered:
+            raise ValueError("RUDP fragment metadata changed within a fragment set")
+        buffer["payloads"][packet.fragment_index] = bytes(packet.payload)
+        buffer["sequences"][packet.fragment_index] = packet.sequence
+        if len(buffer["payloads"]) < packet.fragment_count:
+            return None
+
+        payload = b"".join(buffer["payloads"][index] for index in range(packet.fragment_count))
+        sequences = [buffer["sequences"][index] for index in range(packet.fragment_count)]
+        del self._fragment_buffers[key]
+        return (
+            CultNetRudpDeliveredFrame(packet.channel_id, payload, min(sequences)),
+            bool(buffer["ordered"]),
+            max(sequences) + 1,
+        )
+
+    def _deliver_ordered(self, frame: CultNetRudpDeliveredFrame, next_after_frame: int) -> list[CultNetRudpDeliveredFrame]:
         next_sequence = self._ordered_next_sequence_by_channel.get(frame.channel_id)
         if next_sequence is None:
-            self._ordered_next_sequence_by_channel[frame.channel_id] = frame.sequence + 1
+            self._ordered_next_sequence_by_channel[frame.channel_id] = next_after_frame
             return [frame, *self._drain_ordered(frame.channel_id)]
         if frame.sequence < next_sequence:
             return []
         if frame.sequence > next_sequence:
-            self._ordered_buffers.setdefault(frame.channel_id, {})[frame.sequence] = frame
+            self._ordered_buffers.setdefault(frame.channel_id, {})[frame.sequence] = (frame, next_after_frame)
             return []
 
-        self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence + 1
+        self._ordered_next_sequence_by_channel[frame.channel_id] = next_after_frame
         return [frame, *self._drain_ordered(frame.channel_id)]
 
     def _drain_ordered(self, channel_id: str) -> list[CultNetRudpDeliveredFrame]:
@@ -411,12 +494,20 @@ class CultNetRudpSession:
 
         while True:
             next_sequence = self._ordered_next_sequence_by_channel[channel_id]
-            frame = buffer.pop(next_sequence, None)
-            if frame is None:
+            pending = buffer.pop(next_sequence, None)
+            if pending is None:
                 break
+            frame, next_after_frame = pending
             delivered.append(frame)
-            self._ordered_next_sequence_by_channel[channel_id] = next_sequence + 1
+            self._ordered_next_sequence_by_channel[channel_id] = next_after_frame
         return delivered
+
+    def _allocate_fragment_id(self) -> int:
+        fragment_id = self._next_fragment_id
+        self._next_fragment_id += 1
+        if self._next_fragment_id > 0xFFFF:
+            self._next_fragment_id = 1
+        return fragment_id
 
     def _require_connection(self, packet: CultNetRudpPacket) -> None:
         if packet.connection_id != self.connection_id:
@@ -430,6 +521,7 @@ class CultNetRudpSocketTransportConnection:
         self.socket = options.socket
         self.mode = CultNetRudpSocketMode(options.mode)
         self.remote_addr = options.remote_addr
+        self.max_fragment_bytes = options.max_fragment_bytes
         self.session = CultNetRudpSession(
             CultNetRudpSessionOptions(
                 connection_id=options.connection_id,
@@ -472,12 +564,14 @@ class CultNetRudpSocketTransportConnection:
         self._send_packet(self.session.create_connect(_now_ms(), payload))
 
     def send(self, channel_id: str, payload: bytes) -> None:
-        packet = self.session.send(
+        packets = self.session.send_many(
             channel_id,
             payload,
             _channel_send_options(channel_id, _now_ms()),
+            max_fragment_bytes=self.max_fragment_bytes,
         )
-        self._send_packet(packet)
+        for packet in packets:
+            self._send_packet(packet)
         self._frames_sent += 1
 
     def receive_once(self) -> CultNetTransportFrame | None:
