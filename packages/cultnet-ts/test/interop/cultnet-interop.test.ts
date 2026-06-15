@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { existsSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer } from "node:net";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -25,6 +25,13 @@ const cultNetTsRoot = resolve(__dirname, "../../..");
 const cultLibRoot = findAncestor(cultNetTsRoot, "CultLib.sln") ?? resolve(cultNetTsRoot, "..", "CultLib");
 const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
 const cultcachePySrc = resolve(cultcachePyRoot, "src");
+const cultmeshKotlinRoot = resolve(cultLibRoot, "packages", "cultmesh-kotlin");
+const kotlinHome = process.env.KOTLIN_HOME ?? "C:\\Program Files\\Android\\Android Studio\\plugins\\Kotlin\\kotlinc";
+const kotlinJavaHome = process.env.KOTLIN_JAVA_HOME ?? "C:\\Program Files\\Android\\Android Studio\\jbr";
+const kotlinJavaCommand = process.env.JAVA ?? join(kotlinJavaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
+const kotlinStdlibPath = join(kotlinHome, "lib", "kotlin-stdlib.jar");
+const kotlinJarPath = resolve(cultLibRoot, "artifacts", "cultmesh-kotlin", "cultmesh-kotlin.jar");
+const kotlinClasspath = [kotlinJarPath, kotlinStdlibPath].join(delimiter);
 const cultnetRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultnet-rs"))
   ? resolve(cultLibRoot, "packages", "cultnet-rs")
   : resolve(cultNetTsRoot, "..", "cultnet-rs");
@@ -59,6 +66,7 @@ const rustBinaryPath = resolve(
 const discoveryGroup = "239.77.44.11";
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
+let kotlinInteropPeerBuild: Promise<void> | undefined;
 
 const pythonRudpPeerScript = String.raw`
 import socket
@@ -904,6 +912,82 @@ test("CultNet C# and TypeScript exchange schema frames when C# dials a TypeScrip
   }
 });
 
+test("CultNet TypeScript and Kotlin exchange schema frames over the shared RUDP socket transport", async () => {
+  await buildKotlinInteropPeer();
+  const kotlinPeer = spawnKotlinRudpServer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const kotlinPort = await kotlinPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-kotlin-rudp-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: kotlinPort,
+      connectionId: 0x446688aa,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-kotlin-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Kotlin handshake");
+    client.send("schema", Buffer.from("ts-kotlin-client-state"));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Kotlin RUDP response frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("kotlin-server-state"));
+
+    const [exitCode] = await withTimeout(once(kotlinPeer.child, "exit"), 2_000, "Kotlin RUDP peer exit");
+    assert.equal(exitCode, 0, kotlinPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (kotlinPeer.child.exitCode === null && !kotlinPeer.child.killed) {
+      kotlinPeer.child.kill("SIGTERM");
+      await once(kotlinPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet Kotlin and TypeScript exchange schema frames when Kotlin dials a TypeScript RUDP server", async () => {
+  await buildKotlinInteropPeer();
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-kotlin-rudp-server-interop",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0xaa886644,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const kotlinClient = spawnKotlinRudpClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Kotlin RUDP client frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("kotlin-client-state"));
+    server.send("schema", Buffer.from("ts-kotlin-server-state"));
+
+    const [exitCode] = await withTimeout(once(kotlinClient.child, "exit"), 2_000, "Kotlin RUDP client exit");
+    assert.equal(exitCode, 0, kotlinClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (kotlinClient.child.exitCode === null && !kotlinClient.child.killed) {
+      kotlinClient.child.kill("SIGTERM");
+      await once(kotlinClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
   await buildCSharpInteropPeer();
@@ -921,6 +1005,18 @@ async function buildCSharpInteropPeer(): Promise<void> {
     cwd: cultLibRoot,
   }).then(() => undefined);
   await csharpInteropPeerBuild;
+}
+
+async function buildKotlinInteropPeer(): Promise<void> {
+  kotlinInteropPeerBuild ??= execFileAsync(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolve(cultmeshKotlinRoot, "build.ps1")],
+    {
+      cwd: cultLibRoot,
+      timeout: 180_000,
+    },
+  ).then(() => undefined);
+  await kotlinInteropPeerBuild;
 }
 
 function cleanInteropStores(runtimeIds: readonly string[]): void {
@@ -1192,10 +1288,86 @@ function spawnCSharpRudpServer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
+function spawnKotlinRudpServer(): RunningPythonRudpPeer {
+  const child = spawn(kotlinJavaCommand, [
+    "-cp", kotlinClasspath,
+    "org.gamecult.cultmesh.CultMeshKt",
+    "rudp-serve-once",
+    "--bind-host", "127.0.0.1",
+  ], {
+    cwd: cultLibRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { status?: string; port?: number };
+          if (parsed.status === "ready" && typeof parsed.port === "number") {
+            resolveReady(parsed.port);
+          } else if (parsed.status !== "ok") {
+            rejectReady(new Error(`Kotlin RUDP peer emitted unexpected stdout: ${line}`));
+          }
+        } catch (error) {
+          rejectReady(new Error(`Kotlin RUDP peer emitted non-JSON stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Kotlin RUDP peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnKotlinRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(kotlinJavaCommand, [
+    "-cp", kotlinClasspath,
+    "org.gamecult.cultmesh.CultMeshKt",
+    "rudp-dial-once",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(remotePort),
+  ], {
+    cwd: cultLibRoot,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];

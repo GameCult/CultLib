@@ -491,9 +491,105 @@ private fun uint16(value: Int, fieldName: String): Int {
 
 private fun nowMs(): Long = Instant.now().toEpochMilli()
 
-fun main() {
-    rudpPacketCodecUsesDeterministicReliableOrderedFixture()
-    rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
+fun main(args: Array<String>) {
+    if (args.isEmpty()) {
+        rudpPacketCodecUsesDeterministicReliableOrderedFixture()
+        rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
+        return
+    }
+
+    val options = parseArgs(args.drop(1))
+    when (args[0]) {
+        "rudp-serve-once" -> rudpServeOnce(options)
+        "rudp-dial-once" -> rudpDialOnce(options)
+        else -> error("Unknown mode ${args[0]}")
+    }
+}
+
+private fun rudpServeOnce(options: Map<String, String>) {
+    val bindHost = options["bind-host"] ?: "127.0.0.1"
+    val bindPort = options["bind-port"]?.toInt() ?: 0
+    val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
+    CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Server,
+        runtimeId = "kotlin-rudp-interop",
+        connectionId = 0x446688aaL,
+        initialSequence = 100,
+        resendDelayMs = 25,
+    ).use { transport ->
+        println("""{"status":"ready","port":${socket.localPort}}""")
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val frame = transport.receiveOnce()
+            if (frame != null) {
+                requireRudpFrame(frame, "schema", "ts-kotlin-client-state")
+                transport.send("schema", "kotlin-server-state".toByteArray(StandardCharsets.UTF_8))
+                println("""{"status":"ok"}""")
+                return
+            }
+            transport.pollResends()
+            Thread.sleep(5)
+        }
+    }
+    error("Timed out waiting for TypeScript RUDP frame")
+}
+
+private fun rudpDialOnce(options: Map<String, String>) {
+    val targetHost = options.getValue("target-host")
+    val targetPort = options.getValue("target-port").toInt()
+    val loopback = InetAddress.getByName("127.0.0.1")
+    val socket = DatagramSocket(0, loopback).also { it.soTimeout = 20 }
+    CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Client,
+        runtimeId = "kotlin-rudp-client-interop",
+        connectionId = 0xaa886644L,
+        remoteAddress = InetSocketAddress(InetAddress.getByName(targetHost), targetPort),
+        initialSequence = 1,
+        resendDelayMs = 25,
+    ).use { transport ->
+        transport.connect("kotlin-join".toByteArray(StandardCharsets.UTF_8))
+        var sent = false
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val frame = transport.receiveOnce()
+            if (frame != null) {
+                requireRudpFrame(frame, "schema", "ts-kotlin-server-state")
+                println("""{"status":"ok"}""")
+                return
+            }
+            transport.pollResends()
+            if (transport.connected && !sent) {
+                transport.send("schema", "kotlin-client-state".toByteArray(StandardCharsets.UTF_8))
+                sent = true
+            }
+            Thread.sleep(5)
+        }
+    }
+    error("Timed out waiting for TypeScript RUDP response")
+}
+
+private fun requireRudpFrame(frame: CultNetTransportFrame, expectedChannelId: String, expectedPayload: String) {
+    val expectedBytes = expectedPayload.toByteArray(StandardCharsets.UTF_8)
+    if (frame.channelId != expectedChannelId || !frame.payload.contentEquals(expectedBytes)) {
+        error("Unexpected RUDP frame: channel=${frame.channelId}, payload=${String(frame.payload, StandardCharsets.UTF_8)}")
+    }
+}
+
+private fun parseArgs(args: List<String>): Map<String, String> {
+    val parsed = linkedMapOf<String, String>()
+    var index = 0
+    while (index < args.size) {
+        val token = args[index]
+        if (!token.startsWith("--")) {
+            index += 1
+            continue
+        }
+        parsed[token.removePrefix("--")] = args.getOrNull(index + 1) ?: error("Missing value for $token")
+        index += 2
+    }
+    return parsed
 }
 
 private fun rudpPacketCodecUsesDeterministicReliableOrderedFixture() {
