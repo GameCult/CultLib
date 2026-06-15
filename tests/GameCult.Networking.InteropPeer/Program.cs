@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,7 +21,7 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: serve | probe | dial");
+            throw new InvalidOperationException("Expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once");
         }
 
         var mode = args[0];
@@ -35,6 +36,12 @@ static async Task<int> ProgramMainAsync(string[] args)
                 return 0;
             case "dial":
                 await DialAsync(ParseDialConfig(options));
+                return 0;
+            case "rudp-serve-once":
+                RudpServeOnce(options);
+                return 0;
+            case "rudp-dial-once":
+                RudpDialOnce(options);
                 return 0;
             default:
                 throw new InvalidOperationException($"Unknown mode {mode}");
@@ -570,6 +577,106 @@ static CultNetTransportProfile CreateTcpFramedTransportProfile(string runtimeId,
     });
 }
 
+static void RudpServeOnce(Dictionary<string, string> options)
+{
+    var bindHost = options.TryGetValue("bind-host", out var configuredBindHost) ? configuredBindHost : "127.0.0.1";
+    var bindPort = options.TryGetValue("bind-port", out var configuredBindPort)
+        ? int.Parse(configuredBindPort, CultureInfo.InvariantCulture)
+        : 0;
+
+    using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    socket.Bind(new IPEndPoint(IPAddress.Parse(bindHost), bindPort));
+    socket.ReceiveTimeout = 20;
+    var local = (IPEndPoint)socket.LocalEndPoint!;
+    using var transport = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+    {
+        RuntimeId = "csharp-rudp-interop",
+        Socket = socket,
+        Mode = CultNetRudpSocketMode.Server,
+        ConnectionId = 0x33557799,
+        InitialSequence = 100,
+        ResendDelayMs = 25
+    });
+
+    WriteJsonLine(new
+    {
+        status = "ready",
+        port = local.Port
+    });
+
+    var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        var frame = transport.ReceiveOnce();
+        if (frame != null)
+        {
+            RequireRudpFrame(frame, "schema", "ts-csharp-client-state");
+            transport.Send("schema", Ascii("csharp-server-state"));
+            WriteJsonLine(new { status = "ok" });
+            return;
+        }
+
+        transport.PollResends();
+        Thread.Sleep(5);
+    }
+
+    throw new TimeoutException("Timed out waiting for TypeScript RUDP frame.");
+}
+
+static void RudpDialOnce(Dictionary<string, string> options)
+{
+    var targetHost = RequireArg(options, "target-host");
+    var targetPort = ParseIntArg(options, "target-port");
+
+    using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+    socket.ReceiveTimeout = 20;
+    using var transport = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+    {
+        RuntimeId = "csharp-rudp-client-interop",
+        Socket = socket,
+        Mode = CultNetRudpSocketMode.Client,
+        RemoteEndPoint = new IPEndPoint(IPAddress.Parse(targetHost), targetPort),
+        ConnectionId = 0x99775533,
+        InitialSequence = 1,
+        ResendDelayMs = 25
+    });
+    transport.Connect(Ascii("csharp-join"));
+
+    var sent = false;
+    var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        var frame = transport.ReceiveOnce();
+        if (frame != null)
+        {
+            RequireRudpFrame(frame, "schema", "ts-csharp-server-state");
+            WriteJsonLine(new { status = "ok" });
+            return;
+        }
+
+        transport.PollResends();
+        if (transport.Connected && !sent)
+        {
+            transport.Send("schema", Ascii("csharp-client-state"));
+            sent = true;
+        }
+        Thread.Sleep(5);
+    }
+
+    throw new TimeoutException("Timed out waiting for TypeScript RUDP response.");
+}
+
+static void RequireRudpFrame(CultNetTransportFrame frame, string expectedChannelId, string expectedPayload)
+{
+    if (!string.Equals(frame.ChannelId, expectedChannelId, StringComparison.Ordinal)
+        || !frame.Payload.SequenceEqual(Ascii(expectedPayload)))
+    {
+        throw new InvalidOperationException(
+            $"Unexpected RUDP frame: channel={frame.ChannelId}, payload={Convert.ToHexString(frame.Payload)}.");
+    }
+}
+
 static async Task SendMessageAsync<TMessage>(
     TcpFramedTransportConnection transport,
     TMessage message,
@@ -798,6 +905,11 @@ static DialConfig ParseDialConfig(Dictionary<string, string> options)
 static void WriteJsonLine(object value)
 {
     Console.Out.WriteLine(JsonSerializer.Serialize(value, InteropPeerShared.JsonOptions));
+}
+
+static byte[] Ascii(string value)
+{
+    return Encoding.ASCII.GetBytes(value);
 }
 
 static void WriteLog(string @event, object payload)

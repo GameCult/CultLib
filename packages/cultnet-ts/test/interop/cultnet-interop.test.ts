@@ -57,6 +57,8 @@ const rustBinaryPath = resolve(
 );
 
 const discoveryGroup = "239.77.44.11";
+let rustInteropPeerBuild: Promise<void> | undefined;
+let csharpInteropPeerBuild: Promise<void> | undefined;
 
 const pythonRudpPeerScript = String.raw`
 import socket
@@ -826,17 +828,99 @@ test("CultNet Rust and TypeScript exchange schema frames when Rust dials a TypeS
   }
 });
 
+test("CultNet TypeScript and C# exchange schema frames over the shared RUDP socket transport", async () => {
+  await buildCSharpInteropPeer();
+  const csharpPeer = spawnCSharpRudpServer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const csharpPort = await csharpPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-csharp-rudp-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: csharpPort,
+      connectionId: 0x33557799,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-csharp-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete C# handshake");
+    client.send("schema", Buffer.from("ts-csharp-client-state"));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "C# RUDP response frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("csharp-server-state"));
+
+    const [exitCode] = await withTimeout(once(csharpPeer.child, "exit"), 2_000, "C# RUDP peer exit");
+    assert.equal(exitCode, 0, csharpPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (csharpPeer.child.exitCode === null && !csharpPeer.child.killed) {
+      csharpPeer.child.kill("SIGTERM");
+      await once(csharpPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet C# and TypeScript exchange schema frames when C# dials a TypeScript RUDP server", async () => {
+  await buildCSharpInteropPeer();
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-csharp-rudp-server-interop",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0x99775533,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const csharpClient = spawnCSharpRudpClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "C# RUDP client frame");
+    assert.equal(frame.channelId, "schema");
+    assert.deepEqual(Buffer.from(frame.payload), Buffer.from("csharp-client-state"));
+    server.send("schema", Buffer.from("ts-csharp-server-state"));
+
+    const [exitCode] = await withTimeout(once(csharpClient.child, "exit"), 2_000, "C# RUDP client exit");
+    assert.equal(exitCode, 0, csharpClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (csharpClient.child.exitCode === null && !csharpClient.child.killed) {
+      csharpClient.child.kill("SIGTERM");
+      await once(csharpClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 async function buildInteropPeers(): Promise<void> {
   await buildRustInteropPeer();
-  await execFileAsync(dotnetCommand, ["build", csharpProjectPath, "-nologo"], {
-    cwd: cultLibRoot,
-  });
+  await buildCSharpInteropPeer();
 }
 
 async function buildRustInteropPeer(): Promise<void> {
-  await execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
+  rustInteropPeerBuild ??= execFileAsync(cargoCommand, ["build", "--quiet", "--example", "cultnet_interop_peer"], {
     cwd: cultnetRsRoot,
-  });
+  }).then(() => undefined);
+  await rustInteropPeerBuild;
+}
+
+async function buildCSharpInteropPeer(): Promise<void> {
+  csharpInteropPeerBuild ??= execFileAsync(dotnetCommand, ["build", csharpProjectPath, "-nologo"], {
+    cwd: cultLibRoot,
+  }).then(() => undefined);
+  await csharpInteropPeerBuild;
 }
 
 function cleanInteropStores(runtimeIds: readonly string[]): void {
@@ -1058,10 +1142,80 @@ function spawnRustRudpServer(): RunningPythonRudpPeer {
   return { child, ready, stderr };
 }
 
+function spawnCSharpRudpServer(): RunningPythonRudpPeer {
+  const child = spawn(dotnetCommand, [csharpDllPath, "rudp-serve-once", "--bind-host", "127.0.0.1"], {
+    cwd: cultLibRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { status?: string; port?: number };
+          if (parsed.status === "ready" && typeof parsed.port === "number") {
+            resolveReady(parsed.port);
+          } else if (parsed.status !== "ok") {
+            rejectReady(new Error(`C# RUDP peer emitted unexpected stdout: ${line}`));
+          }
+        } catch (error) {
+          rejectReady(new Error(`C# RUDP peer emitted non-JSON stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`C# RUDP peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnCSharpRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(dotnetCommand, [
+    csharpDllPath,
+    "rudp-dial-once",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(remotePort),
+  ], {
+    cwd: cultLibRoot,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];
