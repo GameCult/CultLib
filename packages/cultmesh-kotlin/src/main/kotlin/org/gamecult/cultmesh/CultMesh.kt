@@ -256,6 +256,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         val ignoredNow = nowMs
         requireConnection(packet)
         applyAcknowledgements(packet)
+        val expectedSequenceIfUninitialized = (highestReceivedSequence ?: (packet.sequence - 1)) + 1
         when (packet.packetType) {
             CultNetRudpPacketType.Accept -> {
                 rememberReceived(packet.sequence)
@@ -278,7 +279,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         rememberReceived(packet.sequence)
         if (duplicate) return CultNetRudpReceiveResult()
         val reassembled = reassemble(packet) ?: return CultNetRudpReceiveResult()
-        return CultNetRudpReceiveResult(delivered = if (reassembled.ordered) deliverOrdered(reassembled.frame, reassembled.nextSequence) else listOf(reassembled.frame))
+        return CultNetRudpReceiveResult(delivered = if (reassembled.ordered) deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) else listOf(reassembled.frame))
     }
 
     fun createAck(): CultNetRudpPacket = createPacket(CultNetRudpPacketType.Ack, "control", ByteArray(0))
@@ -364,11 +365,13 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         return ReassembledFrame(CultNetRudpDeliveredFrame(buffer.channelId, payload, sequences.minOrNull() ?: packet.sequence), buffer.ordered, (sequences.maxOrNull() ?: packet.sequence) + 1)
     }
 
-    private fun deliverOrdered(frame: CultNetRudpDeliveredFrame, nextSequenceAfterFrame: Long): List<CultNetRudpDeliveredFrame> {
-        val next = orderedNextSequenceByChannel[frame.channelId]
-        if (next == null) {
-            orderedNextSequenceByChannel[frame.channelId] = nextSequenceAfterFrame
-            return listOf(frame) + drainOrdered(frame.channelId)
+    private fun deliverOrdered(
+        frame: CultNetRudpDeliveredFrame,
+        nextSequenceAfterFrame: Long,
+        expectedSequenceIfUninitialized: Long,
+    ): List<CultNetRudpDeliveredFrame> {
+        val next = orderedNextSequenceByChannel[frame.channelId] ?: minOf(expectedSequenceIfUninitialized, frame.sequence).also {
+            orderedNextSequenceByChannel[frame.channelId] = it
         }
         if (frame.sequence < next) return emptyList()
         if (frame.sequence > next) {
@@ -596,6 +599,7 @@ private fun rudpServeOnce(options: Map<String, String>) {
     val bindPort = options["bind-port"]?.toInt() ?: 0
     val expectedClientPayload = (options["client-payload"] ?: "ts-kotlin-client-state").toByteArray(StandardCharsets.UTF_8)
     val serverPayload = (options["server-payload"] ?: "kotlin-server-state").toByteArray(StandardCharsets.UTF_8)
+    val serverExtraPayload = options["server-extra-payload"]?.toByteArray(StandardCharsets.UTF_8)
     val maxFragmentBytes = options["max-fragment-bytes"]?.toInt()
     val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
     CultNetRudpSocketTransportConnection(
@@ -614,6 +618,9 @@ private fun rudpServeOnce(options: Map<String, String>) {
             if (frame != null) {
                 requireRudpFrame(frame, "schema", expectedClientPayload)
                 transport.send("schema", serverPayload)
+                if (serverExtraPayload != null) {
+                    transport.send("schema", serverExtraPayload)
+                }
                 pollRudpAfterSend(transport, 250)
                 println("""{"status":"ok"}""")
                 return

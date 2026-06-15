@@ -277,6 +277,10 @@ impl CultNetRudpSession {
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
         self.apply_acknowledgements(packet);
+        let expected_sequence_if_uninitialized = self
+            .highest_received_sequence
+            .map(|sequence| sequence + 1)
+            .unwrap_or(packet.sequence);
 
         if packet.packet_type == CultNetRudpPacketType::Accept {
             self.remember_received(packet.sequence);
@@ -335,7 +339,7 @@ impl CultNetRudpSession {
             });
         };
         let delivered = if ordered {
-            self.deliver_ordered(frame, next_sequence)
+            self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
         } else {
             vec![frame]
         };
@@ -548,18 +552,21 @@ impl CultNetRudpSession {
         &mut self,
         frame: CultNetRudpDeliveredFrame,
         next_sequence_after_frame: u32,
+        expected_sequence_if_uninitialized: u32,
     ) -> Vec<CultNetRudpDeliveredFrame> {
         let channel_id = frame.channel_id.clone();
-        let Some(next) = self
+        let next = if let Some(next) = self
             .ordered_next_sequence_by_channel
             .get(&channel_id)
             .copied()
-        else {
-            self.ordered_next_sequence_by_channel
-                .insert(channel_id.clone(), next_sequence_after_frame);
-            let mut delivered = vec![frame];
-            delivered.extend(self.drain_ordered(&channel_id));
-            return delivered;
+        {
+            next
+        } else {
+            self.ordered_next_sequence_by_channel.insert(
+                channel_id.clone(),
+                expected_sequence_if_uninitialized.min(frame.sequence),
+            );
+            expected_sequence_if_uninitialized.min(frame.sequence)
         };
 
         if frame.sequence < next {

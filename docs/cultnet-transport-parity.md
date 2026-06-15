@@ -180,6 +180,11 @@ Current progress:
   dropped data packet in both directions between TypeScript and C#/Kotlin/Python/Rust.
   The drops happen below the transport connection through a UDP bridge, so the
   recovery is RUDP resend/ack behavior, not application-level retry.
+- The same harness now proves reliable ordered `schema` delivery survives
+  reordered data packets in both directions between TypeScript and
+  C#/Kotlin/Python/Rust. The bridge delays one packet below the transport, sends
+  the following packet first, and then releases the held packet; delivered frames
+  still surface in sequence.
 - TypeScript, C#, Rust, Python, and Kotlin now share the first RUDP
   fragmentation implementation: the session can split oversized reliable
   ordered payloads into fragment packets, reassemble them before delivery, and
@@ -190,8 +195,8 @@ Current progress:
   C#/Kotlin/Python/Rust one-shot UDP peers.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into the full loss, reordering,
-  reconnect, backpressure, and schema-message matrix.
+  ports, then broaden RUDP interop into reconnect, backpressure, and the wider
+  schema-message matrix.
 
 ## RUDP Packet Contract V0
 

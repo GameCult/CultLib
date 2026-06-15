@@ -81,6 +81,7 @@ interface RudpServerInteropPeerSpec {
 interface RudpServerSpawnOptions {
   clientPayload?: string;
   serverPayload?: string;
+  serverExtraPayload?: string;
   maxFragmentBytes?: number;
 }
 
@@ -138,6 +139,8 @@ from cultnet_py import (
 
 expected_client_payload = os.environ.get("RUDP_CLIENT_PAYLOAD", "client-state").encode()
 server_payload = os.environ.get("RUDP_SERVER_PAYLOAD", "python-state").encode()
+server_extra_payload_raw = os.environ.get("RUDP_SERVER_EXTRA_PAYLOAD")
+server_extra_payload = server_extra_payload_raw.encode() if server_extra_payload_raw else None
 max_fragment_bytes_raw = os.environ.get("RUDP_MAX_FRAGMENT_BYTES")
 max_fragment_bytes = int(max_fragment_bytes_raw) if max_fragment_bytes_raw else None
 
@@ -166,6 +169,8 @@ while time.time() < deadline:
         transport.close()
         raise SystemExit(f"unexpected RUDP frame: {frame.channel_id!r} {frame.payload!r}")
     transport.send("schema", server_payload)
+    if server_extra_payload is not None:
+        transport.send("schema", server_extra_payload)
     print("OK", flush=True)
     ack_deadline = time.time() + 0.25
     while time.time() < ack_deadline:
@@ -1166,6 +1171,123 @@ test("CultNet RUDP reliable schema response survives one dropped server data pac
   }
 });
 
+test("CultNet RUDP reliable schema delivery survives reordered client data packets across runtimes", async () => {
+  for (const peer of rudpServerInteropPeers()) {
+    await peer.build();
+    const serverPeer = peer.spawn();
+    const clientSocket = await bindUdpSocket();
+    const lossyBridge = await createRudpLossyBridge({
+      remoteHost: "127.0.0.1",
+      remotePort: await serverPeer.ready,
+      shouldDelayClientPacket: (wire) => {
+        const packet = decodeRudpPacket(wire);
+        return packet.packetType === "data"
+          && packet.channelId === "schema"
+          && Buffer.from(packet.payload ?? []).equals(Buffer.from(peer.clientPayload));
+      },
+    });
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-reordered-${peer.name.replace(/\W/g, "").toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: lossyBridge.port,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+      });
+
+      const receivedFrame = once(client, "frame");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} handshake through reorder bridge`);
+      client.send("schema", Buffer.from(peer.clientPayload));
+      client.send("schema", Buffer.from(`${peer.clientPayload}:second`));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} RUDP response frame after reordered client data packets`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(peer.expectedPayload));
+      assert.equal(lossyBridge.delayedClientPackets, 1, `${peer.name} bridge should delay exactly one client data packet`);
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after reordered delivery`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      lossyBridge.close();
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
+test("CultNet RUDP reliable schema response survives reordered server data packets across runtimes", async () => {
+  for (const peer of rudpServerInteropPeers()) {
+    await peer.build();
+    const serverPeer = peer.spawn({
+      serverExtraPayload: `${peer.expectedPayload}:second`,
+    });
+    const clientSocket = await bindUdpSocket();
+    const lossyBridge = await createRudpLossyBridge({
+      remoteHost: "127.0.0.1",
+      remotePort: await serverPeer.ready,
+      shouldDelayServerPacket: (wire) => {
+        const packet = decodeRudpPacket(wire);
+        return packet.packetType === "data"
+          && packet.channelId === "schema"
+          && Buffer.from(packet.payload ?? []).equals(Buffer.from(peer.expectedPayload));
+      },
+    });
+    let client: CultNetRudpSocketTransportConnection | undefined;
+
+    try {
+      client = new CultNetRudpSocketTransportConnection({
+        runtimeId: `ts-server-reordered-${peer.name.replace(/\W/g, "").toLowerCase()}-rudp-interop`,
+        socket: clientSocket,
+        mode: "client",
+        remoteHost: "127.0.0.1",
+        remotePort: lossyBridge.port,
+        connectionId: peer.connectionId,
+        initialSequence: 1,
+        resendDelayMs: 25,
+        resendPollMs: 5,
+      });
+
+      const receivedFrame = once(client, "frame");
+      client.connect(Buffer.from(peer.joinPayload));
+      await waitFor(() => client?.connected === true, `TypeScript RUDP client to complete ${peer.name} handshake through server reorder bridge`);
+      client.send("schema", Buffer.from(peer.clientPayload));
+
+      const [frame] = await withTimeout(receivedFrame, 2_000, `${peer.name} RUDP response frame after reordered server data packets`);
+      assert.equal(frame.channelId, "schema");
+      assert.deepEqual(Buffer.from(frame.payload), Buffer.from(peer.expectedPayload));
+      assert.equal(lossyBridge.delayedServerPackets, 1, `${peer.name} bridge should delay exactly one server data packet`);
+
+      const [exitCode] = await withTimeout(once(serverPeer.child, "exit"), 2_000, `${peer.name} RUDP peer exit after server reorder`);
+      assert.equal(exitCode, 0, serverPeer.stderr.join(""));
+    } finally {
+      if (client) {
+        client.close();
+      } else {
+        clientSocket.close();
+      }
+      lossyBridge.close();
+      if (serverPeer.child.exitCode === null && !serverPeer.child.killed) {
+        serverPeer.child.kill("SIGTERM");
+        await once(serverPeer.child, "exit").catch(() => undefined);
+      }
+    }
+  }
+});
+
 test("CultNet RUDP fragmented schema frames cross runtime boundaries", async () => {
   for (const peer of rudpServerInteropPeers()) {
     await peer.build();
@@ -1378,6 +1500,7 @@ function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPytho
       PYTHONPATH: cultcachePySrc,
       ...(options.clientPayload ? { RUDP_CLIENT_PAYLOAD: options.clientPayload } : {}),
       ...(options.serverPayload ? { RUDP_SERVER_PAYLOAD: options.serverPayload } : {}),
+      ...(options.serverExtraPayload ? { RUDP_SERVER_EXTRA_PAYLOAD: options.serverExtraPayload } : {}),
       ...(options.maxFragmentBytes ? { RUDP_MAX_FRAGMENT_BYTES: String(options.maxFragmentBytes) } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1430,6 +1553,7 @@ function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPytho
     "--bind-host", "127.0.0.1",
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultnetRsRoot,
@@ -1487,6 +1611,7 @@ function spawnCSharpRudpServer(options: RudpServerSpawnOptions = {}): RunningPyt
     "--bind-host", "127.0.0.1",
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultLibRoot,
@@ -1545,6 +1670,7 @@ function spawnKotlinRudpServer(options: RudpServerSpawnOptions = {}): RunningPyt
     "--bind-host", "127.0.0.1",
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
     ...(options.serverPayload ? ["--server-payload", options.serverPayload] : []),
+    ...(options.serverExtraPayload ? ["--server-extra-payload", options.serverExtraPayload] : []),
     ...(options.maxFragmentBytes ? ["--max-fragment-bytes", String(options.maxFragmentBytes)] : []),
   ], {
     cwd: cultLibRoot,
@@ -1686,6 +1812,8 @@ interface RudpLossyBridge {
   port: number;
   readonly droppedClientPackets: number;
   readonly droppedServerPackets: number;
+  readonly delayedClientPackets: number;
+  readonly delayedServerPackets: number;
   close(): void;
 }
 
@@ -1694,12 +1822,46 @@ async function createRudpLossyBridge(options: {
   remotePort: number;
   shouldDropClientPacket?: (wire: Buffer) => boolean;
   shouldDropServerPacket?: (wire: Buffer) => boolean;
+  shouldDelayClientPacket?: (wire: Buffer) => boolean;
+  shouldDelayServerPacket?: (wire: Buffer) => boolean;
 }): Promise<RudpLossyBridge> {
   const socket = dgram.createSocket("udp4");
   const remote = { address: options.remoteHost, port: options.remotePort };
   let client: { address: string; port: number } | undefined;
   let droppedClientPackets = 0;
   let droppedServerPackets = 0;
+  let delayedClientPackets = 0;
+  let delayedServerPackets = 0;
+  let heldClientWire: Buffer | undefined;
+  let heldServerWire: Buffer | undefined;
+  let heldClientTimer: NodeJS.Timeout | undefined;
+  let heldServerTimer: NodeJS.Timeout | undefined;
+
+  const flushHeldClient = () => {
+    if (!heldClientWire) {
+      return;
+    }
+    const wire = heldClientWire;
+    heldClientWire = undefined;
+    if (heldClientTimer) {
+      clearTimeout(heldClientTimer);
+      heldClientTimer = undefined;
+    }
+    socket.send(wire, remote.port, remote.address);
+  };
+
+  const flushHeldServer = () => {
+    if (!heldServerWire || !client) {
+      return;
+    }
+    const wire = heldServerWire;
+    heldServerWire = undefined;
+    if (heldServerTimer) {
+      clearTimeout(heldServerTimer);
+      heldServerTimer = undefined;
+    }
+    socket.send(wire, client.port, client.address);
+  };
 
   socket.on("message", (wire, sender) => {
     if (sender.address === remote.address && sender.port === remote.port) {
@@ -1707,8 +1869,15 @@ async function createRudpLossyBridge(options: {
         droppedServerPackets += 1;
         return;
       }
+      if (delayedServerPackets === 0 && options.shouldDelayServerPacket?.(wire)) {
+        delayedServerPackets += 1;
+        heldServerWire = Buffer.from(wire);
+        heldServerTimer = setTimeout(flushHeldServer, 25);
+        return;
+      }
       if (client) {
         socket.send(wire, client.port, client.address);
+        flushHeldServer();
       }
       return;
     }
@@ -1718,8 +1887,15 @@ async function createRudpLossyBridge(options: {
       droppedClientPackets += 1;
       return;
     }
+    if (delayedClientPackets === 0 && options.shouldDelayClientPacket?.(wire)) {
+      delayedClientPackets += 1;
+      heldClientWire = Buffer.from(wire);
+      heldClientTimer = setTimeout(flushHeldClient, 25);
+      return;
+    }
 
     socket.send(wire, remote.port, remote.address);
+    flushHeldClient();
   });
 
   await new Promise<void>((resolveBind, rejectBind) => {
@@ -1738,7 +1914,19 @@ async function createRudpLossyBridge(options: {
     get droppedServerPackets() {
       return droppedServerPackets;
     },
+    get delayedClientPackets() {
+      return delayedClientPackets;
+    },
+    get delayedServerPackets() {
+      return delayedServerPackets;
+    },
     close() {
+      if (heldClientTimer) {
+        clearTimeout(heldClientTimer);
+      }
+      if (heldServerTimer) {
+        clearTimeout(heldServerTimer);
+      }
       socket.close();
     },
   };

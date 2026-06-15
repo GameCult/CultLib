@@ -240,6 +240,9 @@ export class CultNetRudpSession {
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
     this.#requireConnection(packet);
     this.#applyAcknowledgements(packet);
+    const expectedSequenceIfUninitialized = this.#highestReceivedSequence === undefined
+      ? packet.sequence
+      : this.#highestReceivedSequence + 1;
 
     if (packet.packetType === "accept") {
       this.#rememberReceived(packet.sequence);
@@ -283,7 +286,7 @@ export class CultNetRudpSession {
       return { delivered: [reassembled.frame] };
     }
 
-    return { delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence) };
+    return { delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) };
   }
 
   createAck(): CultNetRudpPacket {
@@ -449,14 +452,15 @@ export class CultNetRudpSession {
     };
   }
 
-  #deliverOrdered(frame: CultNetRudpDeliveredFrame, nextSequence: number): CultNetRudpDeliveredFrame[] {
-    const next = this.#orderedNextSequenceByChannel.get(frame.channelId);
+  #deliverOrdered(
+    frame: CultNetRudpDeliveredFrame,
+    nextSequence: number,
+    expectedSequenceIfUninitialized: number,
+  ): CultNetRudpDeliveredFrame[] {
+    let next = this.#orderedNextSequenceByChannel.get(frame.channelId);
     if (next === undefined) {
-      this.#orderedNextSequenceByChannel.set(frame.channelId, nextSequence);
-      return [
-        frame,
-        ...this.#drainOrdered(frame.channelId),
-      ];
+      next = Math.min(expectedSequenceIfUninitialized, frame.sequence);
+      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
     }
 
     if (frame.sequence < next) {

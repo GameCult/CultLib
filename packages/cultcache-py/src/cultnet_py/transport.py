@@ -320,6 +320,11 @@ class CultNetRudpSession:
         del now_ms
         self._require_connection(packet)
         self._apply_acknowledgements(packet)
+        expected_sequence_if_uninitialized = (
+            packet.sequence
+            if self._highest_received_sequence is None
+            else self._highest_received_sequence + 1
+        )
 
         if packet.packet_type == CultNetRudpPacketType.ACCEPT:
             self._remember_received(packet.sequence)
@@ -350,7 +355,11 @@ class CultNetRudpSession:
         frame, ordered, next_sequence = reassembled
         if not ordered:
             return CultNetRudpReceiveResult(delivered=(frame,))
-        return CultNetRudpReceiveResult(delivered=tuple(self._deliver_ordered(frame, next_sequence)))
+        return CultNetRudpReceiveResult(
+            delivered=tuple(
+                self._deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
+            )
+        )
 
     def create_ack(self) -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
@@ -472,11 +481,16 @@ class CultNetRudpSession:
             max(sequences) + 1,
         )
 
-    def _deliver_ordered(self, frame: CultNetRudpDeliveredFrame, next_after_frame: int) -> list[CultNetRudpDeliveredFrame]:
+    def _deliver_ordered(
+        self,
+        frame: CultNetRudpDeliveredFrame,
+        next_after_frame: int,
+        expected_sequence_if_uninitialized: int,
+    ) -> list[CultNetRudpDeliveredFrame]:
         next_sequence = self._ordered_next_sequence_by_channel.get(frame.channel_id)
         if next_sequence is None:
-            self._ordered_next_sequence_by_channel[frame.channel_id] = next_after_frame
-            return [frame, *self._drain_ordered(frame.channel_id)]
+            next_sequence = min(expected_sequence_if_uninitialized, frame.sequence)
+            self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence
         if frame.sequence < next_sequence:
             return []
         if frame.sequence > next_sequence:

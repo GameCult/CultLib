@@ -589,6 +589,9 @@ static void RudpServeOnce(Dictionary<string, string> options)
     var serverPayload = Ascii(options.TryGetValue("server-payload", out var configuredServerPayload)
         ? configuredServerPayload
         : "csharp-server-state");
+    var serverExtraPayload = options.TryGetValue("server-extra-payload", out var configuredServerExtraPayload)
+        ? Ascii(configuredServerExtraPayload)
+        : null;
     var maxFragmentBytes = options.TryGetValue("max-fragment-bytes", out var configuredMaxFragmentBytes)
         ? int.Parse(configuredMaxFragmentBytes, CultureInfo.InvariantCulture)
         : (int?)null;
@@ -622,6 +625,10 @@ static void RudpServeOnce(Dictionary<string, string> options)
         {
             RequireRudpFrameBytes(frame, "schema", expectedClientPayload);
             transport.Send("schema", serverPayload);
+            if (serverExtraPayload != null)
+            {
+                transport.Send("schema", serverExtraPayload);
+            }
             PollRudpAfterSend(transport, TimeSpan.FromMilliseconds(250));
             WriteJsonLine(new { status = "ok" });
             return;

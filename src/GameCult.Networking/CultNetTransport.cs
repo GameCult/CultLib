@@ -724,6 +724,9 @@ namespace GameCult.Networking
         {
             RequireConnection(packet);
             ApplyAcknowledgements(packet);
+            var expectedSequenceIfUninitialized = _highestReceivedSequence.HasValue
+                ? _highestReceivedSequence.Value + 1
+                : packet.Sequence;
 
             if (packet.PacketType == CultNetRudpPacketType.Accept)
             {
@@ -774,7 +777,7 @@ namespace GameCult.Networking
             return new CultNetRudpReceiveResult
             {
                 Delivered = reassembled.Ordered
-                    ? DeliverOrdered(reassembled.Frame, reassembled.NextSequence)
+                    ? DeliverOrdered(reassembled.Frame, reassembled.NextSequence, expectedSequenceIfUninitialized)
                     : new[] { reassembled.Frame }
             };
         }
@@ -972,12 +975,15 @@ namespace GameCult.Networking
             };
         }
 
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(CultNetRudpDeliveredFrame frame, uint nextSequenceAfterFrame)
+        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(
+            CultNetRudpDeliveredFrame frame,
+            uint nextSequenceAfterFrame,
+            uint expectedSequenceIfUninitialized)
         {
             if (!_orderedNextSequenceByChannel.TryGetValue(frame.ChannelId, out var next))
             {
-                _orderedNextSequenceByChannel[frame.ChannelId] = nextSequenceAfterFrame;
-                return new[] { frame }.Concat(DrainOrdered(frame.ChannelId)).ToArray();
+                next = Math.Min(expectedSequenceIfUninitialized, frame.Sequence);
+                _orderedNextSequenceByChannel[frame.ChannelId] = next;
             }
 
             if (frame.Sequence < next)
