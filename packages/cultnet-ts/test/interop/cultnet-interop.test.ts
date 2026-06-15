@@ -1062,6 +1062,114 @@ test("CultNet Kotlin and TypeScript exchange schema frames when Kotlin dials a T
   }
 });
 
+test("CultNet TypeScript and Kotlin exchange schema-v0 MessagePack messages over RUDP", async () => {
+  await buildKotlinInteropPeer();
+  const kotlinPeer = spawnKotlinRudpMessageServer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const kotlinPort = await kotlinPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-kotlin-rudp-message-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: kotlinPort,
+      connectionId: 0x446688ab,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-kotlin-message-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Kotlin message handshake");
+    client.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.schema_catalog_request.v0",
+      messageId: "ts-kotlin-schema-message",
+      includeSchemaJson: false,
+      schemaIds: [],
+      kinds: ["wire_message"],
+    })));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Kotlin RUDP schema-v0 response frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      runtimeId?: string;
+      supportsSchemaCatalog?: boolean;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+    };
+    assert.equal(message.schemaVersion, "cultnet.hello.v0");
+    assert.equal(message.runtimeId, "kotlin-rudp-message-interop");
+    assert.equal(message.supportsSchemaCatalog, true);
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
+
+    const [exitCode] = await withTimeout(once(kotlinPeer.child, "exit"), 2_000, "Kotlin RUDP message peer exit");
+    assert.equal(exitCode, 0, kotlinPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (kotlinPeer.child.exitCode === null && !kotlinPeer.child.killed) {
+      kotlinPeer.child.kill("SIGTERM");
+      await once(kotlinPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet Kotlin and TypeScript exchange schema-v0 MessagePack messages when Kotlin dials", async () => {
+  await buildKotlinInteropPeer();
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-kotlin-rudp-message-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0xaa886645,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const kotlinClient = spawnKotlinRudpMessageClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Kotlin RUDP schema-v0 client frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      messageId?: string;
+      kinds?: string[];
+    };
+    assert.equal(message.schemaVersion, "cultnet.schema_catalog_request.v0");
+    assert.equal(message.messageId, "kotlin-ts-schema-message");
+    assert.deepEqual(message.kinds, ["wire_message"]);
+    server.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "ts-kotlin-rudp-message-server",
+      runtimeKind: "typescript",
+      supportedDocumentTypes: [],
+      supportedMutationContracts: [],
+      supportedMessageVersions: ["cultnet.hello.v0", "cultnet.schema_catalog_request.v0"],
+      transportProfiles: [],
+      supportsSchemaCatalog: true,
+    })));
+
+    const [exitCode] = await withTimeout(once(kotlinClient.child, "exit"), 2_000, "Kotlin RUDP message client exit");
+    assert.equal(exitCode, 0, kotlinClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (kotlinClient.child.exitCode === null && !kotlinClient.child.killed) {
+      kotlinClient.child.kill("SIGTERM");
+      await once(kotlinClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 test("CultNet RUDP reliable schema delivery survives one dropped client data packet across runtimes", async () => {
   for (const peer of rudpServerInteropPeers()) {
     await peer.build();
@@ -1834,6 +1942,61 @@ function spawnKotlinRudpServer(options: RudpServerSpawnOptions = {}): RunningPyt
   return { child, ready, stderr };
 }
 
+function spawnKotlinRudpMessageServer(): RunningPythonRudpPeer {
+  const child = spawn(kotlinJavaCommand, [
+    "-cp", kotlinClasspath,
+    "org.gamecult.cultmesh.CultMeshKt",
+    "rudp-serve-message-once",
+    "--bind-host", "127.0.0.1",
+  ], {
+    cwd: cultLibRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { status?: string; port?: number };
+          if (parsed.status === "ready" && typeof parsed.port === "number") {
+            resolveReady(parsed.port);
+          } else if (parsed.status !== "ok") {
+            rejectReady(new Error(`Kotlin RUDP message peer emitted unexpected stdout: ${line}`));
+          }
+        } catch (error) {
+          rejectReady(new Error(`Kotlin RUDP message peer emitted non-JSON stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Kotlin RUDP message peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
@@ -1854,6 +2017,27 @@ function spawnKotlinRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, 
     "-cp", kotlinClasspath,
     "org.gamecult.cultmesh.CultMeshKt",
     "rudp-dial-once",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(remotePort),
+  ], {
+    cwd: cultLibRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnKotlinRudpMessageClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(kotlinJavaCommand, [
+    "-cp", kotlinClasspath,
+    "org.gamecult.cultmesh.CultMeshKt",
+    "rudp-dial-message-once",
     "--target-host", "127.0.0.1",
     "--target-port", String(remotePort),
   ], {

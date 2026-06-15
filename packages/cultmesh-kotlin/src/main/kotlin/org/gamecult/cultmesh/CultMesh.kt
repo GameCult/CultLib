@@ -266,6 +266,176 @@ fun createRudpTransportProfile(
     ),
 )
 
+data class CultNetMessage(
+    val schemaVersion: String,
+    val body: Map<String, Any?> = emptyMap(),
+) {
+    fun toWireMap(): Map<String, Any?> {
+        val wire = linkedMapOf<String, Any?>("schemaVersion" to schemaVersion)
+        wire.putAll(body)
+        return wire
+    }
+
+    fun toBytes(): ByteArray = encodeCultNetMessage(this)
+}
+
+data class CultNetRawDocumentRecord(
+    val schemaId: String,
+    val recordKey: String,
+    val storedAt: String,
+    val payload: ByteArray,
+    val sourceRuntimeId: String? = null,
+    val tags: List<String> = emptyList(),
+) {
+    fun toWireMap(): Map<String, Any?> {
+        val wire = linkedMapOf<String, Any?>(
+            "schemaId" to schemaId,
+            "recordKey" to recordKey,
+            "storedAt" to storedAt,
+            "payloadEncoding" to "messagepack",
+            "payload" to payload.copyOf(),
+        )
+        if (!sourceRuntimeId.isNullOrBlank()) wire["sourceRuntimeId"] = sourceRuntimeId
+        if (tags.isNotEmpty()) wire["tags"] = tags
+        return wire
+    }
+}
+
+fun cultNetHello(
+    runtimeId: String,
+    runtimeKind: String = "kotlin",
+    displayName: String? = null,
+    supportedDocumentTypes: List<String> = emptyList(),
+    supportedMutationContracts: List<Map<String, Any?>> = emptyList(),
+    supportedMessageVersions: List<String> = emptyList(),
+    transportProfiles: List<CultNetTransportProfile> = emptyList(),
+    supportsSchemaCatalog: Boolean = true,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "runtimeId" to runtimeId,
+        "runtimeKind" to runtimeKind,
+        "supportedDocumentTypes" to supportedDocumentTypes,
+        "supportedMutationContracts" to supportedMutationContracts,
+        "supportedMessageVersions" to supportedMessageVersions,
+        "transportProfiles" to transportProfiles.map { it.toWireMap() },
+        "supportsSchemaCatalog" to supportsSchemaCatalog,
+    )
+    if (!displayName.isNullOrBlank()) body["displayName"] = displayName
+    return CultNetMessage("cultnet.hello.v0", body)
+}
+
+fun cultNetSchemaCatalogRequest(
+    messageId: String,
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+): CultNetMessage = CultNetMessage(
+    "cultnet.schema_catalog_request.v0",
+    linkedMapOf(
+        "messageId" to messageId,
+        "includeSchemaJson" to includeSchemaJson,
+        "schemaIds" to schemaIds,
+        "kinds" to kinds,
+    ),
+)
+
+fun cultNetDocumentPutRaw(
+    messageId: String,
+    document: CultNetRawDocumentRecord,
+    shardId: String? = null,
+    shardEpoch: Long? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "document" to document.toWireMap(),
+    )
+    if (!shardId.isNullOrBlank()) body["shardId"] = shardId
+    if (shardEpoch != null) body["shardEpoch"] = shardEpoch
+    return CultNetMessage("cultnet.document_put_raw.v0", body)
+}
+
+fun cultNetDocumentDelete(
+    messageId: String,
+    schemaId: String,
+    recordKey: String,
+    shardId: String? = null,
+    shardEpoch: Long? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "schemaId" to schemaId,
+        "recordKey" to recordKey,
+    )
+    if (!shardId.isNullOrBlank()) body["shardId"] = shardId
+    if (shardEpoch != null) body["shardEpoch"] = shardEpoch
+    return CultNetMessage("cultnet.document_delete.v0", body)
+}
+
+fun cultNetSnapshotRequest(
+    messageId: String,
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+    shardId: String? = null,
+    shardEpoch: Long? = null,
+): CultNetMessage {
+    val body = linkedMapOf<String, Any?>(
+        "messageId" to messageId,
+        "schemaIds" to schemaIds,
+        "recordKeys" to recordKeys,
+    )
+    if (!shardId.isNullOrBlank()) body["shardId"] = shardId
+    if (shardEpoch != null) body["shardEpoch"] = shardEpoch
+    return CultNetMessage("cultnet.snapshot_request.v0", body)
+}
+
+fun encodeCultNetMessage(message: CultNetMessage): ByteArray =
+    MessagePackWriter().value(message.toWireMap()).toByteArray()
+
+fun parseCultNetMessage(payload: ByteArray): CultNetMessage {
+    val decoded = MessagePackReader(payload).readAny()
+    if (decoded !is Map<*, *>) throw IOException("CultNet schema-v0 messages must be MessagePack maps")
+    val schemaVersion = decoded["schemaVersion"]
+    if (schemaVersion !is String || schemaVersion.isBlank()) {
+        throw IOException("CultNet schema-v0 messages must declare schemaVersion")
+    }
+    val body = linkedMapOf<String, Any?>()
+    for ((key, value) in decoded) {
+        if (key !is String) throw IOException("CultNet schema-v0 message keys must be strings")
+        if (key != "schemaVersion") body[key] = value
+    }
+    return CultNetMessage(schemaVersion, body)
+}
+
+fun CultNetTransportProfile.toWireMap(): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to schemaVersion,
+    "runtimeId" to runtimeId,
+    "transports" to transports.map { it.toWireMap() },
+)
+
+fun CultNetTransportDescriptor.toWireMap(): Map<String, Any?> {
+    val wire = linkedMapOf<String, Any?>(
+        "transportId" to transportId,
+        "protocol" to protocol,
+        "wireContracts" to wireContracts,
+        "channels" to channels.map { it.toWireMap() },
+    )
+    if (!host.isNullOrBlank()) wire["host"] = host
+    if (port != null) wire["port"] = port.toLong()
+    return wire
+}
+
+fun CultNetTransportChannel.toWireMap(): Map<String, Any?> {
+    val wire = linkedMapOf<String, Any?>(
+        "channelId" to channelId,
+        "delivery" to delivery,
+        "ordering" to ordering,
+    )
+    if (maxPayloadBytes != null) wire["maxPayloadBytes"] = maxPayloadBytes.toLong()
+    if (maxFragmentBytes != null) wire["maxFragmentBytes"] = maxFragmentBytes.toLong()
+    if (maxPendingReliablePackets != null) wire["maxPendingReliablePackets"] = maxPendingReliablePackets.toLong()
+    return wire
+}
+
 enum class CultNetRudpPacketType(val code: Int) {
     Connect(1),
     Accept(2),
@@ -741,6 +911,8 @@ class CultNetRudpSocketTransportConnection(
 
     fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
 
+    fun sendSchemaMessage(message: CultNetMessage) = sendSchema(message.toBytes())
+
     fun sendLatest(payload: ByteArray) = send("latest", payload)
 
     fun sendLatest(payload: String) = sendLatest(payload.toByteArray(StandardCharsets.UTF_8))
@@ -778,6 +950,9 @@ class CultNetRudpSocketTransportConnection(
 
     fun receiveSchema(timeoutMs: Long, pollIntervalMs: Long = 5): ByteArray? =
         receiveUntil(timeoutMs, pollIntervalMs) { it.channelId == "schema" }?.payload
+
+    fun receiveSchemaMessage(timeoutMs: Long, pollIntervalMs: Long = 5): CultNetMessage? =
+        receiveSchema(timeoutMs, pollIntervalMs)?.let { parseCultNetMessage(it) }
 
     fun receiveOnce(): CultNetTransportFrame? {
         if (!delivered.isEmpty()) return delivered.removeFirst()
@@ -921,6 +1096,7 @@ private fun nowMs(): Long = Instant.now().toEpochMilli()
 fun main(args: Array<String>) {
     if (args.isEmpty()) {
         cultCacheErgonomicsCoverTypedDocumentsAndGlobals()
+        cultNetSchemaMessagesUseMessagePackMaps()
         rudpPacketCodecUsesDeterministicReliableOrderedFixture()
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
@@ -935,6 +1111,8 @@ fun main(args: Array<String>) {
     when (args[0]) {
         "rudp-serve-once" -> rudpServeOnce(options)
         "rudp-dial-once" -> rudpDialOnce(options)
+        "rudp-serve-message-once" -> rudpServeSchemaMessageOnce(options)
+        "rudp-dial-message-once" -> rudpDialSchemaMessageOnce(options)
         else -> error("Unknown mode ${args[0]}")
     }
 }
@@ -968,6 +1146,43 @@ private fun cultCacheErgonomicsCoverTypedDocumentsAndGlobals() {
     node.remember(notes, "node-note", "remembered")
     check(node.require(notes, "node-note") == "remembered")
     check(node.forget(notes, "node-note"))
+}
+
+private fun cultNetSchemaMessagesUseMessagePackMaps() {
+    val hello = cultNetHello(
+        runtimeId = "kotlin-peer",
+        displayName = "Kotlin Peer",
+        supportedDocumentTypes = listOf("gamecult.note"),
+        supportedMessageVersions = listOf("cultnet.hello.v0", "cultnet.schema_catalog_request.v0"),
+        transportProfiles = listOf(createRudpTransportProfile("kotlin-peer", port = 4000, maxPendingReliablePackets = 32)),
+    )
+    val parsedHello = parseCultNetMessage(hello.toBytes())
+    check(parsedHello.schemaVersion == "cultnet.hello.v0")
+    check(parsedHello.body["runtimeId"] == "kotlin-peer")
+    check(parsedHello.body["supportsSchemaCatalog"] == true)
+    val profiles = parsedHello.body["transportProfiles"] as List<*>
+    val profile = profiles.single() as Map<*, *>
+    check(profile["schemaVersion"] == "cultnet.transport_profile.v0")
+    val transports = profile["transports"] as List<*>
+    check((transports.single() as Map<*, *>)["protocol"] == "rudp")
+
+    val payload = MessagePackWriter().map(1).string("body").string("wire smoke").toByteArray()
+    val put = cultNetDocumentPutRaw(
+        messageId = "kotlin-put",
+        document = CultNetRawDocumentRecord(
+            schemaId = "gamecult.note",
+            recordKey = "note:1",
+            storedAt = "2026-06-15T00:00:00Z",
+            payload = payload,
+            sourceRuntimeId = "kotlin-peer",
+            tags = listOf("interop"),
+        ),
+    )
+    val parsedPut = parseCultNetMessage(put.toBytes())
+    check(parsedPut.schemaVersion == "cultnet.document_put_raw.v0")
+    val document = parsedPut.body["document"] as Map<*, *>
+    check(document["payloadEncoding"] == "messagepack")
+    check((document["payload"] as ByteArray).contentEquals(payload))
 }
 
 private fun rudpServeOnce(options: Map<String, String>) {
@@ -1045,6 +1260,89 @@ private fun rudpDialOnce(options: Map<String, String>) {
         }
     }
     error("Timed out waiting for TypeScript RUDP response")
+}
+
+private fun rudpServeSchemaMessageOnce(options: Map<String, String>) {
+    val bindHost = options["bind-host"] ?: "127.0.0.1"
+    val bindPort = options["bind-port"]?.toInt() ?: 0
+    val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
+    CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Server,
+        runtimeId = "kotlin-rudp-message-interop",
+        connectionId = 0x446688abL,
+        initialSequence = 100,
+        resendDelayMs = 25,
+    ).use { transport ->
+        println("""{"status":"ready","port":${socket.localPort}}""")
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val frame = transport.receiveOnce()
+            if (frame != null) {
+                require(frame.channelId == "schema") { "Unexpected RUDP channel ${frame.channelId}" }
+                val request = parseCultNetMessage(frame.payload)
+                require(request.schemaVersion == "cultnet.schema_catalog_request.v0") { "Unexpected schema message ${request.schemaVersion}" }
+                require(request.body["messageId"] == "ts-kotlin-schema-message") { "Unexpected messageId ${request.body["messageId"]}" }
+                transport.sendSchemaMessage(
+                    cultNetHello(
+                        runtimeId = "kotlin-rudp-message-interop",
+                        displayName = "Kotlin RUDP Interop",
+                        supportedMessageVersions = listOf("cultnet.hello.v0", "cultnet.schema_catalog_request.v0"),
+                        transportProfiles = listOf(transport.profile),
+                    ),
+                )
+                pollRudpAfterSend(transport, 250)
+                println("""{"status":"ok"}""")
+                return
+            }
+            transport.pollResends()
+            Thread.sleep(5)
+        }
+    }
+    error("Timed out waiting for TypeScript schema-v0 message")
+}
+
+private fun rudpDialSchemaMessageOnce(options: Map<String, String>) {
+    val targetHost = options.getValue("target-host")
+    val targetPort = options.getValue("target-port").toInt()
+    val loopback = InetAddress.getByName("127.0.0.1")
+    val socket = DatagramSocket(0, loopback).also { it.soTimeout = 20 }
+    CultNetRudpSocketTransportConnection(
+        socket = socket,
+        mode = CultNetRudpSocketMode.Client,
+        runtimeId = "kotlin-rudp-message-client-interop",
+        connectionId = 0xaa886645L,
+        remoteAddress = InetSocketAddress(InetAddress.getByName(targetHost), targetPort),
+        initialSequence = 1,
+        resendDelayMs = 25,
+    ).use { transport ->
+        transport.connect("kotlin-message-join")
+        var sent = false
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val frame = transport.receiveOnce()
+            if (frame != null) {
+                require(frame.channelId == "schema") { "Unexpected RUDP channel ${frame.channelId}" }
+                val response = parseCultNetMessage(frame.payload)
+                require(response.schemaVersion == "cultnet.hello.v0") { "Unexpected schema message ${response.schemaVersion}" }
+                require(response.body["runtimeId"] == "ts-kotlin-rudp-message-server") { "Unexpected runtimeId ${response.body["runtimeId"]}" }
+                println("""{"status":"ok"}""")
+                return
+            }
+            transport.pollResends()
+            if (transport.connected && !sent) {
+                transport.sendSchemaMessage(
+                    cultNetSchemaCatalogRequest(
+                        messageId = "kotlin-ts-schema-message",
+                        kinds = listOf("wire_message"),
+                    ),
+                )
+                sent = true
+            }
+            Thread.sleep(5)
+        }
+    }
+    error("Timed out waiting for TypeScript schema-v0 response")
 }
 
 private fun pollRudpAfterSend(transport: CultNetRudpSocketTransportConnection, durationMs: Long) {
@@ -1440,6 +1738,14 @@ class MessagePackReader(payload: ByteArray) {
         throw IOException("expected array")
     }
 
+    fun readMapHeader(): Int {
+        val code = readCode()
+        if (code and 0xf0 == 0x80) return code and 0x0f
+        if (code == 0xde) return input.readUnsignedShort()
+        if (code == 0xdf) return input.readInt()
+        throw IOException("expected map")
+    }
+
     fun readNullableArrayHeader(): Int? {
         val code = readCode()
         if (code == 0xc0) return null
@@ -1452,16 +1758,18 @@ class MessagePackReader(payload: ByteArray) {
     fun readNullableString(): String? {
         val code = readCode()
         if (code == 0xc0) return null
-        val length = when {
-            code and 0xe0 == 0xa0 -> code and 0x1f
-            code == 0xd9 -> input.readUnsignedByte()
-            code == 0xda -> input.readUnsignedShort()
-            code == 0xdb -> input.readInt()
-            else -> throw IOException("expected string")
+        return readStringAfterCode(code)
+    }
+
+    fun readBinary(): ByteArray {
+        val code = readCode()
+        val length = when (code) {
+            0xc4 -> input.readUnsignedByte()
+            0xc5 -> input.readUnsignedShort()
+            0xc6 -> input.readInt()
+            else -> throw IOException("expected binary")
         }
-        val bytes = ByteArray(length)
-        input.readFully(bytes)
-        return String(bytes, StandardCharsets.UTF_8)
+        return readPayload(length)
     }
 
     fun readBoolean(): Boolean = when (readCode()) {
@@ -1495,6 +1803,37 @@ class MessagePackReader(payload: ByteArray) {
         return readLong().toDouble()
     }
 
+    fun readAny(): Any? {
+        val code = readCode()
+        if (code == 0xc0) return null
+        if (code == 0xc2) return false
+        if (code == 0xc3) return true
+        if (code <= 0x7f) return code.toLong()
+        if (code >= 0xe0) return code.toByte().toLong()
+        if (code and 0xe0 == 0xa0) return readStringAfterCode(code)
+        if (code and 0xf0 == 0x90) return readArrayAfterHeader(code and 0x0f)
+        if (code and 0xf0 == 0x80) return readMapAfterHeader(code and 0x0f)
+        return when (code) {
+            0xcc -> input.readUnsignedByte().toLong()
+            0xcd -> input.readUnsignedShort().toLong()
+            0xce -> input.readInt().toLong() and 0xffffffffL
+            0xcf -> input.readLong()
+            0xd0 -> input.readByte().toLong()
+            0xd1 -> input.readShort().toLong()
+            0xd2 -> input.readInt().toLong()
+            0xd3 -> input.readLong()
+            0xca -> input.readFloat().toDouble()
+            0xcb -> input.readDouble()
+            0xd9, 0xda, 0xdb -> readStringAfterCode(code)
+            0xc4, 0xc5, 0xc6 -> readBinaryAfterCode(code)
+            0xdc -> readArrayAfterHeader(input.readUnsignedShort())
+            0xdd -> readArrayAfterHeader(input.readInt())
+            0xde -> readMapAfterHeader(input.readUnsignedShort())
+            0xdf -> readMapAfterHeader(input.readInt())
+            else -> throw IOException("unsupported MessagePack value")
+        }
+    }
+
     fun readNullableDouble(): Double? {
         val code = readCode()
         if (code == 0xc0) return null
@@ -1507,6 +1846,7 @@ class MessagePackReader(payload: ByteArray) {
         if (code == 0xc0 || code == 0xc2 || code == 0xc3 || code <= 0x7f || code >= 0xe0) return
         if (code and 0xe0 == 0xa0) { input.skipBytes(code and 0x1f); return }
         if (code and 0xf0 == 0x90) { repeat(code and 0x0f) { skip() }; return }
+        if (code and 0xf0 == 0x80) { repeat(code and 0x0f) { skip(); skip() }; return }
         when (code) {
             0xcc, 0xd0 -> input.skipBytes(1)
             0xcd, 0xd1 -> input.skipBytes(2)
@@ -1515,10 +1855,59 @@ class MessagePackReader(payload: ByteArray) {
             0xd9 -> input.skipBytes(input.readUnsignedByte())
             0xda -> input.skipBytes(input.readUnsignedShort())
             0xdb -> input.skipBytes(input.readInt())
+            0xc4 -> input.skipBytes(input.readUnsignedByte())
+            0xc5 -> input.skipBytes(input.readUnsignedShort())
+            0xc6 -> input.skipBytes(input.readInt())
             0xdc -> repeat(input.readUnsignedShort()) { skip() }
             0xdd -> repeat(input.readInt()) { skip() }
+            0xde -> repeat(input.readUnsignedShort()) { skip(); skip() }
+            0xdf -> repeat(input.readInt()) { skip(); skip() }
             else -> throw IOException("cannot skip")
         }
+    }
+
+    private fun readPayload(length: Int): ByteArray {
+        if (length < 0) throw IOException("negative MessagePack length")
+        val bytes = ByteArray(length)
+        input.readFully(bytes)
+        return bytes
+    }
+
+    private fun readStringAfterCode(code: Int): String {
+        val length = when {
+            code and 0xe0 == 0xa0 -> code and 0x1f
+            code == 0xd9 -> input.readUnsignedByte()
+            code == 0xda -> input.readUnsignedShort()
+            code == 0xdb -> input.readInt()
+            else -> throw IOException("expected string")
+        }
+        return String(readPayload(length), StandardCharsets.UTF_8)
+    }
+
+    private fun readBinaryAfterCode(code: Int): ByteArray {
+        val length = when (code) {
+            0xc4 -> input.readUnsignedByte()
+            0xc5 -> input.readUnsignedShort()
+            0xc6 -> input.readInt()
+            else -> throw IOException("expected binary")
+        }
+        return readPayload(length)
+    }
+
+    private fun readArrayAfterHeader(count: Int): List<Any?> {
+        if (count < 0) throw IOException("negative MessagePack array length")
+        return List(count) { readAny() }
+    }
+
+    private fun readMapAfterHeader(count: Int): Map<String, Any?> {
+        if (count < 0) throw IOException("negative MessagePack map length")
+        val map = linkedMapOf<String, Any?>()
+        repeat(count) {
+            val key = readAny()
+            if (key !is String) throw IOException("CultNet MessagePack maps must use string keys")
+            map[key] = readAny()
+        }
+        return map
     }
 
     private fun readCode(): Int {
@@ -1548,6 +1937,15 @@ class MessagePackWriter {
         }
     }
 
+    fun map(count: Int): MessagePackWriter = apply {
+        if (count < 16) out.write(0x80 or count)
+        else {
+            out.write(0xde)
+            out.write((count shr 8) and 0xff)
+            out.write(count and 0xff)
+        }
+    }
+
     fun string(value: String?): MessagePackWriter = apply {
         val bytes = (value ?: "").toByteArray(StandardCharsets.UTF_8)
         when {
@@ -1571,6 +1969,41 @@ class MessagePackWriter {
     fun nullableBoolean(value: Boolean?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else out.write(if (value) 0xc3 else 0xc2) }
     fun nullableDouble(value: Double?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else doubleValue(value) }
     fun nullableLong(value: Long?): MessagePackWriter = apply { if (value == null) out.write(0xc0) else longValue(value) }
+    fun nil(): MessagePackWriter = apply { out.write(0xc0) }
+    fun boolean(value: Boolean): MessagePackWriter = apply { out.write(if (value) 0xc3 else 0xc2) }
     fun longValue(value: Long): MessagePackWriter = apply { out.write(0xd3); out.write(ByteBuffer.allocate(8).putLong(value).array()) }
     fun doubleValue(value: Double): MessagePackWriter = apply { out.write(0xcb); out.write(ByteBuffer.allocate(8).putDouble(value).array()) }
+
+    fun value(value: Any?): MessagePackWriter = apply {
+        when (value) {
+            null -> nil()
+            is String -> string(value)
+            is ByteArray -> binary(value)
+            is Boolean -> boolean(value)
+            is Byte -> longValue(value.toLong())
+            is Short -> longValue(value.toLong())
+            is Int -> longValue(value.toLong())
+            is Long -> longValue(value)
+            is Float -> doubleValue(value.toDouble())
+            is Double -> doubleValue(value)
+            is Map<*, *> -> {
+                map(value.size)
+                for ((key, nested) in value) {
+                    if (key !is String) throw IOException("CultNet MessagePack map keys must be strings")
+                    string(key)
+                    this.value(nested)
+                }
+            }
+            is Iterable<*> -> {
+                val items = value.toList()
+                array(items.size)
+                items.forEach { this.value(it) }
+            }
+            is Array<*> -> {
+                array(value.size)
+                value.forEach { this.value(it) }
+            }
+            else -> throw IOException("Unsupported MessagePack value type ${value::class.java.name}")
+        }
+    }
 }
