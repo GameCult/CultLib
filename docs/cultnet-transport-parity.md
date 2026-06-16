@@ -302,6 +302,11 @@ Current progress:
   lookup, unsubscribe-able `watch(...)` callbacks for Verse and peer catalogs,
   watch callbacks for authority leases and stream declarations/frame cursors,
   plus lease listing and lookup beside the authority check.
+- TypeScript now also has a `CultNetSchemaCatalog` for remote schema
+  descriptors plus `CultNetPeer` request/fetch/sync helpers for
+  `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.
+  `CultNetSchemaRegistry` remains the local definition owner; the catalog owns
+  imported descriptors so callers do not treat raw response objects as state.
 - Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
   preferred body transports, consumer negotiation, copy-budget classification,

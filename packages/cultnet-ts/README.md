@@ -159,6 +159,7 @@ exchange without resorting to folklore.
 - `cultnet.schema_catalog_request.v0`
 - `cultnet.schema_catalog_response.v0`
 - `CultNetSchemaRegistry`
+- `CultNetSchemaCatalog`
 - `cultNetBuiltinSchemaRegistry`
 
 Descriptors include:
@@ -174,6 +175,13 @@ Descriptors include:
 The inline schema body travels as canonical JSON text, not as a loose object
 graph. Discovery is supposed to reduce ambiguity, not smuggle in a cute new
 polymorphic attack surface.
+
+`CultNetSchemaRegistry` owns local schema definitions and can answer catalog
+requests. `CultNetSchemaCatalog` owns remote descriptors and applies catalog
+responses. `CultNetPeer.requestSchemaCatalog(...)`,
+`fetchSchemaDescriptors(...)`, and `syncSchemaCatalog(...)` perform the common
+message-id-matched request/response cycle so callers do not need to hand-roll
+listener cleanup around every discovery exchange.
 
 ## Quick Example
 

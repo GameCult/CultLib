@@ -21,6 +21,7 @@ import {
   CultNetRudpReconnectLoop,
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,
+  CultNetSchemaCatalog,
   CultNetSchemaRegistry,
   CultNetSecret,
   CultNetServerSecurityOptions,
@@ -836,6 +837,66 @@ test("CultNet schema discovery catalog can advertise canonical schemas without i
     cultNetSchemas.transportProfileSchema.properties.transports.items.properties.reconnectPolicy.properties.schemaVersion.const,
     "cultnet.reconnect_policy.v0",
   );
+});
+
+test("CultNet schema catalog applies remote descriptors and notifies watchers", () => {
+  const catalog = new CultNetSchemaCatalog();
+  let watchedSchemaId: string | undefined;
+  const unsubscribe = catalog.watch((descriptor) => {
+    watchedSchemaId = descriptor.schemaId;
+  });
+  const response = cultNetBuiltinSchemaRegistry.createCatalogResponse({
+    schemaVersion: "cultnet.schema_catalog_request.v0",
+    messageId: "catalog-apply",
+    includeSchemaJson: true,
+    kinds: ["document_payload"],
+  });
+
+  const applied = catalog.applyResponse(response);
+
+  assert.ok(applied.some((descriptor) => descriptor.documentType === "ghostlight.agent-state"));
+  assert.equal(watchedSchemaId, applied.at(-1)?.schemaId);
+  assert.equal(catalog.get(applied[0]!.schemaId)?.schemaJson, undefined);
+  assert.equal(typeof catalog.get(applied[0]!.schemaId, { includeSchemaJson: true })?.schemaJson, "string");
+  assert.deepEqual(
+    catalog.list({ kinds: ["document_payload"] }).map((descriptor) => descriptor.kind),
+    catalog.list().map((descriptor) => descriptor.kind),
+  );
+
+  unsubscribe();
+});
+
+test("CultNet peer can request and sync schema catalogs by message id", async () => {
+  const { a, b } = createDuplexPair();
+  const requester = createTcpFramedCultNetPeer(a, {
+    runtimeId: "catalog-requester",
+    wireContract: "cultnet.schema.v0",
+  });
+  const responder = createTcpFramedCultNetPeer(b, {
+    runtimeId: "catalog-responder",
+    wireContract: "cultnet.schema.v0",
+  });
+
+  responder.on("message", (message) => {
+    if (message.schemaVersion === "cultnet.schema_catalog_request.v0") {
+      responder.sendSchemaCatalogResponse(cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
+    }
+  });
+
+  const synced = new CultNetSchemaCatalog();
+  const applied = await requester.syncSchemaCatalog(synced, {
+    messageId: "peer-schema-catalog",
+    includeSchemaJson: true,
+    kinds: ["document_payload"],
+    timeoutMs: 1_000,
+  });
+
+  assert.ok(applied.some((descriptor) => descriptor.documentType === "ghostlight.agent-state"));
+  assert.equal(synced.get(applied[0]!.schemaId)?.schemaJson, undefined);
+  assert.equal(typeof synced.get(applied[0]!.schemaId, { includeSchemaJson: true })?.schemaJson, "string");
+
+  requester.close();
+  responder.close();
 });
 
 test("CultNet schema discovery can round-trip over the legacy wire contract when schemas are requested inline", () => {

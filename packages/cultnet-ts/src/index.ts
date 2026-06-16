@@ -55,7 +55,7 @@ export {
   type GhostlightWorldState,
 } from "./contracts";
 export { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
-export { CultNetPeer, createTcpFramedCultNetPeer, type CultNetPeerEvents, type TcpFramedCultNetPeerOptions } from "./peer";
+export { CultNetPeer, createTcpFramedCultNetPeer, type CultNetPeerEvents, type CultNetPeerSchemaCatalogRequestOptions, type TcpFramedCultNetPeerOptions } from "./peer";
 export {
   CultNetReconnectController,
   TcpFramedTransportConnection,
@@ -100,6 +100,7 @@ export {
 } from "./replication";
 export {
   CultNetSchemaRegistry,
+  CultNetSchemaCatalog,
   cultNetBuiltinSchemaRegistry,
   type CultNetSchemaCatalogOptions,
   type CultNetSchemaRegistration,

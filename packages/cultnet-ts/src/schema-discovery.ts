@@ -25,6 +25,89 @@ export interface CultNetSchemaCatalogOptions {
   kinds?: readonly CultNetSchemaKind[];
 }
 
+export class CultNetSchemaCatalog {
+  readonly #descriptors = new Map<string, CultNetSchemaDescriptor>();
+  readonly #subscribers = new Set<(descriptor: CultNetSchemaDescriptor) => void>();
+
+  get schemas(): CultNetSchemaDescriptor[] {
+    return Array.from(this.#descriptors.values())
+      .sort((left, right) => left.schemaId.localeCompare(right.schemaId))
+      .map((descriptor) => cloneSchemaDescriptor(descriptor, true));
+  }
+
+  watch(callback: (descriptor: CultNetSchemaDescriptor) => void): () => void {
+    this.#subscribers.add(callback);
+    return () => {
+      this.#subscribers.delete(callback);
+    };
+  }
+
+  upsert(descriptor: CultNetSchemaDescriptor): CultNetSchemaDescriptor {
+    if (!descriptor.schemaId) {
+      throw new Error("CultNet schema descriptor requires schemaId.");
+    }
+    if (!descriptor.kind) {
+      throw new Error("CultNet schema descriptor requires kind.");
+    }
+    if (!descriptor.wireContracts.length) {
+      throw new Error("CultNet schema descriptor requires at least one wire contract.");
+    }
+
+    const stored = cloneSchemaDescriptor(descriptor, true);
+    this.#descriptors.set(stored.schemaId, stored);
+    for (const subscriber of Array.from(this.#subscribers)) {
+      subscriber(cloneSchemaDescriptor(stored, true));
+    }
+    return cloneSchemaDescriptor(stored, true);
+  }
+
+  get(schemaId: string, options: CultNetSchemaCatalogOptions = {}): CultNetSchemaDescriptor | undefined {
+    const descriptor = this.#descriptors.get(schemaId);
+    if (!descriptor) {
+      return undefined;
+    }
+    return cloneSchemaDescriptor(descriptor, options.includeSchemaJson === true);
+  }
+
+  list(options: CultNetSchemaCatalogOptions = {}): CultNetSchemaDescriptor[] {
+    const requestedSchemaIds = options.schemaIds ? new Set(options.schemaIds) : null;
+    const requestedKinds = options.kinds ? new Set(options.kinds) : null;
+
+    return this.schemas
+      .filter((descriptor) => {
+        if (requestedSchemaIds && !requestedSchemaIds.has(descriptor.schemaId)) {
+          return false;
+        }
+        if (requestedKinds && !requestedKinds.has(descriptor.kind)) {
+          return false;
+        }
+        return true;
+      })
+      .map((descriptor) => cloneSchemaDescriptor(descriptor, options.includeSchemaJson === true));
+  }
+
+  createCatalogResponse(
+    request: CultNetSchemaCatalogRequestMessage,
+  ): CultNetSchemaCatalogResponseMessage {
+    return {
+      schemaVersion: "cultnet.schema_catalog_response.v0",
+      messageId: request.messageId,
+      schemas: this.list({
+        includeSchemaJson: request.includeSchemaJson,
+        schemaIds: request.schemaIds,
+        kinds: request.kinds,
+      }),
+    };
+  }
+
+  applyResponse(response: CultNetSchemaCatalogResponseMessage): CultNetSchemaDescriptor[] {
+    if (response.schemaVersion !== "cultnet.schema_catalog_response.v0") {
+      throw new Error(`Expected cultnet.schema_catalog_response.v0, received ${response.schemaVersion}.`);
+    }
+    return response.schemas.map((descriptor) => this.upsert(descriptor));
+  }
+}
+
 interface CultNetRegisteredSchemaRecord extends CultNetSchemaRegistration {
   canonicalSchemaJson: string;
   contentHash: string;
@@ -95,6 +178,31 @@ export class CultNetSchemaRegistry {
       }),
     };
   }
+}
+
+function cloneSchemaDescriptor(
+  descriptor: CultNetSchemaDescriptor,
+  includeSchemaJson: boolean,
+): CultNetSchemaDescriptor {
+  const clone: CultNetSchemaDescriptor = {
+    schemaId: descriptor.schemaId,
+    kind: descriptor.kind,
+    wireContracts: [...descriptor.wireContracts],
+    contentHash: descriptor.contentHash,
+  };
+  if (descriptor.schemaVersion !== undefined) {
+    clone.schemaVersion = descriptor.schemaVersion;
+  }
+  if (descriptor.documentType !== undefined) {
+    clone.documentType = descriptor.documentType;
+  }
+  if (descriptor.title !== undefined) {
+    clone.title = descriptor.title;
+  }
+  if (includeSchemaJson && descriptor.schemaJson !== undefined) {
+    clone.schemaJson = descriptor.schemaJson;
+  }
+  return clone;
 }
 
 function toSchemaDescriptor(
