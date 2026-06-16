@@ -352,11 +352,12 @@ Current progress:
   `CultMesh` surface. It advertises the Kotlin-supported CultNet/CultMesh
   request and response message descriptors, including schema catalog, shard
   catalog, shard log, Verse catalog, peer exchange, and the shared transport
-  profile contract. Descriptors for contracts already present in the canonical
-  schema set use those schema ids and content hashes; Kotlin-local descriptor
-  bodies use schema-version ids until shared schema files exist. The descriptors
-  are still normal `CultNetSchemaCatalog` state; transports do not own catalog
-  truth.
+  profile contract. The branded factory accepts the same schema-id, kind, and
+  inline-schema filters as the catalog request path, while still returning
+  ordinary `CultNetSchemaCatalog` state. Descriptors for contracts already
+  present in the canonical schema set use those schema ids and content hashes;
+  Kotlin-local descriptor bodies use schema-version ids until shared schema
+  files exist. Transports do not own catalog truth.
 - Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
   Android clients can react to lease changes without treating peer-card contact
   hints as trust.
