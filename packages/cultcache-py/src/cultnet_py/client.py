@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import msgpack
 
@@ -23,6 +24,17 @@ from .subscription import CultNetDatabaseChange
 from .transport import TcpFramedTransportConnection, create_tcp_framed_transport_profile
 
 
+class CultNetSchemaTransport(Protocol):
+    def __enter__(self) -> "CultNetSchemaTransport": ...
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None: ...
+    def send(self, channel_id: str, payload: bytes) -> None: ...
+    def receive(self) -> Any: ...
+    def close(self) -> None: ...
+
+
+CultNetSchemaTransportFactory = Callable[[], CultNetSchemaTransport]
+
+
 class CultNetPeerError(RuntimeError):
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = dict(response)
@@ -35,27 +47,16 @@ class CultNetRawClient:
     host: str
     port: int
     timeout_seconds: float = 4.0
+    create_transport: CultNetSchemaTransportFactory | None = None
 
     def send(self, message: CultNetMessage | dict[str, Any]) -> None:
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
-        with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
-            connection.settimeout(self.timeout_seconds)
-            stream = connection.makefile("rwb")
-            transport = TcpFramedTransportConnection(
-                stream,
-                profile=create_tcp_framed_transport_profile("cultnet-python-client", host=self.host, port=self.port),
-            )
+        with self.open_transport() as transport:
             transport.send("schema", msgpack.packb(wire, use_bin_type=True))
 
     def request(self, message: CultNetMessage | dict[str, Any], *, expected_schema_version: str) -> dict[str, Any]:
         wire = message.to_wire() if isinstance(message, CultNetMessage) else message
-        with socket.create_connection((self.host, self.port), timeout=self.timeout_seconds) as connection:
-            connection.settimeout(self.timeout_seconds)
-            stream = connection.makefile("rwb")
-            transport = TcpFramedTransportConnection(
-                stream,
-                profile=create_tcp_framed_transport_profile("cultnet-python-client", host=self.host, port=self.port),
-            )
+        with self.open_transport() as transport:
             transport.send("schema", msgpack.packb(wire, use_bin_type=True))
             response = msgpack.unpackb(transport.receive().payload, raw=False)
         if not isinstance(response, dict):
@@ -65,6 +66,16 @@ class CultNetRawClient:
             _raise_peer_error(response)
             raise ValueError(f"Expected {expected_schema_version}, received {schema_version!r}")
         return response
+
+    def open_transport(self) -> CultNetSchemaTransport:
+        if self.create_transport is not None:
+            return self.create_transport()
+        return create_tcp_framed_schema_transport(
+            host=self.host,
+            port=self.port,
+            timeout_seconds=self.timeout_seconds,
+            runtime_id="cultnet-python-client",
+        )
 
     def fetch_schema_catalog(
         self,
@@ -245,6 +256,7 @@ class CultNetRawClient:
             host=self.host,
             port=self.port,
             timeout_seconds=self.timeout_seconds,
+            create_transport=self.create_transport,
             subscription_id=subscription_id,
             message_id=message_id,
             schema_ids=schema_ids,
@@ -263,17 +275,19 @@ class CultNetDatabaseSubscription:
     schema_ids: list[str] | None = None
     record_keys: list[str] | None = None
     include_snapshot: bool = True
-    _connection: socket.socket | None = None
-    _stream: Any | None = None
-    _transport: TcpFramedTransportConnection | None = None
+    create_transport: CultNetSchemaTransportFactory | None = None
+    _transport: CultNetSchemaTransport | None = None
 
     def __enter__(self) -> "CultNetDatabaseSubscription":
-        self._connection = socket.create_connection((self.host, self.port), timeout=self.timeout_seconds)
-        self._connection.settimeout(self.timeout_seconds)
-        self._stream = self._connection.makefile("rwb")
-        self._transport = TcpFramedTransportConnection(
-            self._stream,
-            profile=create_tcp_framed_transport_profile("cultnet-python-subscription", host=self.host, port=self.port),
+        self._transport = (
+            self.create_transport()
+            if self.create_transport is not None
+            else create_tcp_framed_schema_transport(
+                host=self.host,
+                port=self.port,
+                timeout_seconds=self.timeout_seconds,
+                runtime_id="cultnet-python-subscription",
+            )
         )
         self.send(database_subscribe(
             message_id=self.message_id,
@@ -286,7 +300,7 @@ class CultNetDatabaseSubscription:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         try:
-            if self._stream is not None:
+            if self._transport is not None:
                 self.send(database_unsubscribe(
                     message_id=f"{self.message_id}-unsubscribe",
                     subscription_id=self.subscription_id,
@@ -295,11 +309,6 @@ class CultNetDatabaseSubscription:
             if self._transport is not None:
                 self._transport.close()
                 self._transport = None
-            if self._stream is not None:
-                self._stream = None
-            if self._connection is not None:
-                self._connection.close()
-                self._connection = None
 
     def send(self, message: CultNetMessage | dict[str, Any]) -> None:
         if self._transport is None:
@@ -349,3 +358,32 @@ class CultNetDatabaseSubscription:
 def _raise_peer_error(response: dict[str, Any]) -> None:
     if response.get("schemaVersion") == "cultnet.error.v0":
         raise CultNetPeerError(response)
+
+
+def create_tcp_framed_schema_transport(
+    *,
+    host: str,
+    port: int,
+    timeout_seconds: float = 4.0,
+    runtime_id: str = "cultnet-python-client",
+) -> TcpFramedTransportConnection:
+    connection = socket.create_connection((host, port), timeout=timeout_seconds)
+    connection.settimeout(timeout_seconds)
+    stream = connection.makefile("rwb")
+    return _OwnedTcpFramedTransportConnection(
+        stream,
+        connection,
+        profile=create_tcp_framed_transport_profile(runtime_id, host=host, port=port),
+    )
+
+
+class _OwnedTcpFramedTransportConnection(TcpFramedTransportConnection):
+    def __init__(self, stream: Any, connection: socket.socket, *, profile: dict[str, Any]) -> None:
+        super().__init__(stream, profile=profile)
+        self._connection = connection
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._connection.close()

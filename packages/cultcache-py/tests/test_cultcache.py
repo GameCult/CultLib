@@ -626,6 +626,48 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(receiver.stats.bytes_received, len(payload) + 4)
         self.assertEqual(receiver.profile["transports"][0]["protocol"], "tcp_framed")
 
+    def test_cultnet_raw_client_uses_schema_transport_factory(self) -> None:
+        import msgpack  # type: ignore
+
+        sent_messages: list[dict[str, object]] = []
+        test_case = self
+
+        class FakeSchemaTransport:
+            profile = create_tcp_framed_transport_profile("fake-client")
+
+            def __enter__(self) -> "FakeSchemaTransport":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                self.close()
+
+            def send(self, channel_id: str, payload: bytes) -> None:
+                test_case.assertEqual(channel_id, "schema")
+                sent_messages.append(msgpack.unpackb(payload, raw=False))
+
+            def receive(self) -> object:
+                response = {
+                    "schemaVersion": "cultnet.schema_catalog_response.v0",
+                    "messageId": "transport-factory",
+                    "schemas": [],
+                }
+                return type("Frame", (), {"channel_id": "schema", "payload": msgpack.packb(response, use_bin_type=True)})()
+
+            def close(self) -> None:
+                pass
+
+        client = CultNetRawClient(
+            "unused.example.test",
+            1,
+            create_transport=FakeSchemaTransport,
+        )
+
+        response = client.fetch_schema_catalog(message_id="transport-factory")
+
+        self.assertEqual(response["schemaVersion"], "cultnet.schema_catalog_response.v0")
+        self.assertEqual(sent_messages[0]["schemaVersion"], "cultnet.schema_catalog_request.v0")
+        self.assertEqual(sent_messages[0]["messageId"], "transport-factory")
+
     def test_cultnet_rudp_packet_codec_uses_deterministic_reliable_ordered_fixture(self) -> None:
         encoded = encode_rudp_packet(
             CultNetRudpPacket(

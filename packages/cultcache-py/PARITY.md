@@ -18,7 +18,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   database subscription changes. Request-response reads and database
   subscription streams raise typed `CultNetPeerError` values for
   `cultnet.error.v0` peer responses while preserving the raw error document for
-  callers that need the wire evidence.
+  callers that need the wire evidence. `CultNetRawClient` and database
+  subscriptions now consume a caller-provided `CultNetSchemaTransport` factory,
+  with `create_tcp_framed_schema_transport(...)` as the default, so request and
+  subscription semantics are no longer owned by inline TCP socket setup.
 - Python CultNet raw snapshot:
   Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
   helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting
@@ -289,11 +292,13 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   raw client, and interop peer still use the TCP-framed schema lane for many
   service and harness flows, while `docs/cultnet-transport-parity.md` tracks the
   remaining work to put broader server-side bodies behind the shared transport
-  port instead of cloning LiteNetLib. The reconnect policy/controller primitive
-  is portable and advertised by RUDP profiles, and `CultNetRudpReconnectLoop`
-  gives Python callers the same RUDP retry-scheduling helper as
-  TypeScript/Kotlin. Automatic reconnect use by Python service bodies is not
-  yet claimed.
+  port instead of cloning LiteNetLib. The raw client request/subscription layer
+  now routes through a schema-transport factory, so the caller-facing semantics
+  are transport-port-shaped even when the default factory opens TCP-framed
+  connections. The reconnect policy/controller primitive is portable and
+  advertised by RUDP profiles, and `CultNetRudpReconnectLoop` gives Python
+  callers the same RUDP retry-scheduling helper as TypeScript/Kotlin.
+  Automatic reconnect use by Python service bodies is not yet claimed.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

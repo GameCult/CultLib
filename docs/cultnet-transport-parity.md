@@ -291,6 +291,11 @@ Current progress:
   callers: the caller-owned receive loop reports closure, the shared controller
   owns retry delay/exhaustion state, and the caller-provided factory opens the
   next `CultNetRudpSocketTransportConnection`.
+- Python raw CultNet clients now consume a caller-provided
+  `CultNetSchemaTransport` factory for request/response and database
+  subscription flows. The default factory opens the existing TCP-framed schema
+  transport, but the raw client no longer owns inline socket setup as its
+  request truth.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the

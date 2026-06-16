@@ -1026,6 +1026,12 @@ class TcpFramedTransportConnection:
         self._frames_received = 0
         self._frames_sent = 0
 
+    def __enter__(self) -> "TcpFramedTransportConnection":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
     @property
     def stats(self) -> CultNetTransportStats:
         return CultNetTransportStats(

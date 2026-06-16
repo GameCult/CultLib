@@ -1,4 +1,11 @@
-from .client import CultNetDatabaseSubscription, CultNetPeerError, CultNetRawClient
+from .client import (
+    CultNetDatabaseSubscription,
+    CultNetPeerError,
+    CultNetRawClient,
+    CultNetSchemaTransport,
+    CultNetSchemaTransportFactory,
+    create_tcp_framed_schema_transport,
+)
 from .framing import decode_frame, encode_frame, read_frame, write_frame
 from .messages import (
     CultNetMessage,
@@ -105,6 +112,8 @@ __all__ = [
     "CultNetDatabaseChange",
     "CultNetPeerError",
     "CultNetRawClient",
+    "CultNetSchemaTransport",
+    "CultNetSchemaTransportFactory",
     "CultNetClientSecurityOptions",
     "CultNetSecret",
     "CultNetServerSecurityOptions",
@@ -161,6 +170,7 @@ __all__ = [
     "compute_simulation_claim_hash",
     "compute_reconnect_delay_ms",
     "create_reconnect_policy",
+    "create_tcp_framed_schema_transport",
     "create_rudp_transport_profile",
     "create_tcp_framed_transport_profile",
     "database_subscribe",
