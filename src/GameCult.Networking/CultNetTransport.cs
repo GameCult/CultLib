@@ -1800,6 +1800,11 @@ namespace GameCult.Networking
             int received;
             try
             {
+                if (!_socket.Poll(0, SelectMode.SelectRead))
+                {
+                    return null;
+                }
+
                 received = _socket.ReceiveFrom(buffer, ref remote);
             }
             catch (SocketException error) when (
