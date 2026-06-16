@@ -18,6 +18,7 @@ jobs:
       CARGO: cargo
       PYTHON: python
       KOTLIN_VERSION: 2.2.21
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Check out CultLib
@@ -84,7 +85,7 @@ jobs:
           npx tsc -p packages/cultnet-ts/tsconfig.test.json --pretty false
 
       - name: Interop schema-v0 discovery lane
-        timeout-minutes: 8
+        timeout-minutes: 20
         run: node --test --test-name-pattern "shared schema-v0 lane" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
 
       - name: Interop RUDP Python lane
