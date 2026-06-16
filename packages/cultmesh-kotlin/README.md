@@ -15,6 +15,7 @@ val peers = CultMesh.createPeerCatalog()
 val leases = CultMesh.createAuthorityLeaseCatalog()
 val streams = CultMesh.createStreamCatalog()
 val schemas = CultMesh.createSchemaCatalog()
+val builtIns = CultMesh.createBuiltInSchemaCatalog(kinds = listOf("shared_contract"))
 val shards = CultMesh.createShardCatalog()
 ```
 
@@ -137,12 +138,13 @@ val response = catalog.createResponse(
 `cultnet.schema_catalog_response.v0` descriptors from other runtimes and keeps
 their content hashes, wire contracts, schema ids, and optional schema JSON.
 `CultMesh.createBuiltInSchemaCatalog(...)` returns the Kotlin-supported
-CultNet/CultMesh wire-message descriptors on the same catalog surface, including
-schema catalog, shard catalog, shard log, Verse catalog, peer exchange, and the
-shared transport profile contract. Descriptors for shared schema files keep the
-canonical schema ids and content hashes; Kotlin-local descriptor bodies use
-schema-version ids until shared schema files exist. Inline schema JSON is opt-in
-and only emitted for descriptor bodies Kotlin owns.
+CultNet/CultMesh descriptors on the same catalog surface, with optional
+`schemaIds`, `kinds`, and inline-schema filters. It includes schema catalog,
+shard catalog, shard log, Verse catalog, peer exchange, and the shared transport
+profile contract. Descriptors for shared schema files keep the canonical schema
+ids and content hashes; Kotlin-local descriptor bodies use schema-version ids
+until shared schema files exist. Inline schema JSON is opt-in and only emitted
+for descriptor bodies Kotlin owns.
 
 Shard catalogs and shard-log responses use the same schema-v0 lane:
 

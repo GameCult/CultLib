@@ -287,8 +287,15 @@ object CultMesh {
 
     fun createSchemaCatalog(): CultNetSchemaCatalog = CultNetSchemaCatalog()
 
-    fun createBuiltInSchemaCatalog(includeSchemaJson: Boolean = false): CultNetSchemaCatalog =
-        cultNetBuiltInSchemaCatalog(includeSchemaJson)
+    fun createBuiltInSchemaCatalog(
+        includeSchemaJson: Boolean = false,
+        schemaIds: List<String> = emptyList(),
+        kinds: List<String> = emptyList(),
+    ): CultNetSchemaCatalog = cultNetBuiltInSchemaCatalog(
+        includeSchemaJson = includeSchemaJson,
+        schemaIds = schemaIds,
+        kinds = kinds,
+    )
 
     fun createShardCatalog(): CultNetShardCatalog = CultNetShardCatalog()
 
@@ -1086,9 +1093,18 @@ private val cultNetBuiltInSchemaSpecs = listOf(
     ),
 )
 
-fun cultNetBuiltInSchemaCatalog(includeSchemaJson: Boolean = false): CultNetSchemaCatalog {
+fun cultNetBuiltInSchemaCatalog(
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+): CultNetSchemaCatalog {
     val catalog = CultNetSchemaCatalog()
-    cultNetBuiltInSchemaSpecs.forEach { spec ->
+    val requestedSchemaIds = schemaIds.toSet()
+    val requestedKinds = kinds.toSet()
+    cultNetBuiltInSchemaSpecs.filter { spec ->
+        (requestedSchemaIds.isEmpty() || spec.schemaId in requestedSchemaIds) &&
+            (requestedKinds.isEmpty() || spec.kind in requestedKinds)
+    }.forEach { spec ->
         val schemaJson = cultNetBuiltInSchemaJson(spec, spec.schemaId)
         val inlineSchemaJson = if (spec.contentHash == null && includeSchemaJson) schemaJson else null
         catalog.upsert(
@@ -3191,6 +3207,19 @@ private fun cultNetBuiltInSchemaCatalogAdvertisesWireContracts() {
     check(transportProfile["kind"] == "shared_contract")
     check(transportProfile["contentHash"] == "84473264f543ca3443267999e43d72b7993b61b7b2ac53c642c9cbe8b6de0217")
     check(!transportProfile.containsKey("schemaJson"))
+
+    val filteredTransportCatalog = CultMesh.createBuiltInSchemaCatalog(
+        includeSchemaJson = true,
+        schemaIds = listOf("$cultNetSchemaBase/cultnet.transport-profile.schema.json"),
+    )
+    check(filteredTransportCatalog.schemas.single().schemaVersion == "cultnet.transport_profile.v0")
+    val filteredSharedContracts = CultMesh.createBuiltInSchemaCatalog(kinds = listOf("shared_contract"))
+    check(filteredSharedContracts.schemas.single().schemaId == "$cultNetSchemaBase/cultnet.transport-profile.schema.json")
+    val filteredInlineCatalog = CultMesh.createBuiltInSchemaCatalog(
+        includeSchemaJson = true,
+        schemaIds = listOf("cultmesh.peer_exchange_request.v0"),
+    )
+    check(filteredInlineCatalog.schemas.single().schemaJson?.contains("cultmesh.peer_exchange_request.v0") == true)
 
     val inlineResponse = inlineCatalog.createResponse(
         cultNetSchemaCatalogRequest(
