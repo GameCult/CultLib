@@ -1063,12 +1063,19 @@ data class CultMeshAuthorityLease(
 
 class CultMeshAuthorityLeaseCatalog {
     private val knownLeases = linkedMapOf<String, CultMeshAuthorityLease>()
+    private val subscribers = mutableListOf<(CultMeshAuthorityLease) -> Unit>()
 
     val leases: List<CultMeshAuthorityLease>
         get() = knownLeases.toSortedMap().values.toList()
 
+    fun watch(callback: (CultMeshAuthorityLease) -> Unit): () -> Unit {
+        subscribers.add(callback)
+        return { subscribers.remove(callback) }
+    }
+
     fun upsert(lease: CultMeshAuthorityLease) {
         knownLeases[lease.leaseId] = lease
+        subscribers.toList().forEach { it(lease) }
     }
 
     fun get(leaseId: String): CultMeshAuthorityLease? {
@@ -1222,12 +1229,25 @@ data class CultMeshStreamFrameHandle(
 class CultMeshStreamCatalog {
     private val knownStreams = linkedMapOf<String, CultMeshStreamDescriptor>()
     private val latestFrames = linkedMapOf<String, CultMeshStreamFrameHandle>()
+    private val streamSubscribers = mutableListOf<(CultMeshStreamDescriptor) -> Unit>()
+    private val frameSubscribers = mutableListOf<(CultMeshStreamFrameHandle) -> Unit>()
 
     val streams: List<CultMeshStreamDescriptor>
         get() = knownStreams.toSortedMap().values.toList()
 
+    fun watch(callback: (CultMeshStreamDescriptor) -> Unit): () -> Unit {
+        streamSubscribers.add(callback)
+        return { streamSubscribers.remove(callback) }
+    }
+
+    fun watchFrames(callback: (CultMeshStreamFrameHandle) -> Unit): () -> Unit {
+        frameSubscribers.add(callback)
+        return { frameSubscribers.remove(callback) }
+    }
+
     fun declare(stream: CultMeshStreamDescriptor): CultMeshStreamDescriptor {
         knownStreams[stream.streamId] = stream
+        streamSubscribers.toList().forEach { it(stream) }
         return stream
     }
 
@@ -1265,6 +1285,7 @@ class CultMeshStreamCatalog {
     fun publishFrame(frame: CultMeshStreamFrameHandle): CultMeshStreamFrameHandle {
         if (frame.streamId !in knownStreams) throw IOException("Unknown CultMesh stream '${frame.streamId}'")
         latestFrames[frame.streamId] = frame
+        frameSubscribers.toList().forEach { it(frame) }
         return frame
     }
 
@@ -3048,6 +3069,8 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
     val validFrom = Instant.parse("2026-06-15T00:00:00Z")
     val expiresAt = Instant.parse("2026-06-15T01:00:00Z")
     val duringLease = Instant.parse("2026-06-15T00:30:00Z")
+    var watchedLease: CultMeshAuthorityLease? = null
+    val unsubscribeLease = leases.watch { watchedLease = it }
 
     check(!leases.isAuthorized(peer, "shard-primary", "players", duringLease))
     leases.upsert(
@@ -3063,6 +3086,10 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
         ),
     )
 
+    check(watchedLease?.leaseId == "lease:peer-authority")
+    unsubscribeLease()
+    leases.upsert(watchedLease!!.copy(signature = "after-unsubscribe"))
+    check(watchedLease?.roles == listOf("shard-primary"))
     check(leases.get("lease:peer-authority")?.issuerRuntimeId == "kotlin-authority")
     check(leases.leases.map { it.leaseId } == listOf("lease:peer-authority"))
     check(leases.isAuthorized(peer, "shard-primary", "players", duringLease))
@@ -3073,32 +3100,36 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
 
 private fun cultMeshStreamCatalogNegotiatesBodyTransports() {
     val streams = createStreamCatalog()
-    streams.declare(
-        CultMeshStreamDescriptor(
-            streamId = "mimir:kiyo-pro",
-            verseId = "studio",
-            ownerPeerId = "starfire",
-            kind = CultMeshStreamKinds.Video,
-            label = "Kiyo Pro",
-            clock = CultMeshStreamClock(
-                clockDomainId = "starfire-qpc",
-                confidence = 0.25,
-                evidenceKind = "provisional-clock-domain-edge-fit",
-            ),
-            video = CultMeshVideoStreamFormat(
-                width = 1920,
-                height = 1080,
-                pixelFormat = "YUY2",
-                framesPerSecond = 30.0,
-            ),
-            preferredTransports = listOf(
-                CultMeshStreamBodyTransports.SharedD3D12Texture,
-                CultMeshStreamBodyTransports.SharedMemory,
-                CultMeshStreamBodyTransports.CultCachePage,
-            ),
-            maxInFlightFrames = 3,
+    var watchedStream: CultMeshStreamDescriptor? = null
+    var watchedFrame: CultMeshStreamFrameHandle? = null
+    val unsubscribeStream = streams.watch { watchedStream = it }
+    val unsubscribeFrame = streams.watchFrames { watchedFrame = it }
+    val stream = CultMeshStreamDescriptor(
+        streamId = "mimir:kiyo-pro",
+        verseId = "studio",
+        ownerPeerId = "starfire",
+        kind = CultMeshStreamKinds.Video,
+        label = "Kiyo Pro",
+        clock = CultMeshStreamClock(
+            clockDomainId = "starfire-qpc",
+            confidence = 0.25,
+            evidenceKind = "provisional-clock-domain-edge-fit",
         ),
+        video = CultMeshVideoStreamFormat(
+            width = 1920,
+            height = 1080,
+            pixelFormat = "YUY2",
+            framesPerSecond = 30.0,
+        ),
+        preferredTransports = listOf(
+            CultMeshStreamBodyTransports.SharedD3D12Texture,
+            CultMeshStreamBodyTransports.SharedMemory,
+            CultMeshStreamBodyTransports.CultCachePage,
+        ),
+        maxInFlightFrames = 3,
     )
+    streams.declare(stream)
+    check(watchedStream?.streamId == "mimir:kiyo-pro")
 
     val negotiation = streams.negotiate(
         "mimir:kiyo-pro",
@@ -3124,20 +3155,26 @@ private fun cultMeshStreamCatalogNegotiatesBodyTransports() {
     check(negotiation.copyBudget == "zero-copy-target")
     check(streams.find("studio", CultMeshStreamKinds.Video).single().streamId == "mimir:kiyo-pro")
 
-    streams.publishFrame(
-        CultMeshStreamFrameHandle(
-            streamId = "mimir:kiyo-pro",
-            sequence = 42,
-            timestampNs = 1_000_000_000,
-            durationNs = 33_333_334,
-            transport = negotiation.transport,
-            nativeHandle = "0xfeed",
-            fenceHandle = "0xbeef",
-            fenceValue = 7,
-            unavoidableCopyCount = 0,
-        ),
+    val frame = CultMeshStreamFrameHandle(
+        streamId = "mimir:kiyo-pro",
+        sequence = 42,
+        timestampNs = 1_000_000_000,
+        durationNs = 33_333_334,
+        transport = negotiation.transport,
+        nativeHandle = "0xfeed",
+        fenceHandle = "0xbeef",
+        fenceValue = 7,
+        unavoidableCopyCount = 0,
     )
+    streams.publishFrame(frame)
+    check(watchedFrame?.sequence == 42L)
     check(streams.latestFrame("mimir:kiyo-pro")?.sequence == 42L)
+    unsubscribeStream()
+    unsubscribeFrame()
+    streams.declare(stream.copy(streamId = "mimir:kiyo-pro-alt"))
+    streams.publishFrame(frame.copy(sequence = 43))
+    check(watchedStream?.streamId == "mimir:kiyo-pro")
+    check(watchedFrame?.sequence == 42L)
 }
 
 private fun cultNetShardCatalogsAndLogsRoundTrip() {

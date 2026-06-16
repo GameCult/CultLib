@@ -287,7 +287,8 @@ Current progress:
 - Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
   preferred body transports, consumer negotiation, copy-budget classification,
-  max in-flight frame pressure, and latest-frame cursors.
+  max in-flight frame pressure, latest-frame cursors, and watch callbacks for
+  stream declarations plus latest-frame publication.
 - Kotlin now has a branded `CultMesh` facade matching the C#/TypeScript/Python
   entrypoint pattern for local nodes, Verse catalogs, peer catalogs, authority
   lease catalogs, stream catalogs, and RUDP client/server construction. Kotlin
@@ -295,6 +296,9 @@ Current progress:
   client directly from a peer card contact hint. The facade delegates to the
   same owners as the top-level helpers instead of creating a second authority
   path.
+- Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
+  Android clients can react to lease changes without treating peer-card contact
+  hints as trust.
 - Rust now has a small `CultMesh` facade for its substrate role: peer cards,
   sorted peer catalogs, authority lease catalogs, `rudp://host:port` endpoint
   parsing, and RUDP client/server construction from endpoint or peer-card

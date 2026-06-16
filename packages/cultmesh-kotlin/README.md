@@ -278,6 +278,9 @@ val peer = CultMeshPeerCard(
 )
 
 val leases = CultMesh.createAuthorityLeaseCatalog()
+val unsubscribeLeaseWatch = leases.watch { lease ->
+    println("authority lease changed: ${lease.leaseId}")
+}
 leases.upsert(
     CultMeshAuthorityLease(
         leaseId = "lease:kotlin-peer",
@@ -292,6 +295,7 @@ leases.upsert(
 )
 
 check(leases.isAuthorized(peer, "shard-primary", "players"))
+unsubscribeLeaseWatch()
 ```
 
 ## Streaming Catalog
@@ -303,6 +307,12 @@ cursors; it does not own the frame bytes themselves.
 
 ```kotlin
 val streams = CultMesh.createStreamCatalog()
+val unsubscribeStreamWatch = streams.watch { stream ->
+    println("stream declared: ${stream.streamId}")
+}
+val unsubscribeFrameWatch = streams.watchFrames { frame ->
+    println("latest frame ${frame.sequence} for ${frame.streamId}")
+}
 streams.declare(
     CultMeshStreamDescriptor(
         streamId = "mimir:camera",
@@ -334,6 +344,9 @@ val lane = streams.negotiate(
         maxInFlightFrames = 2,
     ),
 )
+
+unsubscribeStreamWatch()
+unsubscribeFrameWatch()
 ```
 
 `EveMediaObservationDocument` carries byte-backed device streams such as camera
