@@ -25,6 +25,7 @@ import {
   CultNetSchemaRegistry,
   CultNetSecret,
   CultNetServerSecurityOptions,
+  CultNetShardCatalog,
   TcpFramedTransportConnection,
   CultNetReconnectController,
   cultNetSchemas,
@@ -42,6 +43,7 @@ import {
   parseCultNetMessage,
   validateGhostlightAgentStateGenerated,
   validateGhostlightAgentState,
+  shardServes,
   type CultNetLoginMessage,
   type GhostlightAgentStateShape,
   type GhostlightAgentStateDocument,
@@ -894,6 +896,96 @@ test("CultNet peer can request and sync schema catalogs by message id", async ()
   assert.ok(applied.some((descriptor) => descriptor.documentType === "ghostlight.agent-state"));
   assert.equal(synced.get(applied[0]!.schemaId)?.schemaJson, undefined);
   assert.equal(typeof synced.get(applied[0]!.schemaId, { includeSchemaJson: true })?.schemaJson, "string");
+
+  requester.close();
+  responder.close();
+});
+
+test("CultNet shard catalog filters descriptors and answers catalog requests", () => {
+  const catalog = new CultNetShardCatalog();
+  let watchedShardId: string | undefined;
+  const unsubscribe = catalog.watch((descriptor) => {
+    watchedShardId = descriptor.shardId;
+  });
+
+  catalog.upsert({
+    shardId: "notes-a",
+    ownerRuntimeId: "ts-owner",
+    epoch: 7,
+    isPrimary: true,
+    schemaIds: ["note.v1"],
+    keyPrefix: "note:",
+    primaryEndpoints: ["rudp://127.0.0.1:4100"],
+    authorityLeaseId: "lease-a",
+  });
+  catalog.upsert({
+    shardId: "profiles-a",
+    ownerRuntimeId: "ts-owner",
+    epoch: 3,
+    schemaIds: ["profile.v1"],
+    keyPrefix: "profile:",
+  });
+
+  assert.equal(watchedShardId, "profiles-a");
+  assert.equal(shardServes(catalog.get("notes-a")!, { schemaId: "note.v1", recordKey: "note:1" }), true);
+  assert.equal(shardServes(catalog.get("notes-a")!, { schemaId: "profile.v1", recordKey: "note:1" }), false);
+  assert.deepEqual(catalog.list({ schemaIds: ["note.v1"], recordKeys: ["note:1"] }).map((shard) => shard.shardId), ["notes-a"]);
+
+  const response = catalog.createCatalogResponse({
+    schemaVersion: "cultnet.shard_catalog_request.v0",
+    messageId: "shards",
+    schemaIds: ["note.v1"],
+    recordKeys: ["note:2"],
+  });
+  assert.equal(response.schemaVersion, "cultnet.shard_catalog_response.v0");
+  assert.equal(response.shards[0]?.shardId, "notes-a");
+
+  const parsed = parseCultNetMessage(response);
+  assert.equal(parsed.schemaVersion, "cultnet.shard_catalog_response.v0");
+  if (parsed.schemaVersion === "cultnet.shard_catalog_response.v0") {
+    assert.equal(parsed.shards[0]?.ownerRuntimeId, "ts-owner");
+  }
+
+  unsubscribe();
+});
+
+test("CultNet peer can request and sync shard catalogs by message id", async () => {
+  const { a, b } = createDuplexPair();
+  const requester = createTcpFramedCultNetPeer(a, {
+    runtimeId: "shard-requester",
+    wireContract: "cultnet.schema.v0",
+  });
+  const responder = createTcpFramedCultNetPeer(b, {
+    runtimeId: "shard-responder",
+    wireContract: "cultnet.schema.v0",
+  });
+  const remote = new CultNetShardCatalog();
+  remote.upsert({
+    shardId: "notes-peer",
+    ownerRuntimeId: "shard-responder",
+    epoch: 1,
+    isPrimary: true,
+    schemaIds: ["note.v1"],
+    keyPrefix: "note:",
+    primaryEndpoints: ["rudp://127.0.0.1:4200"],
+  });
+
+  responder.on("message", (message) => {
+    if (message.schemaVersion === "cultnet.shard_catalog_request.v0") {
+      responder.sendShardCatalogResponse(remote.createCatalogResponse(message));
+    }
+  });
+
+  const synced = new CultNetShardCatalog();
+  const applied = await requester.syncShardCatalog(synced, {
+    messageId: "peer-shards",
+    schemaIds: ["note.v1"],
+    recordKeys: ["note:local"],
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(applied[0]?.shardId, "notes-peer");
+  assert.equal(synced.get("notes-peer")?.primaryEndpoints?.[0], "rudp://127.0.0.1:4200");
 
   requester.close();
   responder.close();

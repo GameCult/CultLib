@@ -23,6 +23,9 @@ export {
   type CultNetSchemaCatalogResponseMessage,
   type CultNetSchemaDescriptor,
   type CultNetSchemaKind,
+  type CultNetShardCatalogRequestMessage,
+  type CultNetShardCatalogResponseMessage,
+  type CultNetShardDescriptor,
   type CultNetSnapshotRequestMessage,
   type CultNetSnapshotResponseMessage,
   type CultNetSnapshotResponseRawMessage,
@@ -55,7 +58,7 @@ export {
   type GhostlightWorldState,
 } from "./contracts";
 export { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
-export { CultNetPeer, createTcpFramedCultNetPeer, type CultNetPeerEvents, type CultNetPeerSchemaCatalogRequestOptions, type TcpFramedCultNetPeerOptions } from "./peer";
+export { CultNetPeer, createTcpFramedCultNetPeer, type CultNetPeerEvents, type CultNetPeerSchemaCatalogRequestOptions, type CultNetPeerShardCatalogRequestOptions, type TcpFramedCultNetPeerOptions } from "./peer";
 export {
   CultNetReconnectController,
   TcpFramedTransportConnection,
@@ -105,6 +108,11 @@ export {
   type CultNetSchemaCatalogOptions,
   type CultNetSchemaRegistration,
 } from "./schema-discovery";
+export {
+  CultNetShardCatalog,
+  shardServes,
+  type CultNetShardCatalogOptions,
+} from "./shard-catalog";
 export {
   CultNetClientSecurityOptions,
   CultNetSecret,

@@ -21,6 +21,8 @@ import snapshotResponseRawSchema from "../contracts/cultnet.snapshot-response-ra
 import schemaDescriptorSchema from "../contracts/cultnet.schema-descriptor.schema.json";
 import schemaCatalogRequestSchema from "../contracts/cultnet.schema-catalog-request.schema.json";
 import schemaCatalogResponseSchema from "../contracts/cultnet.schema-catalog-response.schema.json";
+import shardCatalogRequestSchema from "../contracts/cultnet.shard-catalog-request.schema.json";
+import shardCatalogResponseSchema from "../contracts/cultnet.shard-catalog-response.schema.json";
 import ghostlightAgentStateSchema from "../contracts/ghostlight.agent-state.schema.json";
 
 export type CultNetWireContract = "cultnet.schema.v0" | "gamecult.networking.v0";
@@ -41,7 +43,9 @@ export type CultNetSchemaVersion =
   | "cultnet.snapshot_response.v0"
   | "cultnet.snapshot_response_raw.v0"
   | "cultnet.schema_catalog_request.v0"
-  | "cultnet.schema_catalog_response.v0";
+  | "cultnet.schema_catalog_response.v0"
+  | "cultnet.shard_catalog_request.v0"
+  | "cultnet.shard_catalog_response.v0";
 
 export type CultNetSchemaKind = "wire_message" | "document_payload" | "shared_contract";
 export type CultNetRawPayloadEncoding = "messagepack";
@@ -232,6 +236,33 @@ export interface CultNetSchemaCatalogResponseMessage {
   schemaVersion: "cultnet.schema_catalog_response.v0";
   messageId: string;
   schemas: CultNetSchemaDescriptor[];
+}
+
+export interface CultNetShardDescriptor {
+  shardId: string;
+  ownerRuntimeId: string;
+  epoch: number;
+  isPrimary?: boolean;
+  schemaIds?: string[];
+  keyPrefix?: string;
+  primaryEndpoints?: string[];
+  replicaEndpoints?: string[];
+  readReplicaEndpoints?: string[];
+  region?: string;
+  authorityLeaseId?: string;
+}
+
+export interface CultNetShardCatalogRequestMessage {
+  schemaVersion: "cultnet.shard_catalog_request.v0";
+  messageId: string;
+  schemaIds?: string[];
+  recordKeys?: string[];
+}
+
+export interface CultNetShardCatalogResponseMessage {
+  schemaVersion: "cultnet.shard_catalog_response.v0";
+  messageId: string;
+  shards: CultNetShardDescriptor[];
 }
 
 export interface GhostlightPressure {
@@ -476,7 +507,9 @@ export type CultNetMessage =
   | CultNetSnapshotResponseMessage
   | CultNetSnapshotResponseRawMessage
   | CultNetSchemaCatalogRequestMessage
-  | CultNetSchemaCatalogResponseMessage;
+  | CultNetSchemaCatalogResponseMessage
+  | CultNetShardCatalogRequestMessage
+  | CultNetShardCatalogResponseMessage;
 
 const ajv = new Ajv2020({
   allErrors: true,
@@ -500,6 +533,8 @@ const CULTNET_MESSAGE_SCHEMAS = [
   snapshotResponseRawSchema,
   schemaCatalogRequestSchema,
   schemaCatalogResponseSchema,
+  shardCatalogRequestSchema,
+  shardCatalogResponseSchema,
 ] as const;
 
 const cultNetValidators = new Map<CultNetSchemaVersion, ValidateFunction>();
@@ -978,6 +1013,9 @@ function normalizeCultNetOptionalNulls(
     case "cultnet.schema_catalog_request.v0":
       stripNullProperties(candidate, ["schemaIds", "kinds"]);
       return;
+    case "cultnet.shard_catalog_request.v0":
+      stripNullProperties(candidate, ["schemaIds", "recordKeys"]);
+      return;
     default:
       return;
   }
@@ -1024,5 +1062,7 @@ export const cultNetSchemas = {
   schemaDescriptorSchema,
   schemaCatalogRequestSchema,
   schemaCatalogResponseSchema,
+  shardCatalogRequestSchema,
+  shardCatalogResponseSchema,
   ghostlightAgentStateSchema,
 } as const;

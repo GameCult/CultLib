@@ -307,6 +307,11 @@ Current progress:
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.
   `CultNetSchemaRegistry` remains the local definition owner; the catalog owns
   imported descriptors so callers do not treat raw response objects as state.
+- TypeScript now has the matching `CultNetShardCatalog` and peer
+  request/fetch/sync helpers for
+  `cultnet.shard_catalog_request.v0` / `cultnet.shard_catalog_response.v0`.
+  Shard descriptors can be filtered by schema id and record key without
+  requiring callers to inspect raw response maps.
 - Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
   preferred body transports, consumer negotiation, copy-budget classification,

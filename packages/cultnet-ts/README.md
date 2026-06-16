@@ -183,6 +183,12 @@ responses. `CultNetPeer.requestSchemaCatalog(...)`,
 message-id-matched request/response cycle so callers do not need to hand-roll
 listener cleanup around every discovery exchange.
 
+Shard discovery follows the same split: `CultNetShardCatalog` owns imported
+`cultnet.shard_catalog_response.v0` descriptors, filters by schema id and
+record key, and can answer `cultnet.shard_catalog_request.v0`. `CultNetPeer`
+also exposes `requestShardCatalog(...)`, `fetchShardDescriptors(...)`, and
+`syncShardCatalog(...)` for the same message-id-matched exchange.
+
 ## Quick Example
 
 ```ts
