@@ -1377,6 +1377,14 @@ namespace GameCult.Networking
                 _orderedNextSequenceByChannel[frame.ChannelId] = next;
             }
 
+            while (frame.Sequence > next
+                   && _receivedSequences.Contains(next)
+                   && (!_orderedBuffers.TryGetValue(frame.ChannelId, out var pendingBuffer) || !pendingBuffer.ContainsKey(next)))
+            {
+                next++;
+                _orderedNextSequenceByChannel[frame.ChannelId] = next;
+            }
+
             if (frame.Sequence < next)
             {
                 return Array.Empty<CultNetRudpDeliveredFrame>();
@@ -1411,9 +1419,25 @@ namespace GameCult.Networking
                 buffer.Remove(next);
                 delivered.Add(pending.Frame);
                 _orderedNextSequenceByChannel[channelId] = pending.NextSequence;
+                SkipReceivedNonChannelSequences(channelId);
             }
 
             return delivered;
+        }
+
+        private void SkipReceivedNonChannelSequences(string channelId)
+        {
+            if (!_orderedNextSequenceByChannel.TryGetValue(channelId, out var next))
+            {
+                return;
+            }
+
+            while (_receivedSequences.Contains(next)
+                   && (!_orderedBuffers.TryGetValue(channelId, out var buffer) || !buffer.ContainsKey(next)))
+            {
+                next++;
+                _orderedNextSequenceByChannel[channelId] = next;
+            }
         }
 
         private ushort AllocateFragmentId()

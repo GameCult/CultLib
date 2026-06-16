@@ -804,6 +804,35 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_SkipsControlPacketsWhileOrderingSchemaPayloads()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 124,
+                InitialSequence = 1
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 124,
+                InitialSequence = 100
+            });
+            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 124, Sequence = 90, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 124, Sequence = 91, ChannelId = "control" });
+
+            var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            var control = sender.CreateAck();
+            var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+
+            Assert.That(
+                receiver.Receive(first).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "first" }));
+            Assert.That(receiver.Receive(control).Delivered, Is.Empty);
+            Assert.That(
+                receiver.Receive(second).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "second" }));
+        }
+
+        [Test]
         public void RudpSession_FragmentsAndReassemblesReliableOrderedPayloads()
         {
             var sender = new CultNetRudpSession(new CultNetRudpSessionOptions

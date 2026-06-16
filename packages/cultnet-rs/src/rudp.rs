@@ -672,7 +672,7 @@ impl CultNetRudpSession {
         expected_sequence_if_uninitialized: u32,
     ) -> Vec<CultNetRudpDeliveredFrame> {
         let channel_id = frame.channel_id.clone();
-        let next = if let Some(next) = self
+        let mut next = if let Some(next) = self
             .ordered_next_sequence_by_channel
             .get(&channel_id)
             .copied()
@@ -685,6 +685,18 @@ impl CultNetRudpSession {
             );
             expected_sequence_if_uninitialized.min(frame.sequence)
         };
+
+        while frame.sequence > next
+            && self.received_sequences.contains(&next)
+            && !self
+                .ordered_buffers
+                .get(&channel_id)
+                .is_some_and(|buffer| buffer.contains_key(&next))
+        {
+            next = next.saturating_add(1);
+            self.ordered_next_sequence_by_channel
+                .insert(channel_id.clone(), next);
+        }
 
         if frame.sequence < next {
             return Vec::new();
@@ -727,8 +739,29 @@ impl CultNetRudpSession {
             delivered.push(pending.frame);
             self.ordered_next_sequence_by_channel
                 .insert(channel_id.to_string(), pending.next_sequence);
+            self.skip_received_non_channel_sequences(channel_id);
         }
         delivered
+    }
+
+    fn skip_received_non_channel_sequences(&mut self, channel_id: &str) {
+        let Some(mut next) = self
+            .ordered_next_sequence_by_channel
+            .get(channel_id)
+            .copied()
+        else {
+            return;
+        };
+        while self.received_sequences.contains(&next)
+            && !self
+                .ordered_buffers
+                .get(channel_id)
+                .is_some_and(|buffer| buffer.contains_key(&next))
+        {
+            next = next.saturating_add(1);
+            self.ordered_next_sequence_by_channel
+                .insert(channel_id.to_string(), next);
+        }
     }
 
     fn allocate_fragment_id(&mut self) -> u16 {

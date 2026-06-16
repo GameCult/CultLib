@@ -225,6 +225,11 @@ Current progress:
   C#/Kotlin/Python/Rust. The bridge delays one packet below the transport, sends
   the following packet first, and then releases the held packet; delivered frames
   still surface in sequence.
+- C#, TypeScript, Rust, Python, and Kotlin now also guard against control-packet
+  sequence bleed in ordered channels: a received `ack`/control packet may
+  advance the global acknowledgement window, but it must not block the next
+  ordered `schema` frame for that channel. Runtime-local RUDP tests prove the
+  data-control-data sequence in each implementation.
 - TypeScript, C#, Rust, Python, and Kotlin now share the first RUDP
   fragmentation implementation: the session can split oversized reliable
   ordered payloads into fragment packets, reassemble them before delivery, and

@@ -961,6 +961,24 @@ class CultCacheTests(unittest.TestCase):
             ["second", "third"],
         )
 
+    def test_cultnet_rudp_session_skips_control_packets_while_ordering_schema_payloads(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=100))
+        sender.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 124, 90, 0, 0, "control")
+        )
+        receiver.receive(
+            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 124, 91, 0, 0, "control")
+        )
+
+        first = sender.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
+        control = sender.create_ack()
+        second = sender.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))
+
+        self.assertEqual([frame.payload.decode("utf-8") for frame in receiver.receive(first).delivered], ["first"])
+        self.assertEqual(receiver.receive(control).delivered, ())
+        self.assertEqual([frame.payload.decode("utf-8") for frame in receiver.receive(second).delivered], ["second"])
+
     def test_cultnet_rudp_session_fragments_and_reassembles_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=100))

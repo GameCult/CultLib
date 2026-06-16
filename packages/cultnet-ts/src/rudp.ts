@@ -561,6 +561,11 @@ export class CultNetRudpSession {
       this.#orderedNextSequenceByChannel.set(frame.channelId, next);
     }
 
+    while (frame.sequence > next && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(frame.channelId)?.has(next)) {
+      next += 1;
+      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
+    }
+
     if (frame.sequence < next) {
       return [];
     }
@@ -596,8 +601,17 @@ export class CultNetRudpSession {
       delivered.push(pending.frame);
       next = pending.nextSequence;
       this.#orderedNextSequenceByChannel.set(channelId, next);
+      this.#skipReceivedNonChannelSequences(channelId);
     }
     return delivered;
+  }
+
+  #skipReceivedNonChannelSequences(channelId: string): void {
+    let next = this.#orderedNextSequenceByChannel.get(channelId);
+    while (next !== undefined && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(channelId)?.has(next)) {
+      next += 1;
+      this.#orderedNextSequenceByChannel.set(channelId, next);
+    }
   }
 
   #allocateFragmentId(): number {

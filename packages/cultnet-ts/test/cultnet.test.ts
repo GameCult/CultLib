@@ -520,6 +520,21 @@ test("rudp session suppresses duplicates and delivers reliable ordered payloads 
   ]);
 });
 
+test("rudp session skips received control packets while ordering schema payloads", () => {
+  const sender = new CultNetRudpSession({ connectionId: 124, initialSequence: 1 });
+  const receiver = new CultNetRudpSession({ connectionId: 124, initialSequence: 100 });
+  sender.receive({ packetType: "accept", connectionId: 124, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId: 124, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+
+  const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
+  const control = sender.createAck();
+  const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true });
+
+  assert.deepEqual(receiver.receive(first).delivered.map((frame) => Buffer.from(frame.payload).toString("utf8")), ["first"]);
+  assert.deepEqual(receiver.receive(control).delivered, []);
+  assert.deepEqual(receiver.receive(second).delivered.map((frame) => Buffer.from(frame.payload).toString("utf8")), ["second"]);
+});
+
 test("rudp session fragments and reassembles reliable ordered payloads", () => {
   const sender = new CultNetRudpSession({ connectionId: 456, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 456, initialSequence: 100 });

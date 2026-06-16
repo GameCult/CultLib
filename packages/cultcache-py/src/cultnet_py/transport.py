@@ -728,6 +728,13 @@ class CultNetRudpSession:
         if next_sequence is None:
             next_sequence = min(expected_sequence_if_uninitialized, frame.sequence)
             self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence
+        while (
+            frame.sequence > next_sequence
+            and next_sequence in self._received_sequences
+            and next_sequence not in self._ordered_buffers.get(frame.channel_id, {})
+        ):
+            next_sequence += 1
+            self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence
         if frame.sequence < next_sequence:
             return []
         if frame.sequence > next_sequence:
@@ -751,7 +758,18 @@ class CultNetRudpSession:
             frame, next_after_frame = pending
             delivered.append(frame)
             self._ordered_next_sequence_by_channel[channel_id] = next_after_frame
+            self._skip_received_non_channel_sequences(channel_id)
         return delivered
+
+    def _skip_received_non_channel_sequences(self, channel_id: str) -> None:
+        next_sequence = self._ordered_next_sequence_by_channel.get(channel_id)
+        while (
+            next_sequence is not None
+            and next_sequence in self._received_sequences
+            and next_sequence not in self._ordered_buffers.get(channel_id, {})
+        ):
+            next_sequence += 1
+            self._ordered_next_sequence_by_channel[channel_id] = next_sequence
 
     def _allocate_fragment_id(self) -> int:
         fragment_id = self._next_fragment_id
