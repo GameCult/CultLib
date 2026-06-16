@@ -279,6 +279,33 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Options for creating a LiteNetLib transport profile.
+    /// </summary>
+    public sealed class LiteNetLibTransportProfileOptions
+    {
+        /// <summary>
+        /// Gets or sets the advertised transport id.
+        /// </summary>
+        public string TransportId { get; set; } = "litenetlib";
+        /// <summary>
+        /// Gets or sets the advertised host.
+        /// </summary>
+        public string? Host { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised port.
+        /// </summary>
+        public int? Port { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum payload size for LiteNetLib channels.
+        /// </summary>
+        public int? MaxPayloadBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised reconnect policy for this LiteNetLib transport.
+        /// </summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
+    }
+
+    /// <summary>
     /// Options for creating a CultNet RUDP transport profile.
     /// </summary>
     public sealed class RudpTransportProfileOptions
@@ -351,6 +378,56 @@ namespace GameCult.Networking
                                 Ordering = "ordered",
                                 MaxPayloadBytes = options.MaxPayloadBytes,
                                 MaxFragmentBytes = options.MaxFragmentBytes
+                            }
+                        ]
+                    }
+                ]
+            };
+        }
+
+        /// <summary>
+        /// Creates a profile for the current C# LiteNetLib production lane.
+        /// </summary>
+        public static CultNetTransportProfile CreateLiteNetLib(
+            string runtimeId,
+            LiteNetLibTransportProfileOptions? options = null)
+        {
+            if (string.IsNullOrWhiteSpace(runtimeId)) throw new ArgumentException("Runtime id is required.", nameof(runtimeId));
+            options ??= new LiteNetLibTransportProfileOptions();
+            return new CultNetTransportProfile
+            {
+                RuntimeId = runtimeId,
+                Transports =
+                [
+                    new CultNetTransportDescriptor
+                    {
+                        TransportId = string.IsNullOrWhiteSpace(options.TransportId)
+                            ? "litenetlib"
+                            : options.TransportId,
+                        Protocol = "litenetlib",
+                        Host = options.Host,
+                        Port = options.Port,
+                        WireContracts =
+                        [
+                            CultNetWireContracts.SchemaV0,
+                            CultNetWireContracts.GameCultNetworkingV0
+                        ],
+                        ReconnectPolicy = options.ReconnectPolicy ?? CultNetReconnectPolicies.CreateDefault(),
+                        Channels =
+                        [
+                            new CultNetTransportChannel
+                            {
+                                ChannelId = "schema",
+                                Delivery = "reliable",
+                                Ordering = "ordered",
+                                MaxPayloadBytes = options.MaxPayloadBytes
+                            },
+                            new CultNetTransportChannel
+                            {
+                                ChannelId = "legacy",
+                                Delivery = "reliable",
+                                Ordering = "ordered",
+                                MaxPayloadBytes = options.MaxPayloadBytes
                             }
                         ]
                     }

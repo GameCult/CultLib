@@ -366,6 +366,11 @@ The client:
 - automatically re-verifies using the stored signed session token
 - exposes reconnect state for UI/operator surfaces
 
+`Client.TransportProfile` and `Server.TransportProfile` describe the production
+LiteNetLib lane as a `litenetlib` transport adapter with reliable ordered
+`schema` and `legacy` channels. Discovery and operators can inspect the active
+pipe without treating LiteNetLib as an implicit protocol truth.
+
 The native RUDP socket path also exposes `CultNetRudpReconnectLoop` for
 caller-owned game or service loops. The caller reports closure, calls
 `ReconnectIfDue(nowMs)` from its own scheduler, and the shared

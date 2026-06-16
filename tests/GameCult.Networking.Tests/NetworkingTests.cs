@@ -393,6 +393,59 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void LiteNetLibTransportProfile_AdvertisesLegacyAndSchemaChannels()
+        {
+            var policy = CultNetReconnectPolicies.CreateDefault("client-policy", maxAttempts: 4);
+            var profile = CultNetTransportProfiles.CreateLiteNetLib(
+                "csharp-litenetlib",
+                new LiteNetLibTransportProfileOptions
+                {
+                    TransportId = "game-server",
+                    Host = "127.0.0.1",
+                    Port = 3075,
+                    MaxPayloadBytes = 65_507,
+                    ReconnectPolicy = policy
+                });
+
+            var transport = profile.Transports.Single();
+            Assert.That(transport.Protocol, Is.EqualTo("litenetlib"));
+            Assert.That(transport.TransportId, Is.EqualTo("game-server"));
+            Assert.That(transport.Host, Is.EqualTo("127.0.0.1"));
+            Assert.That(transport.Port, Is.EqualTo(3075));
+            Assert.That(transport.WireContracts, Is.EqualTo(new[] { CultNetWireContracts.SchemaV0, CultNetWireContracts.GameCultNetworkingV0 }));
+            Assert.That(transport.ReconnectPolicy, Is.SameAs(policy));
+            Assert.That(
+                transport.Channels.Select(channel => $"{channel.ChannelId}:{channel.Delivery}:{channel.Ordering}:{channel.MaxPayloadBytes}").ToArray(),
+                Is.EqualTo(new[]
+                {
+                    "schema:reliable:ordered:65507",
+                    "legacy:reliable:ordered:65507"
+                }));
+        }
+
+        [Test]
+        public void LiteNetLibClientAndServer_ExposeTransportProfiles()
+        {
+            var policy = CultNetReconnectPolicies.CreateDefault("client-profile", maxAttempts: 3);
+            using var client = new Client(DevelopmentClientSecurity, policy);
+            using var server = new Server(new CultCache(), DevelopmentServerSecurity);
+
+            var clientTransport = client.TransportProfile.Transports.Single();
+            Assert.That(clientTransport.Protocol, Is.EqualTo("litenetlib"));
+            Assert.That(clientTransport.TransportId, Is.EqualTo("litenetlib-client"));
+            Assert.That(clientTransport.Host, Is.EqualTo("localhost"));
+            Assert.That(clientTransport.ReconnectPolicy, Is.SameAs(policy));
+            Assert.That(clientTransport.WireContracts, Is.EqualTo(new[] { CultNetWireContracts.SchemaV0, CultNetWireContracts.GameCultNetworkingV0 }));
+
+            var serverTransport = server.TransportProfile.Transports.Single();
+            Assert.That(serverTransport.Protocol, Is.EqualTo("litenetlib"));
+            Assert.That(serverTransport.TransportId, Is.EqualTo("litenetlib-server"));
+            Assert.That(serverTransport.Host, Is.EqualTo("0.0.0.0"));
+            Assert.That(serverTransport.Port, Is.EqualTo(3075));
+            Assert.That(serverTransport.Channels.Select(channel => channel.ChannelId).ToArray(), Is.EqualTo(new[] { "schema", "legacy" }));
+        }
+
+        [Test]
         public void ReconnectPolicy_ExposesPortableDelayContract()
         {
             var policy = CultNetReconnectPolicies.CreateDefault("rudp-default", maxAttempts: 8);

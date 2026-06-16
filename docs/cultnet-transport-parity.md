@@ -27,7 +27,7 @@ CultNet owns cross-runtime transport semantics:
 
 | Runtime | Current data transport | Discovery | Transport authority today |
 | --- | --- | --- | --- |
-| C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered`; single-peer RUDP socket transport exists in the library | LiteNetLib connection requests and app-level peer/catalog surfaces | Production LiteNetLib path plus UDP socket binding for the shared RUDP reliability owner |
+| C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered`; single-peer RUDP socket transport exists in the library | LiteNetLib connection requests and app-level peer/catalog surfaces | Production LiteNetLib adapter profile plus UDP socket binding for the shared RUDP reliability owner |
 | C# interop peer | TCP stream with 4-byte length-prefixed MessagePack frames | UDP multicast probe/announce | Test harness only |
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
@@ -146,6 +146,11 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `SendAsync`,
   `ReceiveAsync`, and transfer stats. The C# interop peer advertises and uses
   that shared port instead of owning raw TCP frame I/O directly.
+- C# now has a `litenetlib` transport profile helper, and the production
+  `Client`/`Server` expose profiles for the LiteNetLib lane. The profile names
+  both the modern reliable ordered `schema` channel and the legacy reliable
+  ordered `legacy` union-message channel, so LiteNetLib is described as an
+  adapter instead of remaining the hidden default.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer

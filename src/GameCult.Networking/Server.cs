@@ -60,6 +60,18 @@ namespace GameCult.Networking
         private float Time => (float)(_timer?.Elapsed.TotalSeconds ?? 0d);
 
         /// <summary>
+        /// Gets a transport profile describing the server's LiteNetLib production lane.
+        /// </summary>
+        public CultNetTransportProfile TransportProfile => CultNetTransportProfiles.CreateLiteNetLib(
+            "csharp-server",
+            new LiteNetLibTransportProfileOptions
+            {
+                TransportId = "litenetlib-server",
+                Host = "0.0.0.0",
+                Port = ServerPort
+            });
+
+        /// <summary>
         /// Initializes a new server instance over the supplied cache.
         /// </summary>
         /// <param name="cache">The backing cache used for player persistence.</param>

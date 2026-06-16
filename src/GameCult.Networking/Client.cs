@@ -85,6 +85,19 @@ namespace GameCult.Networking
         public CultNetReconnectPolicy ReconnectPolicy => _reconnectController.Policy;
 
         /// <summary>
+        /// Gets a transport profile describing the client's current LiteNetLib production lane.
+        /// </summary>
+        public CultNetTransportProfile TransportProfile => CultNetTransportProfiles.CreateLiteNetLib(
+            "csharp-client",
+            new LiteNetLibTransportProfileOptions
+            {
+                TransportId = "litenetlib-client",
+                Host = _lastHost,
+                Port = _lastPort > 0 ? _lastPort : null,
+                ReconnectPolicy = ReconnectPolicy
+            });
+
+        /// <summary>
         /// Gets the last scheduled reconnect attempt number.
         /// </summary>
         public int ReconnectAttempt => _reconnectController.Attempt;
@@ -118,6 +131,7 @@ namespace GameCult.Networking
         /// Initializes a new client instance.
         /// </summary>
         /// <param name="security">Validated client security configuration. This must be provided explicitly by the caller.</param>
+        /// <param name="reconnectPolicy">Optional portable reconnect policy for the LiteNetLib client lane.</param>
         public Client(ClientSecurityOptions security, CultNetReconnectPolicy? reconnectPolicy = null)
         {
             _security = security ?? throw new ArgumentNullException(nameof(security));
