@@ -1140,6 +1140,51 @@ class CultCacheTests(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_cultmesh_facade_creates_rudp_client_from_peer_endpoint(self) -> None:
+        connection_id = 0x10203042
+        server = CultMesh.create_rudp_server(
+            "python-cultmesh-rudp-server",
+            connection_id,
+            initial_sequence=100,
+            resend_delay_ms=25,
+            max_fragment_bytes=1024,
+            max_pending_reliable_packets=16,
+        )
+        server_host, server_port = server.socket.getsockname()[:2]
+        endpoint = CultMesh.parse_rudp_endpoint(f"rudp://{server_host}:{server_port}")
+        self.assertEqual(endpoint.host, server_host)
+        self.assertEqual(endpoint.port, server_port)
+        peer = CultMeshPeerCard(
+            peer_id="python-cultmesh-rudp-server",
+            verse_id="local",
+            endpoints=(endpoint.uri,),
+            roles=("schema",),
+        )
+        client = CultMesh.create_rudp_client_for_peer(
+            "python-cultmesh-rudp-client",
+            connection_id,
+            peer,
+            resend_delay_ms=25,
+            max_fragment_bytes=1024,
+            max_pending_reliable_packets=16,
+        )
+
+        try:
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            self.assertTrue(client.connected)
+            self.assertTrue(server.connected)
+
+            client.send("schema", b"client-state")
+            server_frame = receive_rudp_frame(server)
+            self.assertEqual(server_frame.channel_id, "schema")
+            self.assertEqual(server_frame.payload, b"client-state")
+            self.assertEqual(server.profile["transports"][0]["protocol"], "rudp")
+            self.assertEqual(client.profile["transports"][0]["protocol"], "rudp")
+        finally:
+            client.close()
+            server.close()
+
     def test_cultnet_database_subscription_helpers_match_schema_v0_shape(self) -> None:
         subscribe = database_subscribe(
             message_id="sub-message",

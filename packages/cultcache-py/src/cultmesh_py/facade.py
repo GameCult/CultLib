@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import socket as socket_module
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 from cultnet_py import (
     CultNetRawClient,
+    CultNetReconnectPolicy,
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
     CultNetSchemaCatalog,
     CultNetShardCatalog,
     CultNetSimulationObservationHub,
@@ -18,10 +26,18 @@ from .simulation import CultMeshSimulationFactCommitter
 from .wire import (
     AuthorityLeaseVerifier,
     CultMeshAuthorityLeaseCatalog,
+    CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshStreamCatalog,
     CultMeshVerseCatalog,
 )
+
+
+@dataclass(frozen=True)
+class CultMeshRudpEndpoint:
+    host: str
+    port: int
+    uri: str
 
 
 class CultMesh:
@@ -104,6 +120,113 @@ class CultMesh:
         return CultNetShardCatalog()
 
     @staticmethod
+    def parse_rudp_endpoint(endpoint: str) -> CultMeshRudpEndpoint:
+        if not endpoint:
+            raise ValueError("RUDP endpoint must be non-empty")
+        parsed = urlparse(endpoint)
+        if parsed.scheme.lower() != "rudp":
+            raise ValueError("RUDP endpoint must use the rudp:// scheme")
+        if not parsed.hostname or parsed.port is None:
+            raise ValueError("RUDP endpoint must include a host and port")
+        if parsed.port <= 0 or parsed.port > 65535:
+            raise ValueError("RUDP endpoint port must be between 1 and 65535")
+        host = parsed.hostname
+        uri_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        return CultMeshRudpEndpoint(
+            host=host,
+            port=parsed.port,
+            uri=f"rudp://{uri_host}:{parsed.port}",
+        )
+
+    @staticmethod
+    def create_rudp_server(
+        runtime_id: str,
+        connection_id: int,
+        *,
+        bind_host: str = "127.0.0.1",
+        bind_port: int = 0,
+        socket: socket_module.socket | None = None,
+        initial_sequence: int = 1,
+        resend_delay_ms: int = 250,
+        transport_id: str = "rudp",
+        max_payload_bytes: int | None = None,
+        max_fragment_bytes: int | None = None,
+        max_pending_reliable_packets: int | None = None,
+        reconnect_policy: CultNetReconnectPolicy | dict[str, Any] | None = None,
+    ) -> CultNetRudpSocketTransportConnection:
+        transport_socket = socket or _bind_rudp_socket(bind_host, bind_port)
+        return CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id=runtime_id,
+                socket=transport_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+                initial_sequence=initial_sequence,
+                resend_delay_ms=resend_delay_ms,
+                transport_id=transport_id,
+                max_payload_bytes=max_payload_bytes,
+                max_fragment_bytes=max_fragment_bytes,
+                max_pending_reliable_packets=max_pending_reliable_packets,
+                reconnect_policy=reconnect_policy,
+            )
+        )
+
+    @staticmethod
+    def create_rudp_client(
+        runtime_id: str,
+        connection_id: int,
+        endpoint: str | CultMeshRudpEndpoint,
+        *,
+        bind_host: str = "127.0.0.1",
+        bind_port: int = 0,
+        socket: socket_module.socket | None = None,
+        initial_sequence: int = 1,
+        resend_delay_ms: int = 250,
+        transport_id: str = "rudp",
+        max_payload_bytes: int | None = None,
+        max_fragment_bytes: int | None = None,
+        max_pending_reliable_packets: int | None = None,
+        reconnect_policy: CultNetReconnectPolicy | dict[str, Any] | None = None,
+    ) -> CultNetRudpSocketTransportConnection:
+        parsed_endpoint = (
+            CultMesh.parse_rudp_endpoint(endpoint)
+            if isinstance(endpoint, str)
+            else endpoint
+        )
+        transport_socket = socket or _bind_rudp_socket(bind_host, bind_port)
+        return CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id=runtime_id,
+                socket=transport_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=(parsed_endpoint.host, parsed_endpoint.port),
+                connection_id=connection_id,
+                initial_sequence=initial_sequence,
+                resend_delay_ms=resend_delay_ms,
+                transport_id=transport_id,
+                max_payload_bytes=max_payload_bytes,
+                max_fragment_bytes=max_fragment_bytes,
+                max_pending_reliable_packets=max_pending_reliable_packets,
+                reconnect_policy=reconnect_policy,
+            )
+        )
+
+    @staticmethod
+    def create_rudp_client_for_peer(
+        runtime_id: str,
+        connection_id: int,
+        peer: CultMeshPeerCard,
+        **options: Any,
+    ) -> CultNetRudpSocketTransportConnection:
+        endpoint = next(
+            (value for value in peer.endpoints if value.lower().startswith("rudp://")),
+            None,
+        )
+        if endpoint is None:
+            raise ValueError(f"Peer {peer.peer_id!r} does not advertise a RUDP endpoint")
+        return CultMesh.create_rudp_client(runtime_id, connection_id, endpoint, **options)
+
+    @staticmethod
     def create_verse_discovery_client(
         host: str = "localhost",
         port: int = 3075,
@@ -174,3 +297,10 @@ class CultMesh:
         timeout_seconds: float = 4.0,
     ) -> CultNetRawClient:
         return CultNetRawClient(host, port, timeout_seconds)
+
+
+def _bind_rudp_socket(bind_host: str, bind_port: int) -> socket_module.socket:
+    transport_socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    transport_socket.bind((bind_host, bind_port))
+    transport_socket.settimeout(0.02)
+    return transport_socket

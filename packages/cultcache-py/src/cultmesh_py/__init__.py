@@ -8,7 +8,7 @@ from .client import (
     CultMeshVerseDiscoveryClient,
 )
 from .daemon import READY_SCHEMA_VERSION, daemon_ready_document
-from .facade import CultMesh
+from .facade import CultMesh, CultMeshRudpEndpoint
 from .node import CultMeshDatabase, CultMeshDatabaseChange, CultMeshNode, CultMeshNodeOptions, create_node
 from .server import CultMeshLocalServer
 from .session import (
@@ -62,6 +62,7 @@ __all__ = [
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
     "CultMeshPrediction",
+    "CultMeshRudpEndpoint",
     "CultMeshSessionChange",
     "CultMeshSimulationFact",
     "CultMeshSimulationFactCommit",

@@ -299,7 +299,10 @@ Current progress:
 - Python's branded `CultMesh` facade now creates schema catalogs, built-in
   schema catalogs, and shard catalogs by delegating to the existing
   `cultnet_py` owners, matching the TypeScript/Kotlin/Rust entrypoint pattern
-  without creating a second catalog authority.
+  without creating a second catalog authority. The facade now also parses
+  `rudp://host:port` endpoints and creates RUDP client/server transports from
+  endpoint or peer-card contact hints while leaving packet/session semantics in
+  `cultnet_py`.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the
