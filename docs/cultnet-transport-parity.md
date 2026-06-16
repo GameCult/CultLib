@@ -150,7 +150,9 @@ Current progress:
   `Client`/`Server` expose profiles for the LiteNetLib lane. The profile names
   both the modern reliable ordered `schema` channel and the legacy reliable
   ordered `legacy` union-message channel, so LiteNetLib is described as an
-  adapter instead of remaining the hidden default.
+  adapter instead of remaining the hidden default. `NetPeer` send helpers now
+  route through `LiteNetLibTransportConnection`, so outbound schema and legacy
+  messages share one channel-aware ReliableOrdered adapter surface.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer

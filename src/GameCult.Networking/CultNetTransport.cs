@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using LiteNetLib;
 
 namespace GameCult.Networking
 {
@@ -2041,6 +2042,71 @@ namespace GameCult.Networking
             {
                 throw new ObjectDisposedException(nameof(CultNetRudpReconnectLoop));
             }
+        }
+    }
+
+    /// <summary>
+    /// Channel-aware send adapter for the C# LiteNetLib production lane.
+    /// </summary>
+    public sealed class LiteNetLibTransportConnection
+    {
+        private readonly NetPeer _peer;
+        private readonly CultNetTransportStats _stats = new CultNetTransportStats();
+
+        /// <summary>
+        /// Initializes a new channel-aware adapter around a LiteNetLib peer.
+        /// </summary>
+        public LiteNetLibTransportConnection(NetPeer peer, CultNetTransportProfile? profile = null)
+        {
+            _peer = peer ?? throw new ArgumentNullException(nameof(peer));
+            Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        /// <summary>
+        /// Gets the transport profile this adapter implements.
+        /// </summary>
+        public CultNetTransportProfile Profile { get; }
+
+        /// <summary>
+        /// Gets a snapshot of outbound transfer counters.
+        /// </summary>
+        public CultNetTransportStats Stats => _stats.Snapshot();
+
+        /// <summary>
+        /// Sends a payload over a supported LiteNetLib transport channel.
+        /// </summary>
+        public void Send(string channelId, byte[] payload)
+        {
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
+            if (!string.Equals(channelId, "schema", StringComparison.Ordinal)
+                && !string.Equals(channelId, "legacy", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"litenetlib transport only supports schema and legacy channels, got \"{channelId}\".");
+            }
+
+            _peer.Send(payload, DeliveryMethod.ReliableOrdered);
+            _stats.BytesSent += payload.Length;
+            _stats.FramesSent++;
+        }
+
+        /// <summary>
+        /// Serializes and sends a legacy GameCult.Networking union message.
+        /// </summary>
+        public void SendLegacy<T>(T message)
+            where T : Message
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            Send("legacy", MessageSerialization.Serialize(message));
+        }
+
+        /// <summary>
+        /// Serializes and sends a CultNet schema-v0 message.
+        /// </summary>
+        public void SendSchema<T>(T message)
+            where T : ICultNetSchemaMessage
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            Send("schema", CultNetSchemaMessageSerialization.Serialize(message));
         }
     }
 

@@ -1,5 +1,4 @@
 using LiteNetLib;
-using MessagePack;
 
 namespace GameCult.Networking
 {
@@ -16,7 +15,7 @@ namespace GameCult.Networking
         /// <param name="message">The message to serialize and send.</param>
         public static void Send<T>(this NetPeer peer, T message) where T : Message
         {
-            peer.Send(MessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
+            new LiteNetLibTransportConnection(peer).SendLegacy(message);
         }
 
         /// <summary>
@@ -27,7 +26,7 @@ namespace GameCult.Networking
         /// <param name="message">The schema-v0 message to serialize and send.</param>
         public static void SendCultNet<T>(this NetPeer peer, T message) where T : ICultNetSchemaMessage
         {
-            peer.Send(CultNetSchemaMessageSerialization.Serialize(message), DeliveryMethod.ReliableOrdered);
+            new LiteNetLibTransportConnection(peer).SendSchema(message);
         }
     }
 }
