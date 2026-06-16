@@ -31,6 +31,21 @@ peers.upsert({
 });
 
 const readReplicas = peers.find("public", "read-replica");
+
+const leases = CultMesh.createAuthorityLeaseCatalog();
+const stopWatchingLeases = leases.watch((lease) => {
+  console.log("lease changed", lease.leaseId);
+});
+
+leases.upsert({
+  leaseId: "lease:ts-peer",
+  verseId: "public",
+  peerId: "ts-peer",
+  roles: ["read-replica"],
+  validFrom: new Date(Date.now() - 1000),
+  expiresAt: new Date(Date.now() + 60_000),
+});
+stopWatchingLeases();
 ```
 
 ## Streaming Mode
@@ -55,6 +70,12 @@ The mirrored API shape is `CultMeshStreamCatalog`:
 import { CultMesh } from "cultmesh-ts";
 
 const streams = CultMesh.createStreamCatalog();
+const stopWatchingStreams = streams.watch((stream) => {
+  console.log("stream declared", stream.streamId);
+});
+const stopWatchingFrames = streams.watchFrames((frame) => {
+  console.log("latest frame", frame.streamId, frame.sequence);
+});
 
 streams.declare({
   streamId: "mimir:kiyo-pro",
@@ -94,9 +115,13 @@ streams.publishFrame({
   fenceValue: 7n,
   unavoidableCopyCount: 0,
 });
+
+stopWatchingStreams();
+stopWatchingFrames();
 ```
 
 Current implementation status: this package mirrors typed stream declaration,
-negotiation, and latest-frame cursor contracts for non-C# clients. The native
-C# path owns shared-memory rings and GPU-handle integration points. CultCache
-page append/readback remains the durable recording or nonlocal fallback.
+negotiation, watch callbacks, and latest-frame cursor contracts for non-C#
+clients. The native C# path owns shared-memory rings and GPU-handle integration
+points. CultCache page append/readback remains the durable recording or
+nonlocal fallback.

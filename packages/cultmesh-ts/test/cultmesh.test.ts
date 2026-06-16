@@ -69,15 +69,23 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
   assert.deepEqual(peers.find("local", "shard-primary"), [peer]);
   assert.equal(leases.isAuthorized(peer, "shard-primary"), false);
 
-  leases.upsert({
+  const leaseUpdates: string[] = [];
+  const unsubscribeLease = leases.watch((lease) => {
+    leaseUpdates.push(lease.leaseId);
+  });
+  const lease = {
     leaseId: "lease:voidbot-local",
     verseId: "local",
     peerId: "voidbot-local",
     roles: ["shard-primary"],
     validFrom: new Date(Date.now() - 1000),
     expiresAt: new Date(Date.now() + 1000),
-  });
+  };
+  leases.upsert(lease);
+  unsubscribeLease();
+  leases.upsert({ ...lease, roles: ["shard-primary", "schema"] });
 
+  assert.deepEqual(leaseUpdates, ["lease:voidbot-local"]);
   assert.equal(leases.get("lease:voidbot-local")?.peerId, "voidbot-local");
   assert.deepEqual(leases.leases.map((lease) => lease.leaseId), [
     "lease:voidbot-local",
@@ -109,7 +117,15 @@ test("CultMesh TS local Verse catalog exposes sorted views and watch ergonomics"
 
 test("CultMesh TS negotiates streaming frame body transports explicitly", () => {
   const streams = CultMesh.createStreamCatalog();
-  streams.declare({
+  const streamUpdates: string[] = [];
+  const frameUpdates: bigint[] = [];
+  const unsubscribeStream = streams.watch((stream) => {
+    streamUpdates.push(stream.streamId);
+  });
+  const unsubscribeFrame = streams.watchFrames((frame) => {
+    frameUpdates.push(frame.sequence);
+  });
+  const stream = {
     streamId: "mimir:kiyo-pro",
     verseId: "studio",
     ownerPeerId: "starfire",
@@ -132,7 +148,8 @@ test("CultMesh TS negotiates streaming frame body transports explicitly", () => 
       "cultcache-page",
     ],
     maxInFlightFrames: 3,
-  });
+  } as const;
+  streams.declare(stream);
 
   const negotiation = streams.negotiate("mimir:kiyo-pro", {
     peerId: "fensalir",
@@ -152,8 +169,9 @@ test("CultMesh TS negotiates streaming frame body transports explicitly", () => 
     maxInFlightFrames: 2,
     copyBudget: "zero-copy-target",
   });
+  assert.deepEqual(streamUpdates, ["mimir:kiyo-pro"]);
 
-  streams.publishFrame({
+  const frame = {
     streamId: "mimir:kiyo-pro",
     sequence: 42n,
     timestampNs: 1_000_000_000n,
@@ -163,7 +181,15 @@ test("CultMesh TS negotiates streaming frame body transports explicitly", () => 
     fenceHandle: "0xbeef",
     fenceValue: 7n,
     unavoidableCopyCount: 0,
-  });
+  } as const;
+  streams.publishFrame(frame);
 
+  assert.deepEqual(frameUpdates, [42n]);
   assert.equal(streams.latestFrame("mimir:kiyo-pro")?.sequence, 42n);
+  unsubscribeStream();
+  unsubscribeFrame();
+  streams.declare({ ...stream, streamId: "mimir:kiyo-pro-alt" });
+  streams.publishFrame({ ...frame, sequence: 43n });
+  assert.deepEqual(streamUpdates, ["mimir:kiyo-pro"]);
+  assert.deepEqual(frameUpdates, [42n]);
 });

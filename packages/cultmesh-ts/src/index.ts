@@ -152,11 +152,19 @@ export interface CultMeshAuthorityLease {
 
 export class CultMeshAuthorityLeaseCatalog {
   readonly #leases = new Map<string, CultMeshAuthorityLease>();
+  readonly #subscribers = new Set<(lease: CultMeshAuthorityLease) => void>();
 
   public get leases(): readonly CultMeshAuthorityLease[] {
     return [...this.#leases.values()].sort((left, right) =>
       left.leaseId.localeCompare(right.leaseId),
     );
+  }
+
+  public watch(callback: (lease: CultMeshAuthorityLease) => void): () => void {
+    this.#subscribers.add(callback);
+    return () => {
+      this.#subscribers.delete(callback);
+    };
   }
 
   public upsert(lease: CultMeshAuthorityLease): void {
@@ -168,6 +176,9 @@ export class CultMeshAuthorityLeaseCatalog {
     }
 
     this.#leases.set(lease.leaseId, lease);
+    for (const subscriber of [...this.#subscribers]) {
+      subscriber(lease);
+    }
   }
 
   public get(leaseId: string): CultMeshAuthorityLease | undefined {
@@ -298,11 +309,27 @@ export interface CultMeshStreamFrameHandle {
 export class CultMeshStreamCatalog {
   readonly #streams = new Map<string, CultMeshStreamDescriptor>();
   readonly #latestFrames = new Map<string, CultMeshStreamFrameHandle>();
+  readonly #streamSubscribers = new Set<(stream: CultMeshStreamDescriptor) => void>();
+  readonly #frameSubscribers = new Set<(frame: CultMeshStreamFrameHandle) => void>();
 
   public get streams(): readonly CultMeshStreamDescriptor[] {
     return [...this.#streams.values()].sort((left, right) =>
       left.streamId.localeCompare(right.streamId),
     );
+  }
+
+  public watch(callback: (stream: CultMeshStreamDescriptor) => void): () => void {
+    this.#streamSubscribers.add(callback);
+    return () => {
+      this.#streamSubscribers.delete(callback);
+    };
+  }
+
+  public watchFrames(callback: (frame: CultMeshStreamFrameHandle) => void): () => void {
+    this.#frameSubscribers.add(callback);
+    return () => {
+      this.#frameSubscribers.delete(callback);
+    };
   }
 
   public declare(stream: CultMeshStreamDescriptor): CultMeshStreamDescriptor {
@@ -315,6 +342,9 @@ export class CultMeshStreamCatalog {
     }
 
     this.#streams.set(stream.streamId, stream);
+    for (const subscriber of [...this.#streamSubscribers]) {
+      subscriber(stream);
+    }
     return stream;
   }
 
@@ -381,6 +411,9 @@ export class CultMeshStreamCatalog {
     }
 
     this.#latestFrames.set(frame.streamId, frame);
+    for (const subscriber of [...this.#frameSubscribers]) {
+      subscriber(frame);
+    }
     return frame;
   }
 

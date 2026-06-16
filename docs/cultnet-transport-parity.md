@@ -283,6 +283,7 @@ Current progress:
 - TypeScript CultMesh local catalogs now expose the same practical discovery
   ergonomics as the other runtimes: sorted local views, direct `get(...)`
   lookup, unsubscribe-able `watch(...)` callbacks for Verse and peer catalogs,
+  watch callbacks for authority leases and stream declarations/frame cursors,
   plus lease listing and lookup beside the authority check.
 - Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
