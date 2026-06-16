@@ -101,7 +101,8 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   transport profile advertisement, ping/pong, disconnect reason propagation,
   timeout state, fragmentation/reassembly, reliable ordered `schema` delivery,
   unreliable sequenced `latest`, unreliable unordered `realtime`, resend
-  pressure, and bounded reliable-send backpressure. The TypeScript interop
+  pressure, bounded reliable-send backpressure, and the portable
+  `cultnet.reconnect_policy.v0` delay-policy helper. The TypeScript interop
   harness proves bidirectional Python/TypeScript RUDP socket exchange,
   packet-loss recovery, reordering recovery, fragmentation, ping/pong, and
   disconnect reason propagation through the shared wire language.
@@ -283,7 +284,9 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   raw client, and interop peer still use the TCP-framed schema lane for many
   service and harness flows, while `docs/cultnet-transport-parity.md` tracks the
   remaining work to put broader server-side bodies behind the shared transport
-  port instead of cloning LiteNetLib.
+  port instead of cloning LiteNetLib. The reconnect policy helper is portable;
+  automatic reconnect orchestration is not yet claimed for Python service
+  bodies.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

@@ -11,6 +11,7 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetReconnectPolicyOptions;
 use cultnet_rs::CultNetRudpPacket;
 use cultnet_rs::CultNetRudpPacketType;
 use cultnet_rs::CultNetRudpSendOptions;
@@ -35,6 +36,8 @@ use cultnet_rs::LengthPrefixedMessageFramer;
 use cultnet_rs::TcpFramedTransportConnection;
 use cultnet_rs::TcpFramedTransportProfileOptions;
 use cultnet_rs::builtin_schema_registry;
+use cultnet_rs::compute_reconnect_delay_ms;
+use cultnet_rs::create_reconnect_policy;
 use cultnet_rs::create_rudp_transport_profile;
 use cultnet_rs::create_tcp_framed_transport_profile;
 use cultnet_rs::decode_cultnet_message_from_slice;
@@ -313,6 +316,23 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             ),
         ]
     );
+}
+
+#[test]
+fn reconnect_policy_exposes_portable_delay_contract() {
+    let policy = create_reconnect_policy(CultNetReconnectPolicyOptions {
+        policy_id: "rudp-default".to_string(),
+        max_attempts: Some(8),
+        ..CultNetReconnectPolicyOptions::default()
+    });
+
+    assert_eq!(policy.schema_version, "cultnet.reconnect_policy.v0");
+    assert_eq!(policy.policy_id, "rudp-default");
+    assert_eq!(policy.max_attempts, Some(8));
+    assert_eq!(compute_reconnect_delay_ms(&policy, 1, 0), 1_000);
+    assert_eq!(compute_reconnect_delay_ms(&policy, 3, 17), 4_017);
+    assert_eq!(compute_reconnect_delay_ms(&policy, 9, 999), 30_250);
+    assert_eq!(compute_reconnect_delay_ms(&policy, 0, 0), 1_000);
 }
 
 #[test]

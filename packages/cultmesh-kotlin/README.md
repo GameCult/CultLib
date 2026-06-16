@@ -167,6 +167,18 @@ that already has its own receive loop, use `connectAndWait(...)`; for two
 same-process transports, use `pumpRudpPairUntilConnected(...)` to drive both
 sides through the handshake.
 
+Kotlin also exposes the shared reconnect-policy helper for peers that need a
+portable backoff document without inventing a JVM-only delay dialect:
+
+```kotlin
+val policy = createReconnectPolicy(policyId = "rudp-default", maxAttempts = 8)
+val nextDelayMs = computeReconnectDelayMs(policy, attempt = 3, jitterMs = 17)
+```
+
+The helper publishes `cultnet.reconnect_policy.v0` and matches the C#,
+TypeScript, Rust, and Python defaults. It is policy language, not an automatic
+reconnect loop.
+
 `EveDashboardStateDocument` mirrors the CultUI-shaped dashboard surface contract:
 `surface.root` is the retained UI tree, `surface.assets` carries cacheable media
 references, and the flat `nodes` projection remains a compatibility and binding

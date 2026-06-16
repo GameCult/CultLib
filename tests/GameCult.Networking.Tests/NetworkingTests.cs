@@ -391,6 +391,26 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ReconnectPolicy_ExposesPortableDelayContract()
+        {
+            var policy = CultNetReconnectPolicies.CreateDefault("rudp-default", maxAttempts: 8);
+
+            Assert.That(policy.SchemaVersion, Is.EqualTo("cultnet.reconnect_policy.v0"));
+            Assert.That(policy.PolicyId, Is.EqualTo("rudp-default"));
+            Assert.That(policy.MaxAttempts, Is.EqualTo(8));
+            Assert.That(CultNetReconnectPolicies.ComputeDelayMs(policy, 1), Is.EqualTo(1_000));
+            Assert.That(CultNetReconnectPolicies.ComputeDelayMs(policy, 3, 17), Is.EqualTo(4_017));
+            Assert.That(CultNetReconnectPolicies.ComputeDelayMs(policy, 9, 999), Is.EqualTo(30_250));
+            Assert.That(CultNetReconnectPolicies.ComputeDelayMs(policy, 0, -5), Is.EqualTo(1_000));
+
+            var json = MessagePack.MessagePackSerializer.ConvertToJson(
+                MessagePack.MessagePackSerializer.Serialize(policy, CultNetSchemaMessageSerialization.Options));
+            Assert.That(json, Does.Contain("\"schemaVersion\""));
+            Assert.That(json, Does.Contain("\"policyId\""));
+            Assert.That(json, Does.Contain("\"maxAttempts\""));
+        }
+
+        [Test]
         public void RudpSession_HandshakeAcksReliableConnectAndAcceptPackets()
         {
             var client = new CultNetRudpSession(new CultNetRudpSessionOptions

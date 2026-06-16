@@ -16,6 +16,48 @@ export interface CultNetTransportStats {
   framesSent: number;
 }
 
+export interface CultNetReconnectPolicy {
+  schemaVersion: "cultnet.reconnect_policy.v0";
+  policyId: string;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  maxJitterMs: number;
+  maxAttempts?: number;
+}
+
+export interface CultNetReconnectPolicyOptions {
+  policyId?: string;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  maxJitterMs?: number;
+  maxAttempts?: number;
+}
+
+export function createCultNetReconnectPolicy(options: CultNetReconnectPolicyOptions = {}): CultNetReconnectPolicy {
+  return {
+    schemaVersion: "cultnet.reconnect_policy.v0",
+    policyId: options.policyId ?? "default",
+    baseDelayMs: options.baseDelayMs ?? 1_000,
+    maxDelayMs: options.maxDelayMs ?? 30_000,
+    maxJitterMs: options.maxJitterMs ?? 250,
+    ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+  };
+}
+
+export function computeCultNetReconnectDelayMs(
+  policy: CultNetReconnectPolicy,
+  attempt: number,
+  jitterMs = 0,
+): number {
+  const normalizedAttempt = Math.max(1, Math.floor(attempt));
+  const cappedBaseDelay = Math.min(
+    policy.maxDelayMs,
+    policy.baseDelayMs * (2 ** (normalizedAttempt - 1)),
+  );
+  const boundedJitter = Math.max(0, Math.min(policy.maxJitterMs, Math.floor(jitterMs)));
+  return cappedBaseDelay + boundedJitter;
+}
+
 export interface CultNetTransportConnectionEvents {
   frame: (frame: CultNetTransportFrame) => void;
   close: () => void;

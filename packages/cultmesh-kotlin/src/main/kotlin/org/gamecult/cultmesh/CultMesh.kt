@@ -325,6 +325,57 @@ data class CultNetTransportStats(
 
 data class CultNetTransportFrame(val channelId: String, val payload: ByteArray)
 
+data class CultNetReconnectPolicy(
+    val schemaVersion: String = "cultnet.reconnect_policy.v0",
+    val policyId: String = "default",
+    val baseDelayMs: Long = 1_000,
+    val maxDelayMs: Long = 30_000,
+    val maxJitterMs: Long = 250,
+    val maxAttempts: Int? = null,
+) {
+    fun toWireMap(): Map<String, Any?> {
+        val wire = linkedMapOf<String, Any?>(
+            "schemaVersion" to schemaVersion,
+            "policyId" to policyId,
+            "baseDelayMs" to baseDelayMs,
+            "maxDelayMs" to maxDelayMs,
+            "maxJitterMs" to maxJitterMs,
+        )
+        if (maxAttempts != null) wire["maxAttempts"] = maxAttempts
+        return wire
+    }
+}
+
+fun createReconnectPolicy(
+    policyId: String = "default",
+    baseDelayMs: Long = 1_000,
+    maxDelayMs: Long = 30_000,
+    maxJitterMs: Long = 250,
+    maxAttempts: Int? = null,
+): CultNetReconnectPolicy = CultNetReconnectPolicy(
+    policyId = policyId.ifBlank { "default" },
+    baseDelayMs = baseDelayMs,
+    maxDelayMs = maxDelayMs,
+    maxJitterMs = maxJitterMs,
+    maxAttempts = maxAttempts,
+)
+
+fun computeReconnectDelayMs(policy: CultNetReconnectPolicy, attempt: Int, jitterMs: Long = 0): Long {
+    val normalizedAttempt = attempt.coerceAtLeast(1)
+    val exponent = (normalizedAttempt - 1).coerceAtMost(62)
+    val multiplier = 1L shl exponent
+    val base = policy.baseDelayMs.coerceAtLeast(0)
+    val cappedBaseDelay = if (base == 0L) {
+        0L
+    } else {
+        val maxMultiplier = Long.MAX_VALUE / base
+        val product = if (multiplier > maxMultiplier) Long.MAX_VALUE else base * multiplier
+        product.coerceAtMost(policy.maxDelayMs)
+    }
+    val boundedJitter = jitterMs.coerceIn(0, policy.maxJitterMs)
+    return cappedBaseDelay + boundedJitter
+}
+
 data class CultNetTransportProfile(
     val schemaVersion: String = "cultnet.transport_profile.v0",
     val runtimeId: String,
@@ -2285,6 +2336,7 @@ fun main(args: Array<String>) {
         cultMeshFacadeRoutesErgonomicEntrypoints()
         cultCacheRawSnapshotsRoundTripThroughCultNetMessages()
         cultNetSchemaMessagesUseMessagePackMaps()
+        cultNetReconnectPolicyExposesPortableDelayContract()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         cultMeshAuthorityLeasesGatePeerTrust()
@@ -2463,6 +2515,21 @@ private fun cultNetSchemaMessagesUseMessagePackMaps() {
     val document = parsedPut.body["document"] as Map<*, *>
     check(document["payloadEncoding"] == "messagepack")
     check((document["payload"] as ByteArray).contentEquals(payload))
+}
+
+private fun cultNetReconnectPolicyExposesPortableDelayContract() {
+    val policy = createReconnectPolicy(policyId = "rudp-default", maxAttempts = 8)
+    val wire = policy.toWireMap()
+
+    check(policy.schemaVersion == "cultnet.reconnect_policy.v0")
+    check(policy.policyId == "rudp-default")
+    check(policy.maxAttempts == 8)
+    check(wire["policyId"] == "rudp-default")
+    check(wire["maxAttempts"] == 8)
+    check(computeReconnectDelayMs(policy, 1) == 1_000L)
+    check(computeReconnectDelayMs(policy, 3, 17) == 4_017L)
+    check(computeReconnectDelayMs(policy, 9, 999) == 30_250L)
+    check(computeReconnectDelayMs(policy, 0, -5) == 1_000L)
 }
 
 private fun cultNetSchemaCatalogsRoundTripDescriptors() {

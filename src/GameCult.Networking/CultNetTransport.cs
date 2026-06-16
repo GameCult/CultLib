@@ -61,6 +61,84 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Portable reconnect backoff policy document.
+    /// </summary>
+    [MessagePack.MessagePackObject]
+    public sealed class CultNetReconnectPolicy
+    {
+        /// <summary>
+        /// Gets or sets the shared reconnect policy schema version.
+        /// </summary>
+        [MessagePack.Key("schemaVersion")]
+        public string SchemaVersion { get; set; } = "cultnet.reconnect_policy.v0";
+        /// <summary>
+        /// Gets or sets the policy identifier.
+        /// </summary>
+        [MessagePack.Key("policyId")]
+        public string PolicyId { get; set; } = "default";
+        /// <summary>
+        /// Gets or sets the first reconnect delay.
+        /// </summary>
+        [MessagePack.Key("baseDelayMs")]
+        public int BaseDelayMs { get; set; } = 1_000;
+        /// <summary>
+        /// Gets or sets the maximum exponential backoff delay before jitter.
+        /// </summary>
+        [MessagePack.Key("maxDelayMs")]
+        public int MaxDelayMs { get; set; } = 30_000;
+        /// <summary>
+        /// Gets or sets the maximum positive jitter a caller may add.
+        /// </summary>
+        [MessagePack.Key("maxJitterMs")]
+        public int MaxJitterMs { get; set; } = 250;
+        /// <summary>
+        /// Gets or sets the optional maximum reconnect attempts.
+        /// </summary>
+        [MessagePack.Key("maxAttempts")]
+        public int? MaxAttempts { get; set; }
+    }
+
+    /// <summary>
+    /// Helpers for portable reconnect policy documents.
+    /// </summary>
+    public static class CultNetReconnectPolicies
+    {
+        /// <summary>
+        /// Creates a reconnect policy using the shared default values.
+        /// </summary>
+        public static CultNetReconnectPolicy CreateDefault(
+            string policyId = "default",
+            int baseDelayMs = 1_000,
+            int maxDelayMs = 30_000,
+            int maxJitterMs = 250,
+            int? maxAttempts = null)
+        {
+            return new CultNetReconnectPolicy
+            {
+                PolicyId = string.IsNullOrWhiteSpace(policyId) ? "default" : policyId,
+                BaseDelayMs = baseDelayMs,
+                MaxDelayMs = maxDelayMs,
+                MaxJitterMs = maxJitterMs,
+                MaxAttempts = maxAttempts
+            };
+        }
+
+        /// <summary>
+        /// Computes the deterministic exponential reconnect delay for an attempt.
+        /// </summary>
+        public static int ComputeDelayMs(CultNetReconnectPolicy policy, int attempt, int jitterMs = 0)
+        {
+            if (policy == null) throw new ArgumentNullException(nameof(policy));
+            var normalizedAttempt = Math.Max(1, attempt);
+            var cappedBaseDelay = Math.Min(
+                policy.MaxDelayMs,
+                (int)Math.Min(int.MaxValue, policy.BaseDelayMs * Math.Pow(2, normalizedAttempt - 1)));
+            var boundedJitter = Math.Max(0, Math.Min(policy.MaxJitterMs, jitterMs));
+            return cappedBaseDelay + boundedJitter;
+        }
+    }
+
+    /// <summary>
     /// Options for creating a TCP framed transport profile.
     /// </summary>
     public sealed class TcpFramedTransportProfileOptions

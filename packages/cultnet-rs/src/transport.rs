@@ -1,5 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use serde::Deserialize;
+use serde::Serialize;
 use std::io::Read;
 use std::io::Write;
 
@@ -24,6 +26,68 @@ pub struct CultNetTransportStats {
 pub struct CultNetTransportFrame {
     pub channel_id: String,
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetReconnectPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub max_jitter_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CultNetReconnectPolicyOptions {
+    pub policy_id: String,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub max_jitter_ms: u64,
+    pub max_attempts: Option<u32>,
+}
+
+impl Default for CultNetReconnectPolicyOptions {
+    fn default() -> Self {
+        Self {
+            policy_id: "default".to_string(),
+            base_delay_ms: 1_000,
+            max_delay_ms: 30_000,
+            max_jitter_ms: 250,
+            max_attempts: None,
+        }
+    }
+}
+
+pub fn create_reconnect_policy(options: CultNetReconnectPolicyOptions) -> CultNetReconnectPolicy {
+    CultNetReconnectPolicy {
+        schema_version: "cultnet.reconnect_policy.v0".to_string(),
+        policy_id: if options.policy_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            options.policy_id
+        },
+        base_delay_ms: options.base_delay_ms,
+        max_delay_ms: options.max_delay_ms,
+        max_jitter_ms: options.max_jitter_ms,
+        max_attempts: options.max_attempts,
+    }
+}
+
+pub fn compute_reconnect_delay_ms(
+    policy: &CultNetReconnectPolicy,
+    attempt: u32,
+    jitter_ms: u64,
+) -> u64 {
+    let normalized_attempt = attempt.max(1);
+    let multiplier = 2_u64.saturating_pow(normalized_attempt.saturating_sub(1));
+    let capped_base_delay = policy
+        .base_delay_ms
+        .saturating_mul(multiplier)
+        .min(policy.max_delay_ms);
+    capped_base_delay + jitter_ms.min(policy.max_jitter_ms)
 }
 
 #[derive(Clone, Debug, Default)]

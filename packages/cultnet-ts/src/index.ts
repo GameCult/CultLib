@@ -58,7 +58,11 @@ export { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
 export { CultNetPeer, type CultNetPeerEvents } from "./peer";
 export {
   TcpFramedTransportConnection,
+  computeCultNetReconnectDelayMs,
+  createCultNetReconnectPolicy,
   createTcpFramedTransportProfile,
+  type CultNetReconnectPolicy,
+  type CultNetReconnectPolicyOptions,
   type CultNetTransportConnection,
   type CultNetTransportConnectionEvents,
   type CultNetTransportFrame,

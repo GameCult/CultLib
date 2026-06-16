@@ -220,6 +220,11 @@ Current progress:
   connect, accept, single-packet sends, or fragmented sends enqueue anything;
   TCP-framed profiles do not publish the field because they do not own the RUDP
   pending-reliable queue.
+- TypeScript, C#, Rust, Python, and Kotlin now share a portable
+  `cultnet.reconnect_policy.v0` document and deterministic exponential delay
+  helper. This gives RUDP peers the same policy language for reconnect posture;
+  it does not yet claim automatic reconnect orchestration or production service
+  adoption of that policy.
 - Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate
@@ -239,8 +244,8 @@ Current progress:
   creating a second authority path.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into reconnect policy and the wider
-  schema-message matrix.
+  ports, then broaden RUDP interop into automatic reconnect orchestration and
+  the wider schema-message matrix.
 
 ## RUDP Packet Contract V0
 

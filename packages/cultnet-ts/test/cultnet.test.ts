@@ -25,6 +25,8 @@ import {
   TcpFramedTransportConnection,
   cultNetSchemas,
   cultNetBuiltinSchemaRegistry,
+  computeCultNetReconnectDelayMs,
+  createCultNetReconnectPolicy,
   createTcpFramedTransportProfile,
   createRudpTransportProfile,
   defineCultNetDocumentBinding,
@@ -273,6 +275,18 @@ test("rudp transport profile advertises state and realtime channel semantics", (
       ["realtime", "unreliable", "unordered"],
     ],
   );
+});
+
+test("reconnect policy exposes the shared portable delay contract", () => {
+  const policy = createCultNetReconnectPolicy({ policyId: "rudp-default", maxAttempts: 8 });
+
+  assert.equal(policy.schemaVersion, "cultnet.reconnect_policy.v0");
+  assert.equal(policy.policyId, "rudp-default");
+  assert.equal(policy.maxAttempts, 8);
+  assert.equal(computeCultNetReconnectDelayMs(policy, 1), 1_000);
+  assert.equal(computeCultNetReconnectDelayMs(policy, 3, 17), 4_017);
+  assert.equal(computeCultNetReconnectDelayMs(policy, 9, 999), 30_250);
+  assert.equal(computeCultNetReconnectDelayMs(policy, 0, -5), 1_000);
 });
 
 test("rudp session handshake acks reliable connect and accept packets", () => {

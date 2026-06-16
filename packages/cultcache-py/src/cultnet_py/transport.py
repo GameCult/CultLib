@@ -24,6 +24,52 @@ class CultNetTransportStats:
 
 
 @dataclass(frozen=True)
+class CultNetReconnectPolicy:
+    schema_version: str = "cultnet.reconnect_policy.v0"
+    policy_id: str = "default"
+    base_delay_ms: int = 1000
+    max_delay_ms: int = 30000
+    max_jitter_ms: int = 250
+    max_attempts: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "schemaVersion": self.schema_version,
+            "policyId": self.policy_id,
+            "baseDelayMs": self.base_delay_ms,
+            "maxDelayMs": self.max_delay_ms,
+            "maxJitterMs": self.max_jitter_ms,
+        }
+        if self.max_attempts is not None:
+            wire["maxAttempts"] = self.max_attempts
+        return wire
+
+
+def create_reconnect_policy(
+    *,
+    policy_id: str = "default",
+    base_delay_ms: int = 1000,
+    max_delay_ms: int = 30000,
+    max_jitter_ms: int = 250,
+    max_attempts: int | None = None,
+) -> CultNetReconnectPolicy:
+    return CultNetReconnectPolicy(
+        policy_id=policy_id or "default",
+        base_delay_ms=base_delay_ms,
+        max_delay_ms=max_delay_ms,
+        max_jitter_ms=max_jitter_ms,
+        max_attempts=max_attempts,
+    )
+
+
+def compute_reconnect_delay_ms(policy: CultNetReconnectPolicy, attempt: int, jitter_ms: int = 0) -> int:
+    normalized_attempt = max(1, int(attempt))
+    capped_base_delay = min(policy.max_delay_ms, policy.base_delay_ms * (2 ** (normalized_attempt - 1)))
+    bounded_jitter = max(0, min(policy.max_jitter_ms, int(jitter_ms)))
+    return capped_base_delay + bounded_jitter
+
+
+@dataclass(frozen=True)
 class CultNetTransportFrame:
     channel_id: str
     payload: bytes

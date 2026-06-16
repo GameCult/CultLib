@@ -82,6 +82,7 @@ from cultnet_py import (
     apply_shard_log_response,
     create_rudp_transport_profile,
     create_tcp_framed_transport_profile,
+    create_reconnect_policy,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
@@ -107,6 +108,7 @@ from cultnet_py import (
     wire_message_schema_catalog,
     wire_message_schema_descriptors,
     witness_artifact_bundle,
+    compute_reconnect_delay_ms,
 )
 from cultmesh_py import create_node
 from cultmesh_py import (
@@ -682,6 +684,19 @@ class CultCacheTests(unittest.TestCase):
                 ("realtime", "unreliable", "unordered"),
             ],
         )
+
+    def test_cultnet_reconnect_policy_exposes_portable_delay_contract(self) -> None:
+        policy = create_reconnect_policy(policy_id="rudp-default", max_attempts=8)
+
+        self.assertEqual(policy.schema_version, "cultnet.reconnect_policy.v0")
+        self.assertEqual(policy.policy_id, "rudp-default")
+        self.assertEqual(policy.max_attempts, 8)
+        self.assertEqual(policy.to_wire()["policyId"], "rudp-default")
+        self.assertEqual(policy.to_wire()["maxAttempts"], 8)
+        self.assertEqual(compute_reconnect_delay_ms(policy, 1), 1_000)
+        self.assertEqual(compute_reconnect_delay_ms(policy, 3, 17), 4_017)
+        self.assertEqual(compute_reconnect_delay_ms(policy, 9, 999), 30_250)
+        self.assertEqual(compute_reconnect_delay_ms(policy, 0, -5), 1_000)
 
     def test_cultnet_rudp_session_handshake_acks_reliable_connect_and_accept_packets(self) -> None:
         client = CultNetRudpSession(
