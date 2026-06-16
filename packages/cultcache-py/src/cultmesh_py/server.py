@@ -9,10 +9,9 @@ import msgpack
 
 from cultnet_py import (
     CultNetSimulationObservationHub,
+    TcpFramedTransportConnection,
     create_tcp_framed_transport_profile,
-    read_frame,
     wire_message_schema_descriptors,
-    write_frame,
 )
 
 from .node import CultMeshNode
@@ -142,18 +141,27 @@ class CultMeshLocalServer:
     def _handle_connection(self, client: socket.socket) -> None:
         with client:
             stream = client.makefile("rwb")
+            transport = TcpFramedTransportConnection(
+                stream,
+                profile=create_tcp_framed_transport_profile(
+                    self.node.runtime_id,
+                    transport_id="cultmesh-local-tcp",
+                    host=self.host,
+                    port=self.port,
+                ),
+            )
             subscriptions: dict[str, _DatabaseSubscription] = {}
             while not self._stop.is_set():
                 try:
-                    message = msgpack.unpackb(read_frame(stream), raw=False)
+                    frame = transport.receive()
+                    message = msgpack.unpackb(frame.payload, raw=False)
                 except EOFError:
                     return
                 if not isinstance(message, dict):
                     continue
                 responses = self._handle_connection_message(message, subscriptions)
                 for response in responses:
-                    write_frame(stream, msgpack.packb(response, use_bin_type=True))
-                    stream.flush()
+                    transport.send("schema", msgpack.packb(response, use_bin_type=True))
 
     def _handle_connection_message(
         self,

@@ -56,9 +56,9 @@ CultMesh.
 
 ## Remaining Work Before A Full Completion Claim
 
-- Broaden service adoption so local servers and daemon paths use the shared
-  transport port consistently instead of keeping raw TCP/LiteNetLib/WebSocket
-  ownership in individual bodies.
+- Broaden service adoption so remaining daemon and production paths use the
+  shared transport port consistently instead of keeping raw
+  TCP/LiteNetLib/WebSocket ownership in individual bodies.
 - Extend RUDP interop evidence through automatic reconnect orchestration and
   the wider schema-message matrix. RUDP profiles now advertise the portable
   reconnect policy across the targeted runtimes; service adoption of that

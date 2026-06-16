@@ -164,8 +164,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 - Python CultMesh local server:
   Serves a `CultMeshNode` plus Verse and peer catalogs over the same framed
   MessagePack request/response lane used by `CultNetRawClient` and
-  `CultMeshDiscoveryClient`. It also supports live raw database subscriptions
-  for snapshot, put, and delete notifications on a connected client stream.
+  `CultMeshDiscoveryClient`. Accepted connections now read and write through
+  the shared `TcpFramedTransportConnection` port rather than owning raw frame
+  I/O in the server loop. It also supports live raw database subscriptions for
+  snapshot, put, and delete notifications on a connected client stream.
   When given a `CultNetSimulationObservationHub`, it accepts
   `cultnet.simulation_observation.v0` messages and replies with current
   `cultnet.simulation_consensus_candidate.v0` messages through the same framed

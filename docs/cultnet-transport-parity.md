@@ -153,8 +153,9 @@ Current progress:
   path or the transport connection path.
 - Python now has the same `tcp_framed` transport profile helper plus a
   synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
-  and stats. `CultNetRawClient` and database subscriptions send/read through
-  that port instead of owning frame I/O directly.
+  and stats. `CultNetRawClient`, database subscriptions, and the local
+  CultMesh server connection loop send/read through that port instead of owning
+  frame I/O directly.
 - Rust now has the same `tcp_framed` transport profile helper plus a
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
@@ -243,10 +244,9 @@ Current progress:
   lease catalogs, stream catalogs, and RUDP client/server construction. The
   facade delegates to the same owners as the top-level helpers instead of
   creating a second authority path.
-- The remaining parity work is to deepen Python's server-side use of its port
-  and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into automatic reconnect orchestration and
-  the wider schema-message matrix.
+- The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
+  service bodies behind their shared transport ports, then broaden RUDP interop
+  into automatic reconnect orchestration and the wider schema-message matrix.
 
 ## RUDP Packet Contract V0
 
