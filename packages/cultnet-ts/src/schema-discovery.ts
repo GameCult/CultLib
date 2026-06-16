@@ -391,6 +391,22 @@ export const cultNetBuiltinSchemaRegistry = new CultNetSchemaRegistry([
     wireContracts: ["cultnet.schema.v0", "gamecult.networking.v0"],
   },
   {
+    schemaId: cultNetSchemas.shardCatalogRequestSchema.$id,
+    kind: "wire_message",
+    schema: cultNetSchemas.shardCatalogRequestSchema,
+    schemaVersion: "cultnet.shard_catalog_request.v0",
+    title: "CultNet Shard Catalog Request Message",
+    wireContracts: ["cultnet.schema.v0"],
+  },
+  {
+    schemaId: cultNetSchemas.shardCatalogResponseSchema.$id,
+    kind: "wire_message",
+    schema: cultNetSchemas.shardCatalogResponseSchema,
+    schemaVersion: "cultnet.shard_catalog_response.v0",
+    title: "CultNet Shard Catalog Response Message",
+    wireContracts: ["cultnet.schema.v0"],
+  },
+  {
     schemaId: cultNetSchemas.ghostlightAgentStateSchema.$id,
     kind: "document_payload",
     schema: cultNetSchemas.ghostlightAgentStateSchema,

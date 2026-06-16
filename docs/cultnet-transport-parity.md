@@ -317,7 +317,9 @@ Current progress:
   request/fetch/sync helpers for
   `cultnet.shard_catalog_request.v0` / `cultnet.shard_catalog_response.v0`.
   Shard descriptors can be filtered by schema id and record key without
-  requiring callers to inspect raw response maps.
+  requiring callers to inspect raw response maps. The built-in schema registry
+  also advertises the shard catalog request/response wire-message schemas, so
+  discovery matches the helper surface.
 - Kotlin now mirrors the CultMesh stream catalog shape for Android-adjacent
   media, sensor, tensor, and byte streams: stream declaration, clock metadata,
   preferred body transports, consumer negotiation, copy-budget classification,

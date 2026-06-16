@@ -835,6 +835,14 @@ test("CultNet schema discovery catalog can advertise canonical schemas without i
   assert.equal(transportProfile?.kind, "shared_contract");
   assert.equal(transportProfile?.schemaId, cultNetSchemas.transportProfileSchema.$id);
   assert.deepEqual(transportProfile?.wireContracts, ["cultnet.schema.v0"]);
+  const shardCatalogRequest = response.schemas.find((schema) => schema.schemaVersion === "cultnet.shard_catalog_request.v0");
+  assert.ok(shardCatalogRequest);
+  assert.equal(shardCatalogRequest?.schemaId, cultNetSchemas.shardCatalogRequestSchema.$id);
+  assert.deepEqual(shardCatalogRequest?.wireContracts, ["cultnet.schema.v0"]);
+  const shardCatalogResponse = response.schemas.find((schema) => schema.schemaVersion === "cultnet.shard_catalog_response.v0");
+  assert.ok(shardCatalogResponse);
+  assert.equal(shardCatalogResponse?.schemaId, cultNetSchemas.shardCatalogResponseSchema.$id);
+  assert.deepEqual(shardCatalogResponse?.wireContracts, ["cultnet.schema.v0"]);
   assert.equal(
     cultNetSchemas.transportProfileSchema.properties.transports.items.properties.reconnectPolicy.properties.schemaVersion.const,
     "cultnet.reconnect_policy.v0",

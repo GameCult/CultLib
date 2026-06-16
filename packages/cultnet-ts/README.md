@@ -187,7 +187,10 @@ Shard discovery follows the same split: `CultNetShardCatalog` owns imported
 `cultnet.shard_catalog_response.v0` descriptors, filters by schema id and
 record key, and can answer `cultnet.shard_catalog_request.v0`. `CultNetPeer`
 also exposes `requestShardCatalog(...)`, `fetchShardDescriptors(...)`, and
-`syncShardCatalog(...)` for the same message-id-matched exchange.
+`syncShardCatalog(...)` for the same message-id-matched exchange. The built-in
+schema registry advertises the shard catalog request/response schemas as
+schema-v0 wire messages, so callers can discover the contracts before using
+the helper path.
 
 ## Quick Example
 
