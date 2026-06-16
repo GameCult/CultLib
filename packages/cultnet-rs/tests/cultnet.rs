@@ -16,6 +16,7 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetReconnectController;
 use cultnet_rs::CultNetReconnectPolicyOptions;
 use cultnet_rs::CultNetRudpPacket;
 use cultnet_rs::CultNetRudpPacketType;
@@ -354,6 +355,44 @@ fn reconnect_policy_exposes_portable_delay_contract() {
     assert_eq!(compute_reconnect_delay_ms(&policy, 3, 17), 4_017);
     assert_eq!(compute_reconnect_delay_ms(&policy, 9, 999), 30_250);
     assert_eq!(compute_reconnect_delay_ms(&policy, 0, 0), 1_000);
+}
+
+#[test]
+fn reconnect_controller_schedules_attempts_and_reset() {
+    let policy = create_reconnect_policy(CultNetReconnectPolicyOptions {
+        max_attempts: Some(2),
+        ..CultNetReconnectPolicyOptions::default()
+    });
+    let mut controller = CultNetReconnectController::new(policy);
+
+    let first = controller.record_failure(10_000, 0);
+    assert_eq!(first.attempt, 1);
+    assert!(first.should_retry);
+    assert_eq!(first.delay_ms, 1_000);
+    assert_eq!(first.next_attempt_at_ms, Some(11_000));
+    assert!(!first.exhausted);
+    assert!(!controller.can_attempt(10_999));
+    assert!(controller.can_attempt(11_000));
+
+    let second = controller.record_failure(11_000, 17);
+    assert_eq!(second.attempt, 2);
+    assert_eq!(second.delay_ms, 2_017);
+    assert_eq!(second.next_attempt_at_ms, Some(13_017));
+    assert!(second.should_retry);
+
+    let exhausted = controller.record_failure(13_017, 0);
+    assert_eq!(exhausted.attempt, 2);
+    assert!(!exhausted.should_retry);
+    assert_eq!(exhausted.delay_ms, 0);
+    assert_eq!(exhausted.next_attempt_at_ms, None);
+    assert!(exhausted.exhausted);
+    assert!(!controller.can_attempt(99_000));
+
+    controller.reset();
+    assert_eq!(controller.attempt(), 0);
+    assert_eq!(controller.next_attempt_at_ms(), None);
+    assert!(!controller.exhausted());
+    assert!(controller.can_attempt(99_000));
 }
 
 #[test]

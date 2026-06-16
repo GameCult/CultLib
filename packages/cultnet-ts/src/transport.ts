@@ -58,6 +58,69 @@ export function computeCultNetReconnectDelayMs(
   return cappedBaseDelay + boundedJitter;
 }
 
+export interface CultNetReconnectDecision {
+  attempt: number;
+  shouldRetry: boolean;
+  delayMs: number;
+  nextAttemptAtMs?: number;
+  exhausted: boolean;
+}
+
+export class CultNetReconnectController {
+  #attempt = 0;
+  #nextAttemptAtMs: number | undefined;
+  #exhausted = false;
+
+  public constructor(public readonly policy: CultNetReconnectPolicy = createCultNetReconnectPolicy()) {}
+
+  public get attempt(): number {
+    return this.#attempt;
+  }
+
+  public get nextAttemptAtMs(): number | undefined {
+    return this.#nextAttemptAtMs;
+  }
+
+  public get exhausted(): boolean {
+    return this.#exhausted;
+  }
+
+  public reset(): void {
+    this.#attempt = 0;
+    this.#nextAttemptAtMs = undefined;
+    this.#exhausted = false;
+  }
+
+  public canAttempt(nowMs: number): boolean {
+    return !this.#exhausted && (this.#nextAttemptAtMs === undefined || nowMs >= this.#nextAttemptAtMs);
+  }
+
+  public recordFailure(nowMs: number, jitterMs = 0): CultNetReconnectDecision {
+    const nextAttempt = this.#attempt + 1;
+    if (this.policy.maxAttempts !== undefined && nextAttempt > this.policy.maxAttempts) {
+      this.#exhausted = true;
+      this.#nextAttemptAtMs = undefined;
+      return {
+        attempt: this.#attempt,
+        shouldRetry: false,
+        delayMs: 0,
+        exhausted: true,
+      };
+    }
+
+    this.#attempt = nextAttempt;
+    const delayMs = computeCultNetReconnectDelayMs(this.policy, this.#attempt, jitterMs);
+    this.#nextAttemptAtMs = nowMs + delayMs;
+    return {
+      attempt: this.#attempt,
+      shouldRetry: true,
+      delayMs,
+      nextAttemptAtMs: this.#nextAttemptAtMs,
+      exhausted: false,
+    };
+  }
+}
+
 export interface CultNetTransportConnectionEvents {
   frame: (frame: CultNetTransportFrame) => void;
   close: () => void;

@@ -139,6 +139,115 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Decision emitted by the portable reconnect controller.
+    /// </summary>
+    public sealed class CultNetReconnectDecision
+    {
+        /// <summary>
+        /// Gets or sets the scheduled attempt number.
+        /// </summary>
+        public int Attempt { get; set; }
+        /// <summary>
+        /// Gets or sets whether another attempt should be made.
+        /// </summary>
+        public bool ShouldRetry { get; set; }
+        /// <summary>
+        /// Gets or sets the computed delay before the next attempt.
+        /// </summary>
+        public int DelayMs { get; set; }
+        /// <summary>
+        /// Gets or sets the absolute scheduler time for the next attempt.
+        /// </summary>
+        public long? NextAttemptAtMs { get; set; }
+        /// <summary>
+        /// Gets or sets whether the policy has exhausted its attempts.
+        /// </summary>
+        public bool Exhausted { get; set; }
+    }
+
+    /// <summary>
+    /// Portable reconnect attempt scheduler for CultNet transports.
+    /// </summary>
+    public sealed class CultNetReconnectController
+    {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="CultNetReconnectController"/> class.
+        /// </summary>
+        public CultNetReconnectController(CultNetReconnectPolicy? policy = null)
+        {
+            Policy = policy ?? CultNetReconnectPolicies.CreateDefault();
+        }
+
+        /// <summary>
+        /// Gets the reconnect policy.
+        /// </summary>
+        public CultNetReconnectPolicy Policy { get; }
+        /// <summary>
+        /// Gets the last scheduled attempt number.
+        /// </summary>
+        public int Attempt { get; private set; }
+        /// <summary>
+        /// Gets the absolute scheduler time for the next attempt.
+        /// </summary>
+        public long? NextAttemptAtMs { get; private set; }
+        /// <summary>
+        /// Gets a value indicating whether the policy exhausted reconnect attempts.
+        /// </summary>
+        public bool Exhausted { get; private set; }
+
+        /// <summary>
+        /// Clears attempt state after a successful connection.
+        /// </summary>
+        public void Reset()
+        {
+            Attempt = 0;
+            NextAttemptAtMs = null;
+            Exhausted = false;
+        }
+
+        /// <summary>
+        /// Returns whether a caller may attempt to connect at the supplied scheduler time.
+        /// </summary>
+        public bool CanAttempt(long nowMs)
+        {
+            return !Exhausted && (!NextAttemptAtMs.HasValue || nowMs >= NextAttemptAtMs.Value);
+        }
+
+        /// <summary>
+        /// Records a failed connection attempt and schedules the next retry.
+        /// </summary>
+        public CultNetReconnectDecision RecordFailure(long nowMs, int jitterMs = 0)
+        {
+            var nextAttempt = Attempt + 1;
+            if (Policy.MaxAttempts.HasValue && nextAttempt > Policy.MaxAttempts.Value)
+            {
+                Exhausted = true;
+                NextAttemptAtMs = null;
+                return new CultNetReconnectDecision
+                {
+                    Attempt = Attempt,
+                    ShouldRetry = false,
+                    DelayMs = 0,
+                    NextAttemptAtMs = null,
+                    Exhausted = true
+                };
+            }
+
+            Attempt = nextAttempt;
+            var delayMs = CultNetReconnectPolicies.ComputeDelayMs(Policy, Attempt, jitterMs);
+            NextAttemptAtMs = nowMs + delayMs;
+            return new CultNetReconnectDecision
+            {
+                Attempt = Attempt,
+                ShouldRetry = true,
+                DelayMs = delayMs,
+                NextAttemptAtMs = NextAttemptAtMs,
+                Exhausted = false
+            };
+        }
+    }
+
+    /// <summary>
     /// Options for creating a TCP framed transport profile.
     /// </summary>
     public sealed class TcpFramedTransportProfileOptions

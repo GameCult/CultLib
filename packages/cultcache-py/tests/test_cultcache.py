@@ -83,6 +83,7 @@ from cultnet_py import (
     create_rudp_transport_profile,
     create_tcp_framed_transport_profile,
     create_reconnect_policy,
+    CultNetReconnectController,
     database_subscribe,
     database_unsubscribe,
     decode_frame,
@@ -699,6 +700,38 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(compute_reconnect_delay_ms(policy, 3, 17), 4_017)
         self.assertEqual(compute_reconnect_delay_ms(policy, 9, 999), 30_250)
         self.assertEqual(compute_reconnect_delay_ms(policy, 0, -5), 1_000)
+
+    def test_cultnet_reconnect_controller_schedules_attempts_and_reset(self) -> None:
+        controller = CultNetReconnectController(create_reconnect_policy(max_attempts=2))
+
+        first = controller.record_failure(10_000)
+        self.assertEqual(first.attempt, 1)
+        self.assertTrue(first.should_retry)
+        self.assertEqual(first.delay_ms, 1_000)
+        self.assertEqual(first.next_attempt_at_ms, 11_000)
+        self.assertFalse(first.exhausted)
+        self.assertFalse(controller.can_attempt(10_999))
+        self.assertTrue(controller.can_attempt(11_000))
+
+        second = controller.record_failure(11_000, 17)
+        self.assertEqual(second.attempt, 2)
+        self.assertEqual(second.delay_ms, 2_017)
+        self.assertEqual(second.next_attempt_at_ms, 13_017)
+        self.assertTrue(second.should_retry)
+
+        exhausted = controller.record_failure(13_017)
+        self.assertEqual(exhausted.attempt, 2)
+        self.assertFalse(exhausted.should_retry)
+        self.assertEqual(exhausted.delay_ms, 0)
+        self.assertIsNone(exhausted.next_attempt_at_ms)
+        self.assertTrue(exhausted.exhausted)
+        self.assertFalse(controller.can_attempt(99_000))
+
+        controller.reset()
+        self.assertEqual(controller.attempt, 0)
+        self.assertIsNone(controller.next_attempt_at_ms)
+        self.assertFalse(controller.exhausted)
+        self.assertTrue(controller.can_attempt(99_000))
 
     def test_cultnet_rudp_session_handshake_acks_reliable_connect_and_accept_packets(self) -> None:
         client = CultNetRudpSession(

@@ -413,6 +413,42 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ReconnectController_SchedulesAttemptsAndReset()
+        {
+            var controller = new CultNetReconnectController(
+                CultNetReconnectPolicies.CreateDefault(maxAttempts: 2));
+
+            var first = controller.RecordFailure(10_000);
+            Assert.That(first.Attempt, Is.EqualTo(1));
+            Assert.That(first.ShouldRetry, Is.True);
+            Assert.That(first.DelayMs, Is.EqualTo(1_000));
+            Assert.That(first.NextAttemptAtMs, Is.EqualTo(11_000));
+            Assert.That(first.Exhausted, Is.False);
+            Assert.That(controller.CanAttempt(10_999), Is.False);
+            Assert.That(controller.CanAttempt(11_000), Is.True);
+
+            var second = controller.RecordFailure(11_000, 17);
+            Assert.That(second.Attempt, Is.EqualTo(2));
+            Assert.That(second.DelayMs, Is.EqualTo(2_017));
+            Assert.That(second.NextAttemptAtMs, Is.EqualTo(13_017));
+            Assert.That(second.ShouldRetry, Is.True);
+
+            var exhausted = controller.RecordFailure(13_017);
+            Assert.That(exhausted.Attempt, Is.EqualTo(2));
+            Assert.That(exhausted.ShouldRetry, Is.False);
+            Assert.That(exhausted.DelayMs, Is.EqualTo(0));
+            Assert.That(exhausted.NextAttemptAtMs, Is.Null);
+            Assert.That(exhausted.Exhausted, Is.True);
+            Assert.That(controller.CanAttempt(99_000), Is.False);
+
+            controller.Reset();
+            Assert.That(controller.Attempt, Is.EqualTo(0));
+            Assert.That(controller.NextAttemptAtMs, Is.Null);
+            Assert.That(controller.Exhausted, Is.False);
+            Assert.That(controller.CanAttempt(99_000), Is.True);
+        }
+
+        [Test]
         public void RudpSession_HandshakeAcksReliableConnectAndAcceptPackets()
         {
             var client = new CultNetRudpSession(new CultNetRudpSessionOptions

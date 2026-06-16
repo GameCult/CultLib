@@ -226,8 +226,13 @@ Current progress:
   `cultnet.reconnect_policy.v0` document and deterministic exponential delay
   helper, and RUDP transport profiles advertise that policy under
   `reconnectPolicy`. This gives discovery the same policy language for
-  reconnect posture; it does not yet claim automatic reconnect orchestration or
-  production service adoption of that policy.
+  reconnect posture.
+- TypeScript, C#, Rust, Python, and Kotlin now share a portable reconnect
+  controller shape over that policy: failed connection attempts produce the
+  same attempt number, delay, next-attempt time, exhaustion signal, and
+  successful-connection reset semantics. This is the orchestration primitive
+  service loops must use; it does not yet claim every production daemon or
+  socket path automatically redials through it.
 - Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate
@@ -254,8 +259,9 @@ Current progress:
   transport; discovery contact remains separate from trust, which is still
   gated by the authority lease catalog.
 - The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
-  service bodies behind their shared transport ports, then broaden RUDP interop
-  into automatic reconnect orchestration and the wider schema-message matrix.
+  service bodies behind their shared transport ports, then wire daemon/socket
+  reconnect loops through the shared controller and broaden the RUDP
+  schema-message matrix.
 
 ## RUDP Packet Contract V0
 

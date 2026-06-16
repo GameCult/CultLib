@@ -428,6 +428,60 @@ fun computeReconnectDelayMs(policy: CultNetReconnectPolicy, attempt: Int, jitter
     return cappedBaseDelay + boundedJitter
 }
 
+data class CultNetReconnectDecision(
+    val attempt: Int,
+    val shouldRetry: Boolean,
+    val delayMs: Long = 0,
+    val nextAttemptAtMs: Long? = null,
+    val exhausted: Boolean = false,
+)
+
+class CultNetReconnectController(
+    val policy: CultNetReconnectPolicy = createReconnectPolicy(),
+) {
+    var attempt: Int = 0
+        private set
+    var nextAttemptAtMs: Long? = null
+        private set
+    var exhausted: Boolean = false
+        private set
+
+    fun reset() {
+        attempt = 0
+        nextAttemptAtMs = null
+        exhausted = false
+    }
+
+    fun canAttempt(nowMs: Long): Boolean {
+        val next = nextAttemptAtMs
+        return !exhausted && (next == null || nowMs >= next)
+    }
+
+    fun recordFailure(nowMs: Long, jitterMs: Long = 0): CultNetReconnectDecision {
+        val nextAttempt = attempt + 1
+        if (policy.maxAttempts != null && nextAttempt > policy.maxAttempts) {
+            exhausted = true
+            nextAttemptAtMs = null
+            return CultNetReconnectDecision(
+                attempt = attempt,
+                shouldRetry = false,
+                exhausted = true,
+            )
+        }
+
+        attempt = nextAttempt
+        val delay = computeReconnectDelayMs(policy, attempt, jitterMs)
+        val nextAt = nowMs + delay
+        nextAttemptAtMs = nextAt
+        return CultNetReconnectDecision(
+            attempt = attempt,
+            shouldRetry = true,
+            delayMs = delay,
+            nextAttemptAtMs = nextAt,
+        )
+    }
+}
+
 data class CultNetTransportProfile(
     val schemaVersion: String = "cultnet.transport_profile.v0",
     val runtimeId: String,
@@ -2402,6 +2456,7 @@ fun main(args: Array<String>) {
         cultCacheRawSnapshotsRoundTripThroughCultNetMessages()
         cultNetSchemaMessagesUseMessagePackMaps()
         cultNetReconnectPolicyExposesPortableDelayContract()
+        cultNetReconnectControllerSchedulesAttemptsAndReset()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         cultMeshAuthorityLeasesGatePeerTrust()
@@ -2599,6 +2654,39 @@ private fun cultNetReconnectPolicyExposesPortableDelayContract() {
     check(computeReconnectDelayMs(policy, 3, 17) == 4_017L)
     check(computeReconnectDelayMs(policy, 9, 999) == 30_250L)
     check(computeReconnectDelayMs(policy, 0, -5) == 1_000L)
+}
+
+private fun cultNetReconnectControllerSchedulesAttemptsAndReset() {
+    val controller = CultNetReconnectController(createReconnectPolicy(maxAttempts = 2))
+
+    val first = controller.recordFailure(10_000)
+    check(first.attempt == 1)
+    check(first.shouldRetry)
+    check(first.delayMs == 1_000L)
+    check(first.nextAttemptAtMs == 11_000L)
+    check(!first.exhausted)
+    check(!controller.canAttempt(10_999))
+    check(controller.canAttempt(11_000))
+
+    val second = controller.recordFailure(11_000, 17)
+    check(second.attempt == 2)
+    check(second.delayMs == 2_017L)
+    check(second.nextAttemptAtMs == 13_017L)
+    check(second.shouldRetry)
+
+    val exhausted = controller.recordFailure(13_017)
+    check(exhausted.attempt == 2)
+    check(!exhausted.shouldRetry)
+    check(exhausted.delayMs == 0L)
+    check(exhausted.nextAttemptAtMs == null)
+    check(exhausted.exhausted)
+    check(!controller.canAttempt(99_000))
+
+    controller.reset()
+    check(controller.attempt == 0)
+    check(controller.nextAttemptAtMs == null)
+    check(!controller.exhausted)
+    check(controller.canAttempt(99_000))
 }
 
 private fun cultNetSchemaCatalogsRoundTripDescriptors() {

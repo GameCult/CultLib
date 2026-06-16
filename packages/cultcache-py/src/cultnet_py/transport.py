@@ -70,6 +70,52 @@ def compute_reconnect_delay_ms(policy: CultNetReconnectPolicy, attempt: int, jit
 
 
 @dataclass(frozen=True)
+class CultNetReconnectDecision:
+    attempt: int
+    should_retry: bool
+    delay_ms: int = 0
+    next_attempt_at_ms: int | None = None
+    exhausted: bool = False
+
+
+@dataclass
+class CultNetReconnectController:
+    policy: CultNetReconnectPolicy = field(default_factory=create_reconnect_policy)
+    attempt: int = 0
+    next_attempt_at_ms: int | None = None
+    exhausted: bool = False
+
+    def reset(self) -> None:
+        self.attempt = 0
+        self.next_attempt_at_ms = None
+        self.exhausted = False
+
+    def can_attempt(self, now_ms: int) -> bool:
+        return not self.exhausted and (self.next_attempt_at_ms is None or now_ms >= self.next_attempt_at_ms)
+
+    def record_failure(self, now_ms: int, jitter_ms: int = 0) -> CultNetReconnectDecision:
+        next_attempt = self.attempt + 1
+        if self.policy.max_attempts is not None and next_attempt > self.policy.max_attempts:
+            self.exhausted = True
+            self.next_attempt_at_ms = None
+            return CultNetReconnectDecision(
+                attempt=self.attempt,
+                should_retry=False,
+                exhausted=True,
+            )
+
+        self.attempt = next_attempt
+        delay_ms = compute_reconnect_delay_ms(self.policy, self.attempt, jitter_ms)
+        self.next_attempt_at_ms = int(now_ms) + delay_ms
+        return CultNetReconnectDecision(
+            attempt=self.attempt,
+            should_retry=True,
+            delay_ms=delay_ms,
+            next_attempt_at_ms=self.next_attempt_at_ms,
+        )
+
+
+@dataclass(frozen=True)
 class CultNetTransportFrame:
     channel_id: str
     payload: bytes

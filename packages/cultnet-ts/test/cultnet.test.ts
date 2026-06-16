@@ -23,6 +23,7 @@ import {
   CultNetSecret,
   CultNetServerSecurityOptions,
   TcpFramedTransportConnection,
+  CultNetReconnectController,
   cultNetSchemas,
   cultNetBuiltinSchemaRegistry,
   computeCultNetReconnectDelayMs,
@@ -289,6 +290,44 @@ test("reconnect policy exposes the shared portable delay contract", () => {
   assert.equal(computeCultNetReconnectDelayMs(policy, 3, 17), 4_017);
   assert.equal(computeCultNetReconnectDelayMs(policy, 9, 999), 30_250);
   assert.equal(computeCultNetReconnectDelayMs(policy, 0, -5), 1_000);
+});
+
+test("reconnect controller schedules attempts and reset with the shared policy", () => {
+  const policy = createCultNetReconnectPolicy({ maxAttempts: 2 });
+  const controller = new CultNetReconnectController(policy);
+
+  const first = controller.recordFailure(10_000);
+  assert.deepEqual(first, {
+    attempt: 1,
+    shouldRetry: true,
+    delayMs: 1_000,
+    nextAttemptAtMs: 11_000,
+    exhausted: false,
+  });
+  assert.equal(controller.canAttempt(10_999), false);
+  assert.equal(controller.canAttempt(11_000), true);
+
+  const second = controller.recordFailure(11_000, 17);
+  assert.equal(second.attempt, 2);
+  assert.equal(second.delayMs, 2_017);
+  assert.equal(second.nextAttemptAtMs, 13_017);
+  assert.equal(second.shouldRetry, true);
+
+  const exhausted = controller.recordFailure(13_017);
+  assert.deepEqual(exhausted, {
+    attempt: 2,
+    shouldRetry: false,
+    delayMs: 0,
+    exhausted: true,
+  });
+  assert.equal(controller.exhausted, true);
+  assert.equal(controller.canAttempt(99_000), false);
+
+  controller.reset();
+  assert.equal(controller.attempt, 0);
+  assert.equal(controller.nextAttemptAtMs, undefined);
+  assert.equal(controller.exhausted, false);
+  assert.equal(controller.canAttempt(99_000), true);
 });
 
 test("rudp session handshake acks reliable connect and accept packets", () => {
