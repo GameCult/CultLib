@@ -127,6 +127,12 @@ export interface CultMeshRudpSocketOptions {
   reconnectPolicy?: CultNetReconnectPolicy;
 }
 
+export interface CultMeshAuthorizedRudpSocketOptions
+  extends CultMeshRudpSocketOptions {
+  shardId?: string;
+  at?: Date;
+}
+
 export class CultMeshPeerCatalog {
   readonly #peers = new Map<string, CultMeshPeerCard>();
   readonly #subscribers = new Set<(peer: CultMeshPeerCard) => void>();
@@ -165,6 +171,30 @@ export class CultMeshPeerCatalog {
         peer.verseId === verseId &&
         (!role || peer.roles?.includes(role) === true),
     );
+  }
+
+  public findAuthorized(
+    verseId: string,
+    role: string,
+    leases: CultMeshAuthorityLeaseCatalog,
+    shardId?: string,
+    at = new Date(),
+  ): readonly CultMeshPeerCard[] {
+    requireNonEmpty(verseId, "verseId");
+    requireNonEmpty(role, "role");
+    return this.find(verseId, role).filter((peer) =>
+      leases.isAuthorized(peer, role, shardId, at),
+    );
+  }
+
+  public firstAuthorized(
+    verseId: string,
+    role: string,
+    leases: CultMeshAuthorityLeaseCatalog,
+    shardId?: string,
+    at = new Date(),
+  ): CultMeshPeerCard | undefined {
+    return this.findAuthorized(verseId, role, leases, shardId, at)[0];
   }
 }
 
@@ -604,6 +634,28 @@ export class CultMesh {
       throw new Error(`Peer ${peer.peerId} does not advertise a RUDP endpoint.`);
     }
     return CultMesh.createRudpClient(runtimeId, connectionId, endpoint, options);
+  }
+
+  public static async createRudpClientForAuthorizedPeer(
+    runtimeId: string,
+    connectionId: number,
+    peers: CultMeshPeerCatalog,
+    leases: CultMeshAuthorityLeaseCatalog,
+    verseId: string,
+    role: string,
+    options: CultMeshAuthorizedRudpSocketOptions = {},
+  ): Promise<CultNetRudpSocketTransportConnection> {
+    const peer = peers.firstAuthorized(
+      verseId,
+      role,
+      leases,
+      options.shardId,
+      options.at,
+    );
+    if (!peer) {
+      throw new Error(`No authorized RUDP peer for role ${role} in Verse ${verseId}.`);
+    }
+    return CultMesh.createRudpClientForPeer(runtimeId, connectionId, peer, options);
   }
 }
 

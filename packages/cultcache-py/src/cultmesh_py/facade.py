@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket as socket_module
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -225,6 +226,29 @@ class CultMesh:
         if endpoint is None:
             raise ValueError(f"Peer {peer.peer_id!r} does not advertise a RUDP endpoint")
         return CultMesh.create_rudp_client(runtime_id, connection_id, endpoint, **options)
+
+    @staticmethod
+    def create_rudp_client_for_authorized_peer(
+        runtime_id: str,
+        connection_id: int,
+        peers: CultMeshPeerCatalog,
+        leases: CultMeshAuthorityLeaseCatalog,
+        verse_id: str,
+        role: str,
+        *,
+        shard_id: str | None = None,
+        at: datetime | None = None,
+        **options: Any,
+    ) -> CultNetRudpSocketTransportConnection:
+        peer = peers.first_authorized(verse_id, role, leases, shard_id=shard_id, at=at)
+        if peer is None:
+            raise ValueError(f"No authorized RUDP peer for role {role!r} in Verse {verse_id!r}")
+        return CultMesh.create_rudp_client_for_peer(
+            runtime_id,
+            connection_id,
+            peer,
+            **options,
+        )
 
     @staticmethod
     def create_verse_discovery_client(

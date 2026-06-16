@@ -222,6 +222,32 @@ class CultMeshPeerCatalog:
             if peer.verse_id == verse_id and (role is None or peer.has_role(role))
         ]
 
+    def find_authorized(
+        self,
+        verse_id: str,
+        role: str,
+        leases: "CultMeshAuthorityLeaseCatalog",
+        shard_id: str | None = None,
+        at: datetime | None = None,
+    ) -> list[CultMeshPeerCard]:
+        require_non_empty(verse_id, "verse_id")
+        require_non_empty(role, "role")
+        return [
+            peer
+            for peer in self.find(verse_id, role)
+            if leases.is_authorized(peer, role, shard_id=shard_id, at=at)
+        ]
+
+    def first_authorized(
+        self,
+        verse_id: str,
+        role: str,
+        leases: "CultMeshAuthorityLeaseCatalog",
+        shard_id: str | None = None,
+        at: datetime | None = None,
+    ) -> CultMeshPeerCard | None:
+        return next(iter(self.find_authorized(verse_id, role, leases, shard_id, at)), None)
+
     def get(self, peer_id: str) -> CultMeshPeerCard | None:
         require_non_empty(peer_id, "peer_id")
         return self._peers.get(peer_id)

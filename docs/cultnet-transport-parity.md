@@ -302,7 +302,9 @@ Current progress:
   without creating a second catalog authority. The facade now also parses
   `rudp://host:port` endpoints and creates RUDP client/server transports from
   endpoint or peer-card contact hints while leaving packet/session semantics in
-  `cultnet_py`.
+  `cultnet_py`. Python peer catalogs also expose authorized-peer lookup, and
+  the branded facade can create a RUDP client from the first peer authorized by
+  the authority lease catalog for a Verse role.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the
@@ -325,7 +327,10 @@ Current progress:
   do not have to leave the CultMesh entrypoint for schema discovery or shard
   topology. The facade now also parses `rudp://host:port` endpoints and creates
   RUDP client/server transports from endpoint or peer-card contact hints while
-  leaving packet/session semantics in `cultnet-ts`.
+  leaving packet/session semantics in `cultnet-ts`. TypeScript now also mirrors
+  Kotlin's authorized-peer lookup and RUDP client helper, so peer cards remain
+  contact hints until the authority lease catalog authorizes the requested
+  Verse role.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.

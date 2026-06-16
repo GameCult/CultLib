@@ -131,11 +131,14 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   schema catalogs, built-in schema catalogs, shard catalogs, sessions, streams,
   authority leases, local TCP node serving, simulation fact commits, RUDP
   endpoint parsing, and RUDP client/server construction from endpoint or
-  peer-card contact hints. The durable shard-log node option attaches a
-  file-backed authoritative log store beside the cache file by default. Schema,
-  shard, and RUDP factories delegate to the existing `cultnet_py` owners, so the
-  branded entrypoint does not create a second source of discovery or transport
-  truth. The `cultmesh-py-daemon` /
+  peer-card contact hints. Peer catalogs expose authorized-peer lookup, and the
+  branded facade can open a RUDP client from the first peer authorized by the
+  authority lease catalog for a Verse role, keeping endpoint contact separate
+  from trust. The durable shard-log node option attaches a file-backed
+  authoritative log store beside the cache file by default. Schema, shard, and
+  RUDP factories delegate to the existing `cultnet_py` owners, so the branded
+  entrypoint does not create a second source of discovery or transport truth.
+  The `cultmesh-py-daemon` /
   `python -m cultmesh_py.daemon` entrypoint launches that same local TCP server
   body and emits a bounded readiness document for process supervisors while the
   served CultNet endpoint remains the capability owner. Readiness now mirrors

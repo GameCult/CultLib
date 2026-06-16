@@ -1159,11 +1159,41 @@ class CultCacheTests(unittest.TestCase):
             verse_id="local",
             endpoints=(endpoint.uri,),
             roles=("schema",),
+            authority_lease_id="lease:python-cultmesh-rudp-server",
         )
-        client = CultMesh.create_rudp_client_for_peer(
+        peers = CultMesh.create_peer_catalog()
+        leases = CultMesh.create_authority_lease_catalog()
+        peers.upsert(peer)
+        with self.assertRaisesRegex(ValueError, "No authorized RUDP peer"):
+            CultMesh.create_rudp_client_for_authorized_peer(
+                "python-cultmesh-rudp-client",
+                connection_id,
+                peers,
+                leases,
+                "local",
+                "schema",
+                resend_delay_ms=25,
+                max_fragment_bytes=1024,
+                max_pending_reliable_packets=16,
+            )
+        leases.upsert(
+            CultMeshAuthorityLease(
+                lease_id="lease:python-cultmesh-rudp-server",
+                verse_id="local",
+                peer_id="python-cultmesh-rudp-server",
+                roles=("schema",),
+                valid_from=datetime.now(UTC) - timedelta(seconds=1),
+                expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                issuer_runtime_id="python-authority",
+            )
+        )
+        client = CultMesh.create_rudp_client_for_authorized_peer(
             "python-cultmesh-rudp-client",
             connection_id,
-            peer,
+            peers,
+            leases,
+            "local",
+            "schema",
             resend_delay_ms=25,
             max_fragment_bytes=1024,
             max_pending_reliable_packets=16,
@@ -4974,8 +5004,11 @@ class CultCacheTests(unittest.TestCase):
             authority_lease_id="lease:voidbot-local",
         )
         leases = CultMeshAuthorityLeaseCatalog()
+        peers = CultMeshPeerCatalog()
+        peers.upsert(peer)
         now = datetime.now(UTC)
         self.assertFalse(leases.is_authorized(peer, "shard-primary", at=now))
+        self.assertEqual(peers.find_authorized("local", "shard-primary", leases, at=now), [])
 
         leases.upsert(
             CultMeshAuthorityLease(
@@ -5002,6 +5035,15 @@ class CultCacheTests(unittest.TestCase):
         self.assertTrue(lease.covers(peer, "shard-primary", shard_id="shard-a", at=now))
         self.assertFalse(lease.covers(peer, "shard-primary", shard_id="shard-b", at=now))
         self.assertTrue(leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+        self.assertEqual(
+            peers.find_authorized("local", "shard-primary", leases, shard_id="shard-a", at=now),
+            [peer],
+        )
+        self.assertEqual(
+            peers.first_authorized("local", "shard-primary", leases, shard_id="shard-a", at=now),
+            peer,
+        )
+        self.assertIsNone(peers.first_authorized("local", "read-replica", leases, at=now))
         self.assertFalse(leases.is_authorized(peer, "shard-primary", shard_id="shard-b", at=now))
         self.assertFalse(leases.is_authorized(peer, "read-replica", at=now))
         self.assertIsNone(leases.get("missing"))

@@ -78,6 +78,10 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
   assert.equal(peers.get("voidbot-local"), peer);
   assert.deepEqual(peers.find("local", "shard-primary"), [peer]);
   assert.equal(leases.isAuthorized(peer, "shard-primary"), false);
+  assert.deepEqual(
+    peers.findAuthorized("local", "shard-primary", leases),
+    [],
+  );
 
   const leaseUpdates: string[] = [];
   const unsubscribeLease = leases.watch((lease) => {
@@ -101,6 +105,15 @@ test("CultMesh TS local authority leases do not trust peer cards by contact alon
     "lease:voidbot-local",
   ]);
   assert.equal(leases.isAuthorized(peer, "shard-primary"), true);
+  assert.deepEqual(
+    peers.findAuthorized("local", "shard-primary", leases),
+    [peer],
+  );
+  assert.equal(
+    peers.firstAuthorized("local", "shard-primary", leases),
+    peer,
+  );
+  assert.equal(peers.firstAuthorized("local", "schema", leases), undefined);
 });
 
 test("CultMesh TS local Verse catalog exposes sorted views and watch ergonomics", () => {
@@ -221,11 +234,43 @@ test("CultMesh TS branded facade creates RUDP clients from peer endpoints", asyn
     verseId: "local",
     endpoints: [endpoint.uri],
     roles: ["schema"],
+    authorityLeaseId: "lease:cultmesh-ts-rudp-server",
   };
-  const client = await CultMesh.createRudpClientForPeer(
+  const peers = CultMesh.createPeerCatalog();
+  const leases = CultMesh.createAuthorityLeaseCatalog();
+  peers.upsert(peer);
+  await assert.rejects(
+    CultMesh.createRudpClientForAuthorizedPeer(
+      "cultmesh-ts-rudp-client",
+      connectionId,
+      peers,
+      leases,
+      "local",
+      "schema",
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+      },
+    ),
+    /No authorized RUDP peer/,
+  );
+  leases.upsert({
+    leaseId: "lease:cultmesh-ts-rudp-server",
+    verseId: "local",
+    peerId: "cultmesh-ts-rudp-server",
+    roles: ["schema"],
+    validFrom: new Date(Date.now() - 1000),
+    expiresAt: new Date(Date.now() + 1000),
+  });
+  const client = await CultMesh.createRudpClientForAuthorizedPeer(
     "cultmesh-ts-rudp-client",
     connectionId,
-    peer,
+    peers,
+    leases,
+    "local",
+    "schema",
     {
       resendDelayMs: 25,
       resendPollMs: 5,
