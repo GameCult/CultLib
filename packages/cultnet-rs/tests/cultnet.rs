@@ -1164,15 +1164,47 @@ fn cultmesh_facade_creates_rudp_client_from_peer_endpoint() -> Result<()> {
     );
 
     let peer = CultMeshPeerCard::new("rust-cultmesh-server", "local", [endpoint.uri()])
-        .with_roles(["schema"]);
+        .with_roles(["schema"])
+        .with_authority_lease_id("lease:rust-cultmesh-server");
     let mut peers = CultMesh::create_peer_catalog();
     peers.upsert(peer.clone())?;
     assert_eq!(peers.find("local", Some("schema")), vec![peer.clone()]);
+    let now = Utc::now();
+    let mut leases = CultMesh::create_authority_lease_catalog();
+    assert!(
+        CultMesh::create_rudp_client_for_authorized_peer(
+            "rust-cultmesh-client",
+            connection_id,
+            &peers,
+            &leases,
+            "local",
+            "schema",
+            None,
+            now,
+            options.clone(),
+        )
+        .is_err()
+    );
+    leases.upsert(CultMeshAuthorityLease {
+        lease_id: "lease:rust-cultmesh-server".to_string(),
+        verse_id: "local".to_string(),
+        peer_id: "rust-cultmesh-server".to_string(),
+        roles: vec!["schema".to_string()],
+        shard_ids: Vec::new(),
+        issuer_runtime_id: Some("odin".to_string()),
+        valid_from: now - Duration::minutes(1),
+        expires_at: now + Duration::minutes(1),
+    })?;
 
-    let mut client = CultMesh::create_rudp_client_for_peer(
+    let mut client = CultMesh::create_rudp_client_for_authorized_peer(
         "rust-cultmesh-client",
         connection_id,
-        &peer,
+        &peers,
+        &leases,
+        "local",
+        "schema",
+        None,
+        now,
         options,
     )?;
     client.connect(b"join".to_vec())?;
@@ -1252,8 +1284,15 @@ fn cultmesh_authority_leases_gate_peer_contact_hints() -> Result<()> {
         .with_roles(["shard-primary"])
         .with_authority_lease_id("lease:rust-peer");
     let mut leases = CultMesh::create_authority_lease_catalog();
+    let mut peers = CultMesh::create_peer_catalog();
+    peers.upsert(peer.clone())?;
 
     assert!(!leases.is_authorized(&peer, "shard-primary", Some("players"), now));
+    assert!(
+        peers
+            .find_authorized("public", "shard-primary", &leases, Some("players"), now)
+            .is_empty()
+    );
     leases.upsert(CultMeshAuthorityLease {
         lease_id: "lease:rust-peer".to_string(),
         verse_id: "public".to_string(),
@@ -1266,7 +1305,20 @@ fn cultmesh_authority_leases_gate_peer_contact_hints() -> Result<()> {
     })?;
 
     assert!(leases.is_authorized(&peer, "shard-primary", Some("players"), now));
+    assert_eq!(
+        peers.find_authorized("public", "shard-primary", &leases, Some("players"), now),
+        vec![peer.clone()]
+    );
+    assert_eq!(
+        peers.first_authorized("public", "shard-primary", &leases, Some("players"), now),
+        Some(peer.clone())
+    );
     assert!(!leases.is_authorized(&peer, "schema", Some("players"), now));
+    assert!(
+        peers
+            .first_authorized("public", "schema", &leases, Some("players"), now)
+            .is_none()
+    );
     assert!(!leases.is_authorized(&peer, "shard-primary", Some("inventory"), now));
     assert!(!leases.is_authorized(
         &peer,

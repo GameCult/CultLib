@@ -124,8 +124,9 @@ contact and authority ergonomics:
 
 ```rust
 use cultnet_rs::{
-    CultMesh, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetSchemaKind,
+    CultMesh, CultMeshAuthorityLease, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetSchemaKind,
 };
+use chrono::{Duration, Utc};
 
 let schemas = CultMesh::create_builtin_schema_registry()?;
 let shared_contracts = schemas.list(&cultnet_rs::CultNetSchemaCatalogOptions {
@@ -146,12 +147,33 @@ let peer = CultMeshPeerCard::new(
     "local",
     [format!("rudp://127.0.0.1:{port}")],
 )
-.with_roles(["schema"]);
+.with_roles(["schema"])
+.with_authority_lease_id("lease:rust-server");
 
-let mut client = CultMesh::create_rudp_client_for_peer(
+let now = Utc::now();
+let mut peers = CultMesh::create_peer_catalog();
+let mut leases = CultMesh::create_authority_lease_catalog();
+peers.upsert(peer.clone())?;
+leases.upsert(CultMeshAuthorityLease {
+    lease_id: "lease:rust-server".to_string(),
+    verse_id: "local".to_string(),
+    peer_id: "rust-server".to_string(),
+    roles: vec!["schema".to_string()],
+    shard_ids: Vec::new(),
+    issuer_runtime_id: None,
+    valid_from: now - Duration::minutes(1),
+    expires_at: now + Duration::minutes(1),
+})?;
+
+let mut client = CultMesh::create_rudp_client_for_authorized_peer(
     "rust-client",
     0x1020_3040,
-    &peer,
+    &peers,
+    &leases,
+    "local",
+    "schema",
+    None,
+    now,
     CultMeshRudpSocketOptions::default(),
 )?;
 client.connect(b"join".to_vec())?;
@@ -184,5 +206,6 @@ if decision.is_some() {
 
 `CultMesh::parse_rudp_endpoint(...)` handles advertised `rudp://host:port`
 contact hints, and `CultMeshAuthorityLeaseCatalog` keeps trust separate from
-discovery. A peer card can say where to dial; a lease decides whether that peer
-is allowed to own a role or shard.
+discovery. A peer card can say where to dial; `peers.first_authorized(...)` and
+`CultMesh::create_rudp_client_for_authorized_peer(...)` only use that contact
+hint after a lease says the peer may own the requested role or shard.

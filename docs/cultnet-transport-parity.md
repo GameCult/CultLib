@@ -387,7 +387,8 @@ Current progress:
 - Rust now has a small `CultMesh` facade for its substrate role: peer cards,
   sorted peer catalogs, authority lease catalogs, schema registry factories,
   shard catalog factories, `rudp://host:port` endpoint parsing, and RUDP
-  client/server construction from endpoint or peer-card contact hints. The
+  client/server construction from endpoint, peer-card contact hints, or the
+  first peer authorized by the authority lease catalog for a Verse role. The
   facade delegates to the existing Rust schema registry, shard catalog, and RUDP
   socket transport owners; discovery contact remains separate from trust, which
   is still gated by the authority lease catalog.

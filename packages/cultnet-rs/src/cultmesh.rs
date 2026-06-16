@@ -104,6 +104,33 @@ impl CultMeshPeerCatalog {
             .cloned()
             .collect()
     }
+
+    pub fn find_authorized(
+        &self,
+        verse_id: &str,
+        role: &str,
+        leases: &CultMeshAuthorityLeaseCatalog,
+        shard_id: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Vec<CultMeshPeerCard> {
+        self.find(verse_id, Some(role))
+            .into_iter()
+            .filter(|peer| leases.is_authorized(peer, role, shard_id, at))
+            .collect()
+    }
+
+    pub fn first_authorized(
+        &self,
+        verse_id: &str,
+        role: &str,
+        leases: &CultMeshAuthorityLeaseCatalog,
+        shard_id: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Option<CultMeshPeerCard> {
+        self.find_authorized(verse_id, role, leases, shard_id, at)
+            .into_iter()
+            .next()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -326,6 +353,25 @@ impl CultMesh {
     ) -> Result<CultNetRudpSocketTransportConnection> {
         let endpoint = peer.rudp_endpoint()?;
         Self::create_rudp_client(runtime_id, connection_id, &endpoint, options)
+    }
+
+    pub fn create_rudp_client_for_authorized_peer(
+        runtime_id: impl Into<String>,
+        connection_id: u32,
+        peers: &CultMeshPeerCatalog,
+        leases: &CultMeshAuthorityLeaseCatalog,
+        verse_id: &str,
+        role: &str,
+        shard_id: Option<&str>,
+        at: DateTime<Utc>,
+        options: CultMeshRudpSocketOptions,
+    ) -> Result<CultNetRudpSocketTransportConnection> {
+        let peer = peers
+            .first_authorized(verse_id, role, leases, shard_id, at)
+            .ok_or_else(|| {
+                anyhow!("No authorized RUDP peer for role {role} in Verse {verse_id}")
+            })?;
+        Self::create_rudp_client_for_peer(runtime_id, connection_id, &peer, options)
     }
 }
 
