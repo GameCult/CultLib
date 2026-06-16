@@ -309,6 +309,11 @@ Current progress:
   `rudp://host:port` endpoints and can build a RUDP client directly from a peer
   card contact hint. The facade delegates to the same owners as the top-level
   helpers instead of creating a second authority path.
+- Kotlin WebSocket and RUDP transports now expose catalog fetch/sync helpers for
+  schema and shard catalogs. The helpers send standard schema-v0 requests,
+  require the matching response schema, and apply through the caller's catalog,
+  giving JVM/Android callers the same client ergonomics Python already had
+  without making the transport own catalog truth.
 - Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
   Android clients can react to lease changes without treating peer-card contact
   hints as trust.

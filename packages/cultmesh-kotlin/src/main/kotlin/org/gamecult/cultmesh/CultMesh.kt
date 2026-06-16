@@ -2214,8 +2214,12 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         nextSequenceAfterFrame: Long,
         expectedSequenceIfUninitialized: Long,
     ): List<CultNetRudpDeliveredFrame> {
-        val next = orderedNextSequenceByChannel[frame.channelId] ?: minOf(expectedSequenceIfUninitialized, frame.sequence).also {
+        var next = orderedNextSequenceByChannel[frame.channelId] ?: minOf(expectedSequenceIfUninitialized, frame.sequence).also {
             orderedNextSequenceByChannel[frame.channelId] = it
+        }
+        while (frame.sequence > next && receivedSequences.contains(next) && orderedBuffers[frame.channelId]?.containsKey(next) != true) {
+            next += 1
+            orderedNextSequenceByChannel[frame.channelId] = next
         }
         if (frame.sequence < next) return emptyList()
         if (frame.sequence > next) {
@@ -2234,8 +2238,17 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
             val pending = buffer.remove(next) ?: break
             delivered.add(pending.frame)
             orderedNextSequenceByChannel[channelId] = pending.nextSequence
+            skipReceivedNonChannelSequences(channelId)
         }
         return delivered
+    }
+
+    private fun skipReceivedNonChannelSequences(channelId: String) {
+        var next = orderedNextSequenceByChannel[channelId] ?: return
+        while (receivedSequences.contains(next) && orderedBuffers[channelId]?.containsKey(next) != true) {
+            next += 1
+            orderedNextSequenceByChannel[channelId] = next
+        }
     }
 
     private fun allocateFragmentId(): Int {
@@ -2920,14 +2933,19 @@ private fun cultNetWebSocketTransportCarriesSchemaFramesWithStats() {
                     output.flush()
                     val request = parseCultNetMessage(readMaskedWebSocketBinaryPayload(input))
                     check(request.schemaVersion == "cultnet.schema_catalog_request.v0")
+                    val catalog = CultNetSchemaCatalog()
+                    catalog.upsert(
+                        defineCultNetSchemaDescriptor(
+                            schemaId = "kotlin.websocket.note.v1",
+                            kind = "document_payload",
+                            documentType = "kotlin.websocket.note",
+                            title = "Kotlin WebSocket Note",
+                            schemaJson = """{"type":"string"}""",
+                        ),
+                    )
                     writeUnmaskedWebSocketBinaryPayload(
                         output,
-                        cultNetHello(
-                            runtimeId = "kotlin-websocket-server",
-                            runtimeKind = "kotlin",
-                            displayName = "Kotlin WebSocket Server",
-                            supportedMessageVersions = listOf("cultnet.hello.v0"),
-                        ).toBytes(),
+                        catalog.createResponse(request).toBytes(),
                     )
                 }
             } catch (error: Throwable) {
@@ -2945,11 +2963,15 @@ private fun cultNetWebSocketTransportCarriesSchemaFramesWithStats() {
             check(descriptor.protocol == "websocket")
             check(descriptor.channels == listOf(CultNetTransportChannel("schema", "reliable", "ordered")))
 
-            transport.sendSchemaMessage(cultNetSchemaCatalogRequest(messageId = "websocket-schema"))
-            val response = transport.receiveSchemaMessage()
-                ?: error("WebSocket transport did not receive schema message")
-            check(response.schemaVersion == "cultnet.hello.v0")
-            check(response.body["runtimeId"] == "kotlin-websocket-server")
+            val synced = CultNetSchemaCatalog()
+            val descriptors = transport.syncSchemaCatalog(
+                synced,
+                messageId = "websocket-schema",
+                includeSchemaJson = true,
+                kinds = listOf("document_payload"),
+            )
+            check(descriptors.single().schemaId == "kotlin.websocket.note.v1")
+            check(synced.get("kotlin.websocket.note.v1")?.documentType == "kotlin.websocket.note")
             check(transport.stats.framesSent == 1L)
             check(transport.stats.framesReceived == 1L)
         }
@@ -3627,7 +3649,7 @@ private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
     CultMesh.createRudpServer(
         runtimeId = "kotlin-rudp-sugar-server",
         connectionId = connectionId,
-        tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
+        tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
     ).use { server ->
         val endpoint = CultMesh.parseRudpEndpoint("rudp://127.0.0.1:${server.localPort}")
         check(endpoint.host == "127.0.0.1")
@@ -3642,14 +3664,91 @@ private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
             runtimeId = "kotlin-rudp-sugar-client",
             connectionId = connectionId,
             peer = peer,
-            tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
+            tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
         ).use { client ->
             client.connect("join")
             check(pumpRudpPairUntilConnected(client, server))
+            val schemaCatalog = CultNetSchemaCatalog()
+            schemaCatalog.upsert(
+                defineCultNetSchemaDescriptor(
+                    schemaId = "kotlin.rudp.note.v1",
+                    kind = "document_payload",
+                    documentType = "kotlin.rudp.note",
+                    title = "Kotlin RUDP Note",
+                    schemaJson = """{"type":"string"}""",
+                ),
+            )
+            val syncedSchemas = CultNetSchemaCatalog()
+            var schemaDescriptors: List<CultNetSchemaDescriptor>? = null
+            var clientError: Throwable? = null
+            val schemaThread = Thread {
+                try {
+                    schemaDescriptors = client.syncSchemaCatalog(
+                        syncedSchemas,
+                        messageId = "rudp-schema",
+                        includeSchemaJson = true,
+                        kinds = listOf("document_payload"),
+                        timeoutMs = 2_000,
+                    )
+                } catch (error: Throwable) {
+                    clientError = error
+                }
+            }
+            schemaThread.isDaemon = true
+            schemaThread.start()
+            val schemaRequest = server.receiveSchemaMessage(2_000)
+                ?: error("RUDP server did not receive schema catalog request")
+            server.sendSchemaMessage(schemaCatalog.createResponse(schemaRequest))
+            pollRudpAfterSend(server, 50)
+            schemaThread.join(2_000)
+            if (schemaThread.isAlive) error("RUDP schema helper client did not finish")
+            clientError?.let { throw it }
+            check(schemaDescriptors?.single()?.schemaId == "kotlin.rudp.note.v1")
+            check(syncedSchemas.get("kotlin.rudp.note.v1")?.documentType == "kotlin.rudp.note")
+            server.receiveOnce()
+
+            val shardCatalog = CultNetShardCatalog()
+            shardCatalog.upsert(
+                CultNetShardDescriptor(
+                    shardId = "kotlin-rudp-shard",
+                    ownerRuntimeId = "kotlin-rudp-sugar-server",
+                    epoch = 3,
+                    isPrimary = true,
+                    schemaIds = listOf("kotlin.rudp.note.v1"),
+                    keyPrefix = "note:",
+                ),
+            )
+            var shardDescriptors: List<CultNetShardDescriptor>? = null
+            clientError = null
+            val shardThread = Thread {
+                try {
+                    shardDescriptors = client.fetchShardDescriptors(
+                        messageId = "rudp-shards",
+                        schemaIds = listOf("kotlin.rudp.note.v1"),
+                        recordKeys = listOf("note:1"),
+                        timeoutMs = 2_000,
+                    )
+                } catch (error: Throwable) {
+                    clientError = error
+                }
+            }
+            shardThread.isDaemon = true
+            shardThread.start()
+            val shardRequest = server.receiveSchemaMessage(2_000)
+                ?: error("RUDP server did not receive shard catalog request")
+            server.sendSchemaMessage(shardCatalog.createResponse(shardRequest))
+            pollRudpAfterSend(server, 50)
+            shardThread.join(2_000)
+            if (shardThread.isAlive) error("RUDP shard helper client did not finish")
+            clientError?.let { throw it }
+            check(shardDescriptors?.single()?.shardId == "kotlin-rudp-shard")
+
             client.sendSchema("client-state")
             check(String(server.receiveSchema(1_000) ?: error("Server did not receive schema frame"), StandardCharsets.UTF_8) == "client-state")
+            client.receiveOnce()
             server.sendSchema("server-state")
             check(String(client.receiveSchema(1_000) ?: error("Client did not receive schema frame"), StandardCharsets.UTF_8) == "server-state")
+            server.receiveOnce()
         }
     }
 }
@@ -3985,6 +4084,144 @@ class CultNetWebSocketTransportConnection(
     override fun close() {
         client.close()
     }
+}
+
+fun CultNetWebSocketTransportConnection.fetchSchemaCatalog(
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+): CultNetMessage {
+    sendSchemaMessage(cultNetSchemaCatalogRequest(messageId, includeSchemaJson, schemaIds, kinds))
+    return requireSchemaResponse(
+        receiveSchemaMessage(),
+        "cultnet.schema_catalog_response.v0",
+        "WebSocket schema catalog",
+    )
+}
+
+fun CultNetWebSocketTransportConnection.fetchSchemaDescriptors(
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+): List<CultNetSchemaDescriptor> =
+    CultNetSchemaCatalog().applyResponse(fetchSchemaCatalog(messageId, includeSchemaJson, schemaIds, kinds))
+
+fun CultNetWebSocketTransportConnection.syncSchemaCatalog(
+    catalog: CultNetSchemaCatalog,
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+): List<CultNetSchemaDescriptor> =
+    catalog.applyResponse(fetchSchemaCatalog(messageId, includeSchemaJson, schemaIds, kinds))
+
+fun CultNetWebSocketTransportConnection.fetchShardCatalog(
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+): CultNetMessage {
+    sendSchemaMessage(cultNetShardCatalogRequest(messageId, schemaIds, recordKeys))
+    return requireSchemaResponse(
+        receiveSchemaMessage(),
+        "cultnet.shard_catalog_response.v0",
+        "WebSocket shard catalog",
+    )
+}
+
+fun CultNetWebSocketTransportConnection.fetchShardDescriptors(
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+): List<CultNetShardDescriptor> =
+    CultNetShardCatalog().applyResponse(fetchShardCatalog(messageId, schemaIds, recordKeys))
+
+fun CultNetWebSocketTransportConnection.syncShardCatalog(
+    catalog: CultNetShardCatalog,
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+): List<CultNetShardDescriptor> =
+    catalog.applyResponse(fetchShardCatalog(messageId, schemaIds, recordKeys))
+
+fun CultNetRudpSocketTransportConnection.fetchSchemaCatalog(
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): CultNetMessage {
+    sendSchemaMessage(cultNetSchemaCatalogRequest(messageId, includeSchemaJson, schemaIds, kinds))
+    return requireSchemaResponse(
+        receiveSchemaMessage(timeoutMs, pollIntervalMs),
+        "cultnet.schema_catalog_response.v0",
+        "RUDP schema catalog",
+    )
+}
+
+fun CultNetRudpSocketTransportConnection.fetchSchemaDescriptors(
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): List<CultNetSchemaDescriptor> =
+    CultNetSchemaCatalog().applyResponse(fetchSchemaCatalog(messageId, includeSchemaJson, schemaIds, kinds, timeoutMs, pollIntervalMs))
+
+fun CultNetRudpSocketTransportConnection.syncSchemaCatalog(
+    catalog: CultNetSchemaCatalog,
+    messageId: String = "kotlin-schema-catalog",
+    includeSchemaJson: Boolean = false,
+    schemaIds: List<String> = emptyList(),
+    kinds: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): List<CultNetSchemaDescriptor> =
+    catalog.applyResponse(fetchSchemaCatalog(messageId, includeSchemaJson, schemaIds, kinds, timeoutMs, pollIntervalMs))
+
+fun CultNetRudpSocketTransportConnection.fetchShardCatalog(
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): CultNetMessage {
+    sendSchemaMessage(cultNetShardCatalogRequest(messageId, schemaIds, recordKeys))
+    return requireSchemaResponse(
+        receiveSchemaMessage(timeoutMs, pollIntervalMs),
+        "cultnet.shard_catalog_response.v0",
+        "RUDP shard catalog",
+    )
+}
+
+fun CultNetRudpSocketTransportConnection.fetchShardDescriptors(
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): List<CultNetShardDescriptor> =
+    CultNetShardCatalog().applyResponse(fetchShardCatalog(messageId, schemaIds, recordKeys, timeoutMs, pollIntervalMs))
+
+fun CultNetRudpSocketTransportConnection.syncShardCatalog(
+    catalog: CultNetShardCatalog,
+    messageId: String = "kotlin-shard-catalog",
+    schemaIds: List<String> = emptyList(),
+    recordKeys: List<String> = emptyList(),
+    timeoutMs: Long = 1_000,
+    pollIntervalMs: Long = 5,
+): List<CultNetShardDescriptor> =
+    catalog.applyResponse(fetchShardCatalog(messageId, schemaIds, recordKeys, timeoutMs, pollIntervalMs))
+
+private fun requireSchemaResponse(message: CultNetMessage?, expectedSchemaVersion: String, label: String): CultNetMessage {
+    val response = message ?: throw IOException("$label request did not receive a schema message")
+    if (response.schemaVersion != expectedSchemaVersion) {
+        throw IOException("Expected $expectedSchemaVersion, received ${response.schemaVersion}")
+    }
+    return response
 }
 
 class MessagePackReader(payload: ByteArray) {
