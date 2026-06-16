@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cultnet_py import CultNetRawClient, CultNetSimulationObservationHub
+from cultnet_py import (
+    CultNetRawClient,
+    CultNetSchemaCatalog,
+    CultNetShardCatalog,
+    CultNetSimulationObservationHub,
+    wire_message_schema_catalog,
+)
 
 from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import CultMeshNode, CultMeshNodeOptions, create_node
@@ -75,6 +81,27 @@ class CultMesh:
     @staticmethod
     def create_stream_catalog() -> CultMeshStreamCatalog:
         return CultMeshStreamCatalog()
+
+    @staticmethod
+    def create_schema_catalog() -> CultNetSchemaCatalog:
+        return CultNetSchemaCatalog()
+
+    @staticmethod
+    def create_builtin_schema_catalog(
+        *,
+        include_schema_json: bool = True,
+        schema_ids: list[str] | None = None,
+        kinds: list[str] | None = None,
+    ) -> CultNetSchemaCatalog:
+        catalog = CultNetSchemaCatalog()
+        builtins = wire_message_schema_catalog(include_schema_json=include_schema_json)
+        for descriptor in builtins.list(schema_ids=schema_ids, kinds=kinds):
+            catalog.upsert(descriptor)
+        return catalog
+
+    @staticmethod
+    def create_shard_catalog() -> CultNetShardCatalog:
+        return CultNetShardCatalog()
 
     @staticmethod
     def create_verse_discovery_client(

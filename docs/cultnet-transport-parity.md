@@ -296,6 +296,10 @@ Current progress:
   subscription flows. The default factory opens the existing TCP-framed schema
   transport, but the raw client no longer owns inline socket setup as its
   request truth.
+- Python's branded `CultMesh` facade now creates schema catalogs, built-in
+  schema catalogs, and shard catalogs by delegating to the existing
+  `cultnet_py` owners, matching the TypeScript/Kotlin/Rust entrypoint pattern
+  without creating a second catalog authority.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the

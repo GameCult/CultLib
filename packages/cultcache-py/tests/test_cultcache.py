@@ -2732,6 +2732,51 @@ class CultCacheTests(unittest.TestCase):
             self.assertIsInstance(CultMesh.create_peer_catalog(), CultMeshPeerCatalog)
             self.assertIsInstance(CultMesh.create_authority_lease_catalog(), CultMeshAuthorityLeaseCatalog)
             self.assertIsInstance(CultMesh.create_stream_catalog(), CultMeshStreamCatalog)
+            self.assertIsInstance(CultMesh.create_schema_catalog(), CultNetSchemaCatalog)
+            self.assertIsInstance(CultMesh.create_builtin_schema_catalog(), CultNetSchemaCatalog)
+            self.assertIsInstance(CultMesh.create_shard_catalog(), CultNetShardCatalog)
+            builtins = CultMesh.create_builtin_schema_catalog(
+                include_schema_json=False,
+                kinds=["shared_contract"],
+            )
+            self.assertEqual(
+                builtins.list()[0].schema_id,
+                "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+            )
+            self.assertIsNone(builtins.list()[0].schema_json)
+            peer_exchange_schema_id = (
+                "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.peer-exchange-request.schema.json"
+            )
+            filtered_builtin = CultMesh.create_builtin_schema_catalog(
+                include_schema_json=True,
+                schema_ids=[peer_exchange_schema_id],
+            )
+            self.assertEqual(
+                filtered_builtin.list()[0].schema_version,
+                "cultmesh.peer_exchange_request.v0",
+            )
+            self.assertIn(
+                "cultmesh.peer_exchange_request.v0",
+                filtered_builtin.list()[0].schema_json or "",
+            )
+            shard_catalog = CultMesh.create_shard_catalog()
+            shard_catalog.upsert(
+                CultNetShardDescriptor(
+                    shard_id="python-notes-a",
+                    owner_runtime_id="mesh-facade",
+                    epoch=7,
+                    is_primary=True,
+                    schema_ids=("python.note.v1",),
+                    key_prefix="note:",
+                )
+            )
+            self.assertEqual(
+                [
+                    shard.shard_id
+                    for shard in shard_catalog.list(schema_ids=["python.note.v1"], record_keys=["note:1"])
+                ],
+                ["python-notes-a"],
+            )
             verse_client = CultMesh.create_verse_discovery_client("127.0.0.1", 4010, timeout_seconds=1.5)
             peer_client = CultMesh.create_peer_exchange_client("127.0.0.1", 4011, timeout_seconds=1.5)
             raw_client = CultMesh.create_client("127.0.0.1", 4012, timeout_seconds=1.5)
