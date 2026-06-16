@@ -334,7 +334,9 @@ Current progress:
   schema and shard catalogs. The helpers send standard schema-v0 requests,
   require the matching response schema, and apply through the caller's catalog,
   giving JVM/Android callers the same client ergonomics Python already had
-  without making the transport own catalog truth.
+  without making the transport own catalog truth. Both adapters implement the
+  shared `CultNetSchemaMessageTransport` shape so the helper logic has one
+  owner across Kotlin stream and RUDP paths.
 - Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
   Android clients can react to lease changes without treating peer-card contact
   hints as trust.

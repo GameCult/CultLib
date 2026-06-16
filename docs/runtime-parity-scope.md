@@ -34,7 +34,7 @@ CultMesh.
 | Python | Package runtime, local daemon endpoint, raw interop peer, typed state participant | CultCache/CultNet/CultMesh package surface, schema catalogs, shard catalogs/logs, local TCP CultMesh server, session/prediction/simulation fact helpers, authority leases, streams, RUDP codec/session/socket transport, RUDP reconnect policy/controller and reconnect-loop helper, schema-v0 MessagePack over RUDP evidence, benchmark evidence against C# cache paths | Universal C# throughput, full C# daemon/server stack, and RUDP as the only public service pipe |
 | TypeScript | Node/browser-adjacent projection and interop runtime | CultCache parity tests, CultNet schema-v0 peer, schema/shard catalog request/sync helpers, transport profiles, TCP-framed transport port and peer helper, shared RUDP socket transport, RUDP reconnect policy/controller, RUDP reconnect-loop helper, local CultMesh node/catalog/authority/stream ergonomics | Full C# game session/server stack |
 | Rust | Low-level cache/transport/runtime substrate | CultCache/CultNet interop lane, transport profiles, TCP-framed port, shared RUDP codec/session/socket transport, RUDP reconnect policy/controller and reconnect-loop helper, schema-v0 MessagePack over RUDP evidence, small CultMesh facade for peer cards, authority leases, RUDP endpoint parsing, and peer-card RUDP client construction | Full CultMesh game-session/server facade, stream catalog, or production game-session server |
-| Kotlin | JVM/Android client substrate | Typed MessagePack cache, schema/shard catalogs with transport fetch/sync helpers, authority leases, stream catalog, branded `CultMesh` facade, WebSocket transport profile/connection helper, RUDP client/server sugar, RUDP reconnect policy/controller and reconnect-loop helper, schema-v0 MessagePack over RUDP evidence | C# SoA store, full C# server daemon, or Unity hot-loop memory layout |
+| Kotlin | JVM/Android client substrate | Typed MessagePack cache, schema/shard catalogs with shared schema-message transport fetch/sync helpers, authority leases, stream catalog, branded `CultMesh` facade, WebSocket transport profile/connection helper, RUDP client/server sugar, RUDP reconnect policy/controller and reconnect-loop helper, schema-v0 MessagePack over RUDP evidence | C# SoA store, full C# server daemon, or Unity hot-loop memory layout |
 
 ## Evidence Gates
 
@@ -70,7 +70,9 @@ CultMesh.
   C#/TypeScript/Rust/Python/Kotlin RUDP reconnect loops use that controller;
   broader service adoption remains a separate claim.
 - Keep Kotlin ergonomic parity moving with Android/JVM-shaped APIs instead of
-  backfilling C# server responsibilities it should not own.
+  backfilling C# server responsibilities it should not own. Kotlin WebSocket
+  and RUDP adapters now share one `CultNetSchemaMessageTransport` helper shape
+  for schema/shard catalog request and sync flows.
 - Keep performance claims evidence-bound: C# owns SoA; Python has benchmark
   comparison gates; other runtimes should advertise measured native hot paths
   only when those paths exist.

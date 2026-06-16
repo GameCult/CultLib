@@ -101,10 +101,13 @@ transport.syncSchemaCatalog(
 The WebSocket adapter advertises a `websocket` transport profile with one
 reliable ordered `schema` channel and exposes transfer stats. `sendSchema`,
 `sendSchemaMessage`, `receiveSchema`, and `receiveSchemaMessage` keep the
-schema lane at the same ergonomic level as RUDP. `fetchSchemaCatalog`,
-`syncSchemaCatalog`, `fetchShardCatalog`, and `syncShardCatalog` mirror the
-Python client helpers without creating a second catalog owner. It is the stream
-adapter; RUDP remains the portable realtime UDP path.
+schema lane at the same ergonomic level as RUDP. WebSocket and RUDP both
+implement `CultNetSchemaMessageTransport`, so `fetchSchemaCatalog`,
+`syncSchemaCatalog`, `fetchShardCatalog`, and `syncShardCatalog` are shared
+schema-message transport helpers rather than duplicated adapter opinions. The
+catalogs still own imported state; the transport only performs the standard
+request/response hop. WebSocket is the stream adapter; RUDP remains the
+portable realtime UDP path.
 
 Schema catalogs are also first-class, so Kotlin peers can publish and consume
 descriptor responses instead of hand-assembling maps:
@@ -215,8 +218,9 @@ harness. `sendSchema`, `sendLatest`, and `sendRealtime` select the shared
 channel semantics; they do not create a Kotlin-only dialect. For a remote peer
 that already has its own receive loop, use `connectAndWait(...)`; for two
 same-process transports, use `pumpRudpPairUntilConnected(...)` to drive both
-sides through the handshake. RUDP transports expose the same catalog helpers as
-WebSocket, with timeout-aware receive loops: `fetchSchemaCatalog`,
+sides through the handshake. Because RUDP also implements
+`CultNetSchemaMessageTransport`, it uses the same catalog helpers as WebSocket,
+with timeout-aware receive loops: `fetchSchemaCatalog`,
 `fetchSchemaDescriptors`, `syncSchemaCatalog`, `fetchShardCatalog`,
 `fetchShardDescriptors`, and `syncShardCatalog`.
 
