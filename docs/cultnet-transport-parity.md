@@ -167,7 +167,9 @@ Current progress:
   synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
   and stats. `CultNetRawClient`, database subscriptions, and the local
   CultMesh server connection loop send/read through that port instead of owning
-  frame I/O directly.
+  frame I/O directly. The Python TCP interop peer now also accepts and dials
+  through that port, so the parity harness no longer keeps a raw framing
+  side-channel for Python's schema lane.
 - Rust now has the same `tcp_framed` transport profile helper plus a
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
@@ -306,10 +308,11 @@ Current progress:
   contact hints. The facade delegates to the existing Rust RUDP socket
   transport; discovery contact remains separate from trust, which is still
   gated by the authority lease catalog.
-- The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
-  service bodies behind their shared transport ports, then wire the remaining
-  daemon/socket reconnect loops through the shared controller and broaden the
-  RUDP schema-message matrix.
+- The remaining parity work is to move the remaining LiteNetLib/WebSocket
+  service bodies behind their shared transport ports, then wire any remaining
+  daemon/socket reconnect loops through the shared controller. The core
+  schema-message RUDP matrix is live in the TypeScript interop gate; broader
+  service adoption remains the unclaimed layer.
 
 ## RUDP Packet Contract V0
 

@@ -50,7 +50,7 @@ CultMesh.
 - `packages/cultcache-py/PARITY.md` is the Python-specific audit ledger. Its
   "Still Not Claimed" section is part of the contract, not an apology.
 - `docs/cultnet-transport-parity.md` is the transport ownership map. It tracks
-  the remaining work to lower older TCP/LiteNetLib/WebSocket bodies behind the
+  the remaining work to lower older LiteNetLib/WebSocket bodies behind the
   shared transport port and expand RUDP adoption beyond the core proof.
 - `packages/cultmesh-kotlin/README.md` records Kotlin's runtime role and
   ergonomic surface, including the explicit non-claim around C# SoA storage.
@@ -58,14 +58,13 @@ CultMesh.
 ## Remaining Work Before A Full Completion Claim
 
 - Broaden service adoption so remaining daemon and production paths use the
-  shared transport port consistently instead of keeping raw
-  TCP/LiteNetLib/WebSocket ownership in individual bodies.
-- Extend RUDP interop evidence through daemon/socket reconnect loops and the
-  wider schema-message matrix. RUDP profiles now advertise the portable
-  reconnect policy, runtime-local tests prove the shared controller across the
-  targeted runtimes, and the C# LiteNetLib client plus C#/TypeScript/Rust/Python/Kotlin
-  RUDP reconnect loops use that controller; broader service adoption remains a
-  separate claim.
+  shared transport port consistently instead of keeping LiteNetLib/WebSocket
+  ownership in individual bodies.
+- Extend RUDP adoption through daemon/socket reconnect loops. RUDP profiles now
+  advertise the portable reconnect policy, runtime-local tests prove the shared
+  controller across the targeted runtimes, and the C# LiteNetLib client plus
+  C#/TypeScript/Rust/Python/Kotlin RUDP reconnect loops use that controller;
+  broader service adoption remains a separate claim.
 - Keep Kotlin ergonomic parity moving with Android/JVM-shaped APIs instead of
   backfilling C# server responsibilities it should not own.
 - Keep performance claims evidence-bound: C# owns SoA; Python has benchmark

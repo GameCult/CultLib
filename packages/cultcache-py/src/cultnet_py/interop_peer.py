@@ -37,9 +37,8 @@ from cultmesh_py import (
     simulation_fact_document,
 )
 
-from .framing import read_frame, write_frame
 from .schema_catalog import INTEROP_WIRE_CONTRACT, wire_message_schema_descriptors
-from .transport import create_tcp_framed_transport_profile
+from .transport import TcpFramedTransportConnection, create_tcp_framed_transport_profile
 
 INTEROP_DOCUMENT_TYPE = "cultnet.interop-note"
 INTEROP_SCHEMA_VERSION = "cultnet.interop_note.v0"
@@ -214,18 +213,22 @@ def accept_loop(server: socket.socket, state: PeerState, stop: threading.Event) 
 def handle_connection(client: socket.socket, state: PeerState) -> None:
     with client:
         stream = client.makefile("rwb", buffering=0)
+        transport = TcpFramedTransportConnection(
+            stream,
+            profile=create_tcp_framed_transport_profile(f"{state.runtime_id}-interop-server"),
+        )
         subscriptions: dict[str, DatabaseSubscription] = {}
         while True:
             try:
-                payload = read_frame(stream)
+                frame = transport.receive()
             except EOFError:
                 return
-            message = msgpack.unpackb(payload, raw=False)
+            message = msgpack.unpackb(frame.payload, raw=False)
             if not isinstance(message, dict):
                 continue
             response_messages = handle_server_message(state, message, subscriptions)
             for response in response_messages:
-                write_message(stream, response)
+                write_message(transport, response)
 
 
 def handle_server_message(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
@@ -618,14 +621,22 @@ def dial(args: argparse.Namespace) -> None:
     state = build_state(args.runtime_id, args.runtime_kind, args.display_name, args.agent_id, args.schema_path, store_suffix="-dial")
     with socket.create_connection((args.target_host, args.target_port), timeout=args.timeout_ms / 1000) as client:
         stream = client.makefile("rwb", buffering=0)
-        write_message(stream, hello_message(state))
-        remote_hello = read_until(stream, lambda message: message.get("schemaVersion") == "cultnet.hello.v0", args.timeout_ms)
+        transport = TcpFramedTransportConnection(
+            stream,
+            profile=create_tcp_framed_transport_profile(
+                f"{args.runtime_id}-interop-dial",
+                host=args.target_host,
+                port=args.target_port,
+            ),
+        )
+        write_message(transport, hello_message(state))
+        remote_hello = read_until(transport, lambda message: message.get("schemaVersion") == "cultnet.hello.v0", args.timeout_ms)
 
-        write_message(stream, {"schemaVersion": "cultnet.schema_catalog_request.v0", "messageId": f"{args.runtime_id}-catalog", "includeSchemaJson": True})
-        catalog = read_until(stream, lambda message: message.get("schemaVersion") == "cultnet.schema_catalog_response.v0", args.timeout_ms)
+        write_message(transport, {"schemaVersion": "cultnet.schema_catalog_request.v0", "messageId": f"{args.runtime_id}-catalog", "includeSchemaJson": True})
+        catalog = read_until(transport, lambda message: message.get("schemaVersion") == "cultnet.schema_catalog_response.v0", args.timeout_ms)
 
-        write_message(stream, {"schemaVersion": "cultnet.snapshot_request.v0", "messageId": f"{args.runtime_id}-snapshot", "schemaIds": [state.note_schema_id]})
-        snapshot = read_until(stream, lambda message: message.get("schemaVersion") == "cultnet.snapshot_response_raw.v0", args.timeout_ms)
+        write_message(transport, {"schemaVersion": "cultnet.snapshot_request.v0", "messageId": f"{args.runtime_id}-snapshot", "schemaIds": [state.note_schema_id]})
+        snapshot = read_until(transport, lambda message: message.get("schemaVersion") == "cultnet.snapshot_response_raw.v0", args.timeout_ms)
         apply_raw_snapshot(state, snapshot)
         note = state.cache.get_required(state.bindings_by_schema_id[state.note_schema_id].document, f'note:{remote_hello["runtimeId"]}')
         has_schema = any(schema.get("schemaId") == state.note_schema_id and schema.get("documentType") == INTEROP_DOCUMENT_TYPE for schema in catalog.get("schemas", []))
@@ -637,11 +648,11 @@ def dial(args: argparse.Namespace) -> None:
             "appendBody": f" Decorated by {args.runtime_id}.",
             "appendTag": f"decorated:{args.runtime_id}",
         }
-        write_message(stream, raw_document_put(state.bindings_by_schema_id[INTEROP_MUTATION_INTENT_SCHEMA_ID], f"{args.runtime_id}-decorate-put", intent["intentId"], intent, state))
+        write_message(transport, raw_document_put(state.bindings_by_schema_id[INTEROP_MUTATION_INTENT_SCHEMA_ID], f"{args.runtime_id}-decorate-put", intent["intentId"], intent, state))
         mutation_receipt: dict[str, Any] | None = None
         mutated_note: dict[str, Any] | None = None
         while mutation_receipt is None or mutated_note is None:
-            message = read_until(stream, lambda candidate: candidate.get("schemaVersion") == "cultnet.document_put_raw.v0", args.timeout_ms)
+            message = read_until(transport, lambda candidate: candidate.get("schemaVersion") == "cultnet.document_put_raw.v0", args.timeout_ms)
             applied = apply_raw_document_put(state, message["document"])
             schema_id = message["document"]["schemaId"]
             if schema_id == INTEROP_MUTATION_RECEIPT_SCHEMA_ID:
@@ -655,8 +666,8 @@ def dial(args: argparse.Namespace) -> None:
             "characterId": remote_hello["runtimeId"],
             "weaponId": "interop-rifle",
         }
-        write_message(stream, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_COMMAND_SCHEMA_ID], f"{args.runtime_id}-fire-put", command["commandId"], command, state))
-        fire_receipt_message = read_until(stream, lambda candidate: candidate.get("schemaVersion") == "cultnet.document_put_raw.v0" and candidate.get("document", {}).get("schemaId") == INTEROP_FIRE_RECEIPT_SCHEMA_ID, args.timeout_ms)
+        write_message(transport, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_COMMAND_SCHEMA_ID], f"{args.runtime_id}-fire-put", command["commandId"], command, state))
+        fire_receipt_message = read_until(transport, lambda candidate: candidate.get("schemaVersion") == "cultnet.document_put_raw.v0" and candidate.get("document", {}).get("schemaId") == INTEROP_FIRE_RECEIPT_SCHEMA_ID, args.timeout_ms)
         fire_receipt = apply_raw_document_put(state, fire_receipt_message["document"])
 
     write_json({
@@ -976,15 +987,15 @@ def raw_record_from_envelope(envelope: CultCacheEnvelope, schema_id: str) -> dic
     }
 
 
-def write_message(stream: Any, message: dict[str, Any]) -> None:
-    write_frame(stream, msgpack.packb(message, use_bin_type=True))
+def write_message(transport: TcpFramedTransportConnection, message: dict[str, Any]) -> None:
+    transport.send("schema", msgpack.packb(message, use_bin_type=True))
 
 
-def read_until(stream: Any, predicate: Callable[[dict[str, Any]], bool], timeout_ms: int) -> dict[str, Any]:
+def read_until(transport: TcpFramedTransportConnection, predicate: Callable[[dict[str, Any]], bool], timeout_ms: int) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
-        payload = read_frame(stream)
-        message = msgpack.unpackb(payload, raw=False)
+        frame = transport.receive()
+        message = msgpack.unpackb(frame.payload, raw=False)
         if isinstance(message, dict) and predicate(message):
             return message
     raise TimeoutError(f"Timed out waiting for CultNet message after {timeout_ms}ms")
