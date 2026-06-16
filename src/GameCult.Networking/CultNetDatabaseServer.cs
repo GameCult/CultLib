@@ -209,31 +209,51 @@ namespace GameCult.Networking
 
         private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, NetPeer peer)
         {
-            _server.SendCultNet(peer, CreateSnapshotResponse(request));
+            return HandleSnapshotRequestAsync(request, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, CultNetServerPeer peer)
+        {
+            peer.SendCultNet(CreateSnapshotResponse(request));
             return Task.CompletedTask;
         }
 
         private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, NetPeer peer)
         {
-            _server.SendCultNet(peer, CreateShardCatalogResponse(request));
+            return HandleShardCatalogRequestAsync(request, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, CultNetServerPeer peer)
+        {
+            peer.SendCultNet(CreateShardCatalogResponse(request));
             return Task.CompletedTask;
         }
 
         private Task HandleShardLogRequestAsync(CultNetShardLogRequestMessage request, NetPeer peer)
         {
+            return HandleShardLogRequestAsync(request, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleShardLogRequestAsync(CultNetShardLogRequestMessage request, CultNetServerPeer peer)
+        {
             try
             {
-                _server.SendCultNet(peer, CreateShardLogResponse(request));
+                peer.SendCultNet(CreateShardLogResponse(request));
             }
             catch (Exception ex)
             {
-                _server.SendCultNet(peer, new CultNetErrorMessage { Error = ex.Message });
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
 
             return Task.CompletedTask;
         }
 
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, NetPeer peer)
+        {
+            await HandlePutAsync(message, _server.GetPeerContext(peer)).ConfigureAwait(false);
+        }
+
+        private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
         {
             try
             {
@@ -244,17 +264,22 @@ namespace GameCult.Networking
                 if (!await TryForwardPutAsync(ex, message).ConfigureAwait(false))
                 {
                     _server.Logger.LogError($"CultNet raw put authority failed: {ex.Message}");
-                    _server.SendCultNet(peer, CreateRoutingError(ex));
+                    peer.SendCultNet(CreateRoutingError(ex));
                 }
             }
             catch (Exception ex)
             {
                 _server.Logger.LogError($"CultNet raw put failed: {ex.Message}");
-                _server.SendCultNet(peer, new CultNetErrorMessage { Error = ex.Message });
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
         }
 
         private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, NetPeer peer)
+        {
+            await HandleDeleteAsync(message, _server.GetPeerContext(peer)).ConfigureAwait(false);
+        }
+
+        private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, CultNetServerPeer peer)
         {
             try
             {
@@ -264,27 +289,32 @@ namespace GameCult.Networking
             {
                 if (!await TryForwardDeleteAsync(ex, message).ConfigureAwait(false))
                 {
-                    _server.SendCultNet(peer, CreateRoutingError(ex));
+                    peer.SendCultNet(CreateRoutingError(ex));
                 }
             }
             catch (Exception ex)
             {
-                _server.SendCultNet(peer, new CultNetErrorMessage { Error = ex.Message });
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
         }
 
         private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage message, NetPeer peer)
+        {
+            return HandleSubscribeAsync(message, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage message, CultNetServerPeer peer)
         {
             var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
                 ? message.MessageId
                 : message.SubscriptionId;
             if (string.IsNullOrWhiteSpace(subscriptionId))
             {
-                _server.SendCultNet(peer, new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
                 return Task.CompletedTask;
             }
 
-            var key = SubscriptionKey(peer, subscriptionId);
+            var key = SubscriptionKey(peer.Peer, subscriptionId);
             _subscriptions.AddOrUpdate(
                 key,
                 _ => CreateSubscription(message, subscriptionId, peer),
@@ -296,7 +326,7 @@ namespace GameCult.Networking
 
             if (message.IncludeSnapshot)
             {
-                _server.SendCultNet(peer, CreateSnapshotResponse(new CultNetSnapshotRequestMessage
+                peer.SendCultNet(CreateSnapshotResponse(new CultNetSnapshotRequestMessage
                 {
                     MessageId = message.MessageId,
                     SchemaIds = message.SchemaIds,
@@ -324,14 +354,14 @@ namespace GameCult.Networking
         private IDisposable CreateSubscription(
             CultNetDatabaseSubscribeMessage request,
             string subscriptionId,
-            NetPeer peer)
+            CultNetServerPeer peer)
         {
             return _database.WatchAllChanges().Subscribe(change =>
             {
                 var outbound = CreateChangeMessage(change, subscriptionId, request);
                 if (outbound != null)
                 {
-                    _server.SendCultNet(peer, outbound);
+                    peer.SendCultNet(outbound);
                 }
             });
         }

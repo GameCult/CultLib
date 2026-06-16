@@ -61,16 +61,21 @@ namespace GameCult.Networking
 
         private Task HandleObservationAsync(CultNetSimulationObservationMessage message, NetPeer peer)
         {
+            return HandleObservationAsync(message, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleObservationAsync(CultNetSimulationObservationMessage message, CultNetServerPeer peer)
+        {
             try
             {
                 foreach (var candidate in CreateCandidateMessages(message))
                 {
-                    _server.SendCultNet(peer, candidate);
+                    peer.SendCultNet(candidate);
                 }
             }
             catch (Exception ex)
             {
-                _server.SendCultNet(peer, new CultNetErrorMessage { Error = ex.Message });
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
 
             return Task.CompletedTask;

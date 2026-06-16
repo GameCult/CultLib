@@ -127,7 +127,12 @@ namespace GameCult.Mesh
 
         private Task HandleRequestAsync(CultMeshVerseCatalogRequestMessage request, NetPeer peer)
         {
-            _server.SendCultNet(peer, CreateResponse(request));
+            return HandleRequestAsync(request, _server.GetPeerContext(peer));
+        }
+
+        private Task HandleRequestAsync(CultMeshVerseCatalogRequestMessage request, CultNetServerPeer peer)
+        {
+            peer.SendCultNet(CreateResponse(request));
             return Task.CompletedTask;
         }
     }

@@ -156,8 +156,9 @@ Current progress:
   well. Inbound payload classification and transfer stats also belong to that
   channel-aware adapter before dispatching schema-v0 or legacy messages. The
   C# database, simulation-observation, Verse-discovery, and peer-exchange
-  service wrappers now send responses through `Server.SendCultNet(...)`, so
-  server-owned service bodies no longer reach around the per-peer adapter with
+  service wrappers now enter their built-in handlers through
+  `CultNetServerPeer`, a transport-aware server peer context. Responses send
+  through that context instead of reaching around the per-peer adapter with
   direct `NetPeer` extension sends.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes

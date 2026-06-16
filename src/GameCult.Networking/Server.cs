@@ -194,6 +194,19 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Gets the transport-aware server peer context for a connected LiteNetLib peer.
+        /// </summary>
+        public CultNetServerPeer GetPeerContext(NetPeer peer)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            var user = _users.GetOrAdd(
+                peer.Id,
+                _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
+            user.Transport ??= new LiteNetLibTransportConnection(peer);
+            return new CultNetServerPeer(peer, user.Transport);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>
@@ -662,11 +675,7 @@ namespace GameCult.Networking
                 return;
             }
 
-            var user = _users.GetOrAdd(
-                peer.Id,
-                _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
-            user.Transport ??= new LiteNetLibTransportConnection(peer);
-            user.Transport.SendLegacy(message);
+            GetPeerContext(peer).Send(message);
         }
 
         private void SendSchema<T>(NetPeer? peer, T message)
@@ -677,11 +686,7 @@ namespace GameCult.Networking
                 return;
             }
 
-            var user = _users.GetOrAdd(
-                peer.Id,
-                _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
-            user.Transport ??= new LiteNetLibTransportConnection(peer);
-            user.Transport.SendSchema(message);
+            GetPeerContext(peer).SendCultNet(message);
         }
 
         private static bool CheckRateLimit(
@@ -705,6 +710,50 @@ namespace GameCult.Networking
                 queue.Enqueue(now);
                 return queue.Count <= maxAttemptsPerMinute;
             }
+        }
+    }
+
+    /// <summary>
+    /// Transport-aware server peer context for built-in CultNet service bodies.
+    /// </summary>
+    public sealed class CultNetServerPeer
+    {
+        internal CultNetServerPeer(NetPeer peer, LiteNetLibTransportConnection transport)
+        {
+            Peer = peer ?? throw new ArgumentNullException(nameof(peer));
+            Transport = transport ?? throw new ArgumentNullException(nameof(transport));
+        }
+
+        /// <summary>
+        /// Gets the underlying LiteNetLib peer identity.
+        /// </summary>
+        public NetPeer Peer { get; }
+
+        /// <summary>
+        /// Gets the channel-aware LiteNetLib transport adapter for this peer.
+        /// </summary>
+        public LiteNetLibTransportConnection Transport { get; }
+
+        /// <summary>
+        /// Gets a snapshot of transport counters for this peer.
+        /// </summary>
+        public CultNetTransportStats Stats => Transport.Stats;
+
+        /// <summary>
+        /// Sends a legacy GameCult.Networking union message through the peer transport adapter.
+        /// </summary>
+        public void Send(Message message)
+        {
+            Transport.SendLegacy(message);
+        }
+
+        /// <summary>
+        /// Sends a CultNet schema-v0 message through the peer transport adapter.
+        /// </summary>
+        public void SendCultNet<T>(T message)
+            where T : ICultNetSchemaMessage
+        {
+            Transport.SendSchema(message);
         }
     }
 
