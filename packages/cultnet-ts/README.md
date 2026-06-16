@@ -21,6 +21,9 @@ The library currently includes:
 - `CultCacheTS` replication helpers for document put/delete/snapshot flows
 - schema discovery catalog messages and a registry for asking what contracts a
   peer can actually exchange safely
+- RUDP socket transport, reconnect policy helpers, and
+  `CultNetRudpReconnectLoop` for controller-owned retry scheduling around a
+  caller-owned socket factory
 - generated TypeScript contracts and runtime verifiers from canonical JSON
   schemas owned elsewhere in the swarm
 - an exact mirrored runtime validator and generated TS contract surface for

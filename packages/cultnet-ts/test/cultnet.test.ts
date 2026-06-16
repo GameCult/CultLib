@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { Duplex } from "node:stream";
 import dgram, { type Socket } from "node:dgram";
 import { rmSync, mkdtempSync } from "node:fs";
@@ -17,6 +18,7 @@ import {
   CultNetClientSecurityOptions,
   CultNetDocumentRegistry,
   CultNetPeer,
+  CultNetRudpReconnectLoop,
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,
   CultNetSchemaRegistry,
@@ -49,6 +51,22 @@ import {
   createMismatchedInteropNoteFormatter,
   type InteropNote,
 } from "./interop/cultnet-interop-shared";
+
+class FakeRudpReconnectTransport extends EventEmitter {
+  public connectCalls = 0;
+  public closeCalls = 0;
+  public lastPayload: Uint8Array | undefined;
+
+  public connect(payload = new Uint8Array()): void {
+    this.connectCalls += 1;
+    this.lastPayload = payload;
+  }
+
+  public close(): void {
+    this.closeCalls += 1;
+    this.emit("close");
+  }
+}
 
 class LinkedDuplex extends Duplex {
   peer?: LinkedDuplex;
@@ -328,6 +346,52 @@ test("reconnect controller schedules attempts and reset with the shared policy",
   assert.equal(controller.nextAttemptAtMs, undefined);
   assert.equal(controller.exhausted, false);
   assert.equal(controller.canAttempt(99_000), true);
+});
+
+test("rudp reconnect loop consumes the shared reconnect controller", () => {
+  let nowMs = 10_000;
+  let capturedTimer: (() => void) | undefined;
+  const transports: FakeRudpReconnectTransport[] = [];
+  const loop = new CultNetRudpReconnectLoop({
+    reconnectPolicy: createCultNetReconnectPolicy({ maxAttempts: 2 }),
+    connectPayload: Buffer.from("join", "utf8"),
+    createTransport: () => {
+      const transport = new FakeRudpReconnectTransport();
+      transports.push(transport);
+      return transport;
+    },
+    nowMs: () => nowMs,
+    jitterMs: () => 17,
+    setTimer: (callback, delayMs) => {
+      assert.equal(delayMs, 1_017);
+      capturedTimer = callback;
+      return "timer";
+    },
+    clearTimer: () => {
+      capturedTimer = undefined;
+    },
+  });
+
+  const first = loop.start() as FakeRudpReconnectTransport;
+  assert.equal(first.connectCalls, 1);
+  assert.equal(Buffer.from(first.lastPayload ?? []).toString("utf8"), "join");
+
+  first.emit("close");
+  assert.equal(loop.reconnectController.attempt, 1);
+  assert.equal(loop.reconnectController.nextAttemptAtMs, 11_017);
+  assert.equal(typeof capturedTimer, "function");
+
+  nowMs = 11_017;
+  capturedTimer?.();
+  assert.equal(transports.length, 2);
+  assert.equal(transports[1]?.connectCalls, 1);
+
+  loop.markConnected();
+  assert.equal(loop.reconnectController.attempt, 0);
+
+  loop.stop();
+  assert.equal(transports[1]?.closeCalls, 1);
+  assert.equal(loop.transport, undefined);
 });
 
 test("rudp session handshake acks reliable connect and accept packets", () => {

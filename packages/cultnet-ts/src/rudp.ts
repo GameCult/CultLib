@@ -3,7 +3,9 @@ import { type RemoteInfo, type Socket } from "node:dgram";
 
 import type { CultNetTransportProfile } from "./contracts";
 import {
+  CultNetReconnectController,
   createCultNetReconnectPolicy,
+  type CultNetReconnectDecision,
   type CultNetReconnectPolicy,
   type CultNetTransportConnection,
   type CultNetTransportFrame,
@@ -107,6 +109,21 @@ export interface CultNetRudpSocketTransportOptions {
   maxFragmentBytes?: number;
   maxPendingReliablePackets?: number;
   reconnectPolicy?: CultNetReconnectPolicy;
+}
+
+export interface CultNetRudpReconnectTransport extends EventEmitter {
+  connect(payload?: Uint8Array): void;
+  close(): void;
+}
+
+export interface CultNetRudpReconnectLoopOptions {
+  reconnectPolicy?: CultNetReconnectPolicy;
+  createTransport: () => CultNetRudpReconnectTransport;
+  connectPayload?: Uint8Array;
+  nowMs?: () => number;
+  jitterMs?: () => number;
+  setTimer?: (callback: () => void, delayMs: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
 
 const packetTypeToCode: Record<CultNetRudpPacketType, number> = {
@@ -764,6 +781,96 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     const wire = encodeRudpPacket(packet);
     this.#stats.bytesSent += wire.length;
     this.#socket.send(wire, this.#remotePort, this.#remoteHost);
+  }
+}
+
+export class CultNetRudpReconnectLoop extends EventEmitter {
+  readonly reconnectController: CultNetReconnectController;
+  readonly #createTransport: () => CultNetRudpReconnectTransport;
+  readonly #connectPayload: Uint8Array;
+  readonly #nowMs: () => number;
+  readonly #jitterMs: () => number;
+  readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
+  readonly #clearTimer: (handle: unknown) => void;
+  #transport: CultNetRudpReconnectTransport | undefined;
+  #timer: unknown;
+  #stopped = true;
+
+  constructor(options: CultNetRudpReconnectLoopOptions) {
+    super();
+    this.reconnectController = new CultNetReconnectController(options.reconnectPolicy ?? createCultNetReconnectPolicy());
+    this.#createTransport = options.createTransport;
+    this.#connectPayload = options.connectPayload ?? new Uint8Array();
+    this.#nowMs = options.nowMs ?? Date.now;
+    this.#jitterMs = options.jitterMs ?? (() => 0);
+    this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+    this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
+  }
+
+  get transport(): CultNetRudpReconnectTransport | undefined {
+    return this.#transport;
+  }
+
+  start(): CultNetRudpReconnectTransport {
+    this.#stopped = false;
+    this.reconnectController.reset();
+    return this.#openTransport();
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    if (this.#timer !== undefined) {
+      this.#clearTimer(this.#timer);
+      this.#timer = undefined;
+    }
+    const transport = this.#transport;
+    this.#transport = undefined;
+    transport?.close();
+    this.reconnectController.reset();
+  }
+
+  markConnected(): void {
+    this.reconnectController.reset();
+  }
+
+  #openTransport(): CultNetRudpReconnectTransport {
+    const transport = this.#createTransport();
+    this.#transport = transport;
+    transport.once("close", () => {
+      if (this.#transport === transport) {
+        this.#transport = undefined;
+      }
+      this.#scheduleReconnect();
+    });
+    transport.on("error", (error) => this.emit("error", error));
+    this.emit("transport", transport);
+    try {
+      transport.connect(this.#connectPayload);
+    } catch (error) {
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+      this.#scheduleReconnect();
+    }
+    return transport;
+  }
+
+  #scheduleReconnect(): void {
+    if (this.#stopped || this.#timer !== undefined) {
+      return;
+    }
+    const decision = this.reconnectController.recordFailure(this.#nowMs(), this.#jitterMs());
+    this.emit("reconnectScheduled", decision satisfies CultNetReconnectDecision);
+    if (!decision.shouldRetry) {
+      this.emit("reconnectExhausted", decision);
+      return;
+    }
+    this.#timer = this.#setTimer(() => {
+      this.#timer = undefined;
+      if (this.#stopped || !this.reconnectController.canAttempt(this.#nowMs())) {
+        return;
+      }
+      this.emit("reconnecting", decision);
+      this.#openTransport();
+    }, decision.delayMs);
   }
 }
 
