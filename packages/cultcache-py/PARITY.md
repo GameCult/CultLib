@@ -103,7 +103,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   unreliable sequenced `latest`, unreliable unordered `realtime`, resend
   pressure, bounded reliable-send backpressure, and the portable
   `cultnet.reconnect_policy.v0` delay-policy helper plus reconnect controller
-  advertised through RUDP transport profiles. The TypeScript interop harness proves bidirectional Python/TypeScript RUDP socket exchange,
+  advertised through RUDP transport profiles. `CultNetRudpReconnectLoop`
+  consumes that controller for caller-owned RUDP transport factories, matching
+  the TypeScript/Kotlin reconnect-loop shape without making the socket factory
+  a hidden global. The TypeScript interop harness proves bidirectional Python/TypeScript RUDP socket exchange,
   packet-loss recovery, reordering recovery, fragmentation, ping/pong, and
   disconnect reason propagation through the shared wire language.
 - Python CultMesh discovery client:
@@ -287,8 +290,10 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   service and harness flows, while `docs/cultnet-transport-parity.md` tracks the
   remaining work to put broader server-side bodies behind the shared transport
   port instead of cloning LiteNetLib. The reconnect policy/controller primitive
-  is portable and advertised by RUDP profiles; automatic reconnect use by
-  Python service bodies is not yet claimed.
+  is portable and advertised by RUDP profiles, and `CultNetRudpReconnectLoop`
+  gives Python callers the same RUDP retry-scheduling helper as
+  TypeScript/Kotlin. Automatic reconnect use by Python service bodies is not
+  yet claimed.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

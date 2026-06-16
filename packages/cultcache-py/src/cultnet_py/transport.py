@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import socket
+import threading
 import time
+from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -113,6 +115,89 @@ class CultNetReconnectController:
             delay_ms=delay_ms,
             next_attempt_at_ms=self.next_attempt_at_ms,
         )
+
+
+CultNetRudpReconnectScheduler = Callable[[int, Callable[[], None]], Callable[[], None]]
+
+
+def _default_rudp_reconnect_scheduler(delay_ms: int, callback: Callable[[], None]) -> Callable[[], None]:
+    timer = threading.Timer(max(0, delay_ms) / 1000.0, callback)
+    timer.daemon = True
+    timer.start()
+    return timer.cancel
+
+
+class CultNetRudpReconnectLoop:
+    def __init__(
+        self,
+        create_transport: Callable[[], CultNetRudpSocketTransportConnection],
+        *,
+        reconnect_policy: CultNetReconnectPolicy | None = None,
+        connect_payload: bytes = b"",
+        now_ms: Callable[[], int] | None = None,
+        jitter_ms: Callable[[], int] | None = None,
+        scheduler: CultNetRudpReconnectScheduler | None = None,
+    ) -> None:
+        self.reconnect_controller = CultNetReconnectController(reconnect_policy or create_reconnect_policy())
+        self._create_transport = create_transport
+        self._connect_payload = bytes(connect_payload)
+        self._now_ms = now_ms or _now_ms
+        self._jitter_ms = jitter_ms or (lambda: 0)
+        self._scheduler = scheduler or _default_rudp_reconnect_scheduler
+        self._cancel_timer: Callable[[], None] | None = None
+        self._stopped = True
+        self.transport: CultNetRudpSocketTransportConnection | None = None
+
+    def start(self) -> CultNetRudpSocketTransportConnection:
+        self._stopped = False
+        self.reconnect_controller.reset()
+        return self._open_transport()
+
+    def stop(self) -> None:
+        self._stopped = True
+        if self._cancel_timer is not None:
+            self._cancel_timer()
+            self._cancel_timer = None
+        transport = self.transport
+        self.transport = None
+        if transport is not None:
+            transport.close()
+        self.reconnect_controller.reset()
+
+    def mark_connected(self) -> None:
+        self.reconnect_controller.reset()
+
+    def handle_closed(self) -> CultNetReconnectDecision | None:
+        self.transport = None
+        return self._schedule_reconnect()
+
+    def _open_transport(self) -> CultNetRudpSocketTransportConnection:
+        transport = self._create_transport()
+        self.transport = transport
+        try:
+            transport.connect(self._connect_payload)
+        except Exception:
+            self.transport = None
+            transport.close()
+            self._schedule_reconnect()
+            raise
+        return transport
+
+    def _schedule_reconnect(self) -> CultNetReconnectDecision | None:
+        if self._stopped or self._cancel_timer is not None:
+            return None
+
+        decision = self.reconnect_controller.record_failure(self._now_ms(), self._jitter_ms())
+        if not decision.should_retry:
+            return decision
+
+        def reconnect() -> None:
+            self._cancel_timer = None
+            if not self._stopped and self.reconnect_controller.can_attempt(self._now_ms()):
+                self._open_transport()
+
+        self._cancel_timer = self._scheduler(decision.delay_ms, reconnect)
+        return decision
 
 
 @dataclass(frozen=True)

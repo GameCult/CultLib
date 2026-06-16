@@ -73,6 +73,7 @@ from cultnet_py import (
     CultNetRudpSession,
     CultNetRudpSessionOptions,
     CultNetRudpSocketMode,
+    CultNetRudpReconnectLoop,
     CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions,
     TcpFramedTransportConnection,
@@ -732,6 +733,75 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(controller.next_attempt_at_ms)
         self.assertFalse(controller.exhausted)
         self.assertTrue(controller.can_attempt(99_000))
+
+    def test_cultnet_rudp_reconnect_loop_consumes_shared_controller(self) -> None:
+        class FakeRudpReconnectTransport:
+            def __init__(self) -> None:
+                self.connect_calls = 0
+                self.close_calls = 0
+                self.last_payload: bytes | None = None
+
+            def connect(self, payload: bytes = b"") -> None:
+                self.connect_calls += 1
+                self.last_payload = bytes(payload)
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        now_ms = 10_000
+        captured_callback: list[Callable[[], None]] = []
+        transports: list[FakeRudpReconnectTransport] = []
+
+        def create_transport() -> FakeRudpReconnectTransport:
+            transport = FakeRudpReconnectTransport()
+            transports.append(transport)
+            return transport
+
+        def scheduler(delay_ms: int, callback: Callable[[], None]) -> Callable[[], None]:
+            self.assertEqual(delay_ms, 1_017)
+            captured_callback[:] = [callback]
+
+            def cancel() -> None:
+                captured_callback.clear()
+
+            return cancel
+
+        loop = CultNetRudpReconnectLoop(
+            create_transport,
+            reconnect_policy=create_reconnect_policy(max_attempts=2),
+            connect_payload=b"join",
+            now_ms=lambda: now_ms,
+            jitter_ms=lambda: 17,
+            scheduler=scheduler,
+        )
+
+        first = loop.start()
+        self.assertEqual(first.connect_calls, 1)
+        self.assertEqual(first.last_payload, b"join")
+        self.assertIs(loop.transport, first)
+
+        decision = loop.handle_closed()
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.attempt, 1)
+        self.assertTrue(decision.should_retry)
+        self.assertEqual(decision.delay_ms, 1_017)
+        self.assertEqual(decision.next_attempt_at_ms, 11_017)
+        self.assertEqual(loop.reconnect_controller.attempt, 1)
+        self.assertEqual(loop.reconnect_controller.next_attempt_at_ms, 11_017)
+        self.assertEqual(len(captured_callback), 1)
+
+        now_ms = 11_017
+        captured_callback[0]()
+        self.assertEqual(len(transports), 2)
+        self.assertEqual(transports[1].connect_calls, 1)
+        self.assertIs(loop.transport, transports[1])
+
+        loop.mark_connected()
+        self.assertEqual(loop.reconnect_controller.attempt, 0)
+
+        loop.stop()
+        self.assertEqual(transports[1].close_calls, 1)
+        self.assertIsNone(loop.transport)
 
     def test_cultnet_rudp_session_handshake_acks_reliable_connect_and_accept_packets(self) -> None:
         client = CultNetRudpSession(
