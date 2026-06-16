@@ -154,7 +154,11 @@ Current progress:
   route through `LiteNetLibTransportConnection`; `Client` and `Server` now keep
   a per-peer adapter and route their own schema/legacy sends through it as
   well. Inbound payload classification and transfer stats also belong to that
-  channel-aware adapter before dispatching schema-v0 or legacy messages.
+  channel-aware adapter before dispatching schema-v0 or legacy messages. The
+  C# database, simulation-observation, Verse-discovery, and peer-exchange
+  service wrappers now send responses through `Server.SendCultNet(...)`, so
+  server-owned service bodies no longer reach around the per-peer adapter with
+  direct `NetPeer` extension sends.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer

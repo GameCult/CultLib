@@ -177,6 +177,23 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Sends a legacy GameCult.Networking union message through this server's per-peer LiteNetLib adapter.
+        /// </summary>
+        public void Send(NetPeer? peer, Message message)
+        {
+            SendLegacy(peer, message);
+        }
+
+        /// <summary>
+        /// Sends a CultNet schema-v0 message through this server's per-peer LiteNetLib adapter.
+        /// </summary>
+        public void SendCultNet<T>(NetPeer? peer, T message)
+            where T : ICultNetSchemaMessage
+        {
+            SendSchema(peer, message);
+        }
+
+        /// <summary>
         /// Removes a previously registered listener for a specific message type.
         /// </summary>
         /// <typeparam name="T">The message type to unsubscribe from.</typeparam>

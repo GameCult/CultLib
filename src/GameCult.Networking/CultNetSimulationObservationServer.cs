@@ -65,12 +65,12 @@ namespace GameCult.Networking
             {
                 foreach (var candidate in CreateCandidateMessages(message))
                 {
-                    peer.SendCultNet(candidate);
+                    _server.SendCultNet(peer, candidate);
                 }
             }
             catch (Exception ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+                _server.SendCultNet(peer, new CultNetErrorMessage { Error = ex.Message });
             }
 
             return Task.CompletedTask;
