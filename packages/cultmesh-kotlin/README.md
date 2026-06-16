@@ -221,6 +221,27 @@ CultMesh.createRudpServer(
 }
 ```
 
+When peer discovery and authority leases are already local, callers can ask the
+branded entrypoint to select an authorized RUDP peer for a Verse role:
+
+```kotlin
+val peers = CultMesh.createPeerCatalog()
+val leases = CultMesh.createAuthorityLeaseCatalog()
+
+val client = CultMesh.createRudpClientForAuthorizedPeer(
+    runtimeId = "kotlin-client",
+    connectionId = 0x10203040,
+    peers = peers,
+    leases = leases,
+    verseId = "local",
+    role = "schema",
+)
+```
+
+The helper uses `CultMeshPeerCatalog.firstAuthorized(...)`, which delegates
+trust to `CultMeshAuthorityLeaseCatalog.isAuthorized(...)`; peer endpoints
+remain contact hints, not authority.
+
 The sugar delegates to the same `CultNetRudpSocketTransportConnection` and
 `cultnet.transport.rudp.v0` packet codec used by the cross-runtime interop
 harness. `sendSchema`, `sendLatest`, and `sendRealtime` select the shared

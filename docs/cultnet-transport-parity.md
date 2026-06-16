@@ -369,7 +369,10 @@ Current progress:
   files exist. Transports do not own catalog truth.
 - Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
   Android clients can react to lease changes without treating peer-card contact
-  hints as trust.
+  hints as trust. Kotlin peer catalogs also expose authorized-peer lookup
+  helpers, and the branded `CultMesh` facade can create a RUDP client from the
+  first peer authorized for a Verse role while still delegating the trust check
+  to the authority lease catalog.
 - Rust now has a small `CultMesh` facade for its substrate role: peer cards,
   sorted peer catalogs, authority lease catalogs, schema registry factories,
   shard catalog factories, `rudp://host:port` endpoint parsing, and RUDP

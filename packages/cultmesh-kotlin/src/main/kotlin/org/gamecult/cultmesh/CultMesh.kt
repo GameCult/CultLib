@@ -379,6 +379,24 @@ object CultMesh {
         return createRudpClient(runtimeId, connectionId, endpoint, bindHost, bindPort, tuning)
     }
 
+    fun createRudpClientForAuthorizedPeer(
+        runtimeId: String,
+        connectionId: Long,
+        peers: CultMeshPeerCatalog,
+        leases: CultMeshAuthorityLeaseCatalog,
+        verseId: String,
+        role: String,
+        shardId: String? = null,
+        at: Instant = Instant.now(),
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection {
+        val peer = peers.firstAuthorized(verseId, role, leases, shardId, at)
+            ?: throw IOException("No authorized RUDP peer for role $role in Verse $verseId")
+        return createRudpClientForPeer(runtimeId, connectionId, peer, bindHost, bindPort, tuning)
+    }
+
     fun createRudpReconnectLoop(
         reconnectPolicy: CultNetReconnectPolicy = createReconnectPolicy(),
         connectPayload: ByteArray = ByteArray(0),
@@ -1582,6 +1600,26 @@ class CultMeshPeerCatalog {
         requireNonBlank(verseId, "verseId")
         return peers.filter { peer -> peer.verseId == verseId && (role == null || peer.hasRole(role)) }
     }
+
+    fun findAuthorized(
+        verseId: String,
+        role: String,
+        leases: CultMeshAuthorityLeaseCatalog,
+        shardId: String? = null,
+        at: Instant = Instant.now(),
+    ): List<CultMeshPeerCard> {
+        requireNonBlank(verseId, "verseId")
+        requireNonBlank(role, "role")
+        return find(verseId, role).filter { peer -> leases.isAuthorized(peer, role, shardId, at) }
+    }
+
+    fun firstAuthorized(
+        verseId: String,
+        role: String,
+        leases: CultMeshAuthorityLeaseCatalog,
+        shardId: String? = null,
+        at: Instant = Instant.now(),
+    ): CultMeshPeerCard? = findAuthorized(verseId, role, leases, shardId, at).firstOrNull()
 
     fun createResponse(request: CultNetMessage): CultNetMessage {
         require(request.schemaVersion == "cultmesh.peer_exchange_request.v0") {
@@ -3388,8 +3426,11 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
     val duringLease = Instant.parse("2026-06-15T00:30:00Z")
     var watchedLease: CultMeshAuthorityLease? = null
     val unsubscribeLease = leases.watch { watchedLease = it }
+    val peers = CultMesh.createPeerCatalog()
+    peers.upsert(peer)
 
     check(!leases.isAuthorized(peer, "shard-primary", "players", duringLease))
+    check(peers.findAuthorized("public", "shard-primary", leases, "players", duringLease).isEmpty())
     leases.upsert(
         CultMeshAuthorityLease(
             leaseId = "lease:peer-authority",
@@ -3410,6 +3451,9 @@ private fun cultMeshAuthorityLeasesGatePeerTrust() {
     check(leases.get("lease:peer-authority")?.issuerRuntimeId == "kotlin-authority")
     check(leases.leases.map { it.leaseId } == listOf("lease:peer-authority"))
     check(leases.isAuthorized(peer, "shard-primary", "players", duringLease))
+    check(peers.findAuthorized("public", "shard-primary", leases, "players", duringLease).single().peerId == "peer-authority")
+    check(peers.firstAuthorized("public", "shard-primary", leases, "players", duringLease)?.peerId == "peer-authority")
+    check(peers.firstAuthorized("public", "schema", leases, "players", duringLease) == null)
     check(!leases.isAuthorized(peer, "schema", "players", duringLease))
     check(!leases.isAuthorized(peer, "shard-primary", "inventory", duringLease))
     check(!leases.isAuthorized(peer, "shard-primary", "players", expiresAt))
@@ -3911,11 +3955,41 @@ private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
             verseId = "local",
             endpoints = listOf(endpoint.uri),
             roles = listOf("schema"),
+            authorityLeaseId = "lease:kotlin-rudp-sugar-peer",
         )
-        CultMesh.createRudpClientForPeer(
+        val peers = CultMesh.createPeerCatalog()
+        val leases = CultMesh.createAuthorityLeaseCatalog()
+        peers.upsert(peer)
+        val unauthorized = runCatching {
+            CultMesh.createRudpClientForAuthorizedPeer(
+                runtimeId = "kotlin-rudp-sugar-client",
+                connectionId = connectionId,
+                peers = peers,
+                leases = leases,
+                verseId = "local",
+                role = "schema",
+                tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
+            )
+        }.exceptionOrNull()
+        check(unauthorized is IOException)
+        leases.upsert(
+            CultMeshAuthorityLease(
+                leaseId = "lease:kotlin-rudp-sugar-peer",
+                verseId = "local",
+                peerId = "kotlin-rudp-sugar-peer",
+                roles = listOf("schema"),
+                issuerRuntimeId = "kotlin-authority",
+                validFrom = Instant.now().minusSeconds(60),
+                expiresAt = Instant.now().plusSeconds(60),
+            ),
+        )
+        CultMesh.createRudpClientForAuthorizedPeer(
             runtimeId = "kotlin-rudp-sugar-client",
             connectionId = connectionId,
-            peer = peer,
+            peers = peers,
+            leases = leases,
+            verseId = "local",
+            role = "schema",
             tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
         ).use { client ->
             client.connect("join")
