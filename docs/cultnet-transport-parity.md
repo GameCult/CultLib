@@ -293,12 +293,12 @@ Current progress:
   max in-flight frame pressure, latest-frame cursors, and watch callbacks for
   stream declarations plus latest-frame publication.
 - Kotlin now has a branded `CultMesh` facade matching the C#/TypeScript/Python
-  entrypoint pattern for local nodes, Verse catalogs, peer catalogs, authority
-  lease catalogs, stream catalogs, and RUDP client/server construction. Kotlin
-  also parses advertised `rudp://host:port` endpoints and can build a RUDP
-  client directly from a peer card contact hint. The facade delegates to the
-  same owners as the top-level helpers instead of creating a second authority
-  path.
+  entrypoint pattern for local nodes, schema catalogs, shard catalogs, Verse
+  catalogs, peer catalogs, authority lease catalogs, stream catalogs, and RUDP
+  client/server construction. Kotlin also parses advertised
+  `rudp://host:port` endpoints and can build a RUDP client directly from a peer
+  card contact hint. The facade delegates to the same owners as the top-level
+  helpers instead of creating a second authority path.
 - Kotlin authority lease catalogs now also expose watch callbacks, so JVM and
   Android clients can react to lease changes without treating peer-card contact
   hints as trust.

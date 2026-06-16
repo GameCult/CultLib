@@ -285,6 +285,10 @@ object CultMesh {
 
     fun createStreamCatalog(): CultMeshStreamCatalog = CultMeshStreamCatalog()
 
+    fun createSchemaCatalog(): CultNetSchemaCatalog = CultNetSchemaCatalog()
+
+    fun createShardCatalog(): CultNetShardCatalog = CultNetShardCatalog()
+
     fun createRudpServer(
         runtimeId: String,
         connectionId: Long,
@@ -2671,6 +2675,36 @@ private fun cultMeshFacadeRoutesErgonomicEntrypoints() {
 
     val streams = CultMesh.createStreamCatalog()
     check(streams.streams.isEmpty())
+
+    val schemas = CultMesh.createSchemaCatalog()
+    schemas.upsert(
+        defineCultNetSchemaDescriptor(
+            schemaId = notes.schemaVersion,
+            kind = "document_payload",
+            documentType = notes.documentType,
+            title = "Facade Note",
+            schemaJson = """{"type":"string"}""",
+        ),
+    )
+    check(schemas.get(notes.schemaVersion)?.documentType == notes.documentType)
+
+    val shards = CultMesh.createShardCatalog()
+    shards.upsert(
+        CultNetShardDescriptor(
+            shardId = "facade-shard",
+            ownerRuntimeId = "facade-owner",
+            epoch = 1,
+            isPrimary = true,
+            schemaIds = listOf(notes.schemaVersion),
+            keyPrefix = "note:",
+        ),
+    )
+    check(
+        shards.list(
+            schemaIds = listOf(notes.schemaVersion),
+            recordKeys = listOf("note:facade"),
+        ).single().shardId == "facade-shard",
+    )
 }
 
 private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {

@@ -14,6 +14,8 @@ val verses = CultMesh.createVerseCatalog()
 val peers = CultMesh.createPeerCatalog()
 val leases = CultMesh.createAuthorityLeaseCatalog()
 val streams = CultMesh.createStreamCatalog()
+val schemas = CultMesh.createSchemaCatalog()
+val shards = CultMesh.createShardCatalog()
 ```
 
 ## CultCache Happy Path
