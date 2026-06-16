@@ -367,7 +367,8 @@ Current progress:
 - The remaining parity work is to finish production service-body adoption
   behind the shared transport ports, then wire any remaining daemon/socket
   reconnect loops through the shared controller. C# built-in LiteNetLib service
-  wrappers now route through `CultNetServerPeer`, TypeScript exposes a
+  wrappers now register transport-aware `CultNetServerPeer` listeners instead
+  of requiring each bridge to bounce through `NetPeer`, TypeScript exposes a
   transport-first TCP peer helper, C# schema-v0 service clients consume
   `ICultNetSchemaClient`, and the core schema-message RUDP matrix is live in
   the TypeScript interop gate; broader service adoption remains the unclaimed

@@ -1,7 +1,6 @@
 using System;
 using System.Linq;
 using System.Threading.Tasks;
-using LiteNetLib;
 
 namespace GameCult.Networking
 {
@@ -12,7 +11,7 @@ namespace GameCult.Networking
     {
         private readonly Server _server;
         private readonly CultNetSimulationObservationHub _hub;
-        private readonly Func<CultNetSimulationObservationMessage, NetPeer, Task> _observationHandler;
+        private readonly Func<CultNetSimulationObservationMessage, CultNetServerPeer, Task> _observationHandler;
         private bool _disposed;
 
         /// <summary>
@@ -57,11 +56,6 @@ namespace GameCult.Networking
 
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultNetSimulationObservationMessage>(_observationHandler);
-        }
-
-        private Task HandleObservationAsync(CultNetSimulationObservationMessage message, NetPeer peer)
-        {
-            return HandleObservationAsync(message, _server.GetPeerContext(peer));
         }
 
         private Task HandleObservationAsync(CultNetSimulationObservationMessage message, CultNetServerPeer peer)

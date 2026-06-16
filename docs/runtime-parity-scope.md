@@ -59,11 +59,12 @@ CultMesh.
 
 - Broaden production service adoption so remaining daemon paths use the shared
   transport port consistently. The C# built-in LiteNetLib service wrappers now
-  route through transport-aware peer context, and TypeScript TCP peer creation
-  has a transport-first helper. C# Verse discovery, peer exchange, shard-log
-  fetch, shard-snapshot fetch, and shard write forwarding clients now consume a
-  schema-client transport port with the LiteNetLib client as the default
-  adapter; broader daemon adoption remains the unclaimed layer.
+  register transport-aware `CultNetServerPeer` listeners instead of requiring
+  `NetPeer` callbacks, and TypeScript TCP peer creation has a transport-first
+  helper. C# Verse discovery, peer exchange, shard-log fetch, shard-snapshot
+  fetch, and shard write forwarding clients now consume a schema-client
+  transport port with the LiteNetLib client as the default adapter; broader
+  daemon adoption remains the unclaimed layer.
 - Extend RUDP adoption through daemon/socket reconnect loops. RUDP profiles now
   advertise the portable reconnect policy, runtime-local tests prove the shared
   controller across the targeted runtimes, and the C# LiteNetLib client plus

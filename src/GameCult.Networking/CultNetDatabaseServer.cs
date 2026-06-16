@@ -17,13 +17,13 @@ namespace GameCult.Networking
         private readonly Server _server;
         private readonly CultNetDatabase _database;
         private readonly CultNetDatabaseServerOptions _options;
-        private readonly Func<CultNetSnapshotRequestMessage, NetPeer, Task> _snapshotHandler;
-        private readonly Func<CultNetDocumentPutRawMessage, NetPeer, Task> _putHandler;
-        private readonly Func<CultNetDocumentDeleteMessage, NetPeer, Task> _deleteHandler;
-        private readonly Func<CultNetShardCatalogRequestMessage, NetPeer, Task> _shardCatalogHandler;
-        private readonly Func<CultNetShardLogRequestMessage, NetPeer, Task> _shardLogHandler;
-        private readonly Func<CultNetDatabaseSubscribeMessage, NetPeer, Task> _subscribeHandler;
-        private readonly Func<CultNetDatabaseUnsubscribeMessage, NetPeer, Task> _unsubscribeHandler;
+        private readonly Func<CultNetSnapshotRequestMessage, CultNetServerPeer, Task> _snapshotHandler;
+        private readonly Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task> _putHandler;
+        private readonly Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task> _deleteHandler;
+        private readonly Func<CultNetShardCatalogRequestMessage, CultNetServerPeer, Task> _shardCatalogHandler;
+        private readonly Func<CultNetShardLogRequestMessage, CultNetServerPeer, Task> _shardLogHandler;
+        private readonly Func<CultNetDatabaseSubscribeMessage, CultNetServerPeer, Task> _subscribeHandler;
+        private readonly Func<CultNetDatabaseUnsubscribeMessage, CultNetServerPeer, Task> _unsubscribeHandler;
         private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
         private bool _disposed;
 
@@ -207,31 +207,16 @@ namespace GameCult.Networking
             _subscriptions.Clear();
         }
 
-        private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, NetPeer peer)
-        {
-            return HandleSnapshotRequestAsync(request, _server.GetPeerContext(peer));
-        }
-
         private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, CultNetServerPeer peer)
         {
             peer.SendCultNet(CreateSnapshotResponse(request));
             return Task.CompletedTask;
         }
 
-        private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, NetPeer peer)
-        {
-            return HandleShardCatalogRequestAsync(request, _server.GetPeerContext(peer));
-        }
-
         private Task HandleShardCatalogRequestAsync(CultNetShardCatalogRequestMessage request, CultNetServerPeer peer)
         {
             peer.SendCultNet(CreateShardCatalogResponse(request));
             return Task.CompletedTask;
-        }
-
-        private Task HandleShardLogRequestAsync(CultNetShardLogRequestMessage request, NetPeer peer)
-        {
-            return HandleShardLogRequestAsync(request, _server.GetPeerContext(peer));
         }
 
         private Task HandleShardLogRequestAsync(CultNetShardLogRequestMessage request, CultNetServerPeer peer)
@@ -246,11 +231,6 @@ namespace GameCult.Networking
             }
 
             return Task.CompletedTask;
-        }
-
-        private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, NetPeer peer)
-        {
-            await HandlePutAsync(message, _server.GetPeerContext(peer)).ConfigureAwait(false);
         }
 
         private async Task HandlePutAsync(CultNetDocumentPutRawMessage message, CultNetServerPeer peer)
@@ -274,11 +254,6 @@ namespace GameCult.Networking
             }
         }
 
-        private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, NetPeer peer)
-        {
-            await HandleDeleteAsync(message, _server.GetPeerContext(peer)).ConfigureAwait(false);
-        }
-
         private async Task HandleDeleteAsync(CultNetDocumentDeleteMessage message, CultNetServerPeer peer)
         {
             try
@@ -296,11 +271,6 @@ namespace GameCult.Networking
             {
                 peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
             }
-        }
-
-        private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage message, NetPeer peer)
-        {
-            return HandleSubscribeAsync(message, _server.GetPeerContext(peer));
         }
 
         private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage message, CultNetServerPeer peer)
@@ -337,13 +307,13 @@ namespace GameCult.Networking
             return Task.CompletedTask;
         }
 
-        private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage message, NetPeer peer)
+        private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage message, CultNetServerPeer peer)
         {
             var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
                 ? message.MessageId
                 : message.SubscriptionId;
             if (!string.IsNullOrWhiteSpace(subscriptionId) &&
-                _subscriptions.TryRemove(SubscriptionKey(peer, subscriptionId), out var subscription))
+                _subscriptions.TryRemove(SubscriptionKey(peer.Peer, subscriptionId), out var subscription))
             {
                 subscription.Dispose();
             }

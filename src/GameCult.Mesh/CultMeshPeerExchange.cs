@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using GameCult.Networking;
-using LiteNetLib;
 using R3;
 
 namespace GameCult.Mesh
@@ -220,7 +219,7 @@ namespace GameCult.Mesh
     {
         private readonly Server _server;
         private readonly CultMeshPeerCatalog _catalog;
-        private readonly Func<CultMeshPeerExchangeRequestMessage, NetPeer, Task> _requestHandler;
+        private readonly Func<CultMeshPeerExchangeRequestMessage, CultNetServerPeer, Task> _requestHandler;
         private bool _disposed;
 
         /// <summary>
@@ -277,11 +276,6 @@ namespace GameCult.Mesh
 
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultMeshPeerExchangeRequestMessage>(_requestHandler);
-        }
-
-        private Task HandleRequestAsync(CultMeshPeerExchangeRequestMessage request, NetPeer peer)
-        {
-            return HandleRequestAsync(request, _server.GetPeerContext(peer));
         }
 
         private Task HandleRequestAsync(CultMeshPeerExchangeRequestMessage request, CultNetServerPeer peer)

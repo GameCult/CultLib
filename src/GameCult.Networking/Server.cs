@@ -30,6 +30,7 @@ namespace GameCult.Networking
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
         private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
+        private readonly ConcurrentDictionary<Type, Delegate> _cultNetServerPeerMessageDelegates = new();
         private readonly ConcurrentDictionary<long, User> _users = new();
         private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _connectionAttempts = new();
         private readonly ConcurrentDictionary<string, object> _connectionAttemptLocks = new();
@@ -106,6 +107,7 @@ namespace GameCult.Networking
         {
             _messageDelegates.Clear();
             _cultNetMessageDelegates.Clear();
+            _cultNetServerPeerMessageDelegates.Clear();
         }
 
         /// <summary>
@@ -161,6 +163,35 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Adds a transport-aware listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Func<T, CultNetServerPeer, Task> callback)
+            where T : ICultNetSchemaMessage
+        {
+            var type = typeof(T);
+            _cultNetServerPeerMessageDelegates.AddOrUpdate(type,
+                _ => callback,
+                (t, current) =>
+                {
+                    var combined = Delegate.Combine(current, callback) as Func<T, CultNetServerPeer, Task>;
+                    return combined ?? throw new InvalidOperationException($"Failed to combine delegates for {t.Name}");
+                });
+        }
+
+        /// <summary>
+        /// Adds a transport-aware listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void AddCultNetMessageListener<T>(Action<T, CultNetServerPeer> callback)
+            where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener<T>((message, peer) =>
+            {
+                callback(message, peer);
+                return Task.CompletedTask;
+            });
+        }
+
+        /// <summary>
         /// Adds a listener for a modern CultNet schema-v0 message type.
         /// </summary>
         public void OnCultNet<T>(Func<T, NetPeer, Task> callback) where T : ICultNetSchemaMessage
@@ -172,6 +203,24 @@ namespace GameCult.Networking
         /// Adds a listener for a modern CultNet schema-v0 message type.
         /// </summary>
         public void OnCultNet<T>(Action<T, NetPeer> callback) where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a transport-aware listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Func<T, CultNetServerPeer, Task> callback)
+            where T : ICultNetSchemaMessage
+        {
+            AddCultNetMessageListener(callback);
+        }
+
+        /// <summary>
+        /// Adds a transport-aware listener for a modern CultNet schema-v0 message type.
+        /// </summary>
+        public void OnCultNet<T>(Action<T, CultNetServerPeer> callback)
+            where T : ICultNetSchemaMessage
         {
             AddCultNetMessageListener(callback);
         }
@@ -243,6 +292,19 @@ namespace GameCult.Networking
                 else
                 {
                     _cultNetMessageDelegates[typeof(T)] = newDelegate;
+                }
+            }
+
+            if (_cultNetServerPeerMessageDelegates.TryGetValue(typeof(T), out var currentServerPeerDelegate))
+            {
+                var newDelegate = Delegate.Remove(currentServerPeerDelegate, callback);
+                if (newDelegate == null)
+                {
+                    _cultNetServerPeerMessageDelegates.TryRemove(typeof(T), out _);
+                }
+                else
+                {
+                    _cultNetServerPeerMessageDelegates[typeof(T)] = newDelegate;
                 }
             }
         }
@@ -434,6 +496,7 @@ namespace GameCult.Networking
                 return;
             }
 
+            var handled = false;
             if (_cultNetMessageDelegates.TryGetValue(message.GetType(), out var del) && del != null)
             {
                 foreach (var listener in del.GetInvocationList())
@@ -445,6 +508,26 @@ namespace GameCult.Networking
                     }
                 }
 
+                handled = true;
+            }
+
+            if (_cultNetServerPeerMessageDelegates.TryGetValue(message.GetType(), out var serverPeerDel) && serverPeerDel != null)
+            {
+                var serverPeer = GetPeerContext(peer);
+                foreach (var listener in serverPeerDel.GetInvocationList())
+                {
+                    var result = listener.DynamicInvoke(message, serverPeer);
+                    if (result is Task task)
+                    {
+                        await task.ConfigureAwait(false);
+                    }
+                }
+
+                handled = true;
+            }
+
+            if (handled)
+            {
                 user.SessionExpiresAt = DateTimeOffset.UtcNow.AddSeconds(SessionTimeoutSeconds);
                 RefreshSessionIfNeeded(peer, user);
             }
