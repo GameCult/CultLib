@@ -999,12 +999,13 @@ test("CultNet TypeScript and Python exchange schema-v0 MessagePack messages over
       schemaVersion?: string;
       runtimeId?: string;
       supportsSchemaCatalog?: boolean;
-      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; reconnectPolicy?: unknown; channels?: Array<{ channelId?: string }> }> }>;
     };
     assert.equal(message.schemaVersion, "cultnet.hello.v0");
     assert.equal(message.runtimeId, "python-rudp-message-interop");
     assert.equal(message.supportsSchemaCatalog, true);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assertRudpReconnectPolicy("Python", message.transportProfiles?.[0]?.transports?.[0]?.reconnectPolicy);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
 
     const [exitCode] = await withTimeout(once(pythonPeer.child, "exit"), 2_000, "Python RUDP message peer exit");
@@ -1182,12 +1183,13 @@ test("CultNet TypeScript and Rust exchange schema-v0 MessagePack messages over R
       schemaVersion?: string;
       runtimeId?: string;
       supportsSchemaCatalog?: boolean;
-      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; reconnectPolicy?: unknown; channels?: Array<{ channelId?: string }> }> }>;
     };
     assert.equal(message.schemaVersion, "cultnet.hello.v0");
     assert.equal(message.runtimeId, "rust-rudp-message-interop");
     assert.equal(message.supportsSchemaCatalog, true);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assertRudpReconnectPolicy("Rust", message.transportProfiles?.[0]?.transports?.[0]?.reconnectPolicy);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
 
     const [exitCode] = await withTimeout(once(rustPeer.child, "exit"), 2_000, "Rust RUDP message peer exit");
@@ -1366,12 +1368,13 @@ test("CultNet TypeScript and C# exchange schema-v0 MessagePack messages over RUD
       schemaVersion?: string;
       runtimeId?: string;
       supportsSchemaCatalog?: boolean;
-      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; reconnectPolicy?: unknown; channels?: Array<{ channelId?: string }> }> }>;
     };
     assert.equal(message.schemaVersion, "cultnet.hello.v0");
     assert.equal(message.runtimeId, "csharp-rudp-message-interop");
     assert.equal(message.supportsSchemaCatalog, true);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assertRudpReconnectPolicy("C#", message.transportProfiles?.[0]?.transports?.[0]?.reconnectPolicy);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
 
     const [exitCode] = await withTimeout(once(csharpPeer.child, "exit"), 2_000, "C# RUDP message peer exit");
@@ -1550,12 +1553,13 @@ test("CultNet TypeScript and Kotlin exchange schema-v0 MessagePack messages over
       schemaVersion?: string;
       runtimeId?: string;
       supportsSchemaCatalog?: boolean;
-      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; reconnectPolicy?: unknown; channels?: Array<{ channelId?: string }> }> }>;
     };
     assert.equal(message.schemaVersion, "cultnet.hello.v0");
     assert.equal(message.runtimeId, "kotlin-rudp-message-interop");
     assert.equal(message.supportsSchemaCatalog, true);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assertRudpReconnectPolicy("Kotlin", message.transportProfiles?.[0]?.transports?.[0]?.reconnectPolicy);
     assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
 
     const [exitCode] = await withTimeout(once(kotlinPeer.child, "exit"), 2_000, "Kotlin RUDP message peer exit");
@@ -2961,6 +2965,22 @@ function assertTcpFramedTransportProfile(peerId: string, value: unknown): void {
   assert.equal(transport?.protocol, "tcp_framed");
   assert.equal(transport?.channels?.[0]?.delivery, "reliable");
   assert.equal(transport?.channels?.[0]?.ordering, "ordered");
+}
+
+function assertRudpReconnectPolicy(peerName: string, value: unknown): void {
+  assert.ok(value && typeof value === "object", `${peerName} did not advertise an RUDP reconnect policy`);
+  const policy = value as {
+    schemaVersion?: string;
+    policyId?: string;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    maxJitterMs?: number;
+  };
+  assert.equal(policy.schemaVersion, "cultnet.reconnect_policy.v0");
+  assert.equal(policy.policyId, "default");
+  assert.equal(policy.baseDelayMs, 1_000);
+  assert.equal(policy.maxDelayMs, 30_000);
+  assert.equal(policy.maxJitterMs, 250);
 }
 
 async function requestCultMeshFromPython(port: number, request: Record<string, unknown>): Promise<any> {

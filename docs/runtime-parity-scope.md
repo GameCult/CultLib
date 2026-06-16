@@ -43,9 +43,10 @@ CultMesh.
   TypeScript, Rust, Python, and Kotlin, including loss, reordering,
   fragmentation, disconnect reason propagation, ping/pong, and schema-v0
   MessagePack over RUDP for C#, Rust, Python, and Kotlin peers against
-  TypeScript. Runtime-local tests also cover RUDP transport-profile
-  advertisement of the portable reconnect policy plus the deterministic delay
-  helper in C#, TypeScript, Rust, Python, and Kotlin.
+  TypeScript. Those RUDP schema-message tests also assert the advertised
+  `reconnectPolicy` profile field from C#, Rust, Python, and Kotlin peers.
+  Runtime-local tests cover the deterministic delay helper in C#, TypeScript,
+  Rust, Python, and Kotlin.
 - `packages/cultcache-py/PARITY.md` is the Python-specific audit ledger. Its
   "Still Not Claimed" section is part of the contract, not an apology.
 - `docs/cultnet-transport-parity.md` is the transport ownership map. It tracks

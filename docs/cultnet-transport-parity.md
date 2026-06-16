@@ -186,7 +186,8 @@ Current progress:
   directions for C#, Kotlin, Python, and Rust peers against TypeScript. Those tests
   send `cultnet.schema_catalog_request.v0` payloads through reliable ordered
   `schema` frames and validate `cultnet.hello.v0` responses with advertised
-  RUDP transport profiles where the responding runtime owns them.
+  RUDP transport profiles where the responding runtime owns them, including the
+  shared `reconnectPolicy` field.
 - The same harness now proves reliable ordered `schema` delivery survives one
   dropped data packet in both directions between TypeScript and C#/Kotlin/Python/Rust.
   The drops happen below the transport connection through a UDP bridge, so the
