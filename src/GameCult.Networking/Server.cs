@@ -264,7 +264,7 @@ namespace GameCult.Networking
             listener.PeerConnectedEvent += peer =>
             {
                 Logger.LogInfo($"User Connected: {peer.Address}");
-                _users.TryAdd(peer.Id, new User { Peer = peer });
+                _users.TryAdd(peer.Id, new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
             };
 
             listener.PeerDisconnectedEvent += (peer, info) =>
@@ -286,8 +286,10 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
-                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
-                    var frame = LiteNetLibTransportConnection.Decode(bytes);
+                    var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
+                    user.Transport ??= new LiteNetLibTransportConnection(peer);
+                    var transport = user.Transport;
+                    var frame = transport.Receive(bytes);
                     if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
                         var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
@@ -321,7 +323,7 @@ namespace GameCult.Networking
 
                         if (message is LoginMessage or RegisterMessage && !CheckAuthRateLimit(peer.Address.ToString()))
                         {
-                            peer.Send(new ErrorMessage { Error = "Too Many Attempts" });
+                            SendLegacy(peer, new ErrorMessage { Error = "Too Many Attempts" });
                             return;
                         }
 
@@ -354,7 +356,7 @@ namespace GameCult.Networking
                     }
                     else
                     {
-                        peer.Send(new ErrorMessage { Error = "User Not Verified" });
+                        SendLegacy(peer, new ErrorMessage { Error = "User Not Verified" });
                     }
                 }
                 catch (Exception ex)
@@ -367,13 +369,13 @@ namespace GameCult.Networking
             {
                 if (!IsValidUsername(message.Name))
                 {
-                    message.Peer?.Send(new ErrorMessage { Error = "Username Invalid" });
+                    SendLegacy(message.Peer, new ErrorMessage { Error = "Username Invalid" });
                     return;
                 }
 
                 if (_database.GetByName<PlayerData>(message.Name) != null)
                 {
-                    message.Peer?.Send(new ErrorMessage { Error = "Username Taken" });
+                    SendLegacy(message.Peer, new ErrorMessage { Error = "Username Taken" });
                     return;
                 }
 
@@ -382,7 +384,7 @@ namespace GameCult.Networking
                     var data = SessionData(user);
                     if (data == null)
                     {
-                        message.Peer.Send(new ErrorMessage { Error = "User Not Verified" });
+                        SendLegacy(message.Peer, new ErrorMessage { Error = "User Not Verified" });
                         return;
                     }
 
@@ -398,7 +400,7 @@ namespace GameCult.Networking
         {
             if (!IsVerified(user) && !CanProcessBeforeVerification(message))
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = "User Not Verified" });
+                SendSchema(peer, new CultNetErrorMessage { Error = "User Not Verified" });
                 return;
             }
 
@@ -454,31 +456,31 @@ namespace GameCult.Networking
 
             if (string.IsNullOrWhiteSpace(name) || !IsValidUsername(name))
             {
-                peer.Send(new ErrorMessage { Error = "Username Invalid" });
+                SendLegacy(peer, new ErrorMessage { Error = "Username Invalid" });
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(email) || !IsValidEmail(email))
             {
-                peer.Send(new ErrorMessage { Error = "Email Invalid" });
+                SendLegacy(peer, new ErrorMessage { Error = "Email Invalid" });
                 return;
             }
 
             if (_database.GetByIndex<PlayerData>("Email", email) != null)
             {
-                peer.Send(new ErrorMessage { Error = "Email Taken" });
+                SendLegacy(peer, new ErrorMessage { Error = "Email Taken" });
                 return;
             }
 
             if (_database.GetByName<PlayerData>(name) != null)
             {
-                peer.Send(new ErrorMessage { Error = "Username Taken" });
+                SendLegacy(peer, new ErrorMessage { Error = "Username Taken" });
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(password))
             {
-                peer.Send(new ErrorMessage { Error = "Password Invalid" });
+                SendLegacy(peer, new ErrorMessage { Error = "Password Invalid" });
                 return;
             }
 
@@ -500,20 +502,20 @@ namespace GameCult.Networking
             var token = Secret.DecryptString(verify.Session, verify.Nonce, _security);
             if (!Secret.TryValidateSessionToken(token, _security, out var playerId, out _, out var sessionVersion))
             {
-                peer.Send(new ErrorMessage { Error = "Session Invalid" });
+                SendLegacy(peer, new ErrorMessage { Error = "Session Invalid" });
                 return;
             }
 
             var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
             if (player == null)
             {
-                peer.Send(new ErrorMessage { Error = "Session Not Found" });
+                SendLegacy(peer, new ErrorMessage { Error = "Session Not Found" });
                 return;
             }
 
             if (player.SessionVersion != sessionVersion)
             {
-                peer.Send(new ErrorMessage { Error = "Session Superseded" });
+                SendLegacy(peer, new ErrorMessage { Error = "Session Superseded" });
                 return;
             }
 
@@ -527,7 +529,7 @@ namespace GameCult.Networking
             var password = Secret.DecryptString(login.Password, login.Nonce, _security);
             if (string.IsNullOrWhiteSpace(auth) || string.IsNullOrWhiteSpace(password))
             {
-                peer.Send(new ErrorMessage { Error = "Credentials Invalid" });
+                SendLegacy(peer, new ErrorMessage { Error = "Credentials Invalid" });
                 return;
             }
 
@@ -538,13 +540,13 @@ namespace GameCult.Networking
 
             if (userData == null)
             {
-                peer.Send(new ErrorMessage { Error = isEmail ? "Email Not Found" : "Username Not Found" });
+                SendLegacy(peer, new ErrorMessage { Error = isEmail ? "Email Not Found" : "Username Not Found" });
                 return;
             }
 
             if (!Argon2.Verify(userData.PasswordHash, password))
             {
-                peer.Send(new ErrorMessage { Error = "Password Incorrect" });
+                SendLegacy(peer, new ErrorMessage { Error = "Password Incorrect" });
                 return;
             }
 
@@ -596,7 +598,7 @@ namespace GameCult.Networking
             var player = _database.GetByIndex<PlayerData>("PlayerId", playerId.ToString("D"));
             if (player == null)
             {
-                peer.Send(new ErrorMessage { Error = "Session Not Found" });
+                SendLegacy(peer, new ErrorMessage { Error = "Session Not Found" });
                 return;
             }
 
@@ -619,7 +621,7 @@ namespace GameCult.Networking
             }
 
             var nonce = Secret.NewNonce;
-            peer.Send(new LoginSuccessMessage
+            SendLegacy(peer, new LoginSuccessMessage
             {
                 Nonce = nonce,
                 Session = Secret.EncryptString(token, nonce, _security) ?? Array.Empty<byte>()
@@ -634,6 +636,35 @@ namespace GameCult.Networking
             }
 
             SendSessionToken(peer, user.PlayerId);
+        }
+
+        private void SendLegacy(NetPeer? peer, Message message)
+        {
+            if (peer == null)
+            {
+                return;
+            }
+
+            var user = _users.GetOrAdd(
+                peer.Id,
+                _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
+            user.Transport ??= new LiteNetLibTransportConnection(peer);
+            user.Transport.SendLegacy(message);
+        }
+
+        private void SendSchema<T>(NetPeer? peer, T message)
+            where T : ICultNetSchemaMessage
+        {
+            if (peer == null)
+            {
+                return;
+            }
+
+            var user = _users.GetOrAdd(
+                peer.Id,
+                _ => new User { Peer = peer, Transport = new LiteNetLibTransportConnection(peer) });
+            user.Transport ??= new LiteNetLibTransportConnection(peer);
+            user.Transport.SendSchema(message);
         }
 
         private static bool CheckRateLimit(
@@ -685,6 +716,11 @@ namespace GameCult.Networking
         /// The connected network peer.
         /// </summary>
         public NetPeer Peer = null!;
+
+        /// <summary>
+        /// Channel-aware LiteNetLib transport adapter for this peer.
+        /// </summary>
+        public LiteNetLibTransportConnection? Transport;
 
         /// <summary>
         /// The last reported latency for the peer.

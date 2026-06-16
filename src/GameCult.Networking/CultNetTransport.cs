@@ -2055,7 +2055,7 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class LiteNetLibTransportConnection
     {
-        private readonly NetPeer _peer;
+        private readonly NetPeer? _peer;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
 
         /// <summary>
@@ -2064,6 +2064,14 @@ namespace GameCult.Networking
         public LiteNetLibTransportConnection(NetPeer peer, CultNetTransportProfile? profile = null)
         {
             _peer = peer ?? throw new ArgumentNullException(nameof(peer));
+            Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
+        }
+
+        /// <summary>
+        /// Initializes a receive-only channel-aware adapter for LiteNetLib payload classification.
+        /// </summary>
+        public LiteNetLibTransportConnection(CultNetTransportProfile? profile = null)
+        {
             Profile = profile ?? CultNetTransportProfiles.CreateLiteNetLib("csharp-litenetlib-peer");
         }
 
@@ -2078,11 +2086,23 @@ namespace GameCult.Networking
         public CultNetTransportStats Stats => _stats.Snapshot();
 
         /// <summary>
+        /// Classifies an inbound LiteNetLib payload into the adapter's schema or legacy channel shape.
+        /// </summary>
+        public CultNetTransportFrame Receive(byte[] payload)
+        {
+            var frame = Decode(payload);
+            _stats.BytesReceived += frame.Payload.Length;
+            _stats.FramesReceived++;
+            return frame;
+        }
+
+        /// <summary>
         /// Sends a payload over a supported LiteNetLib transport channel.
         /// </summary>
         public void Send(string channelId, byte[] payload)
         {
             if (payload == null) throw new ArgumentNullException(nameof(payload));
+            if (_peer == null) throw new InvalidOperationException("A LiteNetLib peer is required to send through this transport.");
             if (!string.Equals(channelId, "schema", StringComparison.Ordinal)
                 && !string.Equals(channelId, "legacy", StringComparison.Ordinal))
             {

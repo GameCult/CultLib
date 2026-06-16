@@ -44,6 +44,7 @@ namespace GameCult.Networking
         public event Action<ClientReconnectState>? OnReconnectStateChanged;
         private NetManager? _client;
         private NetPeer? _peer;
+        private LiteNetLibTransportConnection? _transportConnection;
         private IDisposable? _pollSubscription;
         private IDisposable? _reconnectSubscription;
         private bool _disposed;
@@ -163,7 +164,7 @@ namespace GameCult.Networking
                     {
                         Logger.LogDebug($"Sending message {typeof(T).Name}");
                     }
-                    _peer.Send(m);
+                    (_transportConnection ??= new LiteNetLibTransportConnection(_peer)).SendLegacy(m);
                 }
                 else Logger.LogError("Cannot send, client is not verified!");
             }
@@ -187,7 +188,7 @@ namespace GameCult.Networking
                 if (AllowUnverifiedCultNetMessages || Verified || message is CultNetLoginMessage or CultNetRegisterMessage or CultNetVerifyMessage)
                 {
                     Logger.LogDebug($"Sending CultNet schema message {message.SchemaVersion}");
-                    _peer.SendCultNet(message);
+                    (_transportConnection ??= new LiteNetLibTransportConnection(_peer)).SendSchema(message);
                 }
                 else
                 {
@@ -400,7 +401,8 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
-                    var frame = LiteNetLibTransportConnection.Decode(bytes);
+                    var transport = _transportConnection ??= new LiteNetLibTransportConnection(peer);
+                    var frame = transport.Receive(bytes);
                     if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
                         var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
@@ -457,12 +459,13 @@ namespace GameCult.Networking
             {
                 Logger.LogInfo($"Peer {peer.Address}:{peer.Port} connected.");
                 _peer = peer;
+                _transportConnection = new LiteNetLibTransportConnection(peer);
                 _reconnectController.Reset();
                 SetReconnectState(ClientReconnectState.Idle);
                 if (Verified)
                 {
                     var nonce = Secret.NewNonce;
-                    peer.Send(new VerifyMessage
+                    _transportConnection.SendLegacy(new VerifyMessage
                     {
                         Nonce = nonce,
                         Session = Secret.EncryptString(_sessionToken, nonce, _security) ?? Array.Empty<byte>()
@@ -576,6 +579,7 @@ namespace GameCult.Networking
         {
             _pollSubscription?.Dispose();
             _pollSubscription = null;
+            _transportConnection = null;
 
             if (_peer != null)
             {

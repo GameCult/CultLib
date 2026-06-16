@@ -482,6 +482,26 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void LiteNetLibTransportConnection_TracksInboundFrames()
+        {
+            var payload = CultNetSchemaMessageSerialization.Serialize(new CultNetHelloMessage
+            {
+                RuntimeId = "csharp",
+                RuntimeKind = "csharp",
+                DisplayName = "C#",
+                SupportedMessageVersions = [CultNetSchemaVersions.Hello]
+            });
+            var connection = new LiteNetLibTransportConnection(CultNetTransportProfiles.CreateLiteNetLib("stats-test"));
+
+            var frame = connection.Receive(payload);
+
+            Assert.That(frame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(frame.Payload, Is.EqualTo(payload));
+            Assert.That(connection.Stats.FramesReceived, Is.EqualTo(1));
+            Assert.That(connection.Stats.BytesReceived, Is.EqualTo(payload.Length));
+        }
+
+        [Test]
         public void ReconnectPolicy_ExposesPortableDelayContract()
         {
             var policy = CultNetReconnectPolicies.CreateDefault("rudp-default", maxAttempts: 8);
