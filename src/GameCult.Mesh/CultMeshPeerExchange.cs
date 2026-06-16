@@ -190,6 +190,34 @@ namespace GameCult.Mesh
                 .ToArray();
         }
 
+        /// <summary>Finds peers that advertise a Verse role and are authorized by the supplied lease catalog.</summary>
+        public IReadOnlyList<CultMeshPeerCard> FindAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityLeaseCatalog leases,
+            string? shardId = null,
+            DateTimeOffset? at = null)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(verseId)) throw new ArgumentException("Value must be non-empty.", nameof(verseId));
+            if (string.IsNullOrWhiteSpace(role)) throw new ArgumentException("Value must be non-empty.", nameof(role));
+            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            return Find(verseId, role)
+                .Where(peer => leases.IsAuthorized(peer, role, shardId, at))
+                .ToArray();
+        }
+
+        /// <summary>Returns the first peer that advertises a Verse role and is authorized by the supplied lease catalog.</summary>
+        public CultMeshPeerCard? FirstAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityLeaseCatalog leases,
+            string? shardId = null,
+            DateTimeOffset? at = null)
+        {
+            return FindAuthorized(verseId, role, leases, shardId, at).FirstOrDefault();
+        }
+
         /// <inheritdoc />
         public void Dispose()
         {

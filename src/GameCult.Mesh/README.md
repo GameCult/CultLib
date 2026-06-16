@@ -112,6 +112,26 @@ leases.Upsert(new CultMeshAuthorityLease(
     signature: "operator-signature"));
 ```
 
+`CultMeshPeerCatalog.FindAuthorized(...)` and `FirstAuthorized(...)` compose
+peer lookup with the lease catalog, so contact gossip stays separate from
+trust. The branded RUDP helpers use the same boundary:
+
+```csharp
+using var rudpClient = CultMesh.CreateRudpClientForAuthorizedPeer(
+    "aetheria-client",
+    connectionId: 0x10203040,
+    peers,
+    leases,
+    "aetheria-main",
+    CultMeshPeerRoles.ShardPrimary,
+    shardId: "players-us-east");
+```
+
+`CreateRudpServer(...)`, `ParseRudpEndpoint(...)`,
+`CreateRudpClient(...)`, and `CreateRudpClientForPeer(...)` delegate to the
+CultNet RUDP socket transport. CultMesh owns peer/authority ergonomics; CultNet
+owns packet reliability, resend pressure, and channel semantics.
+
 Clients can fetch more peers from known peers:
 
 ```csharp

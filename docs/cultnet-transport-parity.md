@@ -282,6 +282,12 @@ Current progress:
   `ReconnectIfDue(nowMs)` inside their own scheduler, and the shared controller
   owns retry delay/exhaustion state while the caller-owned factory opens the
   next `CultNetRudpSocketTransportConnection`.
+- C# `GameCult.Mesh` now mirrors the branded RUDP facade shape used by
+  TypeScript, Python, Kotlin, and Rust: it parses `rudp://host:port` endpoints,
+  creates RUDP client/server transports from endpoint or peer-card contact
+  hints, and can create a RUDP client from the first peer authorized by the
+  authority lease catalog for a Verse role. RUDP packet/session behavior remains
+  owned by `GameCult.Networking`.
 - TypeScript now has a `CultNetRudpReconnectLoop` that consumes the shared
   controller while keeping socket construction caller-owned. A closed RUDP
   transport schedules the next attempt with the portable policy, opens a fresh

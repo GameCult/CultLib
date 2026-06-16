@@ -15,6 +15,11 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreateVerseDiscoveryClient(...)`
 - `CultMesh.CreatePeerExchangeClient(...)`
 - `CultMesh.CreateAuthorityLeaseCatalog()`
+- `CultMesh.ParseRudpEndpoint(...)`
+- `CultMesh.CreateRudpServer(...)`
+- `CultMesh.CreateRudpClient(...)`
+- `CultMesh.CreateRudpClientForPeer(...)`
+- `CultMesh.CreateRudpClientForAuthorizedPeer(...)`
 - `CultMesh.CreateSimulationFactCommitter(...)`
 - `CultMesh.CreateGameSession(...)`
 - `CultMesh.CreateClient(...)`
@@ -67,7 +72,9 @@ responses to a node. The wire contracts are
 `CultMeshPeerExchangeClient` can fetch peer cards from known endpoints and
 upsert them into a local catalog.
 Peer cards are discovery hints; authority still requires a valid lease or
-signature for the target Verse.
+signature for the target Verse. `CultMeshPeerCatalog.FindAuthorized(...)` and
+`FirstAuthorized(...)` compose peer lookup with
+`CultMeshAuthorityLeaseCatalog.IsAuthorized(...)`.
 
 ### Authority Leases
 
@@ -76,6 +83,15 @@ scoped to shard ids and bounded by time. `CultMeshAuthorityLeaseCatalog` checks
 whether a peer card is authorized for a requested role and shard. This keeps
 peer exchange separate from authority instead of letting contact gossip mutate
 the world.
+
+### RUDP Helpers
+
+`CultMesh.ParseRudpEndpoint(...)`, `CreateRudpServer(...)`,
+`CreateRudpClient(...)`, `CreateRudpClientForPeer(...)`, and
+`CreateRudpClientForAuthorizedPeer(...)` provide the branded CultMesh path to
+the native CultNet RUDP socket transport. These helpers parse endpoint contact
+hints and choose authorized peers; `GameCult.Networking` still owns the RUDP
+packet codec, session state, resend, fragmentation, and channel semantics.
 
 ### Shard Authority
 

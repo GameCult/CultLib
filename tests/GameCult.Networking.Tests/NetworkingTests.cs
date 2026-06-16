@@ -2059,6 +2059,7 @@ namespace GameCult.Networking.Tests
         {
             var now = DateTimeOffset.Parse("2026-05-20T12:00:00.0000000Z");
             var catalog = CultMesh.CreateAuthorityLeaseCatalog();
+            using var peers = CultMesh.CreatePeerCatalog();
             var peer = new CultMeshPeerCard(
                 "peer-primary",
                 "aetheria-main",
@@ -2066,6 +2067,9 @@ namespace GameCult.Networking.Tests
                 roles: [CultMeshPeerRoles.ShardPrimary],
                 shardIds: ["players-us-east"],
                 authorityLeaseId: "lease-primary");
+            peers.Upsert(peer);
+
+            Assert.That(peers.FindAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now), Is.Empty);
             catalog.Upsert(new CultMeshAuthorityLease(
                 "lease-primary",
                 "aetheria-main",
@@ -2078,9 +2082,96 @@ namespace GameCult.Networking.Tests
                 signature: "sig"));
 
             Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now), Is.True);
+            Assert.That(peers.FindAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now).Single(), Is.SameAs(peer));
+            Assert.That(peers.FirstAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now), Is.SameAs(peer));
+            Assert.That(peers.FirstAuthorized("aetheria-main", CultMeshPeerRoles.ReadReplica, catalog, "players-us-east", now), Is.Null);
             Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-eu", now), Is.False);
             Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ReadReplica, "players-us-east", now), Is.False);
             Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now.AddMinutes(6)), Is.False);
+        }
+
+        [Test]
+        public void CultMeshRudpFacade_CreatesAuthorizedClientFromPeerEndpoint()
+        {
+            var connectionId = 0x10203045u;
+            using var server = CultMesh.CreateRudpServer(
+                "csharp-cultmesh-rudp-server",
+                connectionId,
+                new CultMeshRudpSocketOptions
+                {
+                    InitialSequence = 100,
+                    ResendDelayMs = 25,
+                    MaxFragmentBytes = 1024,
+                    MaxPendingReliablePackets = 16
+                });
+            var serverPort = server.Profile.Transports[0].Port;
+            Assert.That(serverPort, Is.Not.Null);
+            var endpoint = CultMesh.ParseRudpEndpoint($"rudp://127.0.0.1:{serverPort}");
+            Assert.That(endpoint.Host, Is.EqualTo("127.0.0.1"));
+            Assert.That(endpoint.Port, Is.EqualTo(serverPort));
+
+            using var peers = CultMesh.CreatePeerCatalog();
+            var leases = CultMesh.CreateAuthorityLeaseCatalog();
+            var now = DateTimeOffset.UtcNow;
+            var peer = new CultMeshPeerCard(
+                "csharp-cultmesh-rudp-server",
+                "local",
+                [endpoint.Uri],
+                roles: ["schema"],
+                authorityLeaseId: "lease:csharp-cultmesh-rudp-server");
+            peers.Upsert(peer);
+
+            Assert.Throws<InvalidOperationException>(() => CultMesh.CreateRudpClientForAuthorizedPeer(
+                "csharp-cultmesh-rudp-client",
+                connectionId,
+                peers,
+                leases,
+                "local",
+                "schema",
+                at: now,
+                options: new CultMeshRudpSocketOptions
+                {
+                    ResendDelayMs = 25,
+                    MaxFragmentBytes = 1024,
+                    MaxPendingReliablePackets = 16
+                }));
+
+            leases.Upsert(new CultMeshAuthorityLease(
+                "lease:csharp-cultmesh-rudp-server",
+                "local",
+                "csharp-cultmesh-rudp-server",
+                ["schema"],
+                [],
+                "csharp-authority",
+                now.AddSeconds(-1),
+                now.AddSeconds(30)));
+
+            using var client = CultMesh.CreateRudpClientForAuthorizedPeer(
+                "csharp-cultmesh-rudp-client",
+                connectionId,
+                peers,
+                leases,
+                "local",
+                "schema",
+                at: now,
+                options: new CultMeshRudpSocketOptions
+                {
+                    ResendDelayMs = 25,
+                    MaxFragmentBytes = 1024,
+                    MaxPendingReliablePackets = 16
+                });
+
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+            Assert.That(client.Connected, Is.True);
+            Assert.That(server.Connected, Is.True);
+
+            client.SendSchema(Encoding.UTF8.GetBytes("client-state"));
+            var serverFrame = ReceiveRudpFrame(server);
+            Assert.That(serverFrame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(Encoding.UTF8.GetString(serverFrame.Payload), Is.EqualTo("client-state"));
+            Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(client.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
         }
 
         [Test]

@@ -1,5 +1,8 @@
 using System;
 using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -163,6 +166,65 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Parsed CultMesh RUDP endpoint.
+    /// </summary>
+    public sealed class CultMeshRudpEndpoint
+    {
+        /// <summary>
+        /// Creates a parsed RUDP endpoint.
+        /// </summary>
+        public CultMeshRudpEndpoint(string host, int port, string uri)
+        {
+            Host = string.IsNullOrWhiteSpace(host)
+                ? throw new ArgumentException("Host must be non-empty.", nameof(host))
+                : host;
+            if (port <= 0 || port > 65535)
+            {
+                throw new ArgumentOutOfRangeException(nameof(port), "Port must be between 1 and 65535.");
+            }
+
+            Port = port;
+            Uri = string.IsNullOrWhiteSpace(uri)
+                ? throw new ArgumentException("Uri must be non-empty.", nameof(uri))
+                : uri;
+        }
+
+        /// <summary>Gets the endpoint host.</summary>
+        public string Host { get; }
+        /// <summary>Gets the endpoint port.</summary>
+        public int Port { get; }
+        /// <summary>Gets the normalized rudp:// URI.</summary>
+        public string Uri { get; }
+    }
+
+    /// <summary>
+    /// Options for CultMesh-branded RUDP socket helpers.
+    /// </summary>
+    public sealed class CultMeshRudpSocketOptions
+    {
+        /// <summary>Gets or sets the local bind host.</summary>
+        public string BindHost { get; set; } = "127.0.0.1";
+        /// <summary>Gets or sets the local bind port.</summary>
+        public int BindPort { get; set; }
+        /// <summary>Gets or sets a caller-owned bound socket.</summary>
+        public Socket? Socket { get; set; }
+        /// <summary>Gets or sets the first local packet sequence.</summary>
+        public uint InitialSequence { get; set; } = 1;
+        /// <summary>Gets or sets the reliable resend delay in milliseconds.</summary>
+        public long ResendDelayMs { get; set; } = 250;
+        /// <summary>Gets or sets the advertised transport id.</summary>
+        public string TransportId { get; set; } = "rudp";
+        /// <summary>Gets or sets the advertised maximum payload size.</summary>
+        public int? MaxPayloadBytes { get; set; }
+        /// <summary>Gets or sets the maximum RUDP fragment size.</summary>
+        public int? MaxFragmentBytes { get; set; }
+        /// <summary>Gets or sets the maximum pending reliable packet count.</summary>
+        public int? MaxPendingReliablePackets { get; set; }
+        /// <summary>Gets or sets the advertised reconnect policy.</summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
+    }
+
+    /// <summary>
     /// Public CultMesh entrypoints.
     /// </summary>
     public static class CultMesh
@@ -218,6 +280,139 @@ namespace GameCult.Mesh
         public static CultMeshStreamCatalog CreateStreamCatalog()
         {
             return new CultMeshStreamCatalog();
+        }
+
+        /// <summary>
+        /// Parses a rudp://host:port endpoint into its host/port parts.
+        /// </summary>
+        public static CultMeshRudpEndpoint ParseRudpEndpoint(string endpoint)
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
+                !string.Equals(uri.Scheme, "rudp", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException("RUDP endpoint must use the rudp:// scheme.", nameof(endpoint));
+            }
+
+            if (string.IsNullOrWhiteSpace(uri.Host) || uri.Port <= 0 || uri.Port > 65535)
+            {
+                throw new ArgumentException("RUDP endpoint must include a host and port.", nameof(endpoint));
+            }
+
+            var host = uri.Host;
+            var uriHost = host.Contains(':', StringComparison.Ordinal) && !host.StartsWith("[", StringComparison.Ordinal)
+                ? $"[{host}]"
+                : host;
+            return new CultMeshRudpEndpoint(host, uri.Port, $"rudp://{uriHost}:{uri.Port}");
+        }
+
+        /// <summary>
+        /// Creates a CultNet RUDP server transport with CultMesh-branded defaults.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpServer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            options ??= new CultMeshRudpSocketOptions();
+            return new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = runtimeId,
+                Socket = options.Socket ?? BindRudpSocket(options.BindHost, options.BindPort),
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId,
+                InitialSequence = options.InitialSequence,
+                ResendDelayMs = options.ResendDelayMs,
+                TransportId = options.TransportId,
+                MaxPayloadBytes = options.MaxPayloadBytes,
+                MaxFragmentBytes = options.MaxFragmentBytes,
+                MaxPendingReliablePackets = options.MaxPendingReliablePackets,
+                ReconnectPolicy = options.ReconnectPolicy
+            });
+        }
+
+        /// <summary>
+        /// Creates a CultNet RUDP client transport for a parsed endpoint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClient(
+            string runtimeId,
+            uint connectionId,
+            CultMeshRudpEndpoint endpoint,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
+            options ??= new CultMeshRudpSocketOptions();
+            return new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = runtimeId,
+                Socket = options.Socket ?? BindRudpSocket(options.BindHost, options.BindPort),
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = new IPEndPoint(ResolveRudpAddress(endpoint.Host), endpoint.Port),
+                ConnectionId = connectionId,
+                InitialSequence = options.InitialSequence,
+                ResendDelayMs = options.ResendDelayMs,
+                TransportId = options.TransportId,
+                MaxPayloadBytes = options.MaxPayloadBytes,
+                MaxFragmentBytes = options.MaxFragmentBytes,
+                MaxPendingReliablePackets = options.MaxPendingReliablePackets,
+                ReconnectPolicy = options.ReconnectPolicy
+            });
+        }
+
+        /// <summary>
+        /// Creates a CultNet RUDP client transport for a rudp://host:port endpoint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClient(
+            string runtimeId,
+            uint connectionId,
+            string endpoint,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            return CreateRudpClient(runtimeId, connectionId, ParseRudpEndpoint(endpoint), options);
+        }
+
+        /// <summary>
+        /// Creates a CultNet RUDP client transport from a peer-card contact hint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClientForPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCard peer,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            var endpoint = peer.Endpoints.FirstOrDefault(value => value.StartsWith("rudp://", StringComparison.OrdinalIgnoreCase));
+            if (endpoint == null)
+            {
+                throw new InvalidOperationException($"Peer {peer.PeerId} does not advertise a RUDP endpoint.");
+            }
+
+            return CreateRudpClient(runtimeId, connectionId, endpoint, options);
+        }
+
+        /// <summary>
+        /// Creates a CultNet RUDP client transport from the first peer authorized for a Verse role.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityLeaseCatalog leases,
+            string verseId,
+            string role,
+            string? shardId = null,
+            DateTimeOffset? at = null,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            if (peer == null)
+            {
+                throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
+            }
+
+            return CreateRudpClientForPeer(runtimeId, connectionId, peer, options);
         }
 
         /// <summary>
@@ -296,6 +491,27 @@ namespace GameCult.Mesh
             Action<Client>? configureClient = null)
         {
             return CultNetLocal.ConnectClient(host, port, security, configureClient);
+        }
+
+        private static Socket BindRudpSocket(string host, int port)
+        {
+            var address = ResolveRudpAddress(host);
+            var socket = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(address, port));
+            socket.ReceiveTimeout = 20;
+            return socket;
+        }
+
+        private static IPAddress ResolveRudpAddress(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host)) throw new ArgumentException("Value must be non-empty.", nameof(host));
+            if (IPAddress.TryParse(host, out var parsed))
+            {
+                return parsed;
+            }
+
+            return Dns.GetHostAddresses(host).FirstOrDefault()
+                   ?? throw new InvalidOperationException($"Could not resolve RUDP host {host}.");
         }
     }
 }
