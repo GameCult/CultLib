@@ -271,6 +271,12 @@ Current progress:
   counter and duplicate backoff constants. It still owns LiteNetLib socket
   mechanics and UI-facing reconnect state; the controller owns retry attempt
   scheduling.
+- C# now has an `ICultNetSchemaClient` service-client port for schema-v0
+  request/response bodies. The default adapter is still the LiteNetLib `Client`,
+  but Verse discovery, peer exchange, shard-log fetch, shard-snapshot fetch,
+  and shard write forwarding clients consume the port instead of constructing
+  LiteNetLib directly. This moves transport choice below service payload
+  ownership without claiming every daemon uses native RUDP yet.
 - C# now also has a poll-driven `CultNetRudpReconnectLoop` for the native RUDP
   socket transport. Caller-owned game/service loops report closure, ask
   `ReconnectIfDue(nowMs)` inside their own scheduler, and the shared controller
@@ -342,9 +348,10 @@ Current progress:
   behind the shared transport ports, then wire any remaining daemon/socket
   reconnect loops through the shared controller. C# built-in LiteNetLib service
   wrappers now route through `CultNetServerPeer`, TypeScript exposes a
-  transport-first TCP peer helper, and the core schema-message RUDP matrix is
-  live in the TypeScript interop gate; broader service adoption remains the
-  unclaimed layer.
+  transport-first TCP peer helper, C# schema-v0 service clients consume
+  `ICultNetSchemaClient`, and the core schema-message RUDP matrix is live in
+  the TypeScript interop gate; broader service adoption remains the unclaimed
+  layer.
 
 ## RUDP Packet Contract V0
 

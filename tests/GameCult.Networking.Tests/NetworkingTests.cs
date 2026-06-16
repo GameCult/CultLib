@@ -1733,6 +1733,151 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshVerseDiscoveryClient_Uses_SchemaClientPort()
+        {
+            var fake = new CapturingSchemaClient(message =>
+            {
+                var request = (CultMeshVerseCatalogRequestMessage)message;
+                return new CultMeshVerseCatalogResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    Verses =
+                    [
+                        new CultMeshVerseDescriptor(
+                            "local",
+                            "Local Verse",
+                            CultMeshVerseAuthorityModel.OperatorCluster,
+                            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+                            discoveryEndpoints: ["cultnet://mesh.example.test:4075"]).ToMessage()
+                    ]
+                };
+            });
+            var client = new CultMeshVerseDiscoveryClient(new CultMeshVerseDiscoveryClientOptions
+            {
+                CreateClient = () => fake
+            });
+
+            var response = await client.FetchAsync("cultnet://mesh.example.test:4075");
+
+            Assert.That(fake.ConnectedHost, Is.EqualTo("mesh.example.test"));
+            Assert.That(fake.ConnectedPort, Is.EqualTo(4075));
+            Assert.That(fake.SentMessages.Single(), Is.TypeOf<CultMeshVerseCatalogRequestMessage>());
+            Assert.That(response.Verses.Single().VerseId, Is.EqualTo("local"));
+        }
+
+        [Test]
+        public async Task CultMeshPeerExchangeClient_Uses_SchemaClientPort()
+        {
+            var fake = new CapturingSchemaClient(message =>
+            {
+                var request = (CultMeshPeerExchangeRequestMessage)message;
+                return new CultMeshPeerExchangeResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    Peers =
+                    [
+                        new CultMeshPeerCard(
+                            "peer-a",
+                            request.VerseId,
+                            ["cultnet://peer-a.example.test:3075"],
+                            roles: ["shard-primary"]).ToMessage()
+                    ]
+                };
+            });
+            var client = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions
+            {
+                CreateClient = () => fake
+            });
+
+            var response = await client.FetchAsync(
+                "cultnet://mesh.example.test:4075",
+                new CultMeshPeerExchangeRequestMessage { VerseId = "local" });
+
+            Assert.That(fake.ConnectedHost, Is.EqualTo("mesh.example.test"));
+            Assert.That(fake.SentMessages.Single(), Is.TypeOf<CultMeshPeerExchangeRequestMessage>());
+            Assert.That(response.Peers.Single().PeerId, Is.EqualTo("peer-a"));
+        }
+
+        [Test]
+        public async Task CultNetShardFetchers_Use_SchemaClientPort()
+        {
+            var logClient = new CapturingSchemaClient(message =>
+            {
+                var request = (CultNetShardLogRequestMessage)message;
+                return new CultNetShardLogResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    ShardId = request.ShardId,
+                    ShardEpoch = request.ShardEpoch ?? 0,
+                    Entries = []
+                };
+            });
+            var snapshotClient = new CapturingSchemaClient(message =>
+            {
+                var request = (CultNetSnapshotRequestMessage)message;
+                return new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = request.MessageId,
+                    ShardId = request.ShardId,
+                    ShardEpoch = request.ShardEpoch,
+                    Documents = []
+                };
+            });
+            var shard = new CultNetShardDescriptor(
+                "notes",
+                "primary",
+                7,
+                isPrimary: false,
+                schemaIds: ["note.v0"],
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+
+            var logFetcher = new CultNetSchemaShardLogFetcher(new CultNetSchemaShardLogFetcherOptions
+            {
+                CreateClient = () => logClient
+            });
+            var snapshotFetcher = new CultNetSchemaShardSnapshotFetcher(new CultNetSchemaShardSnapshotFetcherOptions
+            {
+                CreateClient = () => snapshotClient
+            });
+
+            var log = await logFetcher.FetchAsync(shard, afterSequence: 4, limit: 2);
+            var snapshot = await snapshotFetcher.FetchAsync(shard);
+
+            Assert.That(logClient.ConnectedHost, Is.EqualTo("primary.example.test"));
+            Assert.That(logClient.SentMessages.Single(), Is.TypeOf<CultNetShardLogRequestMessage>());
+            Assert.That(log.ShardId, Is.EqualTo("notes"));
+            Assert.That(snapshotClient.SentMessages.Single(), Is.TypeOf<CultNetSnapshotRequestMessage>());
+            Assert.That(snapshot.ShardEpoch, Is.EqualTo(7));
+        }
+
+        [Test]
+        public async Task CultNetSchemaWriteForwarder_Uses_SchemaClientPort()
+        {
+            var fake = new CapturingSchemaClient(_ => null);
+            var forwarder = new CultNetSchemaWriteForwarder(new CultNetSchemaWriteForwarderOptions
+            {
+                CreateClient = () => fake
+            });
+            var shard = new CultNetShardDescriptor(
+                "notes",
+                "primary",
+                3,
+                isPrimary: false,
+                primaryEndpoints: ["cultnet://primary.example.test:4075"]);
+
+            await forwarder.ForwardDeleteAsync(shard, new CultNetDocumentDeleteMessage
+            {
+                SchemaId = "note.v0",
+                RecordKey = "note:1"
+            });
+
+            var sent = (CultNetDocumentDeleteMessage)fake.SentMessages.Single();
+            Assert.That(fake.ConnectedHost, Is.EqualTo("primary.example.test"));
+            Assert.That(sent.ShardId, Is.EqualTo("notes"));
+            Assert.That(sent.ShardEpoch, Is.EqualTo(3));
+        }
+
+        [Test]
         public void CultMeshVerseCatalog_Finds_CompatibleTransferTargets()
         {
             var vanillaRules = CultMeshVerseDescriptor.ComputeRulesHash("aetheria", "rules:v1", "vanilla");
@@ -3506,6 +3651,64 @@ namespace GameCult.Networking.Tests
                 FetchCount++;
                 LastShard = shard;
                 return Task.FromResult(_response);
+            }
+        }
+
+        private sealed class CapturingSchemaClient : ICultNetSchemaClient
+        {
+            private readonly Func<ICultNetSchemaMessage, ICultNetSchemaMessage?> _respond;
+            private readonly Dictionary<Type, List<Delegate>> _handlers = new Dictionary<Type, List<Delegate>>();
+
+            public CapturingSchemaClient(Func<ICultNetSchemaMessage, ICultNetSchemaMessage?> respond)
+            {
+                _respond = respond;
+            }
+
+            public bool Connected { get; private set; }
+            public string? ConnectedHost { get; private set; }
+            public int ConnectedPort { get; private set; }
+            public List<ICultNetSchemaMessage> SentMessages { get; } = new List<ICultNetSchemaMessage>();
+
+            public void Connect(string host, int port)
+            {
+                Connected = true;
+                ConnectedHost = host;
+                ConnectedPort = port;
+            }
+
+            public void SendCultNet<T>(T message)
+                where T : ICultNetSchemaMessage
+            {
+                SentMessages.Add(message);
+                var response = _respond(message);
+                if (response == null)
+                {
+                    return;
+                }
+
+                if (_handlers.TryGetValue(response.GetType(), out var handlers))
+                {
+                    foreach (var handler in handlers)
+                    {
+                        handler.DynamicInvoke(response);
+                    }
+                }
+            }
+
+            public void OnCultNet<T>(Action<T> callback)
+                where T : ICultNetSchemaMessage
+            {
+                if (!_handlers.TryGetValue(typeof(T), out var handlers))
+                {
+                    handlers = new List<Delegate>();
+                    _handlers[typeof(T)] = handlers;
+                }
+
+                handlers.Add(callback);
+            }
+
+            public void Dispose()
+            {
             }
         }
 

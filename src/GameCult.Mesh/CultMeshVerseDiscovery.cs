@@ -161,6 +161,11 @@ namespace GameCult.Mesh
         /// Gets or sets a callback used to customize each ephemeral discovery client.
         /// </summary>
         public Action<Client>? ConfigureClient { get; set; }
+
+        /// <summary>
+        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// </summary>
+        public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
 
     /// <summary>
@@ -191,11 +196,7 @@ namespace GameCult.Mesh
             var completion = new TaskCompletionSource<CultMeshVerseCatalogResponseMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
-            using var client = new Client(_options.Security ?? ClientSecurityOptions.Development())
-            {
-                AllowUnverifiedCultNetMessages = true
-            };
-            _options.ConfigureClient?.Invoke(client);
+            using var client = CreateClient();
             client.OnCultNet<CultMeshVerseCatalogResponseMessage>(response =>
             {
                 if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
@@ -243,7 +244,13 @@ namespace GameCult.Mesh
             return count;
         }
 
-        private async Task WaitForConnectionAsync(Client client, string endpoint)
+        private ICultNetSchemaClient CreateClient()
+        {
+            return _options.CreateClient?.Invoke()
+                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+        }
+
+        private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)
         {
             var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
             while (!client.Connected)

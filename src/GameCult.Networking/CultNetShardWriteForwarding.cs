@@ -55,6 +55,11 @@ namespace GameCult.Networking
         /// Gets or sets a callback used to customize each ephemeral forwarding client.
         /// </summary>
         public Action<Client>? ConfigureClient { get; set; }
+
+        /// <summary>
+        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// </summary>
+        public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
 
     /// <summary>
@@ -115,17 +120,19 @@ namespace GameCult.Networking
         private async Task SendAsync<T>(string endpoint, T message) where T : ICultNetSchemaMessage
         {
             var (host, port) = ParseEndpoint(endpoint);
-            using var client = new Client(_options.Security ?? ClientSecurityOptions.Development())
-            {
-                AllowUnverifiedCultNetMessages = true
-            };
-            _options.ConfigureClient?.Invoke(client);
+            using var client = CreateClient();
             client.Connect(host, port);
             await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
             client.SendCultNet(message);
         }
 
-        private async Task WaitForConnectionAsync(Client client, string endpoint)
+        private ICultNetSchemaClient CreateClient()
+        {
+            return _options.CreateClient?.Invoke()
+                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+        }
+
+        private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)
         {
             var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
             while (!client.Connected)
