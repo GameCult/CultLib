@@ -71,6 +71,9 @@ jobs:
       - name: Install Node dependencies
         run: npm install --no-package-lock
 
+      - name: Build TypeScript workspace dependencies
+        run: npm run build --workspace packages/cultcache-ts
+
       - name: Build Kotlin interop peer
         shell: pwsh
         run: .\packages\cultmesh-kotlin\build.ps1

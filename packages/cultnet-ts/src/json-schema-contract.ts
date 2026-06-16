@@ -5,6 +5,7 @@ export interface JsonSchemaContract<TValue> extends CultCacheSchema<TValue> {
   readonly schemaId: string;
   readonly schema: object;
   readonly validate: (input: unknown) => input is TValue;
+  readonly parse: (input: unknown) => TValue;
 }
 
 export interface JsonSchemaContractDefinition {
