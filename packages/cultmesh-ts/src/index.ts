@@ -7,8 +7,12 @@ import {
 } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
+  CultNetSchemaCatalog,
+  CultNetShardCatalog,
+  cultNetBuiltinSchemaRegistry,
   defineCultNetDocumentBinding,
   type CultNetDocumentBinding,
+  type CultNetSchemaCatalogOptions,
 } from "cultnet-ts";
 
 export interface CultMeshNodeOptions {
@@ -469,6 +473,28 @@ export class CultMesh {
 
   public static createStreamCatalog(): CultMeshStreamCatalog {
     return new CultMeshStreamCatalog();
+  }
+
+  public static createSchemaCatalog(): CultNetSchemaCatalog {
+    return new CultNetSchemaCatalog();
+  }
+
+  public static createBuiltInSchemaCatalog(
+    options: CultNetSchemaCatalogOptions = {},
+  ): CultNetSchemaCatalog {
+    const catalog = new CultNetSchemaCatalog();
+    catalog.applyResponse(cultNetBuiltinSchemaRegistry.createCatalogResponse({
+      schemaVersion: "cultnet.schema_catalog_request.v0",
+      messageId: "cultmesh-ts-builtins",
+      includeSchemaJson: options.includeSchemaJson,
+      schemaIds: options.schemaIds ? [...options.schemaIds] : undefined,
+      kinds: options.kinds ? [...options.kinds] : undefined,
+    }));
+    return catalog;
+  }
+
+  public static createShardCatalog(): CultNetShardCatalog {
+    return new CultNetShardCatalog();
   }
 }
 

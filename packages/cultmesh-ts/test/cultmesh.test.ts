@@ -115,6 +115,79 @@ test("CultMesh TS local Verse catalog exposes sorted views and watch ergonomics"
   );
 });
 
+test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
+  const schemaCatalog = CultMesh.createSchemaCatalog();
+  const schemaUpdates: string[] = [];
+  const unsubscribeSchema = schemaCatalog.watch((descriptor) => {
+    schemaUpdates.push(descriptor.schemaId);
+  });
+  schemaCatalog.upsert({
+    schemaId: "cultmesh.ts.note.v1",
+    kind: "document_payload",
+    documentType: "cultmesh.ts-note",
+    wireContracts: ["cultnet.schema.v0"],
+    contentHash: "note-hash",
+  });
+  unsubscribeSchema();
+  schemaCatalog.upsert({
+    schemaId: "cultmesh.ts.other.v1",
+    kind: "document_payload",
+    documentType: "cultmesh.ts-other",
+    wireContracts: ["cultnet.schema.v0"],
+    contentHash: "other-hash",
+  });
+
+  assert.deepEqual(schemaUpdates, ["cultmesh.ts.note.v1"]);
+  assert.equal(
+    schemaCatalog.get("cultmesh.ts.note.v1")?.documentType,
+    "cultmesh.ts-note",
+  );
+
+  const builtIns = CultMesh.createBuiltInSchemaCatalog();
+  assert.equal(
+    builtIns.get("cultnet.shard_catalog_request.v0")?.schemaVersion,
+    "cultnet.shard_catalog_request.v0",
+  );
+  assert.equal(
+    builtIns.get("cultnet.shard_catalog_response.v0")?.kind,
+    "wire_message",
+  );
+  assert.equal(
+    builtIns.get(
+      "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+    )?.schemaVersion,
+    "cultnet.transport_profile.v0",
+  );
+
+  const shardCatalog = CultMesh.createShardCatalog();
+  const shardUpdates: string[] = [];
+  const unsubscribeShard = shardCatalog.watch((descriptor) => {
+    shardUpdates.push(descriptor.shardId);
+  });
+  shardCatalog.upsert({
+    shardId: "notes-a",
+    ownerRuntimeId: "ts-runtime",
+    epoch: 7,
+    schemaIds: ["cultmesh.ts.note.v1"],
+    keyPrefix: "note:",
+  });
+  unsubscribeShard();
+  shardCatalog.upsert({
+    shardId: "notes-b",
+    ownerRuntimeId: "ts-runtime",
+    epoch: 8,
+  });
+
+  assert.deepEqual(shardUpdates, ["notes-a"]);
+  assert.equal(shardCatalog.get("notes-a")?.ownerRuntimeId, "ts-runtime");
+  assert.deepEqual(
+    shardCatalog
+      .list({ schemaIds: ["cultmesh.ts.note.v1"], recordKeys: ["note:1"] })
+      .map((shard) => shard.shardId),
+    ["notes-a"],
+  );
+});
+
 test("CultMesh TS negotiates streaming frame body transports explicitly", () => {
   const streams = CultMesh.createStreamCatalog();
   const streamUpdates: string[] = [];

@@ -312,7 +312,11 @@ Current progress:
   ergonomics as the other runtimes: sorted local views, direct `get(...)`
   lookup, unsubscribe-able `watch(...)` callbacks for Verse and peer catalogs,
   watch callbacks for authority leases and stream declarations/frame cursors,
-  plus lease listing and lookup beside the authority check.
+  plus lease listing and lookup beside the authority check. The branded
+  `CultMesh` facade also creates schema catalogs, built-in schema catalogs, and
+  shard catalogs by delegating to the existing `cultnet-ts` owners, so callers
+  do not have to leave the CultMesh entrypoint for schema discovery or shard
+  topology.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.

@@ -46,7 +46,28 @@ leases.upsert({
   expiresAt: new Date(Date.now() + 60_000),
 });
 stopWatchingLeases();
+
+const schemas = CultMesh.createBuiltInSchemaCatalog();
+const shardCatalogRequest = schemas.get("cultnet.shard_catalog_request.v0");
+
+const shards = CultMesh.createShardCatalog();
+shards.upsert({
+  shardId: "notes-a",
+  ownerRuntimeId: "ts-peer",
+  epoch: 1,
+  schemaIds: ["cultmesh.note.v0"],
+  keyPrefix: "note:",
+});
+
+const noteShards = shards.list({
+  schemaIds: ["cultmesh.note.v0"],
+  recordKeys: ["note:intro"],
+});
 ```
+
+Schema and shard catalog factories delegate to `cultnet-ts`; the branded
+`CultMesh` entrypoint does not create a second owner for schema discovery or
+topology truth.
 
 ## Streaming Mode
 
