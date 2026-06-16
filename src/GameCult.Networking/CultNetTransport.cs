@@ -163,6 +163,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum fragment size for the schema channel.
         /// </summary>
         public int? MaxFragmentBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised reconnect policy for this TCP transport.
+        /// </summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
     }
 
     /// <summary>
@@ -194,6 +198,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum pending reliable packet count for RUDP channels.
         /// </summary>
         public int? MaxPendingReliablePackets { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised reconnect policy for this RUDP transport.
+        /// </summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
     }
 
     /// <summary>
@@ -224,6 +232,7 @@ namespace GameCult.Networking
                         Host = options.Host,
                         Port = options.Port,
                         WireContracts = [CultNetWireContracts.SchemaV0],
+                        ReconnectPolicy = options.ReconnectPolicy ?? CultNetReconnectPolicies.CreateDefault(),
                         Channels =
                         [
                             new CultNetTransportChannel
@@ -263,6 +272,7 @@ namespace GameCult.Networking
                         Host = options.Host,
                         Port = options.Port,
                         WireContracts = [CultNetWireContracts.SchemaV0],
+                        ReconnectPolicy = options.ReconnectPolicy ?? CultNetReconnectPolicies.CreateDefault(),
                         Channels =
                         [
                             new CultNetTransportChannel
@@ -657,6 +667,10 @@ namespace GameCult.Networking
         /// Gets or sets the maximum pending reliable packet count for RUDP channels.
         /// </summary>
         public int? MaxPendingReliablePackets { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised reconnect policy for this RUDP transport.
+        /// </summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
     }
 
     /// <summary>
@@ -1299,7 +1313,8 @@ namespace GameCult.Networking
                     Port = local?.Port,
                     MaxPayloadBytes = options.MaxPayloadBytes,
                     MaxFragmentBytes = options.MaxFragmentBytes,
-                    MaxPendingReliablePackets = options.MaxPendingReliablePackets
+                    MaxPendingReliablePackets = options.MaxPendingReliablePackets,
+                    ReconnectPolicy = options.ReconnectPolicy
                 });
         }
 

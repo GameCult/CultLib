@@ -161,6 +161,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
                 path: None,
                 discovery_group: None,
                 wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+                reconnect_policy: None,
                 channels: vec![CultNetTransportChannel {
                     channel_id: "schema".to_string(),
                     delivery: CultNetTransportDelivery::Reliable,
@@ -274,12 +275,27 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             max_payload_bytes: Some(1200),
             max_fragment_bytes: Some(1000),
             max_pending_reliable_packets: Some(64),
+            reconnect_policy: None,
         },
     );
 
     assert_eq!(
         profile.transports[0].protocol,
         CultNetTransportProtocol::Rudp
+    );
+    assert_eq!(
+        profile.transports[0]
+            .reconnect_policy
+            .as_ref()
+            .map(|policy| policy.schema_version.as_str()),
+        Some("cultnet.reconnect_policy.v0")
+    );
+    assert_eq!(
+        profile.transports[0]
+            .reconnect_policy
+            .as_ref()
+            .map(|policy| policy.base_delay_ms),
+        Some(1_000)
     );
     let channels = profile.transports[0]
         .channels
@@ -842,6 +858,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -856,6 +873,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -901,6 +919,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -915,6 +934,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         })?;
 
     client.connect(b"join".to_vec())?;

@@ -1,10 +1,9 @@
 use anyhow::Result;
 use anyhow::anyhow;
-use serde::Deserialize;
-use serde::Serialize;
 use std::io::Read;
 use std::io::Write;
 
+use crate::CultNetReconnectPolicy;
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
 use crate::CultNetTransportDescriptor;
@@ -26,18 +25,6 @@ pub struct CultNetTransportStats {
 pub struct CultNetTransportFrame {
     pub channel_id: String,
     pub payload: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CultNetReconnectPolicy {
-    pub schema_version: String,
-    pub policy_id: String,
-    pub base_delay_ms: u64,
-    pub max_delay_ms: u64,
-    pub max_jitter_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +103,7 @@ pub fn create_tcp_framed_transport_profile(
             path: None,
             discovery_group: None,
             wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+            reconnect_policy: None,
             channels: vec![CultNetTransportChannel {
                 channel_id: "schema".to_string(),
                 delivery: CultNetTransportDelivery::Reliable,

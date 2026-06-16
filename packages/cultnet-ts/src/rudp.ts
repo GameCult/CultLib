@@ -2,7 +2,13 @@ import { EventEmitter } from "node:events";
 import { type RemoteInfo, type Socket } from "node:dgram";
 
 import type { CultNetTransportProfile } from "./contracts";
-import type { CultNetTransportConnection, CultNetTransportFrame, CultNetTransportStats } from "./transport";
+import {
+  createCultNetReconnectPolicy,
+  type CultNetReconnectPolicy,
+  type CultNetTransportConnection,
+  type CultNetTransportFrame,
+  type CultNetTransportStats,
+} from "./transport";
 
 const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
@@ -83,6 +89,7 @@ export interface RudpTransportProfileOptions {
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
   maxPendingReliablePackets?: number;
+  reconnectPolicy?: CultNetReconnectPolicy;
 }
 
 export interface CultNetRudpSocketTransportOptions {
@@ -99,6 +106,7 @@ export interface CultNetRudpSocketTransportOptions {
   maxPayloadBytes?: number;
   maxFragmentBytes?: number;
   maxPendingReliablePackets?: number;
+  reconnectPolicy?: CultNetReconnectPolicy;
 }
 
 const packetTypeToCode: Record<CultNetRudpPacketType, number> = {
@@ -631,6 +639,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       maxPayloadBytes: options.maxPayloadBytes,
       maxFragmentBytes: options.maxFragmentBytes,
       maxPendingReliablePackets: options.maxPendingReliablePackets,
+      reconnectPolicy: options.reconnectPolicy,
     });
 
     this.#socket.on("message", (wire, remote) => this.#receiveDatagram(wire, remote));
@@ -788,6 +797,7 @@ export function createRudpTransportProfile(
     transportId: options.transportId ?? "rudp",
     protocol: "rudp",
     wireContracts: ["cultnet.schema.v0"],
+    reconnectPolicy: options.reconnectPolicy ?? createCultNetReconnectPolicy(),
     channels: [
       channel("schema", "reliable", "ordered"),
       channel("latest", "unreliable", "sequenced"),

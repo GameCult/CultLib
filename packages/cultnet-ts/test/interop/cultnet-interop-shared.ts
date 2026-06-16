@@ -243,6 +243,14 @@ export const discoveryTransportProfileSchema = z.object({
     path: z.string().min(1).nullable().optional(),
     discoveryGroup: z.string().min(1).nullable().optional(),
     wireContracts: z.array(z.string().min(1)).nullable().optional(),
+    reconnectPolicy: z.object({
+      schemaVersion: z.literal("cultnet.reconnect_policy.v0"),
+      policyId: z.string().min(1),
+      baseDelayMs: z.number().int().min(0),
+      maxDelayMs: z.number().int().min(0),
+      maxJitterMs: z.number().int().min(0),
+      maxAttempts: z.number().int().min(1).nullable().optional(),
+    }).nullable().optional(),
     channels: z.array(z.object({
       channelId: z.string().min(1),
       delivery: z.enum(["reliable", "unreliable"]),

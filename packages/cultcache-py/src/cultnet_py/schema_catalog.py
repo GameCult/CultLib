@@ -230,6 +230,19 @@ def shared_contract_schema_json(schema_id: str, title: str, schema_version: str)
                         "path": {"type": "string", "minLength": 1},
                         "discoveryGroup": {"type": "string", "minLength": 1},
                         "wireContracts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "reconnectPolicy": {
+                            "type": "object",
+                            "required": ["schemaVersion", "policyId", "baseDelayMs", "maxDelayMs", "maxJitterMs"],
+                            "additionalProperties": False,
+                            "properties": {
+                                "schemaVersion": {"const": "cultnet.reconnect_policy.v0"},
+                                "policyId": {"type": "string", "minLength": 1},
+                                "baseDelayMs": {"type": "integer", "minimum": 0},
+                                "maxDelayMs": {"type": "integer", "minimum": 0},
+                                "maxJitterMs": {"type": "integer", "minimum": 0},
+                                "maxAttempts": {"type": "integer", "minimum": 1},
+                            },
+                        },
                         "channels": {
                             "type": "array",
                             "items": {

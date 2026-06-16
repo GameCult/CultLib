@@ -70,6 +70,14 @@ export interface CultNetTransportDescriptor {
   path?: string;
   discoveryGroup?: string;
   wireContracts?: string[];
+  reconnectPolicy?: {
+    schemaVersion: "cultnet.reconnect_policy.v0";
+    policyId: string;
+    baseDelayMs: number;
+    maxDelayMs: number;
+    maxJitterMs: number;
+    maxAttempts?: number;
+  };
   channels: CultNetTransportChannel[];
 }
 

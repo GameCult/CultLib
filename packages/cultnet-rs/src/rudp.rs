@@ -9,6 +9,7 @@ use std::net::UdpSocket;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::CultNetReconnectPolicy;
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
 use crate::CultNetTransportDescriptor;
@@ -17,6 +18,7 @@ use crate::CultNetTransportOrdering;
 use crate::CultNetTransportProfile;
 use crate::CultNetTransportProtocol;
 use crate::CultNetTransportStats;
+use crate::create_reconnect_policy;
 
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
@@ -766,6 +768,7 @@ pub struct CultNetRudpSocketTransportOptions {
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
+    pub reconnect_policy: Option<CultNetReconnectPolicy>,
 }
 
 impl CultNetRudpSocketTransportOptions {
@@ -787,6 +790,7 @@ impl CultNetRudpSocketTransportOptions {
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         }
     }
 
@@ -803,6 +807,7 @@ impl CultNetRudpSocketTransportOptions {
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            reconnect_policy: None,
         }
     }
 }
@@ -832,6 +837,7 @@ impl CultNetRudpSocketTransportConnection {
                 max_payload_bytes: options.max_payload_bytes,
                 max_fragment_bytes: options.max_fragment_bytes,
                 max_pending_reliable_packets: options.max_pending_reliable_packets,
+                reconnect_policy: options.reconnect_policy,
             },
         );
         let max_pending_reliable_packets = options
@@ -998,6 +1004,7 @@ pub struct RudpTransportProfileOptions {
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
+    pub reconnect_policy: Option<CultNetReconnectPolicy>,
 }
 
 pub fn create_rudp_transport_profile(
@@ -1015,6 +1022,11 @@ pub fn create_rudp_transport_profile(
             path: None,
             discovery_group: None,
             wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+            reconnect_policy: Some(
+                options
+                    .reconnect_policy
+                    .unwrap_or_else(|| create_reconnect_policy(Default::default())),
+            ),
             channels: vec![
                 CultNetTransportChannel {
                     channel_id: "schema".to_string(),

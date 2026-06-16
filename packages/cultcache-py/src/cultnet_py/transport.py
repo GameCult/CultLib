@@ -190,6 +190,7 @@ class CultNetRudpSocketTransportOptions:
     max_payload_bytes: int | None = None
     max_fragment_bytes: int | None = None
     max_pending_reliable_packets: int | None = None
+    reconnect_policy: CultNetReconnectPolicy | dict[str, Any] | None = None
 
 
 @dataclass
@@ -219,6 +220,7 @@ def create_rudp_transport_profile(
     max_payload_bytes: int | None = None,
     max_fragment_bytes: int | None = None,
     max_pending_reliable_packets: int | None = None,
+    reconnect_policy: CultNetReconnectPolicy | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     def channel(channel_id: str, delivery: str, ordering: str) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -238,6 +240,11 @@ def create_rudp_transport_profile(
         "transportId": transport_id,
         "protocol": "rudp",
         "wireContracts": ["cultnet.schema.v0"],
+        "reconnectPolicy": (
+            reconnect_policy.to_wire()
+            if isinstance(reconnect_policy, CultNetReconnectPolicy)
+            else reconnect_policy or create_reconnect_policy().to_wire()
+        ),
         "channels": [
             channel("schema", "reliable", "ordered"),
             channel("latest", "unreliable", "sequenced"),
@@ -652,6 +659,7 @@ class CultNetRudpSocketTransportConnection:
             max_payload_bytes=options.max_payload_bytes,
             max_fragment_bytes=options.max_fragment_bytes,
             max_pending_reliable_packets=options.max_pending_reliable_packets,
+            reconnect_policy=options.reconnect_policy,
         )
         self._bytes_received = 0
         self._bytes_sent = 0

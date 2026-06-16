@@ -318,6 +318,10 @@ namespace GameCult.Networking
         /// </summary>
         [Key("wireContracts")] public string[]? WireContracts { get; set; }
         /// <summary>
+        /// Gets or sets the transport reconnect policy, when the transport owns reconnect posture.
+        /// </summary>
+        [Key("reconnectPolicy")] public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
+        /// <summary>
         /// Gets or sets the channels.
         /// </summary>
         [Key("channels")] public CultNetTransportChannel[] Channels { get; set; } = Array.Empty<CultNetTransportChannel>();

@@ -222,9 +222,10 @@ Current progress:
   pending-reliable queue.
 - TypeScript, C#, Rust, Python, and Kotlin now share a portable
   `cultnet.reconnect_policy.v0` document and deterministic exponential delay
-  helper. This gives RUDP peers the same policy language for reconnect posture;
-  it does not yet claim automatic reconnect orchestration or production service
-  adoption of that policy.
+  helper, and RUDP transport profiles advertise that policy under
+  `reconnectPolicy`. This gives discovery the same policy language for
+  reconnect posture; it does not yet claim automatic reconnect orchestration or
+  production service adoption of that policy.
 - Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate

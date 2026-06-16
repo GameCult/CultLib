@@ -104,7 +104,21 @@ pub struct CultNetTransportDescriptor {
     pub discovery_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_contracts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_policy: Option<CultNetReconnectPolicy>,
     pub channels: Vec<CultNetTransportChannel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetReconnectPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub max_jitter_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

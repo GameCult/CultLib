@@ -377,6 +377,8 @@ namespace GameCult.Networking.Tests
                 });
 
             Assert.That(profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(profile.Transports[0].ReconnectPolicy?.SchemaVersion, Is.EqualTo("cultnet.reconnect_policy.v0"));
+            Assert.That(profile.Transports[0].ReconnectPolicy?.BaseDelayMs, Is.EqualTo(1_000));
             Assert.That(
                 profile.Transports[0].Channels.Select(channel => $"{channel.ChannelId}:{channel.Delivery}:{channel.Ordering}").ToArray(),
                 Is.EqualTo(new[]
@@ -3001,6 +3003,8 @@ namespace GameCult.Networking.Tests
             Assert.That(transportProfile!.Kind, Is.EqualTo("shared_contract"));
             Assert.That(transportProfile.WireContracts, Is.EqualTo([CultNetWireContracts.SchemaV0]));
             Assert.That(transportProfile.SchemaJson, Does.Contain("cultnet.transport_profile.v0"));
+            Assert.That(transportProfile.SchemaJson, Does.Contain("reconnectPolicy"));
+            Assert.That(transportProfile.SchemaJson, Does.Contain("cultnet.reconnect_policy.v0"));
             Assert.That(transportProfile.SchemaJson, Does.Contain("litenetlib"));
         }
 

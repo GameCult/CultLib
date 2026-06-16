@@ -267,6 +267,8 @@ test("rudp transport profile advertises state and realtime channel semantics", (
   });
 
   assert.equal(profile.transports[0]?.protocol, "rudp");
+  assert.equal(profile.transports[0]?.reconnectPolicy?.schemaVersion, "cultnet.reconnect_policy.v0");
+  assert.equal(profile.transports[0]?.reconnectPolicy?.baseDelayMs, 1_000);
   assert.deepEqual(
     profile.transports[0]?.channels.map((channel) => [channel.channelId, channel.delivery, channel.ordering]),
     [
@@ -669,6 +671,10 @@ test("CultNet schema discovery catalog can advertise canonical schemas without i
   assert.equal(transportProfile?.kind, "shared_contract");
   assert.equal(transportProfile?.schemaId, cultNetSchemas.transportProfileSchema.$id);
   assert.deepEqual(transportProfile?.wireContracts, ["cultnet.schema.v0"]);
+  assert.equal(
+    cultNetSchemas.transportProfileSchema.properties.transports.items.properties.reconnectPolicy.properties.schemaVersion.const,
+    "cultnet.reconnect_policy.v0",
+  );
 });
 
 test("CultNet schema discovery can round-trip over the legacy wire contract when schemas are requested inline", () => {

@@ -175,9 +175,10 @@ val policy = createReconnectPolicy(policyId = "rudp-default", maxAttempts = 8)
 val nextDelayMs = computeReconnectDelayMs(policy, attempt = 3, jitterMs = 17)
 ```
 
-The helper publishes `cultnet.reconnect_policy.v0` and matches the C#,
-TypeScript, Rust, and Python defaults. It is policy language, not an automatic
-reconnect loop.
+The helper publishes `cultnet.reconnect_policy.v0`, matches the C#,
+TypeScript, Rust, and Python defaults, and is advertised by Kotlin RUDP
+transport profiles as `reconnectPolicy`. It is policy language, not an
+automatic reconnect loop.
 
 `EveDashboardStateDocument` mirrors the CultUI-shaped dashboard surface contract:
 `surface.root` is the retained UI tree, `surface.assets` carries cacheable media

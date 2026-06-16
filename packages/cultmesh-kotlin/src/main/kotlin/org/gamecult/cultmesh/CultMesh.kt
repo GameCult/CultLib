@@ -388,6 +388,7 @@ data class CultNetTransportDescriptor(
     val host: String? = null,
     val port: Int? = null,
     val wireContracts: List<String> = listOf("cultnet.schema.v0"),
+    val reconnectPolicy: CultNetReconnectPolicy? = null,
     val channels: List<CultNetTransportChannel>,
 )
 
@@ -408,6 +409,7 @@ fun createRudpTransportProfile(
     maxPayloadBytes: Int? = null,
     maxFragmentBytes: Int? = null,
     maxPendingReliablePackets: Int? = null,
+    reconnectPolicy: CultNetReconnectPolicy = createReconnectPolicy(),
 ): CultNetTransportProfile = CultNetTransportProfile(
     runtimeId = runtimeId,
     transports = listOf(
@@ -416,6 +418,7 @@ fun createRudpTransportProfile(
             protocol = "rudp",
             host = host,
             port = port,
+            reconnectPolicy = reconnectPolicy,
             channels = listOf(
                 CultNetTransportChannel("schema", "reliable", "ordered", maxPayloadBytes, maxFragmentBytes, maxPendingReliablePackets),
                 CultNetTransportChannel("latest", "unreliable", "sequenced", maxPayloadBytes, maxFragmentBytes, maxPendingReliablePackets),
@@ -1658,6 +1661,7 @@ fun CultNetTransportDescriptor.toWireMap(): Map<String, Any?> {
     )
     if (!host.isNullOrBlank()) wire["host"] = host
     if (port != null) wire["port"] = port.toLong()
+    if (reconnectPolicy != null) wire["reconnectPolicy"] = reconnectPolicy.toWireMap()
     return wire
 }
 
@@ -2496,7 +2500,11 @@ private fun cultNetSchemaMessagesUseMessagePackMaps() {
     val profile = profiles.single() as Map<*, *>
     check(profile["schemaVersion"] == "cultnet.transport_profile.v0")
     val transports = profile["transports"] as List<*>
-    check((transports.single() as Map<*, *>)["protocol"] == "rudp")
+    val transport = transports.single() as Map<*, *>
+    check(transport["protocol"] == "rudp")
+    val reconnectPolicy = transport["reconnectPolicy"] as Map<*, *>
+    check(reconnectPolicy["schemaVersion"] == "cultnet.reconnect_policy.v0")
+    check(reconnectPolicy["baseDelayMs"] == 1_000L)
 
     val payload = MessagePackWriter().map(1).string("body").string("wire smoke").toByteArray()
     val put = cultNetDocumentPutRaw(

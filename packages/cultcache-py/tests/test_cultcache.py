@@ -673,6 +673,8 @@ class CultCacheTests(unittest.TestCase):
         )
 
         self.assertEqual(profile["transports"][0]["protocol"], "rudp")
+        self.assertEqual(profile["transports"][0]["reconnectPolicy"]["schemaVersion"], "cultnet.reconnect_policy.v0")
+        self.assertEqual(profile["transports"][0]["reconnectPolicy"]["baseDelayMs"], 1_000)
         self.assertEqual(
             [
                 (channel["channelId"], channel["delivery"], channel["ordering"])
@@ -1714,6 +1716,10 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(transport_profile_schema["required"], ["schemaVersion", "runtimeId", "transports"])
         transport = transport_profile_schema["properties"]["transports"]["items"]
         self.assertEqual(transport["properties"]["protocol"]["enum"], ["tcp_framed", "litenetlib", "websocket", "rudp"])
+        self.assertEqual(
+            transport["properties"]["reconnectPolicy"]["properties"]["schemaVersion"]["const"],
+            "cultnet.reconnect_policy.v0",
+        )
         channel = transport["properties"]["channels"]["items"]
         self.assertEqual(channel["properties"]["ordering"]["enum"], ["ordered", "unordered", "sequenced"])
 
