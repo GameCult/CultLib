@@ -49,7 +49,7 @@ namespace GameCult.Networking
         private bool _disposed;
         private bool _manualDisconnect;
         private bool _isReconnecting;
-        private int _reconnectAttemptCount;
+        private readonly CultNetReconnectController _reconnectController;
 
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
         private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
@@ -59,9 +59,6 @@ namespace GameCult.Networking
         private int _lastPort;
         private readonly ClientSecurityOptions _security;
         private ILogger _logger = new NullLogger();
-        private static readonly TimeSpan BaseReconnectDelay = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
-        private static readonly TimeSpan MaxReconnectJitter = TimeSpan.FromMilliseconds(250);
         
         /// <summary>
         /// Gets or sets the logger used by the client.
@@ -81,6 +78,21 @@ namespace GameCult.Networking
         /// Gets the current reconnect posture exposed to consumers.
         /// </summary>
         public ClientReconnectState ReconnectState { get; private set; } = ClientReconnectState.Idle;
+
+        /// <summary>
+        /// Gets the portable reconnect policy used by this client.
+        /// </summary>
+        public CultNetReconnectPolicy ReconnectPolicy => _reconnectController.Policy;
+
+        /// <summary>
+        /// Gets the last scheduled reconnect attempt number.
+        /// </summary>
+        public int ReconnectAttempt => _reconnectController.Attempt;
+
+        /// <summary>
+        /// Gets the absolute scheduler time for the next reconnect attempt.
+        /// </summary>
+        public long? NextReconnectAttemptAtMs => _reconnectController.NextAttemptAtMs;
 
         /// <summary>
         /// Gets or sets whether raw payload bodies may be logged for diagnostics.
@@ -106,9 +118,10 @@ namespace GameCult.Networking
         /// Initializes a new client instance.
         /// </summary>
         /// <param name="security">Validated client security configuration. This must be provided explicitly by the caller.</param>
-        public Client(ClientSecurityOptions security)
+        public Client(ClientSecurityOptions security, CultNetReconnectPolicy? reconnectPolicy = null)
         {
             _security = security ?? throw new ArgumentNullException(nameof(security));
+            _reconnectController = new CultNetReconnectController(reconnectPolicy);
             OnError += s => Logger.LogError(s);
         }
 
@@ -349,7 +362,7 @@ namespace GameCult.Networking
             _isReconnecting = false;
             if (resetReconnectBackoff)
             {
-                _reconnectAttemptCount = 0;
+                _reconnectController.Reset();
             }
             SetReconnectState(ClientReconnectState.Idle);
             _reconnectSubscription?.Dispose();
@@ -428,7 +441,7 @@ namespace GameCult.Networking
             {
                 Logger.LogInfo($"Peer {peer.Address}:{peer.Port} connected.");
                 _peer = peer;
-                _reconnectAttemptCount = 0;
+                _reconnectController.Reset();
                 SetReconnectState(ClientReconnectState.Idle);
                 if (Verified)
                 {
@@ -474,6 +487,7 @@ namespace GameCult.Networking
             _manualDisconnect = true;
             _reconnectSubscription?.Dispose();
             _reconnectSubscription = null;
+            _reconnectController.Reset();
             SetReconnectState(ClientReconnectState.Idle);
             DisposeTransport();
         }
@@ -490,6 +504,7 @@ namespace GameCult.Networking
             _manualDisconnect = true;
             _reconnectSubscription?.Dispose();
             _reconnectSubscription = null;
+            _reconnectController.Reset();
             SetReconnectState(ClientReconnectState.Idle);
             DisposeTransport();
         }
@@ -502,8 +517,18 @@ namespace GameCult.Networking
             }
 
             _isReconnecting = true;
-            _reconnectAttemptCount++;
-            var delay = GetReconnectDelayForAttempt(_reconnectAttemptCount);
+            var decision = _reconnectController.RecordFailure(
+                CurrentSchedulerTimeMs(),
+                RandomNumberGenerator.GetInt32(ReconnectPolicy.MaxJitterMs + 1));
+            if (!decision.ShouldRetry)
+            {
+                _isReconnecting = false;
+                Logger.LogWarning("Reconnect attempts exhausted.");
+                SetReconnectState(ClientReconnectState.Idle);
+                return;
+            }
+
+            var delay = TimeSpan.FromMilliseconds(decision.DelayMs);
             SetReconnectState(ClientReconnectState.WaitingToReconnect);
             _reconnectSubscription = Observable.Timer(delay).Subscribe(_ =>
             {
@@ -526,12 +551,23 @@ namespace GameCult.Networking
 
         internal static TimeSpan GetReconnectDelayForAttempt(int attempt)
         {
-            var normalizedAttempt = Math.Max(1, attempt);
-            var exponentialSeconds = Math.Min(
-                MaxReconnectDelay.TotalSeconds,
-                BaseReconnectDelay.TotalSeconds * Math.Pow(2, normalizedAttempt - 1));
-            var jitterMilliseconds = RandomNumberGenerator.GetInt32((int)MaxReconnectJitter.TotalMilliseconds + 1);
-            return TimeSpan.FromSeconds(exponentialSeconds) + TimeSpan.FromMilliseconds(jitterMilliseconds);
+            var jitterMilliseconds = RandomNumberGenerator.GetInt32(CultNetReconnectPolicies.CreateDefault().MaxJitterMs + 1);
+            return GetReconnectDelayForAttempt(attempt, jitterMilliseconds, CultNetReconnectPolicies.CreateDefault());
+        }
+
+        internal static TimeSpan GetReconnectDelayForAttempt(
+            int attempt,
+            int jitterMs,
+            CultNetReconnectPolicy? policy = null)
+        {
+            var reconnectPolicy = policy ?? CultNetReconnectPolicies.CreateDefault();
+            return TimeSpan.FromMilliseconds(
+                CultNetReconnectPolicies.ComputeDelayMs(reconnectPolicy, attempt, jitterMs));
+        }
+
+        private static long CurrentSchedulerTimeMs()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
         private void DisposeTransport()

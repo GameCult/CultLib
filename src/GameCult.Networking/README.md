@@ -361,7 +361,8 @@ The client:
 
 - disposes its prior polling subscription before reconnecting
 - stops the prior `NetManager`
-- schedules reconnect with bounded exponential backoff and jitter
+- schedules reconnect through `CultNetReconnectController`, using the same
+  `cultnet.reconnect_policy.v0` backoff contract advertised by RUDP profiles
 - automatically re-verifies using the stored signed session token
 - exposes reconnect state for UI/operator surfaces
 

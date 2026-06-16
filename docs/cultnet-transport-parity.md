@@ -233,6 +233,11 @@ Current progress:
   successful-connection reset semantics. This is the orchestration primitive
   service loops must use; it does not yet claim every production daemon or
   socket path automatically redials through it.
+- The C# LiteNetLib `Client` reconnect loop now consumes
+  `CultNetReconnectController` directly instead of owning a private attempt
+  counter and duplicate backoff constants. It still owns LiteNetLib socket
+  mechanics and UI-facing reconnect state; the controller owns retry attempt
+  scheduling.
 - Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate
@@ -259,9 +264,9 @@ Current progress:
   transport; discovery contact remains separate from trust, which is still
   gated by the authority lease catalog.
 - The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
-  service bodies behind their shared transport ports, then wire daemon/socket
-  reconnect loops through the shared controller and broaden the RUDP
-  schema-message matrix.
+  service bodies behind their shared transport ports, then wire the remaining
+  daemon/socket reconnect loops through the shared controller and broaden the
+  RUDP schema-message matrix.
 
 ## RUDP Packet Contract V0
 

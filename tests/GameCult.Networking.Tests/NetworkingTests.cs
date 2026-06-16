@@ -3105,7 +3105,18 @@ namespace GameCult.Networking.Tests
         [Test]
         public void Client_Reconnect_Backoff_Is_Bounded_And_Grows()
         {
-            var method = typeof(Client).GetMethod("GetReconnectDelayForAttempt", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var method = typeof(Client).GetMethod(
+                "GetReconnectDelayForAttempt",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(int) },
+                null)!;
+            var deterministicMethod = typeof(Client).GetMethod(
+                "GetReconnectDelayForAttempt",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(int), typeof(int), typeof(CultNetReconnectPolicy) },
+                null)!;
 
             var first = (TimeSpan)method.Invoke(null, new object[] { 1 })!;
             var third = (TimeSpan)method.Invoke(null, new object[] { 3 })!;
@@ -3117,6 +3128,31 @@ namespace GameCult.Networking.Tests
             Assert.That(third, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(4.25)));
             Assert.That(tenth, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(30)));
             Assert.That(tenth, Is.LessThanOrEqualTo(TimeSpan.FromSeconds(30.25)));
+
+            var deterministic = (TimeSpan)deterministicMethod.Invoke(
+                null,
+                new object[] { 3, 17, CultNetReconnectPolicies.CreateDefault(maxAttempts: 8) })!;
+            Assert.That(deterministic, Is.EqualTo(TimeSpan.FromMilliseconds(4_017)));
+        }
+
+        [Test]
+        public void Client_Reconnect_Uses_Portable_Policy_Controller()
+        {
+            var policy = CultNetReconnectPolicies.CreateDefault("client-rudp", maxAttempts: 2);
+            var client = new Client(DevelopmentClientSecurity, policy);
+
+            Assert.That(client.ReconnectPolicy, Is.SameAs(policy));
+            Assert.That(client.ReconnectAttempt, Is.EqualTo(0));
+            Assert.That(client.NextReconnectAttemptAtMs, Is.Null);
+
+            var schedule = typeof(Client).GetMethod("ScheduleReconnect", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            schedule.Invoke(client, Array.Empty<object>());
+
+            Assert.That(client.ReconnectAttempt, Is.EqualTo(1));
+            Assert.That(client.NextReconnectAttemptAtMs, Is.Not.Null);
+            Assert.That(client.ReconnectState, Is.EqualTo(ClientReconnectState.WaitingToReconnect));
+
+            client.Dispose();
         }
 
         [Test]

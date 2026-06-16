@@ -30,7 +30,7 @@ CultMesh.
 
 | Runtime | Role | Claimed parity | Not claimed |
 | --- | --- | --- | --- |
-| C# | Reference implementation and production game/server substrate | CultCache typed documents and SoA, CultNet schema-v0, LiteNetLib production path, shared transport profiles, shared RUDP socket transport, RUDP reconnect policy/controller, CultMesh node/session/catalog/stream/simulation surfaces | No need to abandon LiteNetLib before the CultNet adapter fully owns production service adoption |
+| C# | Reference implementation and production game/server substrate | CultCache typed documents and SoA, CultNet schema-v0, LiteNetLib production path, shared transport profiles, shared RUDP socket transport, RUDP reconnect policy/controller, LiteNetLib client reconnect-controller adoption, CultMesh node/session/catalog/stream/simulation surfaces | No need to abandon LiteNetLib before the CultNet adapter fully owns production service adoption |
 | Python | Package runtime, local daemon endpoint, raw interop peer, typed state participant | CultCache/CultNet/CultMesh package surface, schema catalogs, shard catalogs/logs, local TCP CultMesh server, session/prediction/simulation fact helpers, authority leases, streams, RUDP codec/session/socket transport, RUDP reconnect policy/controller, schema-v0 MessagePack over RUDP evidence, benchmark evidence against C# cache paths | Universal C# throughput, full C# daemon/server stack, and RUDP as the only public service pipe |
 | TypeScript | Node/browser-adjacent projection and interop runtime | CultCache parity tests, CultNet schema-v0 peer, transport profiles, TCP-framed transport port, shared RUDP socket transport, RUDP reconnect policy/controller, local CultMesh node/catalog/authority/stream ergonomics | Full C# game session/server stack |
 | Rust | Low-level cache/transport/runtime substrate | CultCache/CultNet interop lane, transport profiles, TCP-framed port, shared RUDP codec/session/socket transport, RUDP reconnect policy/controller, schema-v0 MessagePack over RUDP evidence, small CultMesh facade for peer cards, authority leases, RUDP endpoint parsing, and peer-card RUDP client construction | Full CultMesh game-session/server facade, stream catalog, or production game-session server |
@@ -62,9 +62,9 @@ CultMesh.
   TCP/LiteNetLib/WebSocket ownership in individual bodies.
 - Extend RUDP interop evidence through daemon/socket reconnect loops and the
   wider schema-message matrix. RUDP profiles now advertise the portable
-  reconnect policy and runtime-local tests prove the shared controller across
-  the targeted runtimes; service adoption of that controller is a separate
-  claim.
+  reconnect policy, runtime-local tests prove the shared controller across the
+  targeted runtimes, and the C# LiteNetLib client uses that controller; broader
+  service adoption remains a separate claim.
 - Keep Kotlin ergonomic parity moving with Android/JVM-shaped APIs instead of
   backfilling C# server responsibilities it should not own.
 - Keep performance claims evidence-bound: C# owns SoA; Python has benchmark
