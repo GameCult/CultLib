@@ -1,6 +1,6 @@
 param(
-  [string] $KotlinHome = "C:\Program Files\Android\Android Studio\plugins\Kotlin\kotlinc",
-  [string] $JavaHome = "C:\Program Files\Android\Android Studio\jbr"
+  [string] $KotlinHome = $(if ($env:KOTLIN_HOME) { $env:KOTLIN_HOME } else { "C:\Program Files\Android\Android Studio\plugins\Kotlin\kotlinc" }),
+  [string] $JavaHome = $(if ($env:KOTLIN_JAVA_HOME) { $env:KOTLIN_JAVA_HOME } elseif ($env:JAVA_HOME) { $env:JAVA_HOME } else { "C:\Program Files\Android\Android Studio\jbr" })
 )
 
 $ErrorActionPreference = "Stop"

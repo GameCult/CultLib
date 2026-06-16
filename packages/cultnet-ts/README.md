@@ -270,12 +270,10 @@ npm run test
 The cross-runtime interop harness is meant to run in GitHub Actions on
 `windows-latest`.
 
-It expects these sibling checkouts inside the same workspace:
-
-- `CultNetTS`
-- `cultnet-rs`
-- `cultcache-rs`
-- `CultLib`
+It expects this CultLib checkout with the in-tree TypeScript, Rust, Python,
+C#, and Kotlin packages present. The workflow installs the toolchains, builds
+the Kotlin interop jar through `packages/cultmesh-kotlin/build.ps1`, and then
+lets the TypeScript harness build the Rust and C# interop peers it needs.
 
 The workflow lives at
 [.github/workflows/cultnet-interop.yml](.github/workflows/cultnet-interop.yml)
