@@ -312,6 +312,54 @@ object CultMesh {
         bindPort = bindPort,
         tuning = tuning,
     )
+
+    fun parseRudpEndpoint(endpoint: String): CultNetRudpEndpoint = cultNetRudpEndpoint(endpoint)
+
+    fun createRudpClient(
+        runtimeId: String,
+        connectionId: Long,
+        endpoint: CultNetRudpEndpoint,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection = createRudpClient(
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        remoteHost = endpoint.host,
+        remotePort = endpoint.port,
+        bindHost = bindHost,
+        bindPort = bindPort,
+        tuning = tuning,
+    )
+
+    fun createRudpClient(
+        runtimeId: String,
+        connectionId: Long,
+        endpoint: String,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection = createRudpClient(
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        endpoint = parseRudpEndpoint(endpoint),
+        bindHost = bindHost,
+        bindPort = bindPort,
+        tuning = tuning,
+    )
+
+    fun createRudpClientForPeer(
+        runtimeId: String,
+        connectionId: Long,
+        peer: CultMeshPeerCard,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+    ): CultNetRudpSocketTransportConnection {
+        val endpoint = peer.endpoints.firstOrNull { it.startsWith("rudp://", ignoreCase = true) }
+            ?: throw IOException("Peer ${peer.peerId} does not advertise a RUDP endpoint")
+        return createRudpClient(runtimeId, connectionId, endpoint, bindHost, bindPort, tuning)
+    }
 }
 
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
@@ -324,6 +372,10 @@ data class CultNetTransportStats(
 )
 
 data class CultNetTransportFrame(val channelId: String, val payload: ByteArray)
+
+data class CultNetRudpEndpoint(val host: String, val port: Int) {
+    val uri: String get() = "rudp://$host:$port"
+}
 
 data class CultNetReconnectPolicy(
     val schemaVersion: String = "cultnet.reconnect_policy.v0",
@@ -2021,6 +2073,15 @@ data class CultNetRudpSocketTuning(
     val maxPendingReliablePackets: Int? = null,
 )
 
+fun cultNetRudpEndpoint(endpoint: String): CultNetRudpEndpoint {
+    val uri = URI(endpoint)
+    if (!uri.scheme.equals("rudp", ignoreCase = true)) throw IOException("RUDP endpoint must use the rudp scheme")
+    val host = uri.host ?: throw IOException("RUDP endpoint must include a host")
+    val port = uri.port
+    if (port <= 0 || port > 65535) throw IOException("RUDP endpoint must include a valid port")
+    return CultNetRudpEndpoint(host, port)
+}
+
 fun cultNetRudpServer(
     runtimeId: String,
     connectionId: Long,
@@ -3193,11 +3254,19 @@ private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
         connectionId = connectionId,
         tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
     ).use { server ->
-        CultMesh.createRudpClient(
+        val endpoint = CultMesh.parseRudpEndpoint("rudp://127.0.0.1:${server.localPort}")
+        check(endpoint.host == "127.0.0.1")
+        check(endpoint.port == server.localPort)
+        val peer = CultMeshPeerCard(
+            peerId = "kotlin-rudp-sugar-peer",
+            verseId = "local",
+            endpoints = listOf(endpoint.uri),
+            roles = listOf("schema"),
+        )
+        CultMesh.createRudpClientForPeer(
             runtimeId = "kotlin-rudp-sugar-client",
             connectionId = connectionId,
-            remoteHost = "127.0.0.1",
-            remotePort = server.localPort,
+            peer = peer,
             tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 8, maxPendingReliablePackets = 16),
         ).use { client ->
             client.connect("join")

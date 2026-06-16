@@ -242,9 +242,11 @@ Current progress:
   max in-flight frame pressure, and latest-frame cursors.
 - Kotlin now has a branded `CultMesh` facade matching the C#/TypeScript/Python
   entrypoint pattern for local nodes, Verse catalogs, peer catalogs, authority
-  lease catalogs, stream catalogs, and RUDP client/server construction. The
-  facade delegates to the same owners as the top-level helpers instead of
-  creating a second authority path.
+  lease catalogs, stream catalogs, and RUDP client/server construction. Kotlin
+  also parses advertised `rudp://host:port` endpoints and can build a RUDP
+  client directly from a peer card contact hint. The facade delegates to the
+  same owners as the top-level helpers instead of creating a second authority
+  path.
 - The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
   service bodies behind their shared transport ports, then broaden RUDP interop
   into automatic reconnect orchestration and the wider schema-message matrix.

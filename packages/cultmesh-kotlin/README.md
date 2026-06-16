@@ -145,11 +145,16 @@ CultMesh.createRudpServer(
     connectionId = 0x10203040,
     tuning = CultNetRudpSocketTuning(maxFragmentBytes = 1024),
 ).use { server ->
-    CultMesh.createRudpClient(
+    val peer = CultMeshPeerCard(
+        peerId = "kotlin-server",
+        verseId = "local",
+        endpoints = listOf("rudp://127.0.0.1:${server.localPort}"),
+        roles = listOf("schema"),
+    )
+    CultMesh.createRudpClientForPeer(
         runtimeId = "kotlin-client",
         connectionId = 0x10203040,
-        remoteHost = "127.0.0.1",
-        remotePort = server.localPort,
+        peer = peer,
     ).use { client ->
         client.connect("join")
         check(pumpRudpPairUntilConnected(client, server))
@@ -166,6 +171,10 @@ channel semantics; they do not create a Kotlin-only dialect. For a remote peer
 that already has its own receive loop, use `connectAndWait(...)`; for two
 same-process transports, use `pumpRudpPairUntilConnected(...)` to drive both
 sides through the handshake.
+
+For lower-level code, `CultMesh.parseRudpEndpoint("rudp://127.0.0.1:4100")`
+returns the host/port pair, and `CultMesh.createRudpClient(...)` accepts either
+that parsed endpoint or the endpoint string directly.
 
 Kotlin also exposes the shared reconnect-policy helper for peers that need a
 portable backoff document without inventing a JVM-only delay dialect:
