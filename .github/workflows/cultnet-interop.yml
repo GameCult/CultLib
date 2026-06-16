@@ -72,6 +72,9 @@ jobs:
       - name: Install Node dependencies
         run: npm install --no-package-lock
 
+      - name: Install Python package dependencies
+        run: python -m pip install -e packages/cultcache-py
+
       - name: Build TypeScript workspace dependencies
         run: npm run build --workspace packages/cultcache-ts
 
