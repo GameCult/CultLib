@@ -84,10 +84,6 @@ jobs:
           npm run build --workspace packages/cultnet-ts
           npx tsc -p packages/cultnet-ts/tsconfig.test.json --pretty false
 
-      - name: Interop schema-v0 discovery lane
-        timeout-minutes: 20
-        run: node --test --test-name-pattern "shared schema-v0 lane" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
-
       - name: Interop RUDP Python lane
         timeout-minutes: 8
         run: node --test --test-name-pattern "TypeScript and Python|Python and TypeScript" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
@@ -107,3 +103,7 @@ jobs:
       - name: Interop RUDP impairment matrix
         timeout-minutes: 12
         run: node --test --test-name-pattern "dropped|reordered|fragmented|disconnect|ping/pong" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
+
+      - name: Interop schema-v0 discovery lane
+        timeout-minutes: 20
+        run: node --test --test-name-pattern "shared schema-v0 lane" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js

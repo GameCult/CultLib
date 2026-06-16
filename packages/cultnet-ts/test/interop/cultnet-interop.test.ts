@@ -66,6 +66,7 @@ const rustBinaryPath = resolve(
 const discoveryGroup = "239.77.44.11";
 const serveReadyTimeoutMs = 90_000;
 const jsonCommandTimeoutMs = 180_000;
+const processCleanupTimeoutMs = 5_000;
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
@@ -390,6 +391,7 @@ raise SystemExit("timed out waiting for TypeScript RUDP schema-v0 message")
 `;
 
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
+  logInteropPhase("schema-v0", "build peers");
   await buildInteropPeers();
   cleanInteropStores([
     "rust-peer",
@@ -410,6 +412,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   const advertiseHost = findAdvertiseHost();
 
   const servers: RunningServeProcess[] = [];
+  logInteropPhase("schema-v0", "start rust peer");
   servers.push(await spawnServeProcess("rust", {
     command: rustBinaryPath,
     args: [
@@ -429,6 +432,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   }));
   await servers[servers.length - 1].ready;
 
+  logInteropPhase("schema-v0", "start typescript peer");
   servers.push(await spawnServeProcess("ts", {
     command: process.execPath,
     args: [
@@ -449,6 +453,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   }));
   await servers[servers.length - 1].ready;
 
+  logInteropPhase("schema-v0", "start csharp peer");
   servers.push(await spawnServeProcess("csharp", {
     command: dotnetCommand,
     args: [
@@ -469,6 +474,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   }));
   await servers[servers.length - 1].ready;
 
+  logInteropPhase("schema-v0", "start python peer");
   servers.push(await spawnServeProcess("python", {
     command: pythonCommand,
     args: [
@@ -494,6 +500,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     await Promise.all(servers.map(stopProcess));
   });
 
+  logInteropPhase("schema-v0", "typescript dials rust");
   const tsDial = await runJsonCommand("ts-dial", process.execPath, [
     tsPeerScript,
     "dial",
@@ -512,6 +519,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(tsDial.mutationReceipt.accepted, true);
   assert.equal(tsDial.fireReceipt.shotsFired, 1);
 
+  logInteropPhase("schema-v0", "rust dials csharp");
   const rustDial = await runJsonCommand("rust-dial", rustBinaryPath, [
     "dial",
     "--runtime-id", "rust-client",
@@ -528,6 +536,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(rustDial.mutatedNote.tags.includes("decorated:rust-client"));
   assert.equal(rustDial.fireReceipt.ammoRemaining, 29);
 
+  logInteropPhase("schema-v0", "csharp dials typescript");
   const csharpDial = await runJsonCommand("csharp-dial", dotnetCommand, [
     csharpDllPath,
     "dial",
@@ -545,6 +554,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(csharpDial.mutatedNote.tags.includes("decorated:csharp-client"));
   assert.equal(csharpDial.fireReceipt.accepted, true);
 
+  logInteropPhase("schema-v0", "python dials rust");
   const pythonDial = await runJsonCommand("python-dial", pythonCommand, [
     "-m", "cultnet_py.interop_peer",
     "dial",
@@ -562,6 +572,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(pythonDial.mutatedNote.tags.includes("decorated:python-client"));
   assert.equal(pythonDial.fireReceipt.accepted, true);
 
+  logInteropPhase("schema-v0", "typescript dials python");
   const tsDialPython = await runJsonCommand("ts-dial-python", process.execPath, [
     tsPeerScript,
     "dial",
@@ -579,6 +590,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(tsDialPython.mutatedNote.tags.includes("decorated:ts-python-client"));
   assert.equal(tsDialPython.fireReceipt.ammoRemaining, 29);
 
+  logInteropPhase("schema-v0", "python wire catalog");
   const pythonWireCatalog = await requestCultMeshFromPython(pythonPort, {
     schemaVersion: "cultnet.schema_catalog_request.v0",
     messageId: "python-wire-catalog",
@@ -605,6 +617,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.deepEqual(pythonDeleteSchema.required, ["schemaVersion", "messageId", "schemaId", "recordKey"]);
   assert.equal(pythonDeleteSchema.properties.recordKey.type, "string");
 
+  logInteropPhase("schema-v0", "python verse catalog");
   const pythonVerseCatalog = await requestCultMeshFromPython(pythonPort, {
     schemaVersion: "cultmesh.verse_catalog_request.v0",
     messageId: "python-verses",
@@ -626,6 +639,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonPeerExchange.peers[0].peerId, "python-peer");
   assert.ok(pythonPeerExchange.peers[0].roles.includes("read-replica"));
 
+  logInteropPhase("schema-v0", "python client helpers");
   const pythonCultMeshClient = await runPythonCultMeshClient(pythonPort);
   assert.equal(pythonCultMeshClient.verses[0].verseId, "python-interop");
   assert.equal(pythonCultMeshClient.verses[0].transportVersion, "cultmesh.v0");
@@ -646,6 +660,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonCultMeshNodeEmit.note.authorRuntimeId, "python-node-emit");
   assert.equal(pythonCultMeshNodeEmit.note.title, "Python node emitted raw put");
 
+  logInteropPhase("schema-v0", "python prediction/subscription");
   const pythonPrediction = await runPythonCultMeshPredictionReconcile(pythonPort);
   assert.ok(pythonPrediction.reconciledKeys.includes("note:python-node-emit"));
   assert.equal(pythonPrediction.note.title, "Python node emitted raw put");
@@ -734,6 +749,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     && entry.put?.document?.recordKey === "note:ts-python-log"
   ));
 
+  logInteropPhase("schema-v0", "python delete/simulation/witness");
   const pythonDelete = await requestPythonDatabaseDelete(pythonPort, {
     schemaVersion: "cultnet.database_subscribe.v0",
     messageId: "python-delete-subscribe",
@@ -876,6 +892,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
+  logInteropPhase("schema-v0", "typescript discovery probe");
   await expectProbePeers("ts-probe", process.execPath, [
     tsPeerScript,
     "probe",
@@ -885,6 +902,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     "--timeout-ms", "3000",
   ], cultNetTsRoot, {}, expectedPeers);
 
+  logInteropPhase("schema-v0", "rust discovery probe");
   await expectProbePeers("rust-probe", rustBinaryPath, [
     "probe",
     "--runtime-id", "rust-prober",
@@ -893,6 +911,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     "--timeout-ms", "3000",
   ], cultnetRsRoot, {}, expectedPeers);
 
+  logInteropPhase("schema-v0", "csharp discovery probe");
   await expectProbePeers("csharp-probe", dotnetCommand, [
     csharpDllPath,
     "probe",
@@ -902,6 +921,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     "--timeout-ms", "3000",
   ], cultLibRoot, {}, expectedPeers);
 
+  logInteropPhase("schema-v0", "python discovery probe");
   await expectProbePeers("python-probe", pythonCommand, [
     "-m", "cultnet_py.interop_peer",
     "probe",
@@ -2072,6 +2092,10 @@ function cleanInteropStores(runtimeIds: readonly string[]): void {
     rmSync(join(tmpdir(), `cultnet-ts-interop-${runtimeId}.msgpack`), { force: true });
     rmSync(join(tmpdir(), `cultnet-py-interop-${runtimeId}.msgpack`), { force: true });
   }
+}
+
+function logInteropPhase(lane: string, phase: string): void {
+  console.error(`[interop:${lane}] ${new Date().toISOString()} ${phase}`);
 }
 
 function findAncestor(start: string, marker: string): string | undefined {
@@ -3551,11 +3575,13 @@ async function stopProcess(processState: RunningServeProcess): Promise<void> {
   }
 
   if (process.platform === "win32") {
-    await execFileAsync("taskkill.exe", ["/PID", String(processState.child.pid), "/T", "/F"])
+    await execFileAsync("taskkill.exe", ["/PID", String(processState.child.pid), "/T", "/F"], {
+      timeout: processCleanupTimeoutMs,
+    })
       .catch(() => undefined);
     await Promise.race([
       once(processState.child, "exit").then(() => true),
-      delay(2_000).then(() => false),
+      delay(processCleanupTimeoutMs).then(() => false),
     ]);
     return;
   }
