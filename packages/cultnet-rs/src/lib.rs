@@ -5,6 +5,7 @@ mod replication;
 mod rudp;
 mod schema_discovery;
 mod security;
+mod shard_catalog;
 mod transport;
 
 pub use contracts::*;
@@ -14,4 +15,5 @@ pub use replication::*;
 pub use rudp::*;
 pub use schema_discovery::*;
 pub use security::*;
+pub use shard_catalog::*;
 pub use transport::*;

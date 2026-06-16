@@ -31,6 +31,8 @@ use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
 use cultnet_rs::CultNetServerSecurityOptions;
+use cultnet_rs::CultNetShardCatalog;
+use cultnet_rs::CultNetShardDescriptor;
 use cultnet_rs::CultNetTransportChannel;
 use cultnet_rs::CultNetTransportDelivery;
 use cultnet_rs::CultNetTransportDescriptor;
@@ -1453,6 +1455,86 @@ fn builtin_schema_registry_advertises_canonical_ghostlight_schema_without_inline
         transport_profile.wire_contracts,
         vec![CultNetWireContract::CultNetSchemaV0]
     );
+    Ok(())
+}
+
+#[test]
+fn builtin_schema_registry_advertises_shard_catalog_wire_messages() -> Result<()> {
+    let registry = builtin_schema_registry()?;
+    let response = registry.create_catalog_response(&CultNetMessage::SchemaCatalogRequest {
+        message_id: "catalog-shards".to_string(),
+        include_schema_json: None,
+        schema_ids: None,
+        kinds: Some(vec![CultNetSchemaKind::WireMessage]),
+    })?;
+
+    let CultNetMessage::SchemaCatalogResponse { schemas, .. } = response else {
+        panic!("expected catalog response");
+    };
+
+    assert!(schemas.iter().any(|schema| {
+        schema.schema_version.as_deref() == Some("cultnet.shard_catalog_request.v0")
+    }));
+    assert!(schemas.iter().any(|schema| {
+        schema.schema_version.as_deref() == Some("cultnet.shard_catalog_response.v0")
+    }));
+    Ok(())
+}
+
+#[test]
+fn shard_catalog_filters_descriptors_and_applies_remote_responses() -> Result<()> {
+    let mut catalog = CultNetShardCatalog::new();
+    catalog.upsert(CultNetShardDescriptor {
+        shard_id: "notes-a".to_string(),
+        owner_runtime_id: "rust-primary".to_string(),
+        epoch: 3,
+        is_primary: Some(true),
+        schema_ids: vec!["note.v0".to_string()],
+        key_prefix: Some("note:".to_string()),
+        primary_endpoints: vec!["rudp://127.0.0.1:4100".to_string()],
+        replica_endpoints: vec![],
+        read_replica_endpoints: vec![],
+        region: Some("local".to_string()),
+        authority_lease_id: Some("lease:notes-a".to_string()),
+    })?;
+    catalog.upsert(CultNetShardDescriptor {
+        shard_id: "players-a".to_string(),
+        owner_runtime_id: "rust-primary".to_string(),
+        epoch: 1,
+        is_primary: Some(false),
+        schema_ids: vec!["player.v0".to_string()],
+        key_prefix: Some("player:".to_string()),
+        primary_endpoints: vec!["cultnet://127.0.0.1:3075".to_string()],
+        replica_endpoints: vec![],
+        read_replica_endpoints: vec![],
+        region: None,
+        authority_lease_id: None,
+    })?;
+
+    let response = catalog.create_catalog_response(&CultNetMessage::ShardCatalogRequest {
+        message_id: "shards".to_string(),
+        schema_ids: Some(vec!["note.v0".to_string()]),
+        record_keys: Some(vec!["note:1".to_string()]),
+    })?;
+
+    let CultNetMessage::ShardCatalogResponse { message_id, shards } = &response else {
+        panic!("expected shard catalog response");
+    };
+    assert_eq!(message_id, "shards");
+    assert_eq!(shards.len(), 1);
+    assert_eq!(shards[0].shard_id, "notes-a");
+
+    let bytes = encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0)?;
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)?;
+    assert_eq!(decoded, response);
+
+    let mut applied = CultNetShardCatalog::new();
+    let applied_shards = applied.apply_response(&decoded)?;
+    assert_eq!(applied_shards.len(), 1);
+    assert!(applied.get("notes-a").is_some_and(|shard| {
+        shard.serves(Some("note.v0"), Some("note:2"))
+            && !shard.serves(Some("note.v0"), Some("player:2"))
+    }));
     Ok(())
 }
 

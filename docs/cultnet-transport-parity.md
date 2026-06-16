@@ -346,6 +346,13 @@ Current progress:
   contact hints. The facade delegates to the existing Rust RUDP socket
   transport; discovery contact remains separate from trust, which is still
   gated by the authority lease catalog.
+- Rust now also has substrate-shaped shard catalog helpers:
+  `CultNetShardDescriptor`, `CultNetShardCatalog`, request filtering by schema
+  id and record key, response creation, response application, and built-in
+  schema registry entries for `cultnet.shard_catalog_request.v0` /
+  `cultnet.shard_catalog_response.v0`. This gives Rust the same topology
+  vocabulary without claiming stream catalog or production game-session server
+  ownership.
 - The remaining parity work is to finish production service-body adoption
   behind the shared transport ports, then wire any remaining daemon/socket
   reconnect loops through the shared controller. C# built-in LiteNetLib service

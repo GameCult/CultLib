@@ -40,6 +40,7 @@ The initial tests prove:
 - schema-versioned message round trips
 - legacy `gamecult.networking.v0` login mapping
 - schema discovery catalog responses with canonical JSON schema hashes
+- shard catalog request/response filtering and response application
 - CultCache snapshot replication through registered typed documents
 - raw snapshot replication that preserves the original payload bytes
 - document mutation contract advertisement through hello frames and registries
@@ -52,6 +53,7 @@ surface:
 - core wire messages
 - legacy `gamecult.networking.v0` auth/sample payloads
 - schema catalog request/response messages
+- shard catalog request/response messages
 - the canonical `ghostlight.agent-state` document payload schema
 
 Use `builtin_schema_registry()` when you want the standard catalog, or register
@@ -59,6 +61,41 @@ your own closed-world schema set with `CultNetSchemaRegistry`. Discovery stays
 explicit on purpose: peers advertise only the contracts they were compiled to
 understand, the same way CultCache only consumes the document types you
 registered instead of pretending polymorphism is a public park.
+
+## Shard Catalogs
+
+Rust now exposes the same shard topology vocabulary as the other runtimes
+without claiming to be the full C# service body:
+
+```rust
+use cultnet_rs::{CultNetMessage, CultNetShardCatalog, CultNetShardDescriptor};
+
+let mut catalog = CultNetShardCatalog::new();
+catalog.upsert(CultNetShardDescriptor {
+    shard_id: "notes-a".to_string(),
+    owner_runtime_id: "rust-primary".to_string(),
+    epoch: 3,
+    is_primary: Some(true),
+    schema_ids: vec!["note.v0".to_string()],
+    key_prefix: Some("note:".to_string()),
+    primary_endpoints: vec!["rudp://127.0.0.1:4100".to_string()],
+    replica_endpoints: vec![],
+    read_replica_endpoints: vec![],
+    region: None,
+    authority_lease_id: None,
+})?;
+
+let response = catalog.create_catalog_response(&CultNetMessage::ShardCatalogRequest {
+    message_id: "discover-shards".to_string(),
+    schema_ids: Some(vec!["note.v0".to_string()]),
+    record_keys: Some(vec!["note:1".to_string()]),
+})?;
+```
+
+`CultNetShardCatalog::apply_response(...)` imports remote
+`cultnet.shard_catalog_response.v0` descriptors into the local catalog. The
+catalog owns topology inspection only; shard-log serving, daemon policy, and
+game-session authority remain separate responsibilities.
 
 ## Local Fast Lane
 
