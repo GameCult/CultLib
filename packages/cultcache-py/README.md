@@ -169,6 +169,7 @@ from cultnet_py import (
     simulation_observation,
     witness_artifact_bundle,
 )
+from cultmesh_py import CultMesh
 
 payload = hello(runtime_id="python-runtime").to_bytes()
 message = parse_message(decode_frame(encode_frame(payload)))
@@ -186,6 +187,15 @@ shard_log = client.fetch_shard_log_response(shard_id="interop", shard_epoch=1, a
 # log_changes = apply_shard_log_response(cache, [note_doc], shard_log)
 with client.subscribe_database(subscription_id="ui", schema_ids=["cultnet.interop-note"]) as live:
     initial_snapshot = live.read_next_snapshot_response()
+
+# The same raw-client request surface can ride RUDP when the peer advertises a
+# rudp:// endpoint and shares the connection id for that lane.
+rudp_client = CultMesh.create_client(
+    endpoint="rudp://127.0.0.1:3076",
+    connection_id=0x43554C54,
+)
+rudp_catalog = rudp_client.fetch_schema_catalog(kinds=["wire_message"])
+
 claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
 observation = simulation_observation(
     message_id="obs-1",

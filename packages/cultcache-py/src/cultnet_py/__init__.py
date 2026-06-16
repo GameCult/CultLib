@@ -4,6 +4,7 @@ from .client import (
     CultNetRawClient,
     CultNetSchemaTransport,
     CultNetSchemaTransportFactory,
+    create_rudp_schema_transport,
     create_tcp_framed_schema_transport,
 )
 from .framing import decode_frame, encode_frame, read_frame, write_frame
@@ -170,6 +171,7 @@ __all__ = [
     "compute_simulation_claim_hash",
     "compute_reconnect_delay_ms",
     "create_reconnect_policy",
+    "create_rudp_schema_transport",
     "create_tcp_framed_schema_transport",
     "create_rudp_transport_profile",
     "create_tcp_framed_transport_profile",

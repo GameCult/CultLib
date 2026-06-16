@@ -22,6 +22,10 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   subscriptions now consume a caller-provided `CultNetSchemaTransport` factory,
   with `create_tcp_framed_schema_transport(...)` as the default, so request and
   subscription semantics are no longer owned by inline TCP socket setup.
+  `create_rudp_schema_transport(...)` opens the same raw-client request path
+  over a socket-backed RUDP reliable ordered `schema` channel, and the branded
+  `CultMesh.create_client(endpoint="rudp://...")` helper selects that transport
+  from a RUDP endpoint without making callers assemble a factory closure.
 - Python CultNet raw snapshot:
   Provides typed `CultNetRawSnapshotResponse` and `CultNetRawDocumentRecord`
   helpers plus `CultNetRawClient.fetch_snapshot_response(...)` for inspecting
@@ -303,10 +307,12 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   port instead of cloning LiteNetLib. The raw client request/subscription layer
   now routes through a schema-transport factory, so the caller-facing semantics
   are transport-port-shaped even when the default factory opens TCP-framed
-  connections. The reconnect policy/controller primitive is portable and
-  advertised by RUDP profiles, and `CultNetRudpReconnectLoop` gives Python
-  callers the same RUDP retry-scheduling helper as TypeScript/Kotlin.
-  Automatic reconnect use by Python service bodies is not yet claimed.
+  connections. Python raw clients can now use a RUDP schema transport directly
+  through `create_rudp_schema_transport(...)` or the `CultMesh.create_client`
+  RUDP endpoint helper. The reconnect policy/controller primitive is portable
+  and advertised by RUDP profiles, and `CultNetRudpReconnectLoop` gives Python
+  callers the same RUDP retry-scheduling helper as TypeScript/Kotlin. Automatic
+  reconnect use by Python service bodies is not yet claimed.
 - Python does not implement the full C# daemon/server stack. Its current role is
   package runtime, raw interop peer, launchable local CultMesh endpoint, local
   CultMesh session facade, and typed state participant.

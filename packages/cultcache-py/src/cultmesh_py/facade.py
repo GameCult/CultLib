@@ -16,6 +16,7 @@ from cultnet_py import (
     CultNetSchemaCatalog,
     CultNetShardCatalog,
     CultNetSimulationObservationHub,
+    create_rudp_schema_transport,
     wire_message_schema_catalog,
 )
 
@@ -310,8 +311,35 @@ class CultMesh:
         port: int = 3075,
         *,
         timeout_seconds: float = 4.0,
+        endpoint: str | CultMeshRudpEndpoint | None = None,
+        connection_id: int = 0x43554C54,
+        runtime_id: str = "cultmesh-python-rudp-client",
+        bind_host: str = "127.0.0.1",
+        bind_port: int = 0,
     ) -> CultNetRawClient:
-        return CultNetRawClient(host, port, timeout_seconds)
+        if endpoint is None and host.lower().startswith("rudp://"):
+            endpoint = host
+        if endpoint is None:
+            return CultNetRawClient(host, port, timeout_seconds)
+        parsed_endpoint = (
+            CultMesh.parse_rudp_endpoint(endpoint)
+            if isinstance(endpoint, str)
+            else endpoint
+        )
+        return CultNetRawClient(
+            parsed_endpoint.host,
+            parsed_endpoint.port,
+            timeout_seconds,
+            create_transport=lambda: create_rudp_schema_transport(
+                host=parsed_endpoint.host,
+                port=parsed_endpoint.port,
+                connection_id=connection_id,
+                timeout_seconds=timeout_seconds,
+                runtime_id=runtime_id,
+                bind_host=bind_host,
+                bind_port=bind_port,
+            ),
+        )
 
     @staticmethod
     def connect_client(
@@ -319,8 +347,22 @@ class CultMesh:
         port: int = 3075,
         *,
         timeout_seconds: float = 4.0,
+        endpoint: str | CultMeshRudpEndpoint | None = None,
+        connection_id: int = 0x43554C54,
+        runtime_id: str = "cultmesh-python-rudp-client",
+        bind_host: str = "127.0.0.1",
+        bind_port: int = 0,
     ) -> CultNetRawClient:
-        return CultNetRawClient(host, port, timeout_seconds)
+        return CultMesh.create_client(
+            host,
+            port,
+            timeout_seconds=timeout_seconds,
+            endpoint=endpoint,
+            connection_id=connection_id,
+            runtime_id=runtime_id,
+            bind_host=bind_host,
+            bind_port=bind_port,
+        )
 
 
 def _bind_rudp_socket(bind_host: str, bind_port: int) -> socket_module.socket:

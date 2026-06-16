@@ -819,6 +819,12 @@ class CultNetRudpSocketTransportConnection:
         self.disconnect_reason: bytes | None = None
         self.pong_payloads: deque[bytes] = deque()
 
+    def __enter__(self) -> "CultNetRudpSocketTransportConnection":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
     @property
     def connected(self) -> bool:
         return self.session.connected
@@ -889,6 +895,16 @@ class CultNetRudpSocketTransportConnection:
         if packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
             self._send_packet(self.session.create_ack())
         return frame
+
+    def receive(self, timeout_seconds: float | None = None) -> CultNetTransportFrame:
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        while True:
+            frame = self.receive_once()
+            if frame is not None:
+                return frame
+            self.poll_resends()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for RUDP schema frame")
 
     def disconnect(self, reason: bytes = b"") -> None:
         self._send_packet(self.session.create_disconnect(reason))

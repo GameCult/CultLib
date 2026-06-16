@@ -301,7 +301,11 @@ Current progress:
   `CultNetSchemaTransport` factory for request/response and database
   subscription flows. The default factory opens the existing TCP-framed schema
   transport, but the raw client no longer owns inline socket setup as its
-  request truth.
+  request truth. Python now also exposes `create_rudp_schema_transport(...)`,
+  which handshakes a socket-backed RUDP client and gives `CultNetRawClient` the
+  same reliable ordered `schema` request path over `cultnet.transport.rudp.v0`;
+  `CultMesh.create_client(endpoint="rudp://...")` is the branded ergonomic
+  helper for that path.
 - Python's branded `CultMesh` facade now creates schema catalogs, built-in
   schema catalogs, and shard catalogs by delegating to the existing
   `cultnet_py` owners, matching the TypeScript/Kotlin/Rust entrypoint pattern

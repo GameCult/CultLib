@@ -668,6 +668,64 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(sent_messages[0]["schemaVersion"], "cultnet.schema_catalog_request.v0")
         self.assertEqual(sent_messages[0]["messageId"], "transport-factory")
 
+    def test_cultmesh_client_uses_rudp_schema_transport_endpoint(self) -> None:
+        import msgpack  # type: ignore
+
+        server_socket = bind_udp_socket()
+        server_host, server_port = server_socket.getsockname()[:2]
+        connection_id = 0x43554C54
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-schema-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+                initial_sequence=100,
+                resend_delay_ms=25,
+            )
+        )
+        received_messages: list[dict[str, object]] = []
+
+        def serve_once() -> None:
+            deadline = time.monotonic() + 2.0
+            try:
+                while time.monotonic() < deadline:
+                    frame = server.receive_once()
+                    server.poll_resends()
+                    if frame is None:
+                        time.sleep(0.005)
+                        continue
+                    received = msgpack.unpackb(frame.payload, raw=False)
+                    received_messages.append(received)
+                    response = {
+                        "schemaVersion": "cultnet.schema_catalog_response.v0",
+                        "messageId": received["messageId"],
+                        "schemas": [],
+                    }
+                    server.send("schema", msgpack.packb(response, use_bin_type=True))
+                    return
+                raise AssertionError("RUDP schema server did not receive a request")
+            finally:
+                server.close()
+
+        server_thread = threading.Thread(target=serve_once, daemon=True)
+        server_thread.start()
+        client = CultMesh.create_client(
+            endpoint=f"rudp://{server_host}:{server_port}",
+            timeout_seconds=2.0,
+            connection_id=connection_id,
+            runtime_id="python-rudp-schema-client",
+        )
+
+        response = client.fetch_schema_catalog(message_id="rudp-transport-factory")
+        server_thread.join(timeout=2.0)
+
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(response["schemaVersion"], "cultnet.schema_catalog_response.v0")
+        self.assertEqual(response["messageId"], "rudp-transport-factory")
+        self.assertEqual(received_messages[0]["schemaVersion"], "cultnet.schema_catalog_request.v0")
+        self.assertEqual(received_messages[0]["messageId"], "rudp-transport-factory")
+
     def test_cultnet_rudp_packet_codec_uses_deterministic_reliable_ordered_fixture(self) -> None:
         encoded = encode_rudp_packet(
             CultNetRudpPacket(

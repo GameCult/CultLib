@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -21,7 +22,13 @@ from .shard_catalog import CultNetShardCatalog, CultNetShardDescriptor
 from .shard_log import CultNetShardLogResponse
 from .snapshot import CultNetRawSnapshotResponse
 from .subscription import CultNetDatabaseChange
-from .transport import TcpFramedTransportConnection, create_tcp_framed_transport_profile
+from .transport import (
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+    TcpFramedTransportConnection,
+    create_tcp_framed_transport_profile,
+)
 
 
 class CultNetSchemaTransport(Protocol):
@@ -375,6 +382,55 @@ def create_tcp_framed_schema_transport(
         connection,
         profile=create_tcp_framed_transport_profile(runtime_id, host=host, port=port),
     )
+
+
+def create_rudp_schema_transport(
+    *,
+    host: str,
+    port: int,
+    connection_id: int,
+    timeout_seconds: float = 4.0,
+    runtime_id: str = "cultnet-python-rudp-client",
+    bind_host: str = "127.0.0.1",
+    bind_port: int = 0,
+    initial_sequence: int = 1,
+    resend_delay_ms: int = 25,
+    transport_id: str = "rudp",
+    max_payload_bytes: int | None = None,
+    max_fragment_bytes: int | None = None,
+    max_pending_reliable_packets: int | None = None,
+) -> CultNetRudpSocketTransportConnection:
+    transport_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    transport_socket.bind((bind_host, bind_port))
+    transport_socket.settimeout(min(timeout_seconds, 0.02))
+    transport = CultNetRudpSocketTransportConnection(
+        CultNetRudpSocketTransportOptions(
+            runtime_id=runtime_id,
+            socket=transport_socket,
+            mode=CultNetRudpSocketMode.CLIENT,
+            remote_addr=(host, port),
+            connection_id=connection_id,
+            initial_sequence=initial_sequence,
+            resend_delay_ms=resend_delay_ms,
+            transport_id=transport_id,
+            max_payload_bytes=max_payload_bytes,
+            max_fragment_bytes=max_fragment_bytes,
+            max_pending_reliable_packets=max_pending_reliable_packets,
+        )
+    )
+
+    try:
+        transport.connect(b"cultnet-schema")
+        deadline = time.monotonic() + timeout_seconds
+        while not transport.connected:
+            transport.receive_once()
+            transport.poll_resends()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for RUDP schema transport handshake")
+        return transport
+    except Exception:
+        transport.close()
+        raise
 
 
 class _OwnedTcpFramedTransportConnection(TcpFramedTransportConnection):
