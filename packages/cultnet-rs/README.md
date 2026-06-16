@@ -77,3 +77,42 @@ and the receiving cache still decodes once to keep typed reads and validation
 honest. The win is narrower and realer: identical payload bytes stop getting
 decoded into generic sludge and then encoded right back into the same bytes for
 no reason.
+
+## CultMesh Rust Facade
+
+Rust is still the low-level substrate runtime, not a clone of the C# game
+server. It does now expose the small CultMesh entrypoint needed for practical
+contact and authority ergonomics:
+
+```rust
+use cultnet_rs::{
+    CultMesh, CultMeshPeerCard, CultMeshRudpSocketOptions,
+};
+
+let mut server = CultMesh::create_rudp_server(
+    "rust-server",
+    0x1020_3040,
+    CultMeshRudpSocketOptions::default(),
+)?;
+let port = server.profile.transports[0].port.unwrap();
+
+let peer = CultMeshPeerCard::new(
+    "rust-server",
+    "local",
+    [format!("rudp://127.0.0.1:{port}")],
+)
+.with_roles(["schema"]);
+
+let mut client = CultMesh::create_rudp_client_for_peer(
+    "rust-client",
+    0x1020_3040,
+    &peer,
+    CultMeshRudpSocketOptions::default(),
+)?;
+client.connect(b"join".to_vec())?;
+```
+
+`CultMesh::parse_rudp_endpoint(...)` handles advertised `rudp://host:port`
+contact hints, and `CultMeshAuthorityLeaseCatalog` keeps trust separate from
+discovery. A peer card can say where to dial; a lease decides whether that peer
+is allowed to own a role or shard.

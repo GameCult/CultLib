@@ -247,6 +247,12 @@ Current progress:
   client directly from a peer card contact hint. The facade delegates to the
   same owners as the top-level helpers instead of creating a second authority
   path.
+- Rust now has a small `CultMesh` facade for its substrate role: peer cards,
+  sorted peer catalogs, authority lease catalogs, `rudp://host:port` endpoint
+  parsing, and RUDP client/server construction from endpoint or peer-card
+  contact hints. The facade delegates to the existing Rust RUDP socket
+  transport; discovery contact remains separate from trust, which is still
+  gated by the authority lease catalog.
 - The remaining parity work is to move the remaining TCP/LiteNetLib/WebSocket
   service bodies behind their shared transport ports, then broaden RUDP interop
   into automatic reconnect orchestration and the wider schema-message matrix.

@@ -1,8 +1,13 @@
 use anyhow::Result;
 use chrono::Duration;
+use chrono::Utc;
 use cultcache_rs::CultCache;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
+use cultnet_rs::CultMesh;
+use cultnet_rs::CultMeshAuthorityLease;
+use cultnet_rs::CultMeshPeerCard;
+use cultnet_rs::CultMeshRudpSocketOptions;
 use cultnet_rs::CultNetClientSecurityOptions;
 use cultnet_rs::CultNetDocumentBinding;
 use cultnet_rs::CultNetDocumentMutationContract;
@@ -947,6 +952,86 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
     assert_eq!(server_frame.payload, payload);
     assert_eq!(client.stats().frames_sent, 1);
     assert_eq!(server.stats().frames_received, 1);
+    Ok(())
+}
+
+#[test]
+fn cultmesh_facade_creates_rudp_client_from_peer_endpoint() -> Result<()> {
+    let connection_id = 0x2030_4050;
+    let options = CultMeshRudpSocketOptions {
+        resend_delay_ms: 25,
+        max_fragment_bytes: Some(8),
+        max_pending_reliable_packets: Some(16),
+        ..CultMeshRudpSocketOptions::default()
+    };
+    let mut server =
+        CultMesh::create_rudp_server("rust-cultmesh-server", connection_id, options.clone())?;
+    let server_port = server.profile.transports[0]
+        .port
+        .expect("RUDP server profile advertises its local port");
+    let endpoint = CultMesh::parse_rudp_endpoint(&format!("rudp://127.0.0.1:{server_port}"))?;
+    assert_eq!(endpoint.host, "127.0.0.1");
+    assert_eq!(endpoint.port, server_port);
+    assert_eq!(
+        CultMesh::parse_rudp_endpoint("RuDp://localhost:4100")?.host,
+        "localhost"
+    );
+    assert_eq!(
+        CultMesh::parse_rudp_endpoint("rudp://[::1]:4100")?.uri(),
+        "rudp://[::1]:4100"
+    );
+
+    let peer = CultMeshPeerCard::new("rust-cultmesh-server", "local", [endpoint.uri()])
+        .with_roles(["schema"]);
+    let mut peers = CultMesh::create_peer_catalog();
+    peers.upsert(peer.clone())?;
+    assert_eq!(peers.find("local", Some("schema")), vec![peer.clone()]);
+
+    let mut client = CultMesh::create_rudp_client_for_peer(
+        "rust-cultmesh-client",
+        connection_id,
+        &peer,
+        options,
+    )?;
+    client.connect(b"join".to_vec())?;
+    pump_rudp_handshake(&mut client, &mut server)?;
+
+    client.send("schema", b"client-state".to_vec())?;
+    let server_frame = receive_rudp_frame(&mut server)?;
+    assert_eq!(server_frame.channel_id, "schema");
+    assert_eq!(server_frame.payload, b"client-state");
+    Ok(())
+}
+
+#[test]
+fn cultmesh_authority_leases_gate_peer_contact_hints() -> Result<()> {
+    let now = Utc::now();
+    let peer = CultMeshPeerCard::new("rust-peer", "public", ["rudp://127.0.0.1:4100"])
+        .with_roles(["shard-primary"])
+        .with_authority_lease_id("lease:rust-peer");
+    let mut leases = CultMesh::create_authority_lease_catalog();
+
+    assert!(!leases.is_authorized(&peer, "shard-primary", Some("players"), now));
+    leases.upsert(CultMeshAuthorityLease {
+        lease_id: "lease:rust-peer".to_string(),
+        verse_id: "public".to_string(),
+        peer_id: "rust-peer".to_string(),
+        roles: vec!["shard-primary".to_string()],
+        shard_ids: vec!["players".to_string()],
+        issuer_runtime_id: Some("odin".to_string()),
+        valid_from: now - Duration::minutes(1),
+        expires_at: now + Duration::minutes(1),
+    })?;
+
+    assert!(leases.is_authorized(&peer, "shard-primary", Some("players"), now));
+    assert!(!leases.is_authorized(&peer, "schema", Some("players"), now));
+    assert!(!leases.is_authorized(&peer, "shard-primary", Some("inventory"), now));
+    assert!(!leases.is_authorized(
+        &peer,
+        "shard-primary",
+        Some("players"),
+        now + Duration::minutes(1)
+    ));
     Ok(())
 }
 
