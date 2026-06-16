@@ -449,6 +449,60 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpReconnectLoop_ConsumesSharedController()
+        {
+            using var serverSocket = BindUdpSocket();
+            var remoteEndPoint = serverSocket.LocalEndPoint!;
+            var openedLocalPorts = new List<int>();
+            const uint connectionId = 0x22334455;
+
+            using var loop = new CultNetRudpReconnectLoop(
+                () =>
+                {
+                    var socket = BindUdpSocket();
+                    openedLocalPorts.Add(((IPEndPoint)socket.LocalEndPoint!).Port);
+                    return new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+                    {
+                        RuntimeId = "csharp-rudp-reconnect",
+                        Socket = socket,
+                        Mode = CultNetRudpSocketMode.Client,
+                        RemoteEndPoint = remoteEndPoint,
+                        ConnectionId = connectionId
+                    });
+                },
+                CultNetReconnectPolicies.CreateDefault(maxAttempts: 2),
+                Encoding.UTF8.GetBytes("join"));
+
+            var first = loop.Start();
+            Assert.That(first.Stats.BytesSent, Is.GreaterThan(0));
+            Assert.That(loop.Transport, Is.SameAs(first));
+            Assert.That(openedLocalPorts, Has.Count.EqualTo(1));
+
+            var decision = loop.HandleClosed(10_000, 17);
+            Assert.That(decision, Is.Not.Null);
+            Assert.That(decision!.Attempt, Is.EqualTo(1));
+            Assert.That(decision.ShouldRetry, Is.True);
+            Assert.That(decision.DelayMs, Is.EqualTo(1_017));
+            Assert.That(decision.NextAttemptAtMs, Is.EqualTo(11_017));
+            Assert.That(loop.ReconnectController.Attempt, Is.EqualTo(1));
+            Assert.That(loop.ReconnectController.NextAttemptAtMs, Is.EqualTo(11_017));
+            Assert.That(loop.Transport, Is.Null);
+
+            Assert.That(loop.ReconnectIfDue(11_016), Is.False);
+            Assert.That(openedLocalPorts, Has.Count.EqualTo(1));
+            Assert.That(loop.ReconnectIfDue(11_017), Is.True);
+            Assert.That(openedLocalPorts, Has.Count.EqualTo(2));
+            Assert.That(loop.Transport, Is.Not.Null);
+
+            loop.MarkConnected();
+            Assert.That(loop.ReconnectController.Attempt, Is.EqualTo(0));
+
+            loop.Stop();
+            Assert.That(loop.Transport, Is.Null);
+            Assert.That(loop.ReconnectController.Attempt, Is.EqualTo(0));
+        }
+
+        [Test]
         public void RudpSession_HandshakeAcksReliableConnectAndAcceptPackets()
         {
             var client = new CultNetRudpSession(new CultNetRudpSessionOptions

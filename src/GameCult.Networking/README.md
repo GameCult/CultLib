@@ -366,6 +366,11 @@ The client:
 - automatically re-verifies using the stored signed session token
 - exposes reconnect state for UI/operator surfaces
 
+The native RUDP socket path also exposes `CultNetRudpReconnectLoop` for
+caller-owned game or service loops. The caller reports closure, calls
+`ReconnectIfDue(nowMs)` from its own scheduler, and the shared
+`CultNetReconnectController` owns retry attempts, delay, and exhaustion state.
+
 ## Important Constraints
 
 - `Server` currently centers on `PlayerData` as the built-in account model.

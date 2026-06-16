@@ -1835,6 +1835,139 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Caller-owned reconnect loop for the socket-backed CultNet RUDP transport.
+    /// </summary>
+    public sealed class CultNetRudpReconnectLoop : IDisposable
+    {
+        private readonly Func<CultNetRudpSocketTransportConnection> _createTransport;
+        private readonly byte[] _connectPayload;
+        private CultNetRudpSocketTransportConnection? _transport;
+        private bool _stopped = true;
+        private bool _disposed;
+
+        /// <summary>
+        /// Initializes a new reconnect loop around caller-owned RUDP transport construction.
+        /// </summary>
+        public CultNetRudpReconnectLoop(
+            Func<CultNetRudpSocketTransportConnection> createTransport,
+            CultNetReconnectPolicy? reconnectPolicy = null,
+            byte[]? connectPayload = null)
+        {
+            _createTransport = createTransport ?? throw new ArgumentNullException(nameof(createTransport));
+            _connectPayload = connectPayload?.ToArray() ?? Array.Empty<byte>();
+            ReconnectController = new CultNetReconnectController(reconnectPolicy);
+        }
+
+        /// <summary>
+        /// Gets the shared reconnect controller that owns attempt, delay, and exhaustion state.
+        /// </summary>
+        public CultNetReconnectController ReconnectController { get; }
+
+        /// <summary>
+        /// Gets the current transport, if the loop has one open.
+        /// </summary>
+        public CultNetRudpSocketTransportConnection? Transport => _transport;
+
+        /// <summary>
+        /// Opens the first transport and sends its connect packet.
+        /// </summary>
+        public CultNetRudpSocketTransportConnection Start()
+        {
+            ThrowIfDisposed();
+            _stopped = false;
+            ReconnectController.Reset();
+            return OpenTransport();
+        }
+
+        /// <summary>
+        /// Stops reconnecting, disposes the current transport, and clears retry state.
+        /// </summary>
+        public void Stop()
+        {
+            _stopped = true;
+            DisposeTransport();
+            ReconnectController.Reset();
+        }
+
+        /// <summary>
+        /// Clears retry state after the caller observes an established connection.
+        /// </summary>
+        public void MarkConnected()
+        {
+            ReconnectController.Reset();
+        }
+
+        /// <summary>
+        /// Reports that the current transport closed and records the next retry decision.
+        /// </summary>
+        public CultNetReconnectDecision? HandleClosed(long nowMs, int jitterMs = 0)
+        {
+            ThrowIfDisposed();
+            DisposeTransport();
+            return _stopped ? null : ReconnectController.RecordFailure(nowMs, jitterMs);
+        }
+
+        /// <summary>
+        /// Opens a new transport when the shared controller says the next attempt is due.
+        /// </summary>
+        public bool ReconnectIfDue(long nowMs)
+        {
+            ThrowIfDisposed();
+            if (_stopped || !ReconnectController.CanAttempt(nowMs))
+            {
+                return false;
+            }
+
+            OpenTransport();
+            return true;
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            Stop();
+        }
+
+        private CultNetRudpSocketTransportConnection OpenTransport()
+        {
+            var next = _createTransport();
+            try
+            {
+                next.Connect(_connectPayload);
+            }
+            catch
+            {
+                next.Dispose();
+                throw;
+            }
+
+            DisposeTransport();
+            _transport = next;
+            return next;
+        }
+
+        private void DisposeTransport()
+        {
+            _transport?.Dispose();
+            _transport = null;
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(CultNetRudpReconnectLoop));
+            }
+        }
+    }
+
+    /// <summary>
     /// Transport connection for the current TCP length-prefixed CultNet schema lane.
     /// </summary>
     public sealed class TcpFramedTransportConnection

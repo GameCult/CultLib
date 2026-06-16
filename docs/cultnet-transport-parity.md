@@ -238,6 +238,11 @@ Current progress:
   counter and duplicate backoff constants. It still owns LiteNetLib socket
   mechanics and UI-facing reconnect state; the controller owns retry attempt
   scheduling.
+- C# now also has a poll-driven `CultNetRudpReconnectLoop` for the native RUDP
+  socket transport. Caller-owned game/service loops report closure, ask
+  `ReconnectIfDue(nowMs)` inside their own scheduler, and the shared controller
+  owns retry delay/exhaustion state while the caller-owned factory opens the
+  next `CultNetRudpSocketTransportConnection`.
 - TypeScript now has a `CultNetRudpReconnectLoop` that consumes the shared
   controller while keeping socket construction caller-owned. A closed RUDP
   transport schedules the next attempt with the portable policy, opens a fresh
