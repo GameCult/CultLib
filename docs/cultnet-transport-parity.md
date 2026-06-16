@@ -362,11 +362,12 @@ Current progress:
   Android clients can react to lease changes without treating peer-card contact
   hints as trust.
 - Rust now has a small `CultMesh` facade for its substrate role: peer cards,
-  sorted peer catalogs, authority lease catalogs, `rudp://host:port` endpoint
-  parsing, and RUDP client/server construction from endpoint or peer-card
-  contact hints. The facade delegates to the existing Rust RUDP socket
-  transport; discovery contact remains separate from trust, which is still
-  gated by the authority lease catalog.
+  sorted peer catalogs, authority lease catalogs, schema registry factories,
+  shard catalog factories, `rudp://host:port` endpoint parsing, and RUDP
+  client/server construction from endpoint or peer-card contact hints. The
+  facade delegates to the existing Rust schema registry, shard catalog, and RUDP
+  socket transport owners; discovery contact remains separate from trust, which
+  is still gated by the authority lease catalog.
 - Rust now also has substrate-shaped shard catalog helpers:
   `CultNetShardDescriptor`, `CultNetShardCatalog`, request filtering by schema
   id and record key, response creation, response application, and built-in

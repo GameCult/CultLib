@@ -11,6 +11,9 @@ use std::time::Duration;
 use crate::CultNetRudpSocketMode;
 use crate::CultNetRudpSocketTransportConnection;
 use crate::CultNetRudpSocketTransportOptions;
+use crate::CultNetSchemaRegistry;
+use crate::CultNetShardCatalog;
+use crate::builtin_schema_registry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultMeshPeerCard {
@@ -236,6 +239,18 @@ impl Default for CultMeshRudpSocketOptions {
 pub struct CultMesh;
 
 impl CultMesh {
+    pub fn create_schema_registry() -> CultNetSchemaRegistry {
+        CultNetSchemaRegistry::new()
+    }
+
+    pub fn create_builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
+        builtin_schema_registry()
+    }
+
+    pub fn create_shard_catalog() -> CultNetShardCatalog {
+        CultNetShardCatalog::new()
+    }
+
     pub fn create_peer_catalog() -> CultMeshPeerCatalog {
         CultMeshPeerCatalog::new()
     }

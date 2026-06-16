@@ -28,6 +28,7 @@ use cultnet_rs::CultNetRudpSocketMode;
 use cultnet_rs::CultNetRudpSocketTransportConnection;
 use cultnet_rs::CultNetRudpSocketTransportOptions;
 use cultnet_rs::CultNetSchemaKind;
+use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
 use cultnet_rs::CultNetServerSecurityOptions;
@@ -1181,6 +1182,66 @@ fn cultmesh_facade_creates_rudp_client_from_peer_endpoint() -> Result<()> {
     let server_frame = receive_rudp_frame(&mut server)?;
     assert_eq!(server_frame.channel_id, "schema");
     assert_eq!(server_frame.payload, b"client-state");
+    Ok(())
+}
+
+#[test]
+fn cultmesh_facade_exposes_schema_registry_and_shard_catalog_owners() -> Result<()> {
+    let mut schemas = CultMesh::create_schema_registry();
+    schemas.register(CultNetSchemaRegistration {
+        schema_id: "rust.cultmesh.note.v1".to_string(),
+        kind: CultNetSchemaKind::DocumentPayload,
+        wire_contracts: vec![CultNetWireContract::CultNetSchemaV0],
+        schema_version: Some("rust.cultmesh.note.v1".to_string()),
+        document_type: Some("rust.cultmesh.note".to_string()),
+        title: Some("Rust CultMesh Note".to_string()),
+        schema_json: Some(
+            r#"{"$id":"rust.cultmesh.note.v1","type":"object","properties":{"body":{"type":"string"}}}"#
+                .to_string(),
+        ),
+    })?;
+    assert_eq!(
+        schemas
+            .get("rust.cultmesh.note.v1", false)
+            .expect("registered schema is discoverable")
+            .document_type
+            .as_deref(),
+        Some("rust.cultmesh.note")
+    );
+
+    let builtins = CultMesh::create_builtin_schema_registry()?;
+    let shared_contracts = builtins.list(&cultnet_rs::CultNetSchemaCatalogOptions {
+        include_schema_json: false,
+        schema_ids: None,
+        kinds: Some(vec![CultNetSchemaKind::SharedContract]),
+    });
+    assert!(shared_contracts.iter().any(|schema| {
+        schema.schema_id
+            == "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json"
+            && schema.schema_version.as_deref() == Some("cultnet.transport_profile.v0")
+    }));
+
+    let mut shards = CultMesh::create_shard_catalog();
+    shards.upsert(CultNetShardDescriptor {
+        shard_id: "rust-notes-a".to_string(),
+        owner_runtime_id: "rust-cultmesh".to_string(),
+        epoch: 7,
+        is_primary: Some(true),
+        schema_ids: vec!["rust.cultmesh.note.v1".to_string()],
+        key_prefix: Some("note:".to_string()),
+        primary_endpoints: vec!["rudp://127.0.0.1:4100".to_string()],
+        replica_endpoints: Vec::new(),
+        read_replica_endpoints: Vec::new(),
+        region: None,
+        authority_lease_id: Some("lease:rust-notes-a".to_string()),
+    })?;
+    let matching = shards.list(&cultnet_rs::CultNetShardCatalogOptions {
+        schema_ids: Some(vec!["rust.cultmesh.note.v1".to_string()]),
+        record_keys: Some(vec!["note:1".to_string()]),
+    });
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].shard_id, "rust-notes-a");
+    assert!(shards.get("rust-notes-a").is_some());
     Ok(())
 }
 

@@ -56,10 +56,11 @@ surface:
 - shard catalog request/response messages
 - the canonical `ghostlight.agent-state` document payload schema
 
-Use `builtin_schema_registry()` when you want the standard catalog, or register
-your own closed-world schema set with `CultNetSchemaRegistry`. Discovery stays
-explicit on purpose: peers advertise only the contracts they were compiled to
-understand, the same way CultCache only consumes the document types you
+Use `builtin_schema_registry()` or `CultMesh::create_builtin_schema_registry()`
+when you want the standard catalog, or register your own closed-world schema set
+with `CultNetSchemaRegistry` / `CultMesh::create_schema_registry()`. Discovery
+stays explicit on purpose: peers advertise only the contracts they were compiled
+to understand, the same way CultCache only consumes the document types you
 registered instead of pretending polymorphism is a public park.
 
 ## Shard Catalogs
@@ -68,9 +69,9 @@ Rust now exposes the same shard topology vocabulary as the other runtimes
 without claiming to be the full C# service body:
 
 ```rust
-use cultnet_rs::{CultNetMessage, CultNetShardCatalog, CultNetShardDescriptor};
+use cultnet_rs::{CultMesh, CultNetMessage, CultNetShardDescriptor};
 
-let mut catalog = CultNetShardCatalog::new();
+let mut catalog = CultMesh::create_shard_catalog();
 catalog.upsert(CultNetShardDescriptor {
     shard_id: "notes-a".to_string(),
     owner_runtime_id: "rust-primary".to_string(),
@@ -123,8 +124,15 @@ contact and authority ergonomics:
 
 ```rust
 use cultnet_rs::{
-    CultMesh, CultMeshPeerCard, CultMeshRudpSocketOptions,
+    CultMesh, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetSchemaKind,
 };
+
+let schemas = CultMesh::create_builtin_schema_registry()?;
+let shared_contracts = schemas.list(&cultnet_rs::CultNetSchemaCatalogOptions {
+    include_schema_json: false,
+    schema_ids: None,
+    kinds: Some(vec![CultNetSchemaKind::SharedContract]),
+});
 
 let mut server = CultMesh::create_rudp_server(
     "rust-server",
