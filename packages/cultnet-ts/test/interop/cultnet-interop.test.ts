@@ -64,6 +64,8 @@ const rustBinaryPath = resolve(
 );
 
 const discoveryGroup = "239.77.44.11";
+const serveReadyTimeoutMs = 90_000;
+const jsonCommandTimeoutMs = 180_000;
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
@@ -2113,8 +2115,8 @@ async function spawnServeProcess(name: string, command: ServeCommand): Promise<R
 
   const ready = new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`${name} serve process did not become ready within 30000ms.\n${stderr.join("")}`));
-    }, 30_000);
+      reject(new Error(`${name} serve process did not become ready within ${serveReadyTimeoutMs}ms.\n${stderr.join("")}`));
+    }, serveReadyTimeoutMs);
 
     const resolveReady = (value: unknown) => {
       clearTimeout(timeout);
@@ -2178,7 +2180,7 @@ async function runJsonCommand(
   const { stdout, stderr } = await execFileAsync(command, args, {
     cwd,
     env: { ...process.env, ...env },
-    timeout: 90_000,
+    timeout: jsonCommandTimeoutMs,
   });
   const trimmed = stdout.trim();
   if (!trimmed) {
@@ -3545,6 +3547,16 @@ async function putAndSnapshotPythonWitnessBundle(port: number, put: Record<strin
 
 async function stopProcess(processState: RunningServeProcess): Promise<void> {
   if (processState.child.exitCode !== null) {
+    return;
+  }
+
+  if (process.platform === "win32") {
+    await execFileAsync("taskkill.exe", ["/PID", String(processState.child.pid), "/T", "/F"])
+      .catch(() => undefined);
+    await Promise.race([
+      once(processState.child, "exit").then(() => true),
+      delay(2_000).then(() => false),
+    ]);
     return;
   }
 
