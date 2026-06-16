@@ -399,15 +399,15 @@ Current progress:
   `cultnet.shard_catalog_response.v0`. This gives Rust the same topology
   vocabulary without claiming stream catalog or production game-session server
   ownership.
-- The remaining parity work is to finish production service-body adoption
-  behind the shared transport ports, then wire any remaining daemon/socket
-  reconnect loops through the shared controller. C# built-in LiteNetLib service
-  wrappers now register transport-aware `CultNetServerPeer` listeners instead
-  of requiring each bridge to bounce through `NetPeer`, TypeScript exposes a
-  transport-first TCP peer helper, C# schema-v0 service clients consume
-  `ICultNetSchemaClient`, and the core schema-message RUDP matrix is live in
-  the TypeScript interop gate; broader service adoption remains the unclaimed
-  layer.
+- The remaining adoption work beyond the current role-scoped parity claim is
+  to finish production service-body migration behind the shared transport
+  ports, then wire any remaining daemon/socket reconnect loops through the
+  shared controller. C# built-in LiteNetLib service wrappers now register
+  transport-aware `CultNetServerPeer` listeners instead of requiring each bridge
+  to bounce through `NetPeer`, TypeScript exposes a transport-first TCP peer
+  helper, C# schema-v0 service clients consume `ICultNetSchemaClient`, and the
+  core schema-message RUDP matrix is live in the TypeScript interop gate;
+  broader service adoption remains the unclaimed layer.
 
 ## RUDP Packet Contract V0
 

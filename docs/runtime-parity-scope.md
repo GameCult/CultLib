@@ -38,6 +38,11 @@ CultMesh.
 
 ## Evidence Gates
 
+- `.github/workflows/cultnet-interop.yml` is the hosted CI witness for the
+  cross-runtime wire claim. It builds the TypeScript workspace, Kotlin interop
+  peer, Rust/C# interop peers through the TypeScript harness, installs the
+  Python package dependencies, then runs named RUDP lanes for Python, Rust, C#,
+  and Kotlin, the RUDP impairment matrix, and the schema-v0 discovery lane.
 - `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` is the main live
   wire harness. It covers schema-v0 interop and RUDP exchange across C#,
   TypeScript, Rust, Python, and Kotlin, including loss, reordering,
@@ -55,7 +60,12 @@ CultMesh.
 - `packages/cultmesh-kotlin/README.md` records Kotlin's runtime role and
   ergonomic surface, including the explicit non-claim around C# SoA storage.
 
-## Remaining Work Before A Full Completion Claim
+## Expansion Work Outside The Current Parity Claim
+
+The current claim is role-scoped feature, wire, and ergonomic parity across the
+targeted runtimes. The stronger claim that every production daemon/service body
+has already moved to native RUDP, or that every runtime clones the C# production
+server body, is deliberately not made.
 
 - Broaden production service adoption so remaining daemon paths use the shared
   transport port consistently. The C# built-in LiteNetLib service wrappers now
