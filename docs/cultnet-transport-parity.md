@@ -1,13 +1,16 @@
 # CultNet Transport Parity Map
 
 CultNet payload parity is not enough. The runtimes can already trade schema-v0
-MessagePack documents through the interop lane, but realtime networking still
-has one real owner: the C# `GameCult.Networking` stack on LiteNetLib. The other
-runtimes mostly speak a TCP-framed dialect for tests and local services.
+MessagePack documents through the interop lane, and the shared
+`cultnet.transport.rudp.v0` packet/session language now exists across C#,
+TypeScript, Rust, Python, and Kotlin. The remaining split is service adoption:
+C# still carries the production LiteNetLib path, and older TCP-framed or
+WebSocket-like bodies still exist for local services and harnesses.
 
 This document is the working map for promoting transport into CultNet itself so
 C#, TypeScript, Rust, Python, Kotlin, and future runtimes can speak the same
-network language.
+network language. Runtime role boundaries live in
+[runtime-parity-scope.md](runtime-parity-scope.md).
 
 ## Objective
 
@@ -123,8 +126,8 @@ lets the runtimes stop guessing what kind of pipe a peer is offering.
 
 ## Implementation Sequence
 
-1. Add `cultnet.transport_profile.v0` as a shared contract in C#, TS, Rust, and
-   Python catalogs.
+1. Add `cultnet.transport_profile.v0` as a shared contract in C#, TS, Rust,
+   Python, and Kotlin catalogs.
 2. Make every runtime advertise its current transport honestly:
    `tcp_framed`, `litenetlib`, or `websocket`.
 3. Add a cross-runtime transport-profile interop check so parody surfaces fail
@@ -133,12 +136,12 @@ lets the runtimes stop guessing what kind of pipe a peer is offering.
    `connect`, `accept`, `send(channel, payload)`, `receive`, `close`, `stats`.
 5. Put current TCP/LiteNetLib/WebSocket bodies behind that port.
 6. Build `cultnet.transport.rudp.v0` once against the shared port and prove it
-   with C#/TS/Rust/Python ping, loss, reordering, fragmentation, reconnect, and
-   schema-message tests.
+   with C#/TS/Rust/Python/Kotlin ping, loss, reordering, fragmentation,
+   reconnect, and schema-message tests.
 
 Current progress:
 
-- Steps 1-3 are live in C#, TypeScript, Rust, and Python.
+- Steps 1-3 are live in C#, TypeScript, Rust, Python, and Kotlin.
 - C# now has the shared `tcp_framed` transport profile helper plus a
   `TcpFramedTransportConnection` with schema-channel `SendAsync`,
   `ReceiveAsync`, and transfer stats. The C# interop peer advertises and uses
@@ -156,13 +159,13 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
   instead of owning raw TCP frame I/O directly.
-- TypeScript, C#, Rust, and Python now share the first
+- TypeScript, C#, Rust, Python, and Kotlin now share the first
   `cultnet.transport.rudp.v0` packet codec fixture: the same reliable ordered
   fragmented data packet encodes to the same bytes in every runtime. This is not
   the RUDP runtime yet; it is the binary packet language the runtimes must
   converge on before resend loops, windows, and timeout behavior are allowed to
   claim parity.
-- TypeScript, C#, Rust, and Python now share the first deterministic RUDP
+- TypeScript, C#, Rust, Python, and Kotlin now share the first deterministic RUDP
   reliability state machine: connect/accept handshake, packet-level
   ack/ack-mask accounting, reliable resend scheduling, duplicate suppression,
   and reliable ordered channel delivery. It is in-memory and socket-free so the
@@ -239,7 +242,7 @@ Current progress:
 `cultnet.transport.rudp.v0` packets start with a fixed binary header, followed
 by a UTF-8 channel id and payload bytes. All integer fields are unsigned
 big-endian. The first deterministic fixture is live in TypeScript, C#, Rust,
-and Python; every future runtime must port it byte-for-byte before
+Python, and Kotlin; every future runtime must port it byte-for-byte before
 runtime-specific resend loops are allowed to claim parity.
 
 | Offset | Size | Field | Notes |
