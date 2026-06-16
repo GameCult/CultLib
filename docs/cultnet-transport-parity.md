@@ -182,7 +182,7 @@ Current progress:
   exchange reliable ordered `schema` frames through the shared handshake and
   packet language.
 - The same harness now proves schema-v0 MessagePack messages over RUDP in both
-  directions for C#, Kotlin, and Python peers against TypeScript. Those tests
+  directions for C#, Kotlin, Python, and Rust peers against TypeScript. Those tests
   send `cultnet.schema_catalog_request.v0` payloads through reliable ordered
   `schema` frames and validate `cultnet.hello.v0` responses with advertised
   RUDP transport profiles where the responding runtime owns them.
@@ -239,8 +239,8 @@ Current progress:
   creating a second authority path.
 - The remaining parity work is to deepen Python's server-side use of its port
   and move each runtime's existing TCP/LiteNetLib/WebSocket bodies behind those
-  ports, then broaden RUDP interop into reconnect policy, Rust schema-v0
-  MessagePack-over-RUDP coverage, and the wider schema-message matrix.
+  ports, then broaden RUDP interop into reconnect policy and the wider
+  schema-message matrix.
 
 ## RUDP Packet Contract V0
 

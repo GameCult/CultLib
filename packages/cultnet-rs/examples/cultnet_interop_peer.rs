@@ -18,9 +18,11 @@ use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetTransportProfile;
 use cultnet_rs::CultNetWireContract;
+use cultnet_rs::RudpTransportProfileOptions;
 use cultnet_rs::TcpFramedTransportConnection;
 use cultnet_rs::TcpFramedTransportProfileOptions;
 use cultnet_rs::builtin_schema_registry;
+use cultnet_rs::create_rudp_transport_profile;
 use cultnet_rs::create_tcp_framed_transport_profile;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
@@ -206,7 +208,7 @@ struct DialConfig {
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mode = args.next().ok_or_else(|| {
-        anyhow!("expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once")
+        anyhow!("expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once | rudp-serve-message-once | rudp-dial-message-once")
     })?;
     let options = parse_args(args.collect());
 
@@ -216,6 +218,8 @@ fn main() -> Result<()> {
         "dial" => dial(parse_dial_config(&options)?)?,
         "rudp-serve-once" => rudp_serve_once(&options)?,
         "rudp-dial-once" => rudp_dial_once(&options)?,
+        "rudp-serve-message-once" => rudp_serve_message_once(&options)?,
+        "rudp-dial-message-once" => rudp_dial_message_once(&options)?,
         _ => return Err(anyhow!("unknown mode {mode}")),
     }
 
@@ -564,6 +568,149 @@ fn rudp_dial_once(options: &BTreeMap<String, String>) -> Result<()> {
     }
 
     Err(anyhow!("timed out waiting for TypeScript RUDP response"))
+}
+
+fn rudp_serve_message_once(options: &BTreeMap<String, String>) -> Result<()> {
+    let bind_host = options
+        .get("bind-host")
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let bind_port = options
+        .get("bind-port")
+        .map(|value| value.parse::<u16>())
+        .transpose()
+        .with_context(|| "argument --bind-port must be a u16")?
+        .unwrap_or(0);
+    let socket = UdpSocket::bind((bind_host.as_str(), bind_port)).with_context(|| {
+        format!("failed to bind RUDP message server on {bind_host}:{bind_port}")
+    })?;
+    socket.set_read_timeout(Some(Duration::from_millis(20)))?;
+    let local_port = socket.local_addr()?.port();
+    let mut transport_options =
+        CultNetRudpSocketTransportOptions::server("rust-rudp-message-interop", socket, 0x22446689);
+    transport_options.initial_sequence = 100;
+    transport_options.resend_delay_ms = 25;
+    let mut transport = CultNetRudpSocketTransportConnection::new(transport_options)?;
+
+    print_json(&serde_json::json!({
+        "status": "ready",
+        "port": local_port,
+    }))?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(frame) = transport.receive_once()? {
+            if frame.channel_id != "schema" {
+                return Err(anyhow!("unexpected RUDP channel: {}", frame.channel_id));
+            }
+            let message = decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            )?;
+            let CultNetMessage::SchemaCatalogRequest { .. } = message else {
+                return Err(anyhow!("unexpected schema message: {message:?}"));
+            };
+            let response = CultNetMessage::Hello {
+                runtime_id: "rust-rudp-message-interop".to_string(),
+                runtime_kind: "rust".to_string(),
+                agent_id: None,
+                role: None,
+                display_name: Some("Rust RUDP Message Interop".to_string()),
+                supported_document_types: Some(vec![]),
+                supported_mutation_contracts: Some(vec![]),
+                supported_message_versions: Some(vec![
+                    "cultnet.hello.v0".to_string(),
+                    "cultnet.schema_catalog_request.v0".to_string(),
+                ]),
+                transport_profiles: Some(vec![create_rudp_transport_profile(
+                    "rust-rudp-message-interop",
+                    RudpTransportProfileOptions {
+                        host: Some("127.0.0.1".to_string()),
+                        port: Some(local_port),
+                        ..RudpTransportProfileOptions::default()
+                    },
+                )]),
+                supports_schema_catalog: Some(true),
+            };
+            transport.send(
+                "schema",
+                encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0)?,
+            )?;
+            poll_rudp_after_send(&mut transport, Duration::from_millis(250))?;
+            print_json(&serde_json::json!({ "status": "ok" }))?;
+            return Ok(());
+        }
+        transport.poll_resends()?;
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    Err(anyhow!(
+        "timed out waiting for TypeScript RUDP schema-v0 message"
+    ))
+}
+
+fn rudp_dial_message_once(options: &BTreeMap<String, String>) -> Result<()> {
+    let target_host = require_arg(options, "target-host")?;
+    let target_port = parse_u16_arg(options, "target-port")?;
+    let remote_addr: SocketAddr = format!("{target_host}:{target_port}")
+        .parse()
+        .with_context(|| {
+            format!("failed to parse RUDP remote endpoint {target_host}:{target_port}")
+        })?;
+    let socket = UdpSocket::bind(("127.0.0.1", 0))?;
+    socket.set_read_timeout(Some(Duration::from_millis(20)))?;
+    let mut transport_options = CultNetRudpSocketTransportOptions::client(
+        "rust-rudp-message-client-interop",
+        socket,
+        remote_addr,
+        0x88664423,
+    );
+    transport_options.resend_delay_ms = 25;
+    let mut transport = CultNetRudpSocketTransportConnection::new(transport_options)?;
+    transport.connect(b"rust-message-join".to_vec())?;
+
+    let request = CultNetMessage::SchemaCatalogRequest {
+        message_id: "rust-ts-schema-message".to_string(),
+        include_schema_json: Some(false),
+        schema_ids: Some(vec![]),
+        kinds: Some(vec![CultNetSchemaKind::WireMessage]),
+    };
+
+    let mut sent = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(frame) = transport.receive_once()? {
+            if frame.channel_id != "schema" {
+                return Err(anyhow!("unexpected RUDP channel: {}", frame.channel_id));
+            }
+            let message = decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            )?;
+            match message {
+                CultNetMessage::Hello { runtime_id, .. }
+                    if runtime_id == "ts-rust-rudp-message-server" =>
+                {
+                    print_json(&serde_json::json!({ "status": "ok" }))?;
+                    return Ok(());
+                }
+                other => return Err(anyhow!("unexpected schema message: {other:?}")),
+            }
+        }
+        transport.poll_resends()?;
+        if transport.connected() && !sent {
+            transport.send(
+                "schema",
+                encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)?,
+            )?;
+            sent = true;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    Err(anyhow!(
+        "timed out waiting for TypeScript RUDP schema-v0 response"
+    ))
 }
 
 fn poll_rudp_after_send(

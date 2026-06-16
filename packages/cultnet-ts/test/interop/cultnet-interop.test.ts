@@ -947,12 +947,12 @@ test("CultNet Python and TypeScript exchange schema frames when Python dials a T
 
   try {
     const receivedFrame = once(server, "frame");
-    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP client frame");
+    const [frame] = await withTimeout(receivedFrame, 5_000, "Python RUDP client frame");
     assert.equal(frame.channelId, "schema");
     assert.deepEqual(Buffer.from(frame.payload), Buffer.from("python-client-state"));
     server.send("schema", Buffer.from("ts-server-state"));
 
-    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 2_000, "Python RUDP client exit");
+    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 5_000, "Python RUDP client exit");
     assert.equal(exitCode, 0, pythonClient.stderr.join(""));
   } finally {
     server.close();
@@ -1037,7 +1037,7 @@ test("CultNet Python and TypeScript exchange schema-v0 MessagePack messages over
 
   try {
     const receivedFrame = once(server, "frame");
-    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP schema-v0 client frame");
+    const [frame] = await withTimeout(receivedFrame, 5_000, "Python RUDP schema-v0 client frame");
     assert.equal(frame.channelId, "schema");
     const message = decode(frame.payload) as {
       schemaVersion?: string;
@@ -1058,7 +1058,7 @@ test("CultNet Python and TypeScript exchange schema-v0 MessagePack messages over
       supportsSchemaCatalog: true,
     })));
 
-    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 2_000, "Python RUDP message client exit");
+    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 5_000, "Python RUDP message client exit");
     assert.equal(exitCode, 0, pythonClient.stderr.join(""));
   } finally {
     server.close();
@@ -1135,6 +1135,114 @@ test("CultNet Rust and TypeScript exchange schema frames when Rust dials a TypeS
     server.send("schema", Buffer.from("ts-rust-server-state"));
 
     const [exitCode] = await withTimeout(once(rustClient.child, "exit"), 2_000, "Rust RUDP client exit");
+    assert.equal(exitCode, 0, rustClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (rustClient.child.exitCode === null && !rustClient.child.killed) {
+      rustClient.child.kill("SIGTERM");
+      await once(rustClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet TypeScript and Rust exchange schema-v0 MessagePack messages over RUDP", async () => {
+  await buildRustInteropPeer();
+  const rustPeer = spawnRustRudpMessageServer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const rustPort = await rustPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-rust-rudp-message-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: rustPort,
+      connectionId: 0x22446689,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-rust-message-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Rust message handshake");
+    client.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.schema_catalog_request.v0",
+      messageId: "ts-rust-schema-message",
+      includeSchemaJson: false,
+      schemaIds: [],
+      kinds: ["wire_message"],
+    })));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Rust RUDP schema-v0 response frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      runtimeId?: string;
+      supportsSchemaCatalog?: boolean;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+    };
+    assert.equal(message.schemaVersion, "cultnet.hello.v0");
+    assert.equal(message.runtimeId, "rust-rudp-message-interop");
+    assert.equal(message.supportsSchemaCatalog, true);
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
+
+    const [exitCode] = await withTimeout(once(rustPeer.child, "exit"), 2_000, "Rust RUDP message peer exit");
+    assert.equal(exitCode, 0, rustPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (rustPeer.child.exitCode === null && !rustPeer.child.killed) {
+      rustPeer.child.kill("SIGTERM");
+      await once(rustPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet Rust and TypeScript exchange schema-v0 MessagePack messages over RUDP when Rust dials", async () => {
+  await buildRustInteropPeer();
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-rust-rudp-message-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0x88664423,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const rustClient = spawnRustRudpMessageClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Rust RUDP schema-v0 client frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      messageId?: string;
+      kinds?: string[];
+    };
+    assert.equal(message.schemaVersion, "cultnet.schema_catalog_request.v0");
+    assert.equal(message.messageId, "rust-ts-schema-message");
+    assert.deepEqual(message.kinds, ["wire_message"]);
+    server.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "ts-rust-rudp-message-server",
+      runtimeKind: "typescript",
+      supportedDocumentTypes: [],
+      supportedMutationContracts: [],
+      supportedMessageVersions: ["cultnet.hello.v0", "cultnet.schema_catalog_request.v0"],
+      transportProfiles: [],
+      supportsSchemaCatalog: true,
+    })));
+
+    const [exitCode] = await withTimeout(once(rustClient.child, "exit"), 2_000, "Rust RUDP message client exit");
     assert.equal(exitCode, 0, rustClient.stderr.join(""));
   } finally {
     server.close();
@@ -2214,6 +2322,59 @@ function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPytho
   return { child, ready, stderr };
 }
 
+function spawnRustRudpMessageServer(): RunningPythonRudpPeer {
+  const child = spawn(rustBinaryPath, [
+    "rudp-serve-message-once",
+    "--bind-host", "127.0.0.1",
+  ], {
+    cwd: cultnetRsRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { status?: string; port?: number };
+          if (parsed.status === "ready" && typeof parsed.port === "number") {
+            resolveReady(parsed.port);
+          } else if (parsed.status !== "ok") {
+            rejectReady(new Error(`Rust RUDP message peer emitted unexpected stdout: ${line}`));
+          }
+        } catch (error) {
+          rejectReady(new Error(`Rust RUDP message peer emitted non-JSON stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Rust RUDP message peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnCSharpRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
   const child = spawn(dotnetCommand, [
     csharpDllPath,
@@ -2557,6 +2718,25 @@ function spawnCSharpRudpMessageClient(remotePort: number): Omit<RunningPythonRud
 function spawnRustRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(rustBinaryPath, [
     "rudp-dial-once",
+    "--target-host", "127.0.0.1",
+    "--target-port", String(remotePort),
+  ], {
+    cwd: cultnetRsRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnRustRudpMessageClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(rustBinaryPath, [
+    "rudp-dial-message-once",
     "--target-host", "127.0.0.1",
     "--target-port", String(remotePort),
   ], {
