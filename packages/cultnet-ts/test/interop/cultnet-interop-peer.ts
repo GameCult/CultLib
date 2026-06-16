@@ -11,6 +11,7 @@ import {
   CultNetDocumentRegistry,
   CultNetPeer,
   CultNetSchemaRegistry,
+  TcpFramedTransportConnection,
   cultNetBuiltinSchemaRegistry,
   createTcpFramedTransportProfile,
   defineCultNetDocumentBinding,
@@ -132,10 +133,19 @@ async function serve(args: Map<string, string>): Promise<void> {
 
   const tcpServer = createServer();
   tcpServer.on("connection", (socket) => {
-    const peer = new CultNetPeer(socket, { wireContract: INTEROP_WIRE_CONTRACT });
+    const transport = new TcpFramedTransportConnection(
+      socket,
+      createTcpFramedTransportProfile(runtimeId, {
+        transportId: "interop-tcp",
+        host: advertiseHost,
+        port: tcpPort,
+      }),
+    );
+    const peer = new CultNetPeer(transport, { wireContract: INTEROP_WIRE_CONTRACT });
     peer.on("invalidMessage", (error) => writeLog("invalidMessage", { runtimeId, error: error.message }));
     peer.on("error", (error) => writeLog("tcpError", { runtimeId, error: error.message }));
     peer.on("message", async (message) => {
+      writeTrace("serveMessage", { runtimeId, schemaVersion: message.schemaVersion });
       try {
         await handleServerMessage({
           peer,
@@ -529,8 +539,18 @@ async function dial(args: Map<string, string>): Promise<void> {
   const documentRegistry = new CultNetDocumentRegistry(Object.values(documents));
 
   const socket = await connectTo(targetHost, targetPort);
-  const peer = new CultNetPeer(socket, { wireContract: INTEROP_WIRE_CONTRACT });
+  const transport = new TcpFramedTransportConnection(
+    socket,
+    createTcpFramedTransportProfile(runtimeId, {
+      transportId: "interop-tcp",
+      host: targetHost,
+      port: targetPort,
+    }),
+  );
+  const peer = new CultNetPeer(transport, { wireContract: INTEROP_WIRE_CONTRACT });
 
+  writeTrace("dialSendHello", { runtimeId });
+  const remoteHelloWait = waitForMessage(peer, (message) => message.schemaVersion === "cultnet.hello.v0", timeoutMs);
   peer.sendHello({
     schemaVersion: "cultnet.hello.v0",
     runtimeId,
@@ -549,23 +569,30 @@ async function dial(args: Map<string, string>): Promise<void> {
     supportedMessageVersions: [INTEROP_SCHEMA_VERSION],
     supportsSchemaCatalog: true,
   });
-  const remoteHello = await waitForMessage(peer, (message) => message.schemaVersion === "cultnet.hello.v0", timeoutMs);
+  const remoteHello = await remoteHelloWait;
+  writeTrace("dialReceivedHello", { runtimeId, remoteRuntimeId: remoteHello.runtimeId });
 
   const catalogRequest: CultNetSchemaCatalogRequestMessage = {
     schemaVersion: "cultnet.schema_catalog_request.v0",
     messageId: `${runtimeId}-catalog`,
     includeSchemaJson: true,
   };
+  const catalogResponseWait = waitForMessage(peer, (message) => message.schemaVersion === "cultnet.schema_catalog_response.v0", timeoutMs);
+  writeTrace("dialSendCatalogRequest", { runtimeId });
   peer.sendSchemaCatalogRequest(catalogRequest);
-  const catalogResponse = await waitForMessage(peer, (message) => message.schemaVersion === "cultnet.schema_catalog_response.v0", timeoutMs);
+  const catalogResponse = await catalogResponseWait;
+  writeTrace("dialReceivedCatalogResponse", { runtimeId });
 
   const snapshotRequest: CultNetSnapshotRequestMessage = {
     schemaVersion: "cultnet.snapshot_request.v0",
     messageId: `${runtimeId}-snapshot`,
     schemaIds: [interopSchema.schemaId],
   };
+  const snapshotResponseWait = waitForMessage(peer, (message) => message.schemaVersion === "cultnet.snapshot_response_raw.v0", timeoutMs);
+  writeTrace("dialSendSnapshotRequest", { runtimeId });
   peer.sendSnapshotRequest(snapshotRequest);
-  const snapshotResponse = await waitForMessage(peer, (message) => message.schemaVersion === "cultnet.snapshot_response_raw.v0", timeoutMs);
+  const snapshotResponse = await snapshotResponseWait;
+  writeTrace("dialReceivedSnapshotResponse", { runtimeId });
 
   await documentRegistry.applyRawSnapshotResponse(cache, snapshotResponse as CultNetSnapshotResponseRawMessage);
   const note = cache.getRequired(documents.note.definition, `note:${(remoteHello as { runtimeId: string }).runtimeId}`) as InteropNote;
@@ -772,6 +799,12 @@ function writeJsonLine(value: unknown): void {
 
 function writeLog(event: string, payload: Record<string, unknown>): void {
   process.stderr.write(`${JSON.stringify({ event, ...payload })}\n`);
+}
+
+function writeTrace(event: string, payload: Record<string, unknown>): void {
+  if (process.env.CULTNET_INTEROP_TRACE === "1") {
+    writeLog(event, payload);
+  }
 }
 
 function runtimeStorePath(runtimeId: string): string {

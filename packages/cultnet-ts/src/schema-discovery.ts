@@ -101,16 +101,26 @@ function toSchemaDescriptor(
   entry: CultNetRegisteredSchemaRecord,
   includeSchemaJson: boolean,
 ): CultNetSchemaDescriptor {
-  return {
+  const descriptor: CultNetSchemaDescriptor = {
     schemaId: entry.schemaId,
     kind: entry.kind,
-    schemaVersion: entry.schemaVersion,
-    documentType: entry.documentType,
-    title: entry.title,
     wireContracts: [...entry.wireContracts],
     contentHash: entry.contentHash,
-    schemaJson: includeSchemaJson ? entry.canonicalSchemaJson : undefined,
   };
+  if (entry.schemaVersion !== undefined) {
+    descriptor.schemaVersion = entry.schemaVersion;
+  }
+  if (entry.documentType !== undefined) {
+    descriptor.documentType = entry.documentType;
+  }
+  if (entry.title !== undefined) {
+    descriptor.title = entry.title;
+  }
+  if (includeSchemaJson) {
+    descriptor.schemaJson = entry.canonicalSchemaJson;
+  }
+
+  return descriptor;
 }
 
 function stableStringify(value: unknown): string {

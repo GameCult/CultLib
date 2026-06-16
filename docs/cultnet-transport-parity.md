@@ -158,8 +158,11 @@ Current progress:
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer
-  stats, and `CultNetPeer` can now run over either the legacy `Duplex` stream
-  path or the transport connection path.
+  stats, and destroys its owned stream on close. `CultNetPeer` can still run
+  over either the compatibility `Duplex` stream path or the transport
+  connection path, while the TypeScript interop peer now accepts and dials TCP
+  peers through `TcpFramedTransportConnection` so the parity harness exercises
+  the shared port instead of raw socket framing.
 - Python now has the same `tcp_framed` transport profile helper plus a
   synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
   and stats. `CultNetRawClient`, database subscriptions, and the local

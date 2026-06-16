@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import dgram, { type Socket } from "node:dgram";
 import { once } from "node:events";
@@ -20,7 +20,7 @@ const execFileAsync = promisify(execFile);
 
 const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
 const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
-const pythonCommand = process.env.PYTHON ?? "python";
+const pythonCommand = process.env.PYTHON ?? resolvePythonCommand();
 const cultNetTsRoot = resolve(__dirname, "../../..");
 const cultLibRoot = findAncestor(cultNetTsRoot, "CultLib.sln") ?? resolve(cultNetTsRoot, "..", "CultLib");
 const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
@@ -67,6 +67,27 @@ const discoveryGroup = "239.77.44.11";
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
+
+function resolvePythonCommand(): string {
+  const codexPythonCommand = join(homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
+  const candidates = process.platform === "win32"
+    ? [
+        ...(existsSync(codexPythonCommand) ? [codexPythonCommand] : []),
+        "py",
+        "python",
+        "python3",
+      ]
+    : ["python3", "python"];
+
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+    if (result.status === 0) {
+      return candidate;
+    }
+  }
+
+  return process.platform === "win32" ? "python" : "python3";
+}
 
 interface RudpServerInteropPeerSpec {
   name: string;
@@ -2091,6 +2112,20 @@ async function spawnServeProcess(name: string, command: ServeCommand): Promise<R
   let stdoutBuffer = "";
 
   const ready = new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${name} serve process did not become ready within 30000ms.\n${stderr.join("")}`));
+    }, 30_000);
+
+    const resolveReady = (value: unknown) => {
+      clearTimeout(timeout);
+      resolve(value);
+    };
+
+    const rejectReady = (error: Error) => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
@@ -2109,11 +2144,11 @@ async function spawnServeProcess(name: string, command: ServeCommand): Promise<R
         try {
           const parsed = JSON.parse(line) as { status?: string };
           if (parsed.status === "ready") {
-            resolve(parsed);
+            resolveReady(parsed);
             return;
           }
         } catch (error) {
-          reject(new Error(`${name} emitted non-JSON stdout while starting: ${line}`));
+          rejectReady(new Error(`${name} emitted non-JSON stdout while starting: ${line}`));
           return;
         }
       }
@@ -2125,9 +2160,9 @@ async function spawnServeProcess(name: string, command: ServeCommand): Promise<R
     });
 
     child.once("exit", (code, signal) => {
-      reject(new Error(`${name} serve process exited before becoming ready (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+      rejectReady(new Error(`${name} serve process exited before becoming ready (code=${code}, signal=${signal}).\n${stderr.join("")}`));
     });
-    child.once("error", reject);
+    child.once("error", rejectReady);
   });
 
   return { name, child, ready, stderr };
@@ -3509,12 +3544,29 @@ async function putAndSnapshotPythonWitnessBundle(port: number, put: Record<strin
 }
 
 async function stopProcess(processState: RunningServeProcess): Promise<void> {
-  if (processState.child.killed || processState.child.exitCode !== null) {
+  if (processState.child.exitCode !== null) {
     return;
   }
 
+  const gracefulExit = once(processState.child, "exit").then(() => true);
   processState.child.kill("SIGTERM");
-  await once(processState.child, "exit");
+  const exited = await Promise.race([
+    gracefulExit,
+    delay(2_000).then(() => false),
+  ]);
+  if (exited || processState.child.exitCode !== null) {
+    return;
+  }
+
+  const forcedExit = once(processState.child, "exit").then(() => true);
+  processState.child.kill("SIGKILL");
+  const killed = await Promise.race([
+    forcedExit,
+    delay(2_000).then(() => false),
+  ]);
+  if (!killed && processState.child.exitCode === null) {
+    throw new Error(`${processState.name} serve process did not exit after SIGKILL.`);
+  }
 }
 
 async function getFreePort(): Promise<number> {

@@ -228,5 +228,6 @@ export class TcpFramedTransportConnection extends EventEmitter implements CultNe
 
   close(): void {
     this.#stream.end();
+    this.#stream.destroy();
   }
 }
