@@ -243,6 +243,10 @@ Current progress:
   transport schedules the next attempt with the portable policy, opens a fresh
   caller-provided transport when the controller says it may retry, and resets
   attempt state when the caller marks the connection established.
+- Kotlin now has the same RUDP reconnect-loop shape for JVM/Android callers:
+  the app-owned receive loop reports closure, `CultNetRudpReconnectLoop`
+  schedules retry through `CultNetReconnectController`, and the caller-provided
+  factory opens the next `CultNetRudpSocketTransportConnection`.
 - Kotlin now mirrors the C#/TypeScript/Python local authority lease gate:
   peer cards may advertise `authorityLeaseId`, but `CultMeshAuthorityLeaseCatalog`
   owns role/shard/time authorization so discovery contact cannot impersonate

@@ -360,6 +360,16 @@ object CultMesh {
             ?: throw IOException("Peer ${peer.peerId} does not advertise a RUDP endpoint")
         return createRudpClient(runtimeId, connectionId, endpoint, bindHost, bindPort, tuning)
     }
+
+    fun createRudpReconnectLoop(
+        reconnectPolicy: CultNetReconnectPolicy = createReconnectPolicy(),
+        connectPayload: ByteArray = ByteArray(0),
+        createTransport: () -> CultNetRudpSocketTransportConnection,
+    ): CultNetRudpReconnectLoop = CultNetRudpReconnectLoop(
+        reconnectPolicy = reconnectPolicy,
+        connectPayload = connectPayload,
+        createTransport = createTransport,
+    )
 }
 
 data class CultNetFrame(val opcode: Int, val payload: ByteArray)
@@ -479,6 +489,77 @@ class CultNetReconnectController(
             delayMs = delay,
             nextAttemptAtMs = nextAt,
         )
+    }
+}
+
+class CultNetRudpReconnectLoop(
+    reconnectPolicy: CultNetReconnectPolicy = createReconnectPolicy(),
+    private val connectPayload: ByteArray = ByteArray(0),
+    private val createTransport: () -> CultNetRudpSocketTransportConnection,
+    private val nowMsProvider: () -> Long = { nowMs() },
+    private val jitterMsProvider: () -> Long = { 0 },
+    private val scheduler: (delayMs: Long, callback: () -> Unit) -> AutoCloseable = { delayMs, callback ->
+        val thread = Thread {
+            try {
+                Thread.sleep(delayMs)
+                callback()
+            } catch (_: InterruptedException) {
+                // Timer cancelled.
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+        AutoCloseable { thread.interrupt() }
+    },
+) {
+    val reconnectController = CultNetReconnectController(reconnectPolicy)
+    var transport: CultNetRudpSocketTransportConnection? = null
+        private set
+    private var timer: AutoCloseable? = null
+    private var stopped = true
+
+    fun start(): CultNetRudpSocketTransportConnection {
+        stopped = false
+        reconnectController.reset()
+        return openTransport()
+    }
+
+    fun stop() {
+        stopped = true
+        timer?.close()
+        timer = null
+        transport?.close()
+        transport = null
+        reconnectController.reset()
+    }
+
+    fun markConnected() {
+        reconnectController.reset()
+    }
+
+    fun handleClosed(): CultNetReconnectDecision? {
+        transport = null
+        return scheduleReconnect()
+    }
+
+    private fun openTransport(): CultNetRudpSocketTransportConnection {
+        val next = createTransport()
+        transport = next
+        next.connect(connectPayload)
+        return next
+    }
+
+    private fun scheduleReconnect(): CultNetReconnectDecision? {
+        if (stopped || timer != null) return null
+        val decision = reconnectController.recordFailure(nowMsProvider(), jitterMsProvider())
+        if (!decision.shouldRetry) return decision
+        timer = scheduler(decision.delayMs) {
+            timer = null
+            if (!stopped && reconnectController.canAttempt(nowMsProvider())) {
+                openTransport()
+            }
+        }
+        return decision
     }
 }
 
@@ -2457,6 +2538,7 @@ fun main(args: Array<String>) {
         cultNetSchemaMessagesUseMessagePackMaps()
         cultNetReconnectPolicyExposesPortableDelayContract()
         cultNetReconnectControllerSchedulesAttemptsAndReset()
+        cultNetRudpReconnectLoopConsumesSharedController()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         cultMeshAuthorityLeasesGatePeerTrust()
@@ -2687,6 +2769,52 @@ private fun cultNetReconnectControllerSchedulesAttemptsAndReset() {
     check(controller.nextAttemptAtMs == null)
     check(!controller.exhausted)
     check(controller.canAttempt(99_000))
+}
+
+private fun cultNetRudpReconnectLoopConsumesSharedController() {
+    var now = 10_000L
+    var capturedTimer: (() -> Unit)? = null
+    val created = mutableListOf<CultNetRudpSocketTransportConnection>()
+    val loop = CultNetRudpReconnectLoop(
+        reconnectPolicy = createReconnectPolicy(maxAttempts = 2),
+        connectPayload = "join".toByteArray(StandardCharsets.UTF_8),
+        createTransport = {
+            CultMesh.createRudpClient(
+                runtimeId = "kotlin-reconnect-client-${created.size}",
+                connectionId = 0x20304050,
+                remoteHost = "127.0.0.1",
+                remotePort = 9,
+                tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxPendingReliablePackets = 16),
+            ).also { created.add(it) }
+        },
+        nowMsProvider = { now },
+        jitterMsProvider = { 17 },
+        scheduler = { delayMs, callback ->
+            check(delayMs == 1_017L)
+            capturedTimer = callback
+            AutoCloseable { capturedTimer = null }
+        },
+    )
+
+    val first = loop.start()
+    check(created.size == 1)
+    check(loop.transport === first)
+    first.close()
+    val decision = loop.handleClosed()
+    check(decision?.attempt == 1)
+    check(decision?.delayMs == 1_017L)
+    check(loop.reconnectController.nextAttemptAtMs == 11_017L)
+    check(capturedTimer != null)
+
+    now = 11_017L
+    capturedTimer?.invoke()
+    check(created.size == 2)
+    check(loop.transport === created[1])
+
+    loop.markConnected()
+    check(loop.reconnectController.attempt == 0)
+    loop.stop()
+    check(loop.transport == null)
 }
 
 private fun cultNetSchemaCatalogsRoundTripDescriptors() {
