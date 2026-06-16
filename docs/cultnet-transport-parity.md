@@ -181,7 +181,9 @@ Current progress:
 - Kotlin now has a `websocket` transport profile helper plus
   `CultNetWebSocketTransportConnection`, which wraps the older binary
   WebSocket client behind the same `CultNetTransportFrame` and stats shape for
-  reliable ordered `schema` frames.
+  reliable ordered `schema` frames. The adapter now also has `sendSchemaMessage`
+  and `receiveSchemaMessage` sugar so JVM callers can exchange schema-v0
+  MessagePack messages without hand-parsing transport frames.
 - TypeScript, C#, Rust, Python, and Kotlin now share the first
   `cultnet.transport.rudp.v0` packet codec fixture: the same reliable ordered
   fragmented data packet encodes to the same bytes in every runtime. This is not

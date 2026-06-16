@@ -2918,9 +2918,17 @@ private fun cultNetWebSocketTransportCarriesSchemaFramesWithStats() {
                             ).toByteArray(StandardCharsets.US_ASCII),
                     )
                     output.flush()
-                    val request = readMaskedWebSocketBinaryPayload(input)
-                    check(String(request, StandardCharsets.UTF_8) == "client-state")
-                    writeUnmaskedWebSocketBinaryPayload(output, "server-state".toByteArray(StandardCharsets.UTF_8))
+                    val request = parseCultNetMessage(readMaskedWebSocketBinaryPayload(input))
+                    check(request.schemaVersion == "cultnet.schema_catalog_request.v0")
+                    writeUnmaskedWebSocketBinaryPayload(
+                        output,
+                        cultNetHello(
+                            runtimeId = "kotlin-websocket-server",
+                            runtimeKind = "kotlin",
+                            displayName = "Kotlin WebSocket Server",
+                            supportedMessageVersions = listOf("cultnet.hello.v0"),
+                        ).toBytes(),
+                    )
                 }
             } catch (error: Throwable) {
                 serverError = error
@@ -2937,10 +2945,11 @@ private fun cultNetWebSocketTransportCarriesSchemaFramesWithStats() {
             check(descriptor.protocol == "websocket")
             check(descriptor.channels == listOf(CultNetTransportChannel("schema", "reliable", "ordered")))
 
-            transport.sendSchema("client-state")
-            val response = transport.receive() ?: error("WebSocket transport did not receive schema frame")
-            check(response.channelId == "schema")
-            check(String(response.payload, StandardCharsets.UTF_8) == "server-state")
+            transport.sendSchemaMessage(cultNetSchemaCatalogRequest(messageId = "websocket-schema"))
+            val response = transport.receiveSchemaMessage()
+                ?: error("WebSocket transport did not receive schema message")
+            check(response.schemaVersion == "cultnet.hello.v0")
+            check(response.body["runtimeId"] == "kotlin-websocket-server")
             check(transport.stats.framesSent == 1L)
             check(transport.stats.framesReceived == 1L)
         }
@@ -3960,12 +3969,18 @@ class CultNetWebSocketTransportConnection(
 
     fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
 
+    fun sendSchemaMessage(message: CultNetMessage) = sendSchema(message.toBytes())
+
     fun receive(): CultNetTransportFrame? {
         val frame = client.readFrame()
         if (frame.opcode != 2) return null
         stats = stats.copy(bytesReceived = stats.bytesReceived + frame.payload.size, framesReceived = stats.framesReceived + 1)
         return CultNetTransportFrame("schema", frame.payload)
     }
+
+    fun receiveSchema(): ByteArray? = receive()?.takeIf { it.channelId == "schema" }?.payload
+
+    fun receiveSchemaMessage(): CultNetMessage? = receiveSchema()?.let { parseCultNetMessage(it) }
 
     override fun close() {
         client.close()

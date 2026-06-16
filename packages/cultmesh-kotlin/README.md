@@ -82,11 +82,18 @@ val transport = CultMesh.startNode().connectTransport(URI("ws://127.0.0.1:3075/m
 transport.sendSchema(cultNetSchemaCatalogRequest(messageId = "schemas").toBytes())
 val frame = transport.receive()
 check(frame?.channelId == "schema")
+
+// Or stay at the schema-message level.
+transport.sendSchemaMessage(cultNetSchemaCatalogRequest(messageId = "schemas"))
+val message = transport.receiveSchemaMessage()
+check(message?.schemaVersion == "cultnet.schema_catalog_response.v0")
 ```
 
 The WebSocket adapter advertises a `websocket` transport profile with one
-reliable ordered `schema` channel and exposes transfer stats. It is the stream
-adapter; RUDP remains the portable realtime UDP path.
+reliable ordered `schema` channel and exposes transfer stats. `sendSchema`,
+`sendSchemaMessage`, `receiveSchema`, and `receiveSchemaMessage` keep the
+schema lane at the same ergonomic level as RUDP. It is the stream adapter; RUDP
+remains the portable realtime UDP path.
 
 Schema catalogs are also first-class, so Kotlin peers can publish and consume
 descriptor responses instead of hand-assembling maps:
