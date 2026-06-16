@@ -287,17 +287,19 @@ namespace GameCult.Networking
                 {
                     var bytes = reader.GetRemainingBytes();
                     var user = _users.GetOrAdd(peer.Id, _ => new User { Peer = peer });
-                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    var frame = LiteNetLibTransportConnection.Decode(bytes);
+                    if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
+                        var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
                         Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
                         await HandleCultNetSchemaMessageAsync(peer, user, cultNetMessage).ConfigureAwait(false);
                         return;
                     }
 
-                    var message = MessageSerialization.Deserialize<Message>(bytes);
+                    var message = LiteNetLibTransportConnection.DecodeLegacy(frame);
                     if (LogSensitivePayloads)
                     {
-                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(frame.Payload))}");
                     }
                     else
                     {
@@ -429,20 +431,6 @@ namespace GameCult.Networking
                 or CultNetDatabaseSubscribeMessage
                 or CultNetDatabaseUnsubscribeMessage
                 or CultNetSnapshotRequestMessage;
-        }
-
-        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
-        {
-            try
-            {
-                message = CultNetSchemaMessageSerialization.Deserialize(payload);
-                return true;
-            }
-            catch (MessagePackSerializationException)
-            {
-                message = null!;
-                return false;
-            }
         }
 
         /// <inheritdoc />

@@ -371,7 +371,9 @@ LiteNetLib lane as a `litenetlib` transport adapter with reliable ordered
 `schema` and `legacy` channels. Discovery and operators can inspect the active
 pipe without treating LiteNetLib as an implicit protocol truth. `NetPeer`
 send helpers route through `LiteNetLibTransportConnection`, keeping outbound
-schema and legacy messages behind that channel-aware adapter surface.
+schema and legacy messages behind that channel-aware adapter surface. Inbound
+LiteNetLib payloads are classified through the same adapter before the client
+or server dispatches schema-v0 or legacy messages.
 
 The native RUDP socket path also exposes `CultNetRudpReconnectLoop` for
 caller-owned game or service loops. The caller reports closure, calls

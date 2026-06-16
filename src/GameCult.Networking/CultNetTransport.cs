@@ -2108,6 +2108,70 @@ namespace GameCult.Networking
             if (message == null) throw new ArgumentNullException(nameof(message));
             Send("schema", CultNetSchemaMessageSerialization.Serialize(message));
         }
+
+        /// <summary>
+        /// Decodes an inbound LiteNetLib payload into the adapter's schema or legacy channel shape.
+        /// </summary>
+        public static CultNetTransportFrame Decode(byte[] payload)
+        {
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
+            if (TryDeserializeCultNet(payload, out _))
+            {
+                return new CultNetTransportFrame
+                {
+                    ChannelId = "schema",
+                    Payload = payload.ToArray()
+                };
+            }
+
+            return new CultNetTransportFrame
+            {
+                ChannelId = "legacy",
+                Payload = payload.ToArray()
+            };
+        }
+
+        /// <summary>
+        /// Decodes a schema-channel frame as a CultNet schema-v0 message.
+        /// </summary>
+        public static ICultNetSchemaMessage DecodeSchema(CultNetTransportFrame frame)
+        {
+            if (frame == null) throw new ArgumentNullException(nameof(frame));
+            if (!string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Expected schema channel, got \"{frame.ChannelId}\".");
+            }
+
+            return CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
+        }
+
+        /// <summary>
+        /// Decodes a legacy-channel frame as a GameCult.Networking union message.
+        /// </summary>
+        public static Message DecodeLegacy(CultNetTransportFrame frame)
+        {
+            if (frame == null) throw new ArgumentNullException(nameof(frame));
+            if (!string.Equals(frame.ChannelId, "legacy", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Expected legacy channel, got \"{frame.ChannelId}\".");
+            }
+
+            return MessageSerialization.Deserialize<Message>(frame.Payload);
+        }
+
+        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
+        {
+            try
+            {
+                message = CultNetSchemaMessageSerialization.Deserialize(payload);
+                return true;
+            }
+            catch (MessagePack.MessagePackSerializationException)
+            {
+                message = null!;
+                return false;
+            }
+        }
     }
 
     /// <summary>

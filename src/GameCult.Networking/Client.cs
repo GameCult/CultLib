@@ -400,8 +400,10 @@ namespace GameCult.Networking
                 try
                 {
                     var bytes = reader.GetRemainingBytes();
-                    if (TryDeserializeCultNet(bytes, out var cultNetMessage))
+                    var frame = LiteNetLibTransportConnection.Decode(bytes);
+                    if (string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
                     {
+                        var cultNetMessage = LiteNetLibTransportConnection.DecodeSchema(frame);
                         Logger.LogDebug($"Received CultNet schema message {cultNetMessage.SchemaVersion}");
                         var cultNetType = cultNetMessage.GetType();
                         if (_cultNetMessageDelegates.TryGetValue(cultNetType, out var cultNetDelegate) &&
@@ -417,10 +419,10 @@ namespace GameCult.Networking
                         return;
                     }
 
-                    var message = MessageSerialization.Deserialize<Message>(bytes);
+                    var message = LiteNetLibTransportConnection.DecodeLegacy(frame);
                     if (LogSensitivePayloads)
                     {
-                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(bytes))}");
+                        Logger.LogDebug($"Received message: {MessagePackSerializer.ConvertToJson(new ReadOnlyMemory<byte>(frame.Payload))}");
                     }
                     else
                     {
@@ -477,20 +479,6 @@ namespace GameCult.Networking
 
             listener.NetworkLatencyUpdateEvent +=
                 (peer, latency) => Ping = latency; //Logger($"Ping received: {latency} ms");
-        }
-
-        private static bool TryDeserializeCultNet(byte[] payload, out ICultNetSchemaMessage message)
-        {
-            try
-            {
-                message = CultNetSchemaMessageSerialization.Deserialize(payload);
-                return true;
-            }
-            catch (MessagePackSerializationException)
-            {
-                message = null!;
-                return false;
-            }
         }
 
         /// <summary>

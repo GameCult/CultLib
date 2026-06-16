@@ -446,6 +446,42 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void LiteNetLibTransportConnection_DecodesSchemaAndLegacyChannels()
+        {
+            var schemaPayload = CultNetSchemaMessageSerialization.Serialize(new CultNetHelloMessage
+            {
+                RuntimeId = "csharp",
+                RuntimeKind = "csharp",
+                DisplayName = "C#",
+                SupportedMessageVersions = [CultNetSchemaVersions.Hello]
+            });
+            var schemaFrame = LiteNetLibTransportConnection.Decode(schemaPayload);
+
+            Assert.That(schemaFrame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(
+                LiteNetLibTransportConnection.DecodeSchema(schemaFrame),
+                Is.TypeOf<CultNetHelloMessage>());
+
+            var serializationType = typeof(Client).Assembly
+                .GetType("GameCult.Networking.MessageSerialization", throwOnError: true)!;
+            var serialize = serializationType.GetMethod("Serialize", BindingFlags.Public | BindingFlags.Static)!
+                .MakeGenericMethod(typeof(Message));
+            var legacyPayload = (byte[])serialize.Invoke(null, [new ErrorMessage { Error = "Nope" }])!;
+            var legacyFrame = LiteNetLibTransportConnection.Decode(legacyPayload);
+
+            Assert.That(legacyFrame.ChannelId, Is.EqualTo("legacy"));
+            Assert.That(
+                LiteNetLibTransportConnection.DecodeLegacy(legacyFrame),
+                Is.TypeOf<ErrorMessage>());
+            Assert.That(
+                () => LiteNetLibTransportConnection.DecodeSchema(legacyFrame),
+                Throws.InvalidOperationException);
+            Assert.That(
+                () => LiteNetLibTransportConnection.DecodeLegacy(schemaFrame),
+                Throws.InvalidOperationException);
+        }
+
+        [Test]
         public void ReconnectPolicy_ExposesPortableDelayContract()
         {
             var policy = CultNetReconnectPolicies.CreateDefault("rudp-default", maxAttempts: 8);
