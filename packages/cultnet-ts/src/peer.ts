@@ -3,9 +3,9 @@ import type { Duplex } from "node:stream";
 
 import { decode, encode } from "@msgpack/msgpack";
 
-import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetDocumentDeleteMessage, type CultNetDocumentPutMessage, type CultNetErrorMessage, type CultNetHelloMessage, type CultNetLoginMessage, type CultNetLoginSuccessMessage, type CultNetMessage, type CultNetRegisterMessage, type CultNetSampleChangeNameMessage, type CultNetSampleChatMessage, type CultNetSchemaCatalogRequestMessage, type CultNetSchemaCatalogResponseMessage, type CultNetSnapshotRequestMessage, type CultNetSnapshotResponseMessage, type CultNetVerifyMessage, type CultNetWireContract } from "./contracts";
+import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetDocumentDeleteMessage, type CultNetDocumentPutMessage, type CultNetErrorMessage, type CultNetHelloMessage, type CultNetLoginMessage, type CultNetLoginSuccessMessage, type CultNetMessage, type CultNetRegisterMessage, type CultNetSampleChangeNameMessage, type CultNetSampleChatMessage, type CultNetSchemaCatalogRequestMessage, type CultNetSchemaCatalogResponseMessage, type CultNetSnapshotRequestMessage, type CultNetSnapshotResponseMessage, type CultNetTransportProfile, type CultNetVerifyMessage, type CultNetWireContract } from "./contracts";
 import { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
-import type { CultNetTransportConnection } from "./transport";
+import { createTcpFramedTransportProfile, TcpFramedTransportConnection, type CultNetTransportConnection, type TcpFramedTransportProfileOptions } from "./transport";
 
 export interface CultNetPeerEvents {
   message: (message: CultNetMessage) => void;
@@ -16,6 +16,36 @@ export interface CultNetPeerEvents {
 
 export interface CultNetPeerOptions {
   wireContract: CultNetWireContract;
+}
+
+export interface TcpFramedCultNetPeerOptions extends CultNetPeerOptions, TcpFramedTransportProfileOptions {
+  runtimeId: string;
+}
+
+export function createTcpFramedCultNetPeer(
+  stream: Duplex,
+  options: TcpFramedCultNetPeerOptions,
+): CultNetPeer {
+  const {
+    runtimeId,
+    wireContract,
+    transportId,
+    host,
+    port,
+    maxPayloadBytes,
+    maxFragmentBytes,
+  } = options;
+  const transport = new TcpFramedTransportConnection(
+    stream,
+    createTcpFramedTransportProfile(runtimeId, {
+      transportId,
+      host,
+      port,
+      maxPayloadBytes,
+      maxFragmentBytes,
+    }),
+  );
+  return new CultNetPeer(transport, { wireContract });
 }
 
 export class CultNetPeer extends EventEmitter {
@@ -47,6 +77,10 @@ export class CultNetPeer extends EventEmitter {
       this.#stream.on("close", () => this.emit("close"));
       this.#stream.on("error", (error) => this.emit("error", error instanceof Error ? error : new Error(String(error))));
     }
+  }
+
+  get transportProfile(): CultNetTransportProfile | undefined {
+    return this.#transport?.profile;
   }
 
   send(message: CultNetMessage): void {

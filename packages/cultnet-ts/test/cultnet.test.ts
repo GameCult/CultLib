@@ -30,6 +30,7 @@ import {
   cultNetBuiltinSchemaRegistry,
   computeCultNetReconnectDelayMs,
   createCultNetReconnectPolicy,
+  createTcpFramedCultNetPeer,
   createTcpFramedTransportProfile,
   createRudpTransportProfile,
   defineCultNetDocumentBinding,
@@ -729,6 +730,48 @@ test("CultNet peer can speak through a transport connection", async () => {
   }
   assert.equal(leftTransport.stats.framesSent, 1);
   assert.equal(rightTransport.stats.framesReceived, 1);
+
+  sender.close();
+  receiver.close();
+});
+
+test("CultNet TCP helper constructs a transport-backed peer with profile metadata", async () => {
+  const { a, b } = createDuplexPair();
+  const sender = createTcpFramedCultNetPeer(a, {
+    runtimeId: "tcp-helper-left",
+    wireContract: "cultnet.schema.v0",
+    transportId: "helper-left",
+    host: "127.0.0.1",
+    port: 17777,
+    maxPayloadBytes: 64 * 1024,
+  });
+  const receiver = createTcpFramedCultNetPeer(b, {
+    runtimeId: "tcp-helper-right",
+    wireContract: "cultnet.schema.v0",
+  });
+
+  assert.equal(sender.transportProfile?.runtimeId, "tcp-helper-left");
+  assert.equal(sender.transportProfile?.transports[0]?.transportId, "helper-left");
+  assert.equal(sender.transportProfile?.transports[0]?.protocol, "tcp_framed");
+  assert.equal(sender.transportProfile?.transports[0]?.host, "127.0.0.1");
+  assert.equal(sender.transportProfile?.transports[0]?.port, 17777);
+  assert.equal(sender.transportProfile?.transports[0]?.channels[0]?.channelId, "schema");
+  assert.equal(sender.transportProfile?.transports[0]?.channels[0]?.maxPayloadBytes, 64 * 1024);
+
+  const message = await new Promise<ReturnType<typeof parseCultNetMessage>>((resolve, reject) => {
+    receiver.once("message", resolve);
+    receiver.once("invalidMessage", reject);
+    sender.sendHello({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "tcp-helper-sender",
+      runtimeKind: "node-worker",
+    });
+  });
+
+  assert.equal(message.schemaVersion, "cultnet.hello.v0");
+  if (message.schemaVersion === "cultnet.hello.v0") {
+    assert.equal(message.runtimeId, "tcp-helper-sender");
+  }
 
   sender.close();
   receiver.close();

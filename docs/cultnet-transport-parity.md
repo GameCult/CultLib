@@ -167,7 +167,10 @@ Current progress:
   over either the compatibility `Duplex` stream path or the transport
   connection path, while the TypeScript interop peer now accepts and dials TCP
   peers through `TcpFramedTransportConnection` so the parity harness exercises
-  the shared port instead of raw socket framing.
+  the shared port instead of raw socket framing. `createTcpFramedCultNetPeer`
+  gives application callers the same transport-first path without hand-building
+  the profile and adapter; raw `Duplex` peer construction is now explicitly the
+  compatibility lane.
 - Python now has the same `tcp_framed` transport profile helper plus a
   synchronous `TcpFramedTransportConnection` with `send`, `receive`, `close`,
   and stats. `CultNetRawClient`, database subscriptions, and the local
@@ -315,11 +318,13 @@ Current progress:
   contact hints. The facade delegates to the existing Rust RUDP socket
   transport; discovery contact remains separate from trust, which is still
   gated by the authority lease catalog.
-- The remaining parity work is to move the remaining LiteNetLib/WebSocket
-  service bodies behind their shared transport ports, then wire any remaining
-  daemon/socket reconnect loops through the shared controller. The core
-  schema-message RUDP matrix is live in the TypeScript interop gate; broader
-  service adoption remains the unclaimed layer.
+- The remaining parity work is to finish production service-body adoption
+  behind the shared transport ports, then wire any remaining daemon/socket
+  reconnect loops through the shared controller. C# built-in LiteNetLib service
+  wrappers now route through `CultNetServerPeer`, TypeScript exposes a
+  transport-first TCP peer helper, and the core schema-message RUDP matrix is
+  live in the TypeScript interop gate; broader service adoption remains the
+  unclaimed layer.
 
 ## RUDP Packet Contract V0
 

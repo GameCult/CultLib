@@ -181,7 +181,7 @@ polymorphic attack surface.
 import { CultCache, defineDocumentType } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
-  CultNetPeer,
+  createTcpFramedCultNetPeer,
   defineCultNetDocumentBinding,
   ghostlightAgentStateGeneratedContract,
 } from "cultnet-ts";
@@ -198,8 +198,10 @@ const registry = new CultNetDocumentRegistry([
   }),
 ]);
 
-const peer = new CultNetPeer(stream, {
+const peer = createTcpFramedCultNetPeer(stream, {
+  runtimeId: "node-worker",
   wireContract: "cultnet.schema.v0",
+  transportId: "worker-tcp",
 });
 ```
 
@@ -231,8 +233,10 @@ maps them back to the exact C# union payload shape at the wire boundary.
 - The Ghostlight agent-state mirror is an exact copy of Ghostlight's current
   canonical schema. If Ghostlight changes the contract, this mirror must be
   updated in lockstep instead of playing coy with partial validation.
-- The direct transport is any Node `Duplex`; named-pipe/socket server wrappers
-  can be added without changing the message contract.
+- The preferred direct transport path is `CultNetTransportConnection`.
+  `createTcpFramedCultNetPeer(...)` wraps a Node `Duplex` in the shared
+  `tcp_framed` profile before schema messages reach `CultNetPeer`. Passing a
+  raw `Duplex` to `CultNetPeer` remains as compatibility for older callers.
 
 ## Development
 
