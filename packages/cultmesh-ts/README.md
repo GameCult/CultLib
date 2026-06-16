@@ -28,6 +28,7 @@ peers.upsert({
   verseId: "public",
   endpoints: ["rudp://127.0.0.1:4100"],
   roles: ["read-replica"],
+  authorityLeaseId: "lease:ts-peer",
 });
 
 const readReplicas = peers.find("public", "read-replica");
@@ -45,6 +46,11 @@ leases.upsert({
   validFrom: new Date(Date.now() - 1000),
   expiresAt: new Date(Date.now() + 60_000),
 });
+const authorizedReplicas = peers.findAuthorized(
+  "public",
+  "read-replica",
+  leases,
+);
 stopWatchingLeases();
 
 const schemas = CultMesh.createBuiltInSchemaCatalog();
@@ -86,15 +92,37 @@ const peer = {
   verseId: "local",
   endpoints: [endpoint.uri],
   roles: ["schema"],
+  authorityLeaseId: "lease:ts-server",
 };
 
-const client = await CultMesh.createRudpClientForPeer(
+const peers = CultMesh.createPeerCatalog();
+const leases = CultMesh.createAuthorityLeaseCatalog();
+peers.upsert(peer);
+leases.upsert({
+  leaseId: "lease:ts-server",
+  verseId: "local",
+  peerId: "ts-server",
+  roles: ["schema"],
+  validFrom: new Date(Date.now() - 1_000),
+  expiresAt: new Date(Date.now() + 60_000),
+});
+
+const client = await CultMesh.createRudpClientForAuthorizedPeer(
   "ts-client",
   0x1020_3040,
-  peer,
+  peers,
+  leases,
+  "local",
+  "schema",
 );
 client.connect(new TextEncoder().encode("join"));
 ```
+
+`CultMesh.createRudpClientForPeer(...)` remains available for already trusted
+call sites. Discovery-first paths should prefer
+`createRudpClientForAuthorizedPeer(...)`, which composes
+`CultMeshPeerCatalog.firstAuthorized(...)` with the authority lease catalog
+before using the peer-card endpoint as a dial target.
 
 ## Streaming Mode
 
