@@ -31,7 +31,7 @@ CultMesh.
 | Runtime | Role | Claimed parity | Not claimed |
 | --- | --- | --- | --- |
 | C# | Reference implementation and production game/server substrate | CultCache typed documents and SoA, CultNet schema-v0, LiteNetLib production path, shared transport profiles, shared RUDP socket transport, CultMesh node/session/catalog/stream/simulation surfaces | No need to abandon LiteNetLib before the CultNet adapter fully owns production service adoption |
-| Python | Package runtime, local daemon endpoint, raw interop peer, typed state participant | CultCache/CultNet/CultMesh package surface, schema catalogs, shard catalogs/logs, local TCP CultMesh server, session/prediction/simulation fact helpers, authority leases, streams, RUDP codec/session/socket transport, benchmark evidence against C# cache paths | Universal C# throughput, full C# daemon/server stack, and RUDP as the only public service pipe |
+| Python | Package runtime, local daemon endpoint, raw interop peer, typed state participant | CultCache/CultNet/CultMesh package surface, schema catalogs, shard catalogs/logs, local TCP CultMesh server, session/prediction/simulation fact helpers, authority leases, streams, RUDP codec/session/socket transport, schema-v0 MessagePack over RUDP evidence, benchmark evidence against C# cache paths | Universal C# throughput, full C# daemon/server stack, and RUDP as the only public service pipe |
 | TypeScript | Node/browser-adjacent projection and interop runtime | CultCache parity tests, CultNet schema-v0 peer, transport profiles, TCP-framed transport port, shared RUDP socket transport, local CultMesh node/catalog/authority/stream ergonomics | Full C# game session/server stack |
 | Rust | Low-level cache/transport/runtime substrate | CultCache/CultNet interop lane, transport profiles, TCP-framed port, shared RUDP codec/session/socket transport | Full CultMesh ergonomic facade or production game-session server |
 | Kotlin | JVM/Android client substrate | Typed MessagePack cache, schema/shard catalogs, authority leases, stream catalog, branded `CultMesh` facade, RUDP client/server sugar, schema-v0 MessagePack over RUDP evidence | C# SoA store, full C# server daemon, or Unity hot-loop memory layout |
@@ -42,8 +42,7 @@ CultMesh.
   wire harness. It covers schema-v0 interop and RUDP exchange across C#,
   TypeScript, Rust, Python, and Kotlin, including loss, reordering,
   fragmentation, disconnect reason propagation, ping/pong, and schema-v0
-  MessagePack over RUDP for the runtimes currently wired into that message
-  lane.
+  MessagePack over RUDP for C#, Python, and Kotlin peers against TypeScript.
 - `packages/cultcache-py/PARITY.md` is the Python-specific audit ledger. Its
   "Still Not Claimed" section is part of the contract, not an apology.
 - `docs/cultnet-transport-parity.md` is the transport ownership map. It tracks
@@ -57,9 +56,8 @@ CultMesh.
 - Broaden service adoption so local servers and daemon paths use the shared
   transport port consistently instead of keeping raw TCP/LiteNetLib/WebSocket
   ownership in individual bodies.
-- Extend RUDP interop evidence through reconnect policy and the wider
-  schema-message matrix, not only the current schema-frame and selected
-  schema-v0 message paths.
+- Extend RUDP interop evidence through reconnect policy, Rust schema-v0
+  MessagePack-over-RUDP coverage, and the wider schema-message matrix.
 - Keep Kotlin ergonomic parity moving with Android/JVM-shaped APIs instead of
   backfilling C# server responsibilities it should not own.
 - Keep performance claims evidence-bound: C# owns SoA; Python has benchmark

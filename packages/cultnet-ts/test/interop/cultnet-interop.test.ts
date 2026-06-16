@@ -237,6 +237,135 @@ transport.close()
 raise SystemExit("timed out waiting for TypeScript RUDP frame")
 `;
 
+const pythonRudpMessagePeerScript = String.raw`
+import msgpack
+import socket
+import time
+
+from cultnet_py import (
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+    create_rudp_transport_profile,
+)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(0.02)
+transport = CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptions(
+    runtime_id="python-rudp-message-interop",
+    socket=sock,
+    mode=CultNetRudpSocketMode.SERVER,
+    connection_id=0x55667789,
+    initial_sequence=100,
+    resend_delay_ms=25,
+))
+print(f"PORT {sock.getsockname()[1]}", flush=True)
+
+deadline = time.time() + 5
+while time.time() < deadline:
+    frame = transport.receive_once()
+    transport.poll_resends()
+    if frame is None:
+        time.sleep(0.005)
+        continue
+    if frame.channel_id != "schema":
+        transport.close()
+        raise SystemExit(f"unexpected RUDP channel: {frame.channel_id!r}")
+    message = msgpack.unpackb(frame.payload, raw=False)
+    if message.get("schemaVersion") != "cultnet.schema_catalog_request.v0":
+        transport.close()
+        raise SystemExit(f"unexpected schema message: {message!r}")
+    response = {
+        "schemaVersion": "cultnet.hello.v0",
+        "runtimeId": "python-rudp-message-interop",
+        "runtimeKind": "python",
+        "supportedDocumentTypes": [],
+        "supportedMutationContracts": [],
+        "supportedMessageVersions": ["cultnet.hello.v0", "cultnet.schema_catalog_request.v0"],
+        "transportProfiles": [create_rudp_transport_profile(
+            "python-rudp-message-interop",
+            host="127.0.0.1",
+            port=sock.getsockname()[1],
+        )],
+        "supportsSchemaCatalog": True,
+    }
+    transport.send("schema", msgpack.packb(response, use_bin_type=True))
+    print("OK", flush=True)
+    ack_deadline = time.time() + 0.25
+    while time.time() < ack_deadline:
+        transport.receive_once()
+        transport.poll_resends()
+        time.sleep(0.005)
+    transport.close()
+    raise SystemExit(0)
+
+transport.close()
+raise SystemExit("timed out waiting for RUDP schema-v0 message")
+`;
+
+const pythonRudpMessageClientScript = String.raw`
+import msgpack
+import socket
+import sys
+import time
+
+from cultnet_py import (
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+)
+
+remote_port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sock.settimeout(0.02)
+transport = CultNetRudpSocketTransportConnection(CultNetRudpSocketTransportOptions(
+    runtime_id="python-rudp-message-client-interop",
+    socket=sock,
+    mode=CultNetRudpSocketMode.CLIENT,
+    remote_addr=("127.0.0.1", remote_port),
+    connection_id=0x66554434,
+    initial_sequence=1,
+    resend_delay_ms=25,
+))
+transport.connect(b"python-message-join")
+
+sent = False
+deadline = time.time() + 5
+while time.time() < deadline:
+    frame = transport.receive_once()
+    transport.poll_resends()
+    if transport.connected and not sent:
+        transport.send("schema", msgpack.packb({
+            "schemaVersion": "cultnet.schema_catalog_request.v0",
+            "messageId": "python-ts-schema-message",
+            "includeSchemaJson": False,
+            "schemaIds": [],
+            "kinds": ["wire_message"],
+        }, use_bin_type=True))
+        sent = True
+    if frame is None:
+        time.sleep(0.005)
+        continue
+    if frame.channel_id != "schema":
+        transport.close()
+        raise SystemExit(f"unexpected RUDP channel: {frame.channel_id!r}")
+    message = msgpack.unpackb(frame.payload, raw=False)
+    if message.get("schemaVersion") != "cultnet.hello.v0":
+        transport.close()
+        raise SystemExit(f"unexpected schema message: {message!r}")
+    if message.get("runtimeId") != "ts-python-rudp-message-server":
+        transport.close()
+        raise SystemExit(f"unexpected runtime id: {message!r}")
+    print("OK", flush=True)
+    transport.close()
+    raise SystemExit(0)
+
+transport.close()
+raise SystemExit("timed out waiting for TypeScript RUDP schema-v0 message")
+`;
+
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   await buildInteropPeers();
   cleanInteropStores([
@@ -834,6 +963,112 @@ test("CultNet Python and TypeScript exchange schema frames when Python dials a T
   }
 });
 
+test("CultNet TypeScript and Python exchange schema-v0 MessagePack messages over RUDP", async () => {
+  const pythonPeer = spawnPythonRudpMessagePeer();
+  const clientSocket = await bindUdpSocket();
+  let client: CultNetRudpSocketTransportConnection | undefined;
+
+  try {
+    const pythonPort = await pythonPeer.ready;
+    client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "ts-python-rudp-message-interop",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: pythonPort,
+      connectionId: 0x55667789,
+      initialSequence: 1,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+    });
+
+    const receivedFrame = once(client, "frame");
+    client.connect(Buffer.from("ts-python-message-join"));
+    await waitFor(() => client?.connected === true, "TypeScript RUDP client to complete Python message handshake");
+    client.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.schema_catalog_request.v0",
+      messageId: "ts-python-schema-message",
+      includeSchemaJson: false,
+      schemaIds: [],
+      kinds: ["wire_message"],
+    })));
+
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP schema-v0 response frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      runtimeId?: string;
+      supportsSchemaCatalog?: boolean;
+      transportProfiles?: Array<{ transports?: Array<{ protocol?: string; channels?: Array<{ channelId?: string }> }> }>;
+    };
+    assert.equal(message.schemaVersion, "cultnet.hello.v0");
+    assert.equal(message.runtimeId, "python-rudp-message-interop");
+    assert.equal(message.supportsSchemaCatalog, true);
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.protocol, "rudp");
+    assert.equal(message.transportProfiles?.[0]?.transports?.[0]?.channels?.[0]?.channelId, "schema");
+
+    const [exitCode] = await withTimeout(once(pythonPeer.child, "exit"), 2_000, "Python RUDP message peer exit");
+    assert.equal(exitCode, 0, pythonPeer.stderr.join(""));
+  } finally {
+    if (client) {
+      client.close();
+    } else {
+      clientSocket.close();
+    }
+    if (pythonPeer.child.exitCode === null && !pythonPeer.child.killed) {
+      pythonPeer.child.kill("SIGTERM");
+      await once(pythonPeer.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
+test("CultNet Python and TypeScript exchange schema-v0 MessagePack messages over RUDP when Python dials", async () => {
+  const serverSocket = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "ts-python-rudp-message-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId: 0x66554434,
+    initialSequence: 100,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+  });
+  const pythonClient = spawnPythonRudpMessageClient(udpSocketPort(serverSocket));
+
+  try {
+    const receivedFrame = once(server, "frame");
+    const [frame] = await withTimeout(receivedFrame, 2_000, "Python RUDP schema-v0 client frame");
+    assert.equal(frame.channelId, "schema");
+    const message = decode(frame.payload) as {
+      schemaVersion?: string;
+      messageId?: string;
+      kinds?: string[];
+    };
+    assert.equal(message.schemaVersion, "cultnet.schema_catalog_request.v0");
+    assert.equal(message.messageId, "python-ts-schema-message");
+    assert.deepEqual(message.kinds, ["wire_message"]);
+    server.send("schema", Buffer.from(encode({
+      schemaVersion: "cultnet.hello.v0",
+      runtimeId: "ts-python-rudp-message-server",
+      runtimeKind: "typescript",
+      supportedDocumentTypes: [],
+      supportedMutationContracts: [],
+      supportedMessageVersions: ["cultnet.hello.v0", "cultnet.schema_catalog_request.v0"],
+      transportProfiles: [],
+      supportsSchemaCatalog: true,
+    })));
+
+    const [exitCode] = await withTimeout(once(pythonClient.child, "exit"), 2_000, "Python RUDP message client exit");
+    assert.equal(exitCode, 0, pythonClient.stderr.join(""));
+  } finally {
+    server.close();
+    if (pythonClient.child.exitCode === null && !pythonClient.child.killed) {
+      pythonClient.child.kill("SIGTERM");
+      await once(pythonClient.child, "exit").catch(() => undefined);
+    }
+  }
+});
+
 test("CultNet TypeScript and Rust exchange schema frames over the shared RUDP socket transport", async () => {
   await buildRustInteropPeer();
   const rustPeer = spawnRustRudpServer();
@@ -1046,7 +1281,7 @@ test("CultNet TypeScript and C# exchange schema-v0 MessagePack messages over RUD
   }
 });
 
-test("CultNet C# and TypeScript exchange schema-v0 MessagePack messages when C# dials", async () => {
+test("CultNet C# and TypeScript exchange schema-v0 MessagePack messages over RUDP when C# dials", async () => {
   await buildCSharpInteropPeer();
   const serverSocket = await bindUdpSocket();
   const server = new CultNetRudpSocketTransportConnection({
@@ -1230,7 +1465,7 @@ test("CultNet TypeScript and Kotlin exchange schema-v0 MessagePack messages over
   }
 });
 
-test("CultNet Kotlin and TypeScript exchange schema-v0 MessagePack messages when Kotlin dials", async () => {
+test("CultNet Kotlin and TypeScript exchange schema-v0 MessagePack messages over RUDP when Kotlin dials", async () => {
   await buildKotlinInteropPeer();
   const serverSocket = await bindUdpSocket();
   const server = new CultNetRudpSocketTransportConnection({
@@ -1873,6 +2108,54 @@ function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPytho
   return { child, ready, stderr };
 }
 
+function spawnPythonRudpMessagePeer(): RunningPythonRudpPeer {
+  const child = spawn(pythonCommand, ["-c", pythonRudpMessagePeerScript], {
+    cwd: cultcachePyRoot,
+    env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  let stdoutBuffer = "";
+
+  const ready = new Promise<number>((resolveReady, rejectReady) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      while (true) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline === -1) {
+          break;
+        }
+
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        const portMatch = /^PORT\s+(\d+)$/.exec(line);
+        if (portMatch) {
+          resolveReady(Number(portMatch[1]));
+          continue;
+        }
+        if (line !== "OK") {
+          rejectReady(new Error(`Python RUDP message peer emitted unexpected stdout: ${line}`));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      rejectReady(new Error(`Python RUDP message peer exited before publishing a port (code=${code}, signal=${signal}).\n${stderr.join("")}`));
+    });
+    child.once("error", rejectReady);
+  });
+
+  return { child, ready, stderr };
+}
+
 function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
   const child = spawn(rustBinaryPath, [
     "rudp-serve-once",
@@ -2161,6 +2444,21 @@ function spawnKotlinRudpMessageServer(): RunningPythonRudpPeer {
 
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
   const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
+    cwd: cultcachePyRoot,
+    env: { ...process.env, PYTHONPATH: cultcachePySrc },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr.push(chunk);
+  });
+
+  return { child, stderr };
+}
+
+function spawnPythonRudpMessageClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
+  const child = spawn(pythonCommand, ["-c", pythonRudpMessageClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
     stdio: ["ignore", "pipe", "pipe"],
