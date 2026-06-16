@@ -69,6 +69,33 @@ Schema and shard catalog factories delegate to `cultnet-ts`; the branded
 `CultMesh` entrypoint does not create a second owner for schema discovery or
 topology truth.
 
+## RUDP Helpers
+
+Node runtimes can build the shared CultNet reliable-UDP transport from the
+branded CultMesh entrypoint while the transport semantics stay owned by
+`cultnet-ts`:
+
+```ts
+const server = await CultMesh.createRudpServer("ts-server", 0x1020_3040);
+const endpoint = CultMesh.parseRudpEndpoint(
+  `rudp://127.0.0.1:${server.profile.transports[0]?.port}`,
+);
+
+const peer = {
+  peerId: "ts-server",
+  verseId: "local",
+  endpoints: [endpoint.uri],
+  roles: ["schema"],
+};
+
+const client = await CultMesh.createRudpClientForPeer(
+  "ts-client",
+  0x1020_3040,
+  peer,
+);
+client.connect(new TextEncoder().encode("join"));
+```
+
 ## Streaming Mode
 
 CultMesh streaming mode is for audio, video, tensor, and opaque byte frames that

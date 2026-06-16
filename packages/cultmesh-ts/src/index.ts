@@ -1,3 +1,5 @@
+import { createSocket, type Socket } from "node:dgram";
+
 import {
   CultCache,
   SingleFileMessagePackBackingStore,
@@ -7,11 +9,13 @@ import {
 } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
+  CultNetRudpSocketTransportConnection,
   CultNetSchemaCatalog,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
   defineCultNetDocumentBinding,
   type CultNetDocumentBinding,
+  type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
 } from "cultnet-ts";
 
@@ -101,6 +105,26 @@ export interface CultMeshPeerCard {
   roles?: readonly string[];
   shardIds?: readonly string[];
   authorityLeaseId?: string;
+}
+
+export interface CultMeshRudpEndpoint {
+  host: string;
+  port: number;
+  uri: string;
+}
+
+export interface CultMeshRudpSocketOptions {
+  bindHost?: string;
+  bindPort?: number;
+  socket?: Socket;
+  initialSequence?: number;
+  resendDelayMs?: number;
+  resendPollMs?: number;
+  transportId?: string;
+  maxPayloadBytes?: number;
+  maxFragmentBytes?: number;
+  maxPendingReliablePackets?: number;
+  reconnectPolicy?: CultNetReconnectPolicy;
 }
 
 export class CultMeshPeerCatalog {
@@ -496,12 +520,111 @@ export class CultMesh {
   public static createShardCatalog(): CultNetShardCatalog {
     return new CultNetShardCatalog();
   }
+
+  public static parseRudpEndpoint(endpoint: string): CultMeshRudpEndpoint {
+    requireNonEmpty(endpoint, "endpoint");
+    const parsed = new URL(endpoint);
+    if (parsed.protocol.toLowerCase() !== "rudp:") {
+      throw new Error("RUDP endpoint must use the rudp:// scheme.");
+    }
+    if (!parsed.hostname || !parsed.port) {
+      throw new Error("RUDP endpoint must include a host and port.");
+    }
+    const port = Number.parseInt(parsed.port, 10);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error("RUDP endpoint port must be between 1 and 65535.");
+    }
+    const host = parsed.hostname;
+    const uriHost =
+      host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    return { host, port, uri: `rudp://${uriHost}:${port}` };
+  }
+
+  public static async createRudpServer(
+    runtimeId: string,
+    connectionId: number,
+    options: CultMeshRudpSocketOptions = {},
+  ): Promise<CultNetRudpSocketTransportConnection> {
+    requireNonEmpty(runtimeId, "runtimeId");
+    const socket = options.socket ?? (await bindRudpSocket(options));
+    return new CultNetRudpSocketTransportConnection({
+      runtimeId,
+      socket,
+      mode: "server",
+      connectionId,
+      initialSequence: options.initialSequence,
+      resendDelayMs: options.resendDelayMs,
+      resendPollMs: options.resendPollMs,
+      transportId: options.transportId,
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxFragmentBytes: options.maxFragmentBytes,
+      maxPendingReliablePackets: options.maxPendingReliablePackets,
+      reconnectPolicy: options.reconnectPolicy,
+    });
+  }
+
+  public static async createRudpClient(
+    runtimeId: string,
+    connectionId: number,
+    endpoint: string | CultMeshRudpEndpoint,
+    options: CultMeshRudpSocketOptions = {},
+  ): Promise<CultNetRudpSocketTransportConnection> {
+    requireNonEmpty(runtimeId, "runtimeId");
+    const parsedEndpoint =
+      typeof endpoint === "string" ? CultMesh.parseRudpEndpoint(endpoint) : endpoint;
+    const socket = options.socket ?? (await bindRudpSocket(options));
+    return new CultNetRudpSocketTransportConnection({
+      runtimeId,
+      socket,
+      mode: "client",
+      remoteHost: parsedEndpoint.host,
+      remotePort: parsedEndpoint.port,
+      connectionId,
+      initialSequence: options.initialSequence,
+      resendDelayMs: options.resendDelayMs,
+      resendPollMs: options.resendPollMs,
+      transportId: options.transportId,
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxFragmentBytes: options.maxFragmentBytes,
+      maxPendingReliablePackets: options.maxPendingReliablePackets,
+      reconnectPolicy: options.reconnectPolicy,
+    });
+  }
+
+  public static async createRudpClientForPeer(
+    runtimeId: string,
+    connectionId: number,
+    peer: CultMeshPeerCard,
+    options: CultMeshRudpSocketOptions = {},
+  ): Promise<CultNetRudpSocketTransportConnection> {
+    const endpoint = peer.endpoints.find((value) =>
+      value.toLowerCase().startsWith("rudp://"),
+    );
+    if (!endpoint) {
+      throw new Error(`Peer ${peer.peerId} does not advertise a RUDP endpoint.`);
+    }
+    return CultMesh.createRudpClient(runtimeId, connectionId, endpoint, options);
+  }
 }
 
 function requireNonEmpty(value: string, name: string): void {
   if (!value || value.trim().length === 0) {
     throw new Error(`${name} must be non-empty.`);
   }
+}
+
+async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socket> {
+  const socket = createSocket("udp4");
+  const host = options.bindHost ?? "127.0.0.1";
+  const port = options.bindPort ?? 0;
+  await new Promise<void>((resolve, reject) => {
+    socket.once("error", reject);
+    socket.bind(port, host, () => {
+      socket.off("error", reject);
+      resolve();
+    });
+  });
+  return socket;
 }
 
 function copyBudgetFor(

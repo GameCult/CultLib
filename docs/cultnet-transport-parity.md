@@ -320,7 +320,9 @@ Current progress:
   `CultMesh` facade also creates schema catalogs, built-in schema catalogs, and
   shard catalogs by delegating to the existing `cultnet-ts` owners, so callers
   do not have to leave the CultMesh entrypoint for schema discovery or shard
-  topology.
+  topology. The facade now also parses `rudp://host:port` endpoints and creates
+  RUDP client/server transports from endpoint or peer-card contact hints while
+  leaving packet/session semantics in `cultnet-ts`.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.

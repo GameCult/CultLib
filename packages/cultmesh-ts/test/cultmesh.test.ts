@@ -17,6 +17,16 @@ const noteDocument = defineDocumentType({
   name: "noteId",
 });
 
+async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > 1_000) {
+      throw new Error(`Timed out waiting for ${description}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 test("CultMesh TS opens a durable local node and registers document bindings", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-")), "node.ccmp");
   const first = await CultMesh.startNode(filePath, {
@@ -186,6 +196,66 @@ test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
       .map((shard) => shard.shardId),
     ["notes-a"],
   );
+});
+
+test("CultMesh TS branded facade creates RUDP clients from peer endpoints", async () => {
+  const connectionId = 0x10203044;
+  const server = await CultMesh.createRudpServer(
+    "cultmesh-ts-rudp-server",
+    connectionId,
+    {
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+  const serverPort = server.profile.transports[0]?.port;
+  assert.equal(typeof serverPort, "number");
+  const endpoint = CultMesh.parseRudpEndpoint(`rudp://127.0.0.1:${serverPort}`);
+  assert.equal(endpoint.host, "127.0.0.1");
+  assert.equal(endpoint.port, serverPort);
+
+  const peer = {
+    peerId: "cultmesh-ts-rudp-server",
+    verseId: "local",
+    endpoints: [endpoint.uri],
+    roles: ["schema"],
+  };
+  const client = await CultMesh.createRudpClientForPeer(
+    "cultmesh-ts-rudp-client",
+    connectionId,
+    peer,
+    {
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+
+  try {
+    const serverFrame = new Promise<{ channelId: string; payload: Uint8Array }>(
+      (resolve, reject) => {
+        server.once("frame", resolve);
+        server.once("error", reject);
+      },
+    );
+    client.connect(Buffer.from("join", "utf8"));
+    await waitFor(
+      () => client.connected && server.connected,
+      "CultMesh RUDP handshake",
+    );
+    client.send("schema", Buffer.from("client-state", "utf8"));
+    const receivedByServer = await serverFrame;
+    assert.equal(receivedByServer.channelId, "schema");
+    assert.equal(Buffer.from(receivedByServer.payload).toString("utf8"), "client-state");
+    assert.equal(server.profile.transports[0]?.protocol, "rudp");
+    assert.equal(client.profile.transports[0]?.protocol, "rudp");
+  } finally {
+    client.close();
+    server.close();
+  }
 });
 
 test("CultMesh TS negotiates streaming frame body transports explicitly", () => {
