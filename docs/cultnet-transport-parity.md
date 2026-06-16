@@ -247,6 +247,10 @@ Current progress:
   callers: the caller-owned receive loop reports closure, the shared controller
   owns retry delay/exhaustion state, and the caller-provided factory opens the
   next `CultNetRudpSocketTransportConnection`.
+- Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
+  service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
+  reactor, and the shared controller owns retry delay/exhaustion state while the
+  caller-owned factory opens the next socket transport.
 - Kotlin now has the same RUDP reconnect-loop shape for JVM/Android callers:
   the app-owned receive loop reports closure, `CultNetRudpReconnectLoop`
   schedules retry through `CultNetReconnectController`, and the caller-provided

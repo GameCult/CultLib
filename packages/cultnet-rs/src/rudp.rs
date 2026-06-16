@@ -9,6 +9,8 @@ use std::net::UdpSocket;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::CultNetReconnectController;
+use crate::CultNetReconnectDecision;
 use crate::CultNetReconnectPolicy;
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
@@ -993,6 +995,98 @@ impl CultNetRudpSocketTransportConnection {
         let sent = self.socket.send_to(&wire, remote_addr)?;
         self.stats.bytes_sent += sent as u64;
         Ok(())
+    }
+}
+
+pub struct CultNetRudpReconnectLoop<F>
+where
+    F: FnMut() -> Result<CultNetRudpSocketTransportConnection>,
+{
+    pub reconnect_controller: CultNetReconnectController,
+    create_transport: F,
+    connect_payload: Vec<u8>,
+    transport: Option<CultNetRudpSocketTransportConnection>,
+    stopped: bool,
+}
+
+impl<F> CultNetRudpReconnectLoop<F>
+where
+    F: FnMut() -> Result<CultNetRudpSocketTransportConnection>,
+{
+    pub fn new(
+        reconnect_policy: CultNetReconnectPolicy,
+        connect_payload: Vec<u8>,
+        create_transport: F,
+    ) -> Self {
+        Self {
+            reconnect_controller: CultNetReconnectController::new(reconnect_policy),
+            create_transport,
+            connect_payload,
+            transport: None,
+            stopped: true,
+        }
+    }
+
+    pub fn with_default_policy(connect_payload: Vec<u8>, create_transport: F) -> Self {
+        Self::new(
+            create_reconnect_policy(Default::default()),
+            connect_payload,
+            create_transport,
+        )
+    }
+
+    pub fn transport(&self) -> Option<&CultNetRudpSocketTransportConnection> {
+        self.transport.as_ref()
+    }
+
+    pub fn transport_mut(&mut self) -> Option<&mut CultNetRudpSocketTransportConnection> {
+        self.transport.as_mut()
+    }
+
+    pub fn start(&mut self) -> Result<&mut CultNetRudpSocketTransportConnection> {
+        self.stopped = false;
+        self.reconnect_controller.reset();
+        self.open_transport()
+    }
+
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.transport = None;
+        self.reconnect_controller.reset();
+    }
+
+    pub fn mark_connected(&mut self) {
+        self.reconnect_controller.reset();
+    }
+
+    pub fn handle_closed(
+        &mut self,
+        now_ms: u64,
+        jitter_ms: u64,
+    ) -> Option<CultNetReconnectDecision> {
+        self.transport = None;
+        if self.stopped {
+            return None;
+        }
+        Some(self.reconnect_controller.record_failure(now_ms, jitter_ms))
+    }
+
+    pub fn reconnect_if_due(&mut self, now_ms: u64) -> Result<bool> {
+        if self.stopped || !self.reconnect_controller.can_attempt(now_ms) {
+            return Ok(false);
+        }
+        self.open_transport()?;
+        Ok(true)
+    }
+
+    fn open_transport(&mut self) -> Result<&mut CultNetRudpSocketTransportConnection> {
+        let mut transport = (self.create_transport)()?;
+        transport.connect(self.connect_payload.clone())?;
+        self.transport = Some(transport);
+        Ok(self
+            .transport
+            .as_mut()
+            .expect("RUDP reconnect loop opened a transport"))
     }
 }
 

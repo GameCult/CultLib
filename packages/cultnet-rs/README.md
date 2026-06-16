@@ -112,6 +112,31 @@ let mut client = CultMesh::create_rudp_client_for_peer(
 client.connect(b"join".to_vec())?;
 ```
 
+For caller-owned reconnect loops, `CultNetRudpReconnectLoop` keeps transport
+construction outside the library while sharing the portable retry controller:
+
+```rust
+use cultnet_rs::{
+    CultNetReconnectPolicyOptions, CultNetRudpReconnectLoop, create_reconnect_policy,
+};
+
+let policy = create_reconnect_policy(CultNetReconnectPolicyOptions::default());
+let mut reconnect = CultNetRudpReconnectLoop::new(policy, b"join".to_vec(), || {
+    CultMesh::create_rudp_client_for_peer(
+        "rust-client",
+        0x1020_3040,
+        &peer,
+        CultMeshRudpSocketOptions::default(),
+    )
+});
+
+reconnect.start()?;
+let decision = reconnect.handle_closed(now_ms, 0);
+if decision.is_some() {
+    reconnect.reconnect_if_due(now_ms)?;
+}
+```
+
 `CultMesh::parse_rudp_endpoint(...)` handles advertised `rudp://host:port`
 contact hints, and `CultMeshAuthorityLeaseCatalog` keeps trust separate from
 discovery. A peer card can say where to dial; a lease decides whether that peer

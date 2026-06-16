@@ -20,6 +20,7 @@ use cultnet_rs::CultNetReconnectController;
 use cultnet_rs::CultNetReconnectPolicyOptions;
 use cultnet_rs::CultNetRudpPacket;
 use cultnet_rs::CultNetRudpPacketType;
+use cultnet_rs::CultNetRudpReconnectLoop;
 use cultnet_rs::CultNetRudpSendOptions;
 use cultnet_rs::CultNetRudpSession;
 use cultnet_rs::CultNetRudpSessionOptions;
@@ -53,7 +54,9 @@ use cultnet_rs::encode_cultnet_message_to_vec;
 use cultnet_rs::encode_frame;
 use cultnet_rs::encode_rudp_packet;
 use pretty_assertions::assert_eq;
+use std::cell::RefCell;
 use std::net::UdpSocket;
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -393,6 +396,63 @@ fn reconnect_controller_schedules_attempts_and_reset() {
     assert_eq!(controller.next_attempt_at_ms(), None);
     assert!(!controller.exhausted());
     assert!(controller.can_attempt(99_000));
+}
+
+#[test]
+fn rudp_reconnect_loop_consumes_shared_controller() -> Result<()> {
+    let server_socket = bind_udp_socket()?;
+    let remote_addr = server_socket.local_addr()?;
+    let opened_local_addrs = Rc::new(RefCell::new(Vec::new()));
+    let opened_for_factory = Rc::clone(&opened_local_addrs);
+    let connection_id = 0x2233_4455;
+    let policy = create_reconnect_policy(CultNetReconnectPolicyOptions {
+        max_attempts: Some(2),
+        ..CultNetReconnectPolicyOptions::default()
+    });
+
+    let mut loop_ = CultNetRudpReconnectLoop::new(policy, b"join".to_vec(), move || {
+        let socket = bind_udp_socket()?;
+        opened_for_factory.borrow_mut().push(socket.local_addr()?);
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
+            "rust-rudp-reconnect",
+            socket,
+            remote_addr,
+            connection_id,
+        ))
+    });
+
+    {
+        let first = loop_.start()?;
+        assert!(first.stats().bytes_sent > 0);
+    }
+    assert!(loop_.transport().is_some());
+    assert_eq!(opened_local_addrs.borrow().len(), 1);
+
+    let decision = loop_.handle_closed(10_000, 17).expect("retry decision");
+    assert_eq!(decision.attempt, 1);
+    assert!(decision.should_retry);
+    assert_eq!(decision.delay_ms, 1_017);
+    assert_eq!(decision.next_attempt_at_ms, Some(11_017));
+    assert_eq!(loop_.reconnect_controller.attempt(), 1);
+    assert_eq!(
+        loop_.reconnect_controller.next_attempt_at_ms(),
+        Some(11_017)
+    );
+
+    assert!(!loop_.reconnect_if_due(11_016)?);
+    assert_eq!(opened_local_addrs.borrow().len(), 1);
+    assert!(loop_.reconnect_if_due(11_017)?);
+    assert_eq!(opened_local_addrs.borrow().len(), 2);
+    assert!(loop_.transport().is_some());
+
+    loop_.mark_connected();
+    assert_eq!(loop_.reconnect_controller.attempt(), 0);
+
+    loop_.stop();
+    assert!(loop_.transport().is_none());
+    assert_eq!(loop_.reconnect_controller.attempt(), 0);
+
+    Ok(())
 }
 
 #[test]
