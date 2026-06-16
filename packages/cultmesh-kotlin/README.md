@@ -2,8 +2,8 @@
 
 Kotlin/JVM and Android client substrate for CultCache, CultNet, and CultMesh.
 
-It provides typed MessagePack document codecs, a tiny WebSocket CultNet lane,
-a single-peer CultNet RUDP socket transport, stream catalog negotiation, an
+It provides typed MessagePack document codecs, a channel-aware WebSocket
+CultNet transport, a single-peer CultNet RUDP socket transport, stream catalog negotiation, an
 in-memory CultCache, and the first Eve dashboard/sensor document contracts.
 
 The branded entrypoint mirrors C#/TypeScript/Python:
@@ -67,6 +67,24 @@ val note = target.require(notes, "note:1")
 `applyDocumentDelete(...)` require matching codecs to be registered first, so
 raw bytes re-enter the typed cache through the same document definitions that
 local Kotlin callers use.
+
+## WebSocket Transport
+
+For browser/mobile-friendly schema lanes, `CultNetWebSocketTransportConnection`
+wraps the tiny WebSocket client behind the same transport-frame shape used by
+the other runtimes:
+
+```kotlin
+val transport = CultMesh.startNode().connectTransport(URI("ws://127.0.0.1:3075/mesh"))
+
+transport.sendSchema(cultNetSchemaCatalogRequest(messageId = "schemas").toBytes())
+val frame = transport.receive()
+check(frame?.channelId == "schema")
+```
+
+The WebSocket adapter advertises a `websocket` transport profile with one
+reliable ordered `schema` channel and exposes transfer stats. It is the stream
+adapter; RUDP remains the portable realtime UDP path.
 
 Schema catalogs are also first-class, so Kotlin peers can publish and consume
 descriptor responses instead of hand-assembling maps:

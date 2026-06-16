@@ -11,6 +11,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URI
@@ -226,6 +227,9 @@ class CultMeshNode(
     private val random: SecureRandom = SecureRandom(),
 ) {
     fun connect(uri: URI): CultNetWebSocketClient = CultNetWebSocketClient.connect(uri, random)
+
+    fun connectTransport(uri: URI): CultNetWebSocketTransportConnection =
+        CultNetWebSocketTransportConnection.connect(uri, random)
 
     fun <T : Any> remember(codec: CultDocumentCodec<T>, key: String, value: T) {
         cache.put(codec, key, value)
@@ -610,6 +614,28 @@ fun createRudpTransportProfile(
                 CultNetTransportChannel("schema", "reliable", "ordered", maxPayloadBytes, maxFragmentBytes, maxPendingReliablePackets),
                 CultNetTransportChannel("latest", "unreliable", "sequenced", maxPayloadBytes, maxFragmentBytes, maxPendingReliablePackets),
                 CultNetTransportChannel("realtime", "unreliable", "unordered", maxPayloadBytes, maxFragmentBytes, maxPendingReliablePackets),
+            ),
+        ),
+    ),
+)
+
+fun createWebSocketTransportProfile(
+    runtimeId: String,
+    transportId: String = "websocket",
+    host: String? = null,
+    port: Int? = null,
+    maxPayloadBytes: Int? = null,
+): CultNetTransportProfile = CultNetTransportProfile(
+    runtimeId = runtimeId,
+    transports = listOf(
+        CultNetTransportDescriptor(
+            transportId = transportId.ifBlank { "websocket" },
+            protocol = "websocket",
+            host = host,
+            port = port,
+            wireContracts = listOf("cultnet.schema.v0"),
+            channels = listOf(
+                CultNetTransportChannel("schema", "reliable", "ordered", maxPayloadBytes),
             ),
         ),
     ),
@@ -2539,6 +2565,7 @@ fun main(args: Array<String>) {
         cultNetReconnectPolicyExposesPortableDelayContract()
         cultNetReconnectControllerSchedulesAttemptsAndReset()
         cultNetRudpReconnectLoopConsumesSharedController()
+        cultNetWebSocketTransportCarriesSchemaFramesWithStats()
         cultNetSchemaCatalogsRoundTripDescriptors()
         cultMeshCatalogsRoundTripDiscoveryMessages()
         cultMeshAuthorityLeasesGatePeerTrust()
@@ -2815,6 +2842,58 @@ private fun cultNetRudpReconnectLoopConsumesSharedController() {
     check(loop.reconnectController.attempt == 0)
     loop.stop()
     check(loop.transport == null)
+}
+
+private fun cultNetWebSocketTransportCarriesSchemaFramesWithStats() {
+    val loopback = InetAddress.getByName("127.0.0.1")
+    ServerSocket(0, 1, loopback).use { server ->
+        var serverError: Throwable? = null
+        val thread = Thread {
+            try {
+                server.accept().use { socket ->
+                    socket.soTimeout = 1_000
+                    val input = socket.getInputStream()
+                    val output = socket.getOutputStream()
+                    readWebSocketHandshake(input)
+                    output.write(
+                        (
+                            "HTTP/1.1 101 Switching Protocols\r\n" +
+                                "Upgrade: websocket\r\n" +
+                                "Connection: Upgrade\r\n\r\n"
+                            ).toByteArray(StandardCharsets.US_ASCII),
+                    )
+                    output.flush()
+                    val request = readMaskedWebSocketBinaryPayload(input)
+                    check(String(request, StandardCharsets.UTF_8) == "client-state")
+                    writeUnmaskedWebSocketBinaryPayload(output, "server-state".toByteArray(StandardCharsets.UTF_8))
+                }
+            } catch (error: Throwable) {
+                serverError = error
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+
+        CultNetWebSocketTransportConnection.connect(
+            URI("ws://127.0.0.1:${server.localPort}/mesh"),
+            runtimeId = "kotlin-websocket-test",
+        ).use { transport ->
+            val descriptor = transport.profile.transports.single()
+            check(descriptor.protocol == "websocket")
+            check(descriptor.channels == listOf(CultNetTransportChannel("schema", "reliable", "ordered")))
+
+            transport.sendSchema("client-state")
+            val response = transport.receive() ?: error("WebSocket transport did not receive schema frame")
+            check(response.channelId == "schema")
+            check(String(response.payload, StandardCharsets.UTF_8) == "server-state")
+            check(transport.stats.framesSent == 1L)
+            check(transport.stats.framesReceived == 1L)
+        }
+
+        thread.join(1_000)
+        if (thread.isAlive) error("WebSocket transport test server did not finish")
+        serverError?.let { throw it }
+    }
 }
 
 private fun cultNetSchemaCatalogsRoundTripDescriptors() {
@@ -3707,6 +3786,118 @@ private fun InputStream.readExact(buffer: ByteArray) {
         val read = read(buffer, offset, buffer.size - offset)
         if (read < 0) throw EOFException("stream closed")
         offset += read
+    }
+}
+
+private fun readWebSocketHandshake(input: InputStream): String {
+    val bytes = ByteArrayOutputStream()
+    var a = -1
+    var b = -1
+    var c = -1
+    while (true) {
+        val d = input.read()
+        if (d < 0) throw EOFException("websocket handshake closed")
+        bytes.write(d)
+        if (a == '\r'.code && b == '\n'.code && c == '\r'.code && d == '\n'.code) break
+        a = b
+        b = c
+        c = d
+    }
+    return bytes.toString(StandardCharsets.US_ASCII.name())
+}
+
+private fun readMaskedWebSocketBinaryPayload(input: InputStream): ByteArray {
+    val b0 = input.read()
+    val b1 = input.read()
+    if (b0 < 0 || b1 < 0) throw EOFException("websocket frame closed")
+    if ((b0 and 0x0f) != 2) throw IOException("Expected websocket binary opcode, received ${b0 and 0x0f}")
+    if ((b1 and 0x80) == 0) throw IOException("Expected masked websocket client frame")
+    var length = (b1 and 0x7f).toLong()
+    if (length == 126L) {
+        val extended = ByteArray(2)
+        input.readExact(extended)
+        length = ((extended[0].toInt() and 0xff) shl 8 or (extended[1].toInt() and 0xff)).toLong()
+    } else if (length == 127L) {
+        val extended = ByteArray(8)
+        input.readExact(extended)
+        length = ByteBuffer.wrap(extended).getLong()
+    }
+    val mask = ByteArray(4)
+    input.readExact(mask)
+    val payload = ByteArray(length.toInt())
+    input.readExact(payload)
+    payload.indices.forEach { payload[it] = (payload[it].toInt() xor mask[it % 4].toInt()).toByte() }
+    return payload
+}
+
+private fun writeUnmaskedWebSocketBinaryPayload(output: OutputStream, payload: ByteArray) {
+    val frame = ByteArrayOutputStream()
+    frame.write(0x82)
+    when {
+        payload.size < 126 -> frame.write(payload.size)
+        payload.size <= 65535 -> {
+            frame.write(126)
+            frame.write((payload.size shr 8) and 0xff)
+            frame.write(payload.size and 0xff)
+        }
+        else -> {
+            frame.write(127)
+            frame.write(ByteBuffer.allocate(8).putLong(payload.size.toLong()).array())
+        }
+    }
+    frame.write(payload)
+    output.write(frame.toByteArray())
+    output.flush()
+}
+
+class CultNetWebSocketTransportConnection(
+    private val client: CultNetWebSocketClient,
+    val profile: CultNetTransportProfile,
+) : AutoCloseable {
+    var stats: CultNetTransportStats = CultNetTransportStats()
+        private set
+
+    companion object {
+        fun connect(
+            uri: URI,
+            random: SecureRandom = SecureRandom(),
+            runtimeId: String = "kotlin-websocket-client",
+            transportId: String = "websocket",
+            maxPayloadBytes: Int? = null,
+        ): CultNetWebSocketTransportConnection {
+            val port = if (uri.port > 0) uri.port else 80
+            return CultNetWebSocketTransportConnection(
+                CultNetWebSocketClient.connect(uri, random),
+                createWebSocketTransportProfile(
+                    runtimeId = runtimeId,
+                    transportId = transportId,
+                    host = uri.host,
+                    port = port,
+                    maxPayloadBytes = maxPayloadBytes,
+                ),
+            )
+        }
+    }
+
+    fun send(channelId: String, payload: ByteArray) {
+        if (channelId != "schema") throw IOException("websocket transport only supports the reliable ordered schema channel")
+        client.sendBinary(payload)
+        stats = stats.copy(bytesSent = stats.bytesSent + payload.size, framesSent = stats.framesSent + 1)
+    }
+
+    fun sendSchema(payload: ByteArray) = send("schema", payload)
+
+    fun sendSchema(payload: String) = sendSchema(payload.toByteArray(StandardCharsets.UTF_8))
+
+    fun receive(): CultNetTransportFrame? {
+        val frame = client.readFrame()
+        if (frame.opcode != 2) return null
+        stats = stats.copy(bytesReceived = stats.bytesReceived + frame.payload.size, framesReceived = stats.framesReceived + 1)
+        return CultNetTransportFrame("schema", frame.payload)
+    }
+
+    override fun close() {
+        client.close()
     }
 }
 

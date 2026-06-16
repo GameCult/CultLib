@@ -32,7 +32,7 @@ CultNet owns cross-runtime transport semantics:
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
 | Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client; single-peer RUDP socket transport exists in the library | Endpoint lists and CultMesh peer/Verse catalogs | UDP socket binding for the shared RUDP reliability owner |
-| Kotlin `cultmesh-kotlin` | Minimal WebSocket-like lane over TCP socket; single-peer RUDP socket transport exists in the library | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
+| Kotlin `cultmesh-kotlin` | Channel-aware WebSocket transport connection for reliable ordered `schema` frames; single-peer RUDP socket transport exists in the library | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | WebSocket adapter plus UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
 
 The live split is therefore: payload language and the native RUDP packet/session
 language now converge across the targeted runtimes, while production service
@@ -160,6 +160,10 @@ Current progress:
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
   transfer stats. The Rust interop peer advertises and uses that shared port
   instead of owning raw TCP frame I/O directly.
+- Kotlin now has a `websocket` transport profile helper plus
+  `CultNetWebSocketTransportConnection`, which wraps the older binary
+  WebSocket client behind the same `CultNetTransportFrame` and stats shape for
+  reliable ordered `schema` frames.
 - TypeScript, C#, Rust, Python, and Kotlin now share the first
   `cultnet.transport.rudp.v0` packet codec fixture: the same reliable ordered
   fragmented data packet encodes to the same bytes in every runtime. This is not
