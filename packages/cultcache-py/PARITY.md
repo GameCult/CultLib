@@ -301,8 +301,9 @@ node --test packages\cultnet-ts\dist-test\test\interop\cultnet-interop.test.js
   owns the shared security/session primitives for helper parity, while the live
   transport harness still speaks the schema-v0 interop lane.
 - Python does not make RUDP the only public pipe yet. The local CultMesh server,
-  raw client, and interop peer still use the TCP-framed schema lane for many
-  service and harness flows, while `docs/cultnet-transport-parity.md` tracks the
+  raw client, and interop peer still keep the TCP-framed schema lane for
+  compatibility, while the Python interop peer can now serve and dial schema-v0
+  over fragmented RUDP. `docs/cultnet-transport-parity.md` tracks the
   remaining work to put broader server-side bodies behind the shared transport
   port instead of cloning LiteNetLib. The raw client request/subscription layer
   now routes through a schema-transport factory, so the caller-facing semantics

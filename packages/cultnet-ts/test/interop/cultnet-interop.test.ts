@@ -403,6 +403,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     "ts-csharp-dial",
     "python-peer",
     "python-client-dial",
+    "python-rudp-client-dial",
   ]);
 
   const discoveryPort = await getFreePort();
@@ -591,6 +592,25 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonDial.retrievedNote.authorRuntimeId, "rust-peer");
   assert.ok(pythonDial.mutatedNote.tags.includes("decorated:python-client"));
   assert.equal(pythonDial.fireReceipt.accepted, true);
+
+  logInteropPhase("schema-v0", "python dials python over rudp");
+  const pythonRudpDial = await runJsonCommand("python-rudp-dial", pythonCommand, [
+    "-m", "cultnet_py.interop_peer",
+    "dial",
+    "--runtime-id", "python-rudp-client",
+    "--runtime-kind", "python",
+    "--display-name", "Python RUDP Dialer",
+    "--agent-id", "python-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(pythonPort),
+    "--schema-path", interopSchemaPath,
+  ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc });
+  assert.equal(pythonRudpDial.transport, "rudp");
+  assert.equal(pythonRudpDial.remoteHello.runtimeId, "python-peer");
+  assert.equal(pythonRudpDial.hasInteropSchema, true);
+  assert.equal(pythonRudpDial.retrievedNote.authorRuntimeId, "python-peer");
+  assert.ok(pythonRudpDial.mutatedNote.tags.includes("decorated:python-rudp-client"));
+  assert.equal(pythonRudpDial.fireReceipt.accepted, true);
 
   logInteropPhase("schema-v0", "typescript dials python");
   const tsDialPython = await runJsonCommand("ts-dial-python", process.execPath, [

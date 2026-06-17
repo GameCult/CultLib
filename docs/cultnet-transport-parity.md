@@ -321,7 +321,10 @@ Current progress:
   starts a RUDP listener beside the TCP-framed listener by default and advertises
   both transport profiles in `cultnet.hello.v0`; the RUDP listener keeps schema
   request handling in the same server authority while demultiplexing per-remote
-  `CultNetRudpSession` state.
+  `CultNetRudpSession` state. The Python interop peer now also serves and dials
+  schema-v0 over `interop-rudp`, advertises TCP-framed and RUDP in discovery and
+  hello, and caps interop RUDP schema frames into 1024-byte fragments so catalog
+  responses stay inside UDP datagram limits while remaining session-owned.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the

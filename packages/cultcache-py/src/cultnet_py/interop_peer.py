@@ -38,7 +38,19 @@ from cultmesh_py import (
 )
 
 from .schema_catalog import INTEROP_WIRE_CONTRACT, wire_message_schema_descriptors
-from .transport import TcpFramedTransportConnection, create_tcp_framed_transport_profile
+from .client import create_rudp_schema_transport
+from .transport import (
+    CultNetRudpPacket,
+    CultNetRudpPacketType,
+    CultNetRudpSendOptions,
+    CultNetRudpSession,
+    CultNetRudpSessionOptions,
+    TcpFramedTransportConnection,
+    create_rudp_transport_profile,
+    create_tcp_framed_transport_profile,
+    decode_rudp_packet,
+    encode_rudp_packet,
+)
 
 INTEROP_DOCUMENT_TYPE = "cultnet.interop-note"
 INTEROP_SCHEMA_VERSION = "cultnet.interop_note.v0"
@@ -60,6 +72,8 @@ WITNESS_ARTIFACT_BUNDLE_SCHEMA_VERSION = "cultnet.witness_artifact_bundle.v0"
 SIMULATION_FACT_SCHEMA_ID = simulation_fact_document.catalog_entry().schema_id
 DISCOVERY_PROBE_SCHEMA_VERSION = "cultnet.discovery_probe.v0"
 DISCOVERY_ANNOUNCE_SCHEMA_VERSION = "cultnet.discovery_announce.v0"
+RUDP_CONNECTION_ID = 0x43554C54
+RUDP_INTEROP_MAX_FRAGMENT_BYTES = 1024
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,7 @@ class PeerState:
     shard_id: str
     shard_epoch: int
     shard_endpoint: str
+    transport_profiles: list[dict[str, Any]]
     shard_log: list[dict[str, Any]]
     shard_log_lock: threading.Lock
     observations: dict[tuple[str, int, str, str], dict[str, dict[str, Any]]]
@@ -117,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--bind-host", default="127.0.0.1")
     serve_parser.add_argument("--advertise-host", required=True)
     serve_parser.add_argument("--tcp-port", type=int, required=True)
+    serve_parser.add_argument("--rudp-port", type=int)
     serve_parser.add_argument("--discovery-port", type=int, required=True)
     serve_parser.add_argument("--discovery-group", required=True)
     serve_parser.add_argument("--schema-path", required=True)
@@ -130,7 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     dial_parser = sub.add_parser("dial")
     add_common_runtime_args(dial_parser)
     dial_parser.add_argument("--target-host", required=True)
-    dial_parser.add_argument("--target-port", type=int, required=True)
+    dial_parser.add_argument("--target-port", type=int)
+    dial_parser.add_argument("--target-rudp-port", type=int)
     dial_parser.add_argument("--schema-path", required=True)
     dial_parser.add_argument("--timeout-ms", type=int, default=4000)
 
@@ -154,6 +171,7 @@ def add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
+    rudp_port = int(args.rudp_port or args.tcp_port)
     state = build_state(
         args.runtime_id,
         args.runtime_kind,
@@ -161,6 +179,7 @@ def serve(args: argparse.Namespace) -> None:
         args.agent_id,
         args.schema_path,
         shard_endpoint=f"cultnet://{args.advertise_host}:{args.tcp_port}",
+        transport_profiles=interop_transport_profiles(args.runtime_id, args.advertise_host, args.tcp_port, rudp_port),
     )
     state.cache.put(state.bindings["note"].document, f"note:{args.runtime_id}", build_interop_note(args.runtime_id, args.display_name))
 
@@ -170,6 +189,11 @@ def serve(args: argparse.Namespace) -> None:
     tcp_server.bind((args.bind_host, args.tcp_port))
     tcp_server.listen()
     tcp_server.settimeout(0.2)
+
+    rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    rudp_socket.bind((args.bind_host, rudp_port))
+    rudp_socket.settimeout(0.02)
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -182,7 +206,8 @@ def serve(args: argparse.Namespace) -> None:
 
     threads = [
         threading.Thread(target=accept_loop, args=(tcp_server, state, stop), daemon=True),
-        threading.Thread(target=discovery_loop, args=(udp_socket, args.advertise_host, args.tcp_port, state, stop), daemon=True),
+        threading.Thread(target=rudp_loop, args=(rudp_socket, args.advertise_host, args.tcp_port, rudp_port, state, stop), daemon=True),
+        threading.Thread(target=discovery_loop, args=(udp_socket, args.advertise_host, args.tcp_port, rudp_port, state, stop), daemon=True),
     ]
     for thread in threads:
         thread.start()
@@ -192,10 +217,11 @@ def serve(args: argparse.Namespace) -> None:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    write_json({"status": "ready", "mode": "serve", "runtimeId": args.runtime_id, "runtimeKind": args.runtime_kind, "tcpPort": args.tcp_port, "discoveryPort": args.discovery_port, "discoveryGroup": args.discovery_group})
+    write_json({"status": "ready", "mode": "serve", "runtimeId": args.runtime_id, "runtimeKind": args.runtime_kind, "tcpPort": args.tcp_port, "rudpPort": rudp_port, "discoveryPort": args.discovery_port, "discoveryGroup": args.discovery_group})
     while not stop.is_set():
         time.sleep(0.1)
     tcp_server.close()
+    rudp_socket.close()
     udp_socket.close()
 
 
@@ -229,6 +255,104 @@ def handle_connection(client: socket.socket, state: PeerState) -> None:
             response_messages = handle_server_message(state, message, subscriptions)
             for response in response_messages:
                 write_message(transport, response)
+
+
+@dataclass
+class RudpPeerConnection:
+    session: CultNetRudpSession
+    subscriptions: dict[str, DatabaseSubscription]
+
+
+def rudp_loop(
+    sock: socket.socket,
+    advertise_host: str,
+    tcp_port: int,
+    rudp_port: int,
+    state: PeerState,
+    stop: threading.Event,
+) -> None:
+    peers: dict[tuple[str, int], RudpPeerConnection] = {}
+    while not stop.is_set():
+        try:
+            wire, remote = sock.recvfrom(65535)
+        except TimeoutError:
+            poll_rudp_resends(sock, peers)
+            continue
+        except OSError:
+            break
+        try:
+            packet = decode_rudp_packet(wire)
+        except ValueError:
+            continue
+        if packet.connection_id != RUDP_CONNECTION_ID:
+            continue
+        peer = peers.get(remote)
+        if packet.packet_type == CultNetRudpPacketType.CONNECT:
+            peer = RudpPeerConnection(
+                session=CultNetRudpSession(
+                    CultNetRudpSessionOptions(
+                        connection_id=RUDP_CONNECTION_ID,
+                        resend_delay_ms=25,
+                    )
+                ),
+                subscriptions={},
+            )
+            peers[remote] = peer
+            send_rudp_packet(sock, remote, peer.session.accept_connect(packet, now_ms(), b"cultnet-interop-rudp"))
+            continue
+        if peer is None:
+            continue
+        try:
+            result = peer.session.receive(packet, now_ms())
+            if result.reply is not None:
+                send_rudp_packet(sock, remote, result.reply)
+            if result.disconnected:
+                peers.pop(remote, None)
+                continue
+            for frame in result.delivered:
+                if frame.channel_id != "schema":
+                    continue
+                message = msgpack.unpackb(frame.payload, raw=False)
+                if not isinstance(message, dict):
+                    continue
+                for response in handle_server_message(state, message, peer.subscriptions):
+                    send_rudp_schema_frame(sock, remote, peer.session, response)
+            if packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
+                send_rudp_packet(sock, remote, peer.session.create_ack())
+        except Exception as error:
+            sys.stderr.write(json.dumps({
+                "event": "rudpMessageError",
+                "runtimeId": state.runtime_id,
+                "error": str(error),
+            }) + "\n")
+            sys.stderr.flush()
+
+
+def poll_rudp_resends(sock: socket.socket, peers: dict[tuple[str, int], RudpPeerConnection]) -> None:
+    current = now_ms()
+    for remote, peer in list(peers.items()):
+        for packet in peer.session.due_resends(current):
+            send_rudp_packet(sock, remote, packet)
+
+
+def send_rudp_schema_frame(
+    sock: socket.socket,
+    remote: tuple[str, int],
+    session: CultNetRudpSession,
+    message: dict[str, Any],
+) -> None:
+    payload = msgpack.packb(message, use_bin_type=True)
+    for packet in session.send_many(
+        "schema",
+        payload,
+        CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=now_ms()),
+        max_fragment_bytes=RUDP_INTEROP_MAX_FRAGMENT_BYTES,
+    ):
+        send_rudp_packet(sock, remote, packet)
+
+
+def send_rudp_packet(sock: socket.socket, remote: tuple[str, int], packet: CultNetRudpPacket) -> None:
+    sock.sendto(encode_rudp_packet(packet), remote)
 
 
 def handle_server_message(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
@@ -549,7 +673,7 @@ def database_delete_notifications(message: dict[str, Any], subscriptions: dict[s
     return notifications
 
 
-def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, state: PeerState, stop: threading.Event) -> None:
+def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, rudp_port: int, state: PeerState, stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             packet, remote = sock.recvfrom(65536)
@@ -573,14 +697,7 @@ def discovery_loop(sock: socket.socket, advertise_host: str, tcp_port: int, stat
             "tcpHost": advertise_host,
             "tcpPort": tcp_port,
             "wireContract": INTEROP_WIRE_CONTRACT,
-            "transportProfiles": [
-                create_tcp_framed_transport_profile(
-                    state.runtime_id,
-                    transport_id="interop-tcp",
-                    host=advertise_host,
-                    port=tcp_port,
-                )
-            ],
+            "transportProfiles": interop_transport_profiles(state.runtime_id, advertise_host, tcp_port, rudp_port),
             "supportedDocumentTypes": [INTEROP_DOCUMENT_TYPE],
             "supportsSchemaCatalog": True,
         }
@@ -618,9 +735,23 @@ def probe(args: argparse.Namespace) -> None:
 
 
 def dial(args: argparse.Namespace) -> None:
+    if args.target_port is None and args.target_rudp_port is None:
+        raise ValueError("dial mode requires --target-port or --target-rudp-port")
     state = build_state(args.runtime_id, args.runtime_kind, args.display_name, args.agent_id, args.schema_path, store_suffix="-dial")
-    with socket.create_connection((args.target_host, args.target_port), timeout=args.timeout_ms / 1000) as client:
-        stream = client.makefile("rwb", buffering=0)
+    tcp_client: socket.socket | None = None
+    if args.target_rudp_port is not None:
+        transport = create_rudp_schema_transport(
+            host=args.target_host,
+            port=args.target_rudp_port,
+            connection_id=RUDP_CONNECTION_ID,
+            timeout_seconds=args.timeout_ms / 1000,
+            runtime_id=f"{args.runtime_id}-interop-rudp-dial",
+            transport_id="interop-rudp",
+            max_fragment_bytes=RUDP_INTEROP_MAX_FRAGMENT_BYTES,
+        )
+    else:
+        tcp_client = socket.create_connection((args.target_host, args.target_port), timeout=args.timeout_ms / 1000)
+        stream = tcp_client.makefile("rwb", buffering=0)
         transport = TcpFramedTransportConnection(
             stream,
             profile=create_tcp_framed_transport_profile(
@@ -629,6 +760,8 @@ def dial(args: argparse.Namespace) -> None:
                 port=args.target_port,
             ),
         )
+    try:
+        target_port = args.target_rudp_port if args.target_rudp_port is not None else args.target_port
         write_message(transport, hello_message(state))
         remote_hello = read_until(transport, lambda message: message.get("schemaVersion") == "cultnet.hello.v0", args.timeout_ms)
 
@@ -669,12 +802,17 @@ def dial(args: argparse.Namespace) -> None:
         write_message(transport, raw_document_put(state.bindings_by_schema_id[INTEROP_FIRE_COMMAND_SCHEMA_ID], f"{args.runtime_id}-fire-put", command["commandId"], command, state))
         fire_receipt_message = read_until(transport, lambda candidate: candidate.get("schemaVersion") == "cultnet.document_put_raw.v0" and candidate.get("document", {}).get("schemaId") == INTEROP_FIRE_RECEIPT_SCHEMA_ID, args.timeout_ms)
         fire_receipt = apply_raw_document_put(state, fire_receipt_message["document"])
+    finally:
+        transport.close()
+        if tcp_client is not None:
+            tcp_client.close()
 
     write_json({
         "mode": "dial",
         "runtimeId": args.runtime_id,
         "targetHost": args.target_host,
-        "targetPort": args.target_port,
+        "targetPort": target_port,
+        "transport": "rudp" if args.target_rudp_port is not None else "tcp_framed",
         "remoteHello": remote_hello,
         "hasInteropSchema": has_schema,
         "retrievedNote": note,
@@ -692,6 +830,7 @@ def build_state(
     schema_path: str,
     store_suffix: str = "",
     shard_endpoint: str | None = None,
+    transport_profiles: list[dict[str, Any]] | None = None,
 ) -> PeerState:
     schema_json = Path(schema_path).read_text(encoding="utf-8")
     schema = json.loads(schema_json)
@@ -718,6 +857,7 @@ def build_state(
         shard_id="interop",
         shard_epoch=1,
         shard_endpoint=shard_endpoint or f"cultnet://{runtime_id}",
+        transport_profiles=transport_profiles or [],
         shard_log=[],
         shard_log_lock=threading.Lock(),
         observations={},
@@ -810,7 +950,7 @@ def binding(
 
 
 def hello_message(state: PeerState) -> dict[str, Any]:
-    return {
+    message = {
         "schemaVersion": "cultnet.hello.v0",
         "runtimeId": state.runtime_id,
         "runtimeKind": state.runtime_kind,
@@ -828,6 +968,26 @@ def hello_message(state: PeerState) -> dict[str, Any]:
         "supportedMessageVersions": [INTEROP_SCHEMA_VERSION],
         "supportsSchemaCatalog": True,
     }
+    if state.transport_profiles:
+        message["transportProfiles"] = state.transport_profiles
+    return message
+
+
+def interop_transport_profiles(runtime_id: str, host: str, tcp_port: int, rudp_port: int) -> list[dict[str, Any]]:
+    return [
+        create_tcp_framed_transport_profile(
+            runtime_id,
+            transport_id="interop-tcp",
+            host=host,
+            port=tcp_port,
+        ),
+        create_rudp_transport_profile(
+            runtime_id,
+            transport_id="interop-rudp",
+            host=host,
+            port=rudp_port,
+        ),
+    ]
 
 
 def catalog_response(state: PeerState, request: dict[str, Any]) -> dict[str, Any]:
@@ -999,6 +1159,10 @@ def read_until(transport: TcpFramedTransportConnection, predicate: Callable[[dic
         if isinstance(message, dict) and predicate(message):
             return message
     raise TimeoutError(f"Timed out waiting for CultNet message after {timeout_ms}ms")
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def build_interop_note(runtime_id: str, display_name: str) -> dict[str, Any]:
