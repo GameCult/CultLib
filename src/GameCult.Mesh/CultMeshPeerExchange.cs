@@ -339,7 +339,8 @@ namespace GameCult.Mesh
         public Action<Client>? ConfigureClient { get; set; }
 
         /// <summary>
-        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// Gets or sets the schema-v0 client factory.
+        /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
@@ -375,7 +376,7 @@ namespace GameCult.Mesh
             var completion = new TaskCompletionSource<CultMeshPeerExchangeResponseMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
-            using var client = CreateClient();
+            using var client = CreateClient(endpoint);
             client.OnCultNet<CultMeshPeerExchangeResponseMessage>(response =>
             {
                 if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
@@ -431,10 +432,10 @@ namespace GameCult.Mesh
             return count;
         }
 
-        private ICultNetSchemaClient CreateClient()
+        private ICultNetSchemaClient CreateClient(string endpoint)
         {
             return _options.CreateClient?.Invoke()
-                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+                   ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 
         private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)

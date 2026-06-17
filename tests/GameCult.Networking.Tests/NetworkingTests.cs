@@ -1837,6 +1837,143 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshVerseDiscoveryClient_Fetches_Over_RudpEndpoint()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-verse-discovery-server",
+                Mode = CultNetRudpSocketMode.Server,
+                Socket = serverSocket,
+                ConnectionId = 0x43554c54,
+                InitialSequence = 100,
+                TransportId = "schema-rudp",
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+            var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!serverDone.Task.IsCompleted)
+                    {
+                        var request = server.ReceiveSchemaMessageOnce<CultMeshVerseCatalogRequestMessage>();
+                        server.PollResends();
+                        if (request == null)
+                        {
+                            Thread.Sleep(5);
+                            continue;
+                        }
+
+                        server.SendSchemaMessage(new CultMeshVerseCatalogResponseMessage
+                        {
+                            MessageId = request.MessageId,
+                            Verses =
+                            [
+                                new CultMeshVerseDescriptor(
+                                    "rudp-verse",
+                                    "RUDP Verse",
+                                    CultMeshVerseAuthorityModel.OperatorCluster,
+                                    new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+                                    discoveryEndpoints: ["rudp://127.0.0.1"]).ToMessage()
+                            ]
+                        });
+                        serverDone.TrySetResult();
+                        return;
+                    }
+                }
+                catch (Exception error)
+                {
+                    serverDone.TrySetException(error);
+                }
+            })
+            {
+                IsBackground = true
+            };
+            serverThread.Start();
+
+            var client = new CultMeshVerseDiscoveryClient(new CultMeshVerseDiscoveryClientOptions
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(2),
+                ResponseTimeout = TimeSpan.FromSeconds(2)
+            });
+            var response = await client.FetchAsync($"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}");
+            await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(response.Verses.Single().VerseId, Is.EqualTo("rudp-verse"));
+        }
+
+        [Test]
+        public async Task CultMeshPeerExchangeClient_Fetches_Over_RudpEndpoint()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-peer-exchange-server",
+                Mode = CultNetRudpSocketMode.Server,
+                Socket = serverSocket,
+                ConnectionId = 0x43554c54,
+                InitialSequence = 100,
+                TransportId = "schema-rudp",
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+            var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!serverDone.Task.IsCompleted)
+                    {
+                        var request = server.ReceiveSchemaMessageOnce<CultMeshPeerExchangeRequestMessage>();
+                        server.PollResends();
+                        if (request == null)
+                        {
+                            Thread.Sleep(5);
+                            continue;
+                        }
+
+                        server.SendSchemaMessage(new CultMeshPeerExchangeResponseMessage
+                        {
+                            MessageId = request.MessageId,
+                            Peers =
+                            [
+                                new CultMeshPeerCard(
+                                    "rudp-peer",
+                                    request.VerseId,
+                                    ["rudp://127.0.0.1"],
+                                    roles: ["mesh-peer"]).ToMessage()
+                            ]
+                        });
+                        serverDone.TrySetResult();
+                        return;
+                    }
+                }
+                catch (Exception error)
+                {
+                    serverDone.TrySetException(error);
+                }
+            })
+            {
+                IsBackground = true
+            };
+            serverThread.Start();
+
+            var client = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(2),
+                ResponseTimeout = TimeSpan.FromSeconds(2)
+            });
+            var response = await client.FetchAsync(
+                $"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}",
+                new CultMeshPeerExchangeRequestMessage { VerseId = "local" });
+            await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(response.Peers.Single().PeerId, Is.EqualTo("rudp-peer"));
+        }
+
+        [Test]
         public void CultMesh_CreateClient_Returns_CultNetClient()
         {
             using var client = CultMesh.CreateClient(DevelopmentClientSecurity);
