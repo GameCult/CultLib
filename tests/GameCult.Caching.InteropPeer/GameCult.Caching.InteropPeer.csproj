@@ -11,6 +11,6 @@
     <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
-    <PackageReference Include="MessagePack" Version="3.1.4" />
+    <PackageReference Include="MessagePack" Version="3.1.7" />
   </ItemGroup>
 </Project>
