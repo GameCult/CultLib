@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -2146,7 +2147,18 @@ namespace GameCult.Networking.Tests
                 now.AddSeconds(-1),
                 now.AddSeconds(30)));
 
-            using var client = CultMesh.CreateRudpClientForAuthorizedPeer(
+            using var serverPumpCts = new CancellationTokenSource();
+            var serverPump = Task.Run(() =>
+            {
+                while (!server.Connected && !serverPumpCts.IsCancellationRequested)
+                {
+                    _ = server.ReceiveOnce();
+                    server.PollResends();
+                    Thread.Sleep(TimeSpan.FromMilliseconds(5));
+                }
+            });
+
+            using var client = CultMesh.ConnectRudpClientForAuthorizedPeer(
                 "csharp-cultmesh-rudp-client",
                 connectionId,
                 peers,
@@ -2154,22 +2166,31 @@ namespace GameCult.Networking.Tests
                 "local",
                 "schema",
                 at: now,
-                options: new CultMeshRudpSocketOptions
+                options: new CultMeshRudpClientOptions
                 {
-                    ResendDelayMs = 25,
-                    MaxFragmentBytes = 1024,
-                    MaxPendingReliablePackets = 16
+                    ConnectPayload = Encoding.UTF8.GetBytes("join"),
+                    SocketOptions = new CultMeshRudpSocketOptions
+                    {
+                        ResendDelayMs = 25,
+                        MaxFragmentBytes = 1024,
+                        MaxPendingReliablePackets = 16
+                    }
                 });
+            serverPumpCts.Cancel();
+            Assert.That(serverPump.Wait(TimeSpan.FromSeconds(1)), Is.True);
 
-            client.Connect(Encoding.UTF8.GetBytes("join"));
-            PumpRudpHandshake(client, server);
             Assert.That(client.Connected, Is.True);
             Assert.That(server.Connected, Is.True);
 
-            client.SendSchema(Encoding.UTF8.GetBytes("client-state"));
-            var serverFrame = ReceiveRudpFrame(server);
-            Assert.That(serverFrame.ChannelId, Is.EqualTo("schema"));
-            Assert.That(Encoding.UTF8.GetString(serverFrame.Payload), Is.EqualTo("client-state"));
+            client.SendSchemaMessage(new CultNetSchemaCatalogRequestMessage
+            {
+                MessageId = "csharp-cultmesh-rudp-schema-catalog",
+                Kinds = ["document_payload"],
+                IncludeSchemaJson = true
+            });
+            var request = ReceiveRudpSchemaMessage<CultNetSchemaCatalogRequestMessage>(server);
+            Assert.That(request.MessageId, Is.EqualTo("csharp-cultmesh-rudp-schema-catalog"));
+            Assert.That(request.Kinds, Is.EqualTo(new[] { "document_payload" }));
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
             Assert.That(client.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
         }

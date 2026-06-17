@@ -379,6 +379,11 @@ The native RUDP socket path also exposes `CultNetRudpReconnectLoop` for
 caller-owned game or service loops. The caller reports closure, calls
 `ReconnectIfDue(nowMs)` from its own scheduler, and the shared
 `CultNetReconnectController` owns retry attempts, delay, and exhaustion state.
+`GameCult.Mesh` adds discovery-shaped helpers such as
+`CultMesh.ConnectRudpClientForAuthorizedPeer(...)`, which perform authorized
+peer lookup and handshake before returning the same RUDP transport. Packet
+semantics, schema-channel send/receive helpers, and reconnect state still live
+in `GameCult.Networking`.
 
 ## Important Constraints
 

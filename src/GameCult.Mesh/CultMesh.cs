@@ -225,6 +225,21 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Options for CultMesh-branded connected RUDP client helpers.
+    /// </summary>
+    public sealed class CultMeshRudpClientOptions
+    {
+        /// <summary>Gets or sets the socket construction and transport profile options.</summary>
+        public CultMeshRudpSocketOptions SocketOptions { get; set; } = new();
+        /// <summary>Gets or sets the handshake payload.</summary>
+        public byte[] ConnectPayload { get; set; } = Array.Empty<byte>();
+        /// <summary>Gets or sets the handshake timeout.</summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(1);
+        /// <summary>Gets or sets the handshake polling interval.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(5);
+    }
+
+    /// <summary>
     /// Public CultMesh entrypoints.
     /// </summary>
     public static class CultMesh
@@ -413,6 +428,82 @@ namespace GameCult.Mesh
             }
 
             return CreateRudpClientForPeer(runtimeId, connectionId, peer, options);
+        }
+
+        /// <summary>
+        /// Creates and handshakes a CultNet RUDP client transport for a parsed endpoint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClient(
+            string runtimeId,
+            uint connectionId,
+            CultMeshRudpEndpoint endpoint,
+            CultMeshRudpClientOptions? options = null)
+        {
+            options ??= new CultMeshRudpClientOptions();
+            var client = CreateRudpClient(runtimeId, connectionId, endpoint, options.SocketOptions);
+            if (!client.ConnectAndWait(options.ConnectPayload, options.ConnectTimeout, options.PollInterval))
+            {
+                client.Dispose();
+                throw new TimeoutException($"Timed out waiting for RUDP client {runtimeId} to connect.");
+            }
+
+            return client;
+        }
+
+        /// <summary>
+        /// Creates and handshakes a CultNet RUDP client transport for a rudp://host:port endpoint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClient(
+            string runtimeId,
+            uint connectionId,
+            string endpoint,
+            CultMeshRudpClientOptions? options = null)
+        {
+            return ConnectRudpClient(runtimeId, connectionId, ParseRudpEndpoint(endpoint), options);
+        }
+
+        /// <summary>
+        /// Creates and handshakes a CultNet RUDP client transport from a peer-card contact hint.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClientForPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCard peer,
+            CultMeshRudpClientOptions? options = null)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            var endpoint = peer.Endpoints.FirstOrDefault(value => value.StartsWith("rudp://", StringComparison.OrdinalIgnoreCase));
+            if (endpoint == null)
+            {
+                throw new InvalidOperationException($"Peer {peer.PeerId} does not advertise a RUDP endpoint.");
+            }
+
+            return ConnectRudpClient(runtimeId, connectionId, endpoint, options);
+        }
+
+        /// <summary>
+        /// Creates and handshakes a CultNet RUDP client transport from the first peer authorized for a Verse role.
+        /// </summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityLeaseCatalog leases,
+            string verseId,
+            string role,
+            string? shardId = null,
+            DateTimeOffset? at = null,
+            CultMeshRudpClientOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            if (peer == null)
+            {
+                throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
+            }
+
+            return ConnectRudpClientForPeer(runtimeId, connectionId, peer, options);
         }
 
         /// <summary>

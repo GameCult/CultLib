@@ -117,7 +117,7 @@ peer lookup with the lease catalog, so contact gossip stays separate from
 trust. The branded RUDP helpers use the same boundary:
 
 ```csharp
-using var rudpClient = CultMesh.CreateRudpClientForAuthorizedPeer(
+using var rudpClient = CultMesh.ConnectRudpClientForAuthorizedPeer(
     "aetheria-client",
     connectionId: 0x10203040,
     peers,
@@ -128,9 +128,12 @@ using var rudpClient = CultMesh.CreateRudpClientForAuthorizedPeer(
 ```
 
 `CreateRudpServer(...)`, `ParseRudpEndpoint(...)`,
-`CreateRudpClient(...)`, and `CreateRudpClientForPeer(...)` delegate to the
-CultNet RUDP socket transport. CultMesh owns peer/authority ergonomics; CultNet
-owns packet reliability, resend pressure, and channel semantics.
+`ConnectRudpClient(...)`, and `ConnectRudpClientForPeer(...)` delegate to the
+CultNet RUDP socket transport and return the same schema-message-capable
+transport after handshake. `CreateRudpClient(...)` and
+`CreateRudpClientForPeer(...)` remain available when a caller intentionally owns
+the handshake and polling loop. CultMesh owns peer/authority ergonomics;
+CultNet owns packet reliability, resend pressure, and channel semantics.
 
 Clients can fetch more peers from known peers:
 

@@ -286,8 +286,11 @@ Current progress:
   TypeScript, Python, Kotlin, and Rust: it parses `rudp://host:port` endpoints,
   creates RUDP client/server transports from endpoint or peer-card contact
   hints, and can create a RUDP client from the first peer authorized by the
-  authority lease catalog for a Verse role. RUDP packet/session behavior remains
-  owned by `GameCult.Networking`.
+  authority lease catalog for a Verse role. The facade can also return a
+  connected RUDP client from a direct endpoint, peer card, or authorized peer
+  lookup, so schema-message helpers can ride the RUDP pipe without caller-side
+  handshake ceremony. RUDP packet/session behavior remains owned by
+  `GameCult.Networking`.
 - TypeScript now has a `CultNetRudpReconnectLoop` that consumes the shared
   controller while keeping socket construction caller-owned. A closed RUDP
   transport schedules the next attempt with the portable policy, opens a fresh

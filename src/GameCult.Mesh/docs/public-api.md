@@ -20,6 +20,9 @@ Namespace: `GameCult.Mesh`
 - `CultMesh.CreateRudpClient(...)`
 - `CultMesh.CreateRudpClientForPeer(...)`
 - `CultMesh.CreateRudpClientForAuthorizedPeer(...)`
+- `CultMesh.ConnectRudpClient(...)`
+- `CultMesh.ConnectRudpClientForPeer(...)`
+- `CultMesh.ConnectRudpClientForAuthorizedPeer(...)`
 - `CultMesh.CreateSimulationFactCommitter(...)`
 - `CultMesh.CreateGameSession(...)`
 - `CultMesh.CreateClient(...)`
@@ -89,9 +92,12 @@ the world.
 `CultMesh.ParseRudpEndpoint(...)`, `CreateRudpServer(...)`,
 `CreateRudpClient(...)`, `CreateRudpClientForPeer(...)`, and
 `CreateRudpClientForAuthorizedPeer(...)` provide the branded CultMesh path to
-the native CultNet RUDP socket transport. These helpers parse endpoint contact
-hints and choose authorized peers; `GameCult.Networking` still owns the RUDP
-packet codec, session state, resend, fragmentation, and channel semantics.
+the native CultNet RUDP socket transport. `ConnectRudpClient(...)`,
+`ConnectRudpClientForPeer(...)`, and `ConnectRudpClientForAuthorizedPeer(...)`
+also perform the client handshake before returning the same transport. These
+helpers parse endpoint contact hints and choose authorized peers;
+`GameCult.Networking` still owns the RUDP packet codec, session state, resend,
+fragmentation, and channel semantics.
 
 ### Shard Authority
 
