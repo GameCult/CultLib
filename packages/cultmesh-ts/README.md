@@ -107,7 +107,7 @@ leases.upsert({
   expiresAt: new Date(Date.now() + 60_000),
 });
 
-const client = await CultMesh.createRudpClientForAuthorizedPeer(
+const client = await CultMesh.createRudpPeerForAuthorizedPeer(
   "ts-client",
   0x1020_3040,
   peers,
@@ -115,12 +115,15 @@ const client = await CultMesh.createRudpClientForAuthorizedPeer(
   "local",
   "schema",
 );
-client.connect(new TextEncoder().encode("join"));
+const schemas = CultMesh.createSchemaCatalog();
+await client.syncSchemaCatalog(schemas, { kinds: ["document_payload"] });
 ```
 
-`CultMesh.createRudpClientForPeer(...)` remains available for already trusted
-call sites. Discovery-first paths should prefer
-`createRudpClientForAuthorizedPeer(...)`, which composes
+`CultMesh.createRudpPeerForPeer(...)` remains available for already trusted
+call sites, and `CultMesh.createRudpClientForPeer(...)` still returns the lower
+level transport when a caller really needs to own handshaking or raw frames.
+Discovery-first schema/catalog paths should prefer
+`createRudpPeerForAuthorizedPeer(...)`, which composes
 `CultMeshPeerCatalog.firstAuthorized(...)` with the authority lease catalog
 before using the peer-card endpoint as a dial target.
 

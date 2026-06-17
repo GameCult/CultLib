@@ -9,6 +9,7 @@ import {
 } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
+  CultNetPeer,
   CultNetRudpSocketTransportConnection,
   CultNetSchemaCatalog,
   CultNetShardCatalog,
@@ -17,6 +18,7 @@ import {
   type CultNetDocumentBinding,
   type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
+  type CultNetWireContract,
 } from "cultnet-ts";
 
 export interface CultMeshNodeOptions {
@@ -129,6 +131,18 @@ export interface CultMeshRudpSocketOptions {
 
 export interface CultMeshAuthorizedRudpSocketOptions
   extends CultMeshRudpSocketOptions {
+  shardId?: string;
+  at?: Date;
+}
+
+export interface CultMeshRudpPeerOptions extends CultMeshRudpSocketOptions {
+  connectPayload?: Uint8Array;
+  connectTimeoutMs?: number;
+  wireContract?: CultNetWireContract;
+}
+
+export interface CultMeshAuthorizedRudpPeerOptions
+  extends CultMeshRudpPeerOptions {
   shardId?: string;
   at?: Date;
 }
@@ -657,6 +671,70 @@ export class CultMesh {
     }
     return CultMesh.createRudpClientForPeer(runtimeId, connectionId, peer, options);
   }
+
+  public static async createRudpPeer(
+    runtimeId: string,
+    connectionId: number,
+    endpoint: string | CultMeshRudpEndpoint,
+    options: CultMeshRudpPeerOptions = {},
+  ): Promise<CultNetPeer> {
+    const client = await CultMesh.createRudpClient(
+      runtimeId,
+      connectionId,
+      endpoint,
+      options,
+    );
+    client.connect(
+      options.connectPayload === undefined
+        ? undefined
+        : Uint8Array.from(options.connectPayload),
+    );
+    await waitForRudpConnected(
+      client,
+      options.connectTimeoutMs ?? 1_000,
+      `RUDP peer ${runtimeId}`,
+    );
+    return new CultNetPeer(client, {
+      wireContract: options.wireContract ?? "cultnet.schema.v0",
+    });
+  }
+
+  public static async createRudpPeerForPeer(
+    runtimeId: string,
+    connectionId: number,
+    peer: CultMeshPeerCard,
+    options: CultMeshRudpPeerOptions = {},
+  ): Promise<CultNetPeer> {
+    const endpoint = peer.endpoints.find((value) =>
+      value.toLowerCase().startsWith("rudp://"),
+    );
+    if (!endpoint) {
+      throw new Error(`Peer ${peer.peerId} does not advertise a RUDP endpoint.`);
+    }
+    return CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
+  }
+
+  public static async createRudpPeerForAuthorizedPeer(
+    runtimeId: string,
+    connectionId: number,
+    peers: CultMeshPeerCatalog,
+    leases: CultMeshAuthorityLeaseCatalog,
+    verseId: string,
+    role: string,
+    options: CultMeshAuthorizedRudpPeerOptions = {},
+  ): Promise<CultNetPeer> {
+    const peer = peers.firstAuthorized(
+      verseId,
+      role,
+      leases,
+      options.shardId,
+      options.at,
+    );
+    if (!peer) {
+      throw new Error(`No authorized RUDP peer for role ${role} in Verse ${verseId}.`);
+    }
+    return CultMesh.createRudpPeerForPeer(runtimeId, connectionId, peer, options);
+  }
 }
 
 function requireNonEmpty(value: string, name: string): void {
@@ -677,6 +755,55 @@ async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socke
     });
   });
   return socket;
+}
+
+async function waitForRudpConnected(
+  transport: CultNetRudpSocketTransportConnection,
+  timeoutMs: number,
+  description: string,
+): Promise<void> {
+  if (transport.connected) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      clearInterval(poll);
+      clearTimeout(timer);
+      transport.off("error", onError);
+      transport.off("close", onClose);
+    };
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const check = (): void => {
+      if (transport.connected) {
+        finish();
+      }
+    };
+    const onError = (error: Error): void => finish(error);
+    const onClose = (): void =>
+      finish(new Error(`${description} closed before handshake completed.`));
+    const poll = setInterval(check, 5);
+    const timer = setTimeout(
+      () => finish(new Error(`Timed out waiting for ${description} handshake.`)),
+      timeoutMs,
+    );
+    poll.unref?.();
+    timer.unref?.();
+    transport.once("error", onError);
+    transport.once("close", onClose);
+    check();
+  });
 }
 
 function copyBudgetFor(

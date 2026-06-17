@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { defineDocumentType } from "cultcache-ts";
+import { CultNetPeer, cultNetBuiltinSchemaRegistry } from "cultnet-ts";
 import { CultMesh } from "../src/index";
 
 const noteDocument = defineDocumentType({
@@ -300,6 +301,84 @@ test("CultMesh TS branded facade creates RUDP clients from peer endpoints", asyn
   } finally {
     client.close();
     server.close();
+  }
+});
+
+test("CultMesh TS creates connected RUDP schema peers for catalog requests", async () => {
+  const connectionId = 0x10203045;
+  const serverTransport = await CultMesh.createRudpServer(
+    "cultmesh-ts-rudp-schema-server",
+    connectionId,
+    {
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+  const serverPort = serverTransport.profile.transports[0]?.port;
+  assert.equal(typeof serverPort, "number");
+  const serverPeer = new CultNetPeer(serverTransport, {
+    wireContract: "cultnet.schema.v0",
+  });
+  serverPeer.on("message", (message) => {
+    if (message.schemaVersion === "cultnet.schema_catalog_request.v0") {
+      serverPeer.sendSchemaCatalogResponse(
+        cultNetBuiltinSchemaRegistry.createCatalogResponse(message),
+      );
+    }
+  });
+
+  const peer = {
+    peerId: "cultmesh-ts-rudp-schema-server",
+    verseId: "local",
+    endpoints: [`rudp://127.0.0.1:${serverPort}`],
+    roles: ["schema"],
+    authorityLeaseId: "lease:cultmesh-ts-rudp-schema-server",
+  };
+  const peers = CultMesh.createPeerCatalog();
+  const leases = CultMesh.createAuthorityLeaseCatalog();
+  peers.upsert(peer);
+  leases.upsert({
+    leaseId: "lease:cultmesh-ts-rudp-schema-server",
+    verseId: "local",
+    peerId: "cultmesh-ts-rudp-schema-server",
+    roles: ["schema"],
+    validFrom: new Date(Date.now() - 1000),
+    expiresAt: new Date(Date.now() + 1000),
+  });
+
+  let clientPeer: CultNetPeer | undefined;
+  try {
+    clientPeer = await CultMesh.createRudpPeerForAuthorizedPeer(
+      "cultmesh-ts-rudp-schema-client",
+      connectionId,
+      peers,
+      leases,
+      "local",
+      "schema",
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+    const synced = CultMesh.createSchemaCatalog();
+    const applied = await clientPeer.syncSchemaCatalog(synced, {
+      messageId: "cultmesh-ts-rudp-schema-catalog",
+      kinds: ["document_payload"],
+      includeSchemaJson: true,
+      timeoutMs: 1_000,
+    });
+
+    assert.ok(applied.some((descriptor) => descriptor.documentType === "ghostlight.agent-state"));
+    assert.equal(clientPeer.transportProfile?.transports[0]?.protocol, "rudp");
+    assert.equal(serverPeer.transportProfile?.transports[0]?.protocol, "rudp");
+  } finally {
+    clientPeer?.close();
+    serverPeer.close();
   }
 });
 

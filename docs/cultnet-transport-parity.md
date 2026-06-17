@@ -340,7 +340,10 @@ Current progress:
   leaving packet/session semantics in `cultnet-ts`. TypeScript now also mirrors
   Kotlin's authorized-peer lookup and RUDP client helper, so peer cards remain
   contact hints until the authority lease catalog authorizes the requested
-  Verse role.
+  Verse role. The facade can now also create a connected `CultNetPeer` from a
+  direct RUDP endpoint, peer card, or authorized peer lookup, so schema and shard
+  catalog request helpers ride the RUDP transport without callers hand-wrapping
+  the socket transport.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.
