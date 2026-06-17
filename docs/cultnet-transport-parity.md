@@ -30,7 +30,7 @@ CultNet owns cross-runtime transport semantics:
 | C# `GameCult.Networking` | LiteNetLib UDP `NetManager` / `NetPeer`; sends legacy union messages and schema-v0 messages with `DeliveryMethod.ReliableOrdered`; single-peer RUDP socket transport exists in the library | LiteNetLib connection requests and app-level peer/catalog surfaces | Production LiteNetLib adapter profile plus UDP socket binding for the shared RUDP reliability owner |
 | C# interop peer | TCP stream with 4-byte length-prefixed MessagePack frames | UDP multicast probe/announce | Test harness only |
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
-| Rust `cultnet-rs` | Interop example uses TCP length-prefixed MessagePack frames; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce | UDP socket binding for the shared RUDP reliability owner |
+| Rust `cultnet-rs` | Interop example serves and dials schema-v0 MessagePack over TCP-framed or shared RUDP transport; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce with TCP and RUDP transport profiles | UDP socket binding for the shared RUDP reliability owner |
 | Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client; single-peer RUDP socket transport exists in the library | Endpoint lists and CultMesh peer/Verse catalogs | UDP socket binding for the shared RUDP reliability owner |
 | Kotlin `cultmesh-kotlin` | Channel-aware WebSocket transport connection for reliable ordered `schema` frames; single-peer RUDP socket transport exists in the library | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | WebSocket adapter plus UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
 
@@ -180,8 +180,9 @@ Current progress:
   side-channel for Python's schema lane.
 - Rust now has the same `tcp_framed` transport profile helper plus a
   `TcpFramedTransportConnection` with schema-channel `send`, `receive`, and
-  transfer stats. The Rust interop peer advertises and uses that shared port
-  instead of owning raw TCP frame I/O directly.
+  transfer stats. The Rust interop peer advertises TCP and RUDP profiles and
+  serves/dials schema-v0 through the shared RUDP path without giving RUDP its
+  own document semantics.
 - Kotlin now has a `websocket` transport profile helper plus
   `CultNetWebSocketTransportConnection`, which wraps the older binary
   WebSocket client behind the same `CultNetTransportFrame` and stats shape for

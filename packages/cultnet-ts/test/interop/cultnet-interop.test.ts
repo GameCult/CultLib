@@ -972,6 +972,106 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }, expectedPeers);
 });
 
+test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUDP", async (t) => {
+  logInteropPhase("ts-rust-full-rudp", "build peers");
+  await buildRustInteropPeer();
+  cleanInteropStores([
+    "rust-rudp-peer",
+    "rust-rudp-client-dial",
+    "ts-rust-rudp-peer",
+    "ts-rust-rudp-client-dial",
+  ]);
+
+  const rustTcpPort = await getFreePort();
+  const rustRudpPort = await getFreePort();
+  const tsTcpPort = await getFreePort();
+  const tsRudpPort = await getFreePort();
+  const discoveryPort = await getFreePort();
+  const advertiseHost = findAdvertiseHost();
+  const servers: RunningServeProcess[] = [];
+  servers.push(await spawnServeProcess("rust-rudp", {
+    command: rustBinaryPath,
+    args: [
+      "serve",
+      "--runtime-id", "rust-rudp-peer",
+      "--runtime-kind", "rust",
+      "--display-name", "Rust RUDP Peer",
+      "--agent-id", "rust-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(rustTcpPort),
+      "--rudp-port", String(rustRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultnetRsRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  servers.push(await spawnServeProcess("ts-rust-rudp", {
+    command: process.execPath,
+    args: [
+      tsPeerScript,
+      "serve",
+      "--runtime-id", "ts-rust-rudp-peer",
+      "--runtime-kind", "node",
+      "--display-name", "TypeScript Rust RUDP Peer",
+      "--agent-id", "ts-rust-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(tsTcpPort),
+      "--rudp-port", String(tsRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultNetTsRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
+  logInteropPhase("ts-rust-full-rudp", "typescript dials rust over rudp");
+  const tsRudpDial = await runJsonCommand("ts-rust-rudp-dial", process.execPath, [
+    tsPeerScript,
+    "dial",
+    "--runtime-id", "ts-rust-rudp-client",
+    "--runtime-kind", "node",
+    "--display-name", "TS Rust RUDP Dialer",
+    "--agent-id", "ts-rust-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(rustRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultNetTsRoot);
+  assert.equal(tsRudpDial.transport, "rudp");
+  assert.equal(tsRudpDial.remoteHello.runtimeId, "rust-rudp-peer");
+  assert.equal(tsRudpDial.hasInteropSchema, true);
+  assert.equal(tsRudpDial.retrievedNote.authorRuntimeId, "rust-rudp-peer");
+  assert.ok(tsRudpDial.mutatedNote.tags.includes("decorated:ts-rust-rudp-client"));
+  assert.equal(tsRudpDial.fireReceipt.accepted, true);
+
+  logInteropPhase("ts-rust-full-rudp", "rust dials typescript over rudp");
+  const rustRudpDial = await runJsonCommand("rust-rudp-dial", rustBinaryPath, [
+    "dial",
+    "--runtime-id", "rust-rudp-client",
+    "--runtime-kind", "rust",
+    "--display-name", "Rust RUDP Dialer",
+    "--agent-id", "rust-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(tsRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultnetRsRoot);
+  assert.equal(rustRudpDial.transport, "rudp");
+  assert.equal(rustRudpDial.remoteHello.runtimeId, "ts-rust-rudp-peer");
+  assert.equal(rustRudpDial.hasInteropSchema, true);
+  assert.equal(rustRudpDial.retrievedNote.authorRuntimeId, "ts-rust-rudp-peer");
+  assert.ok(rustRudpDial.mutatedNote.tags.includes("decorated:rust-rudp-client"));
+  assert.equal(rustRudpDial.fireReceipt.accepted, true);
+});
+
 test("CultNet TypeScript and Python exchange schema frames over the shared RUDP socket transport", async () => {
   const pythonPeer = spawnPythonRudpPeer();
   const clientSocket = await bindUdpSocket();

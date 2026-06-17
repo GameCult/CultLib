@@ -93,7 +93,7 @@ jobs:
 
       - name: Interop RUDP Rust lane
         timeout-minutes: 8
-        run: node --test --test-name-pattern "TypeScript and Rust|Rust and TypeScript" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
+        run: node --test --test-concurrency=1 --test-name-pattern "TypeScript and Rust|Rust and TypeScript" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
 
       - name: Interop RUDP C# lane
         timeout-minutes: 8
