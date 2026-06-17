@@ -124,8 +124,8 @@ contact and authority ergonomics:
 
 ```rust
 use cultnet_rs::{
-    CultMesh, CultMeshAuthorityLease, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetMessage,
-    CultNetSchemaKind,
+    CultMesh, CultMeshAuthorityLease, CultMeshPeerCard, CultMeshRudpClientOptions,
+    CultMeshRudpSocketOptions, CultNetMessage, CultNetSchemaKind,
 };
 use chrono::{Duration, Utc};
 
@@ -166,7 +166,7 @@ leases.upsert(CultMeshAuthorityLease {
     expires_at: now + Duration::minutes(1),
 })?;
 
-let mut client = CultMesh::create_rudp_client_for_authorized_peer(
+let mut client = CultMesh::connect_rudp_client_for_authorized_peer(
     "rust-client",
     0x1020_3040,
     &peers,
@@ -175,9 +175,12 @@ let mut client = CultMesh::create_rudp_client_for_authorized_peer(
     "schema",
     None,
     now,
-    CultMeshRudpSocketOptions::default(),
+    CultMeshRudpClientOptions {
+        socket_options: CultMeshRudpSocketOptions::default(),
+        connect_payload: b"join".to_vec(),
+        ..CultMeshRudpClientOptions::default()
+    },
 )?;
-client.connect(b"join".to_vec())?;
 client.send_schema_message(&CultNetMessage::SchemaCatalogRequest {
     message_id: "rust-schema-catalog".to_string(),
     include_schema_json: Some(false),
@@ -185,6 +188,10 @@ client.send_schema_message(&CultNetMessage::SchemaCatalogRequest {
     kinds: Some(vec![CultNetSchemaKind::DocumentPayload]),
 })?;
 ```
+
+`create_rudp_client...` remains available when the caller intentionally owns the
+handshake and polling loop. `connect_rudp_client...` performs the client
+handshake before returning the same schema-message-capable RUDP transport.
 
 For caller-owned reconnect loops, `CultNetRudpReconnectLoop` keeps transport
 construction outside the library while sharing the portable retry controller:

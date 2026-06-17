@@ -7,6 +7,7 @@ use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultnet_rs::CultMesh;
 use cultnet_rs::CultMeshAuthorityLease;
 use cultnet_rs::CultMeshPeerCard;
+use cultnet_rs::CultMeshRudpClientOptions;
 use cultnet_rs::CultMeshRudpSocketOptions;
 use cultnet_rs::CultNetClientSecurityOptions;
 use cultnet_rs::CultNetDocumentBinding;
@@ -60,6 +61,8 @@ use pretty_assertions::assert_eq;
 use std::cell::RefCell;
 use std::net::UdpSocket;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -110,6 +113,26 @@ fn receive_rudp_schema_message(
         thread::sleep(StdDuration::from_millis(5));
     }
     anyhow::bail!("RUDP schema message was not delivered")
+}
+
+fn pump_rudp_server_until_connected(
+    server: Arc<Mutex<CultNetRudpSocketTransportConnection>>,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        while !done.load(Ordering::SeqCst) {
+            {
+                let mut server = server.lock().expect("RUDP server mutex poisoned");
+                let _ = server.receive_once()?;
+                server.poll_resends()?;
+                if server.connected() {
+                    return Ok(());
+                }
+            }
+            thread::sleep(StdDuration::from_millis(5));
+        }
+        Ok(())
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
@@ -1255,6 +1278,100 @@ fn cultmesh_facade_creates_rudp_client_from_peer_endpoint() -> Result<()> {
     let server_frame = receive_rudp_frame(&mut server)?;
     assert_eq!(server_frame.channel_id, "schema");
     assert_eq!(server_frame.payload, b"client-state");
+    Ok(())
+}
+
+#[test]
+fn cultmesh_facade_connects_authorized_rudp_client_for_schema_messages() -> Result<()> {
+    let connection_id = 0x2030_4051;
+    let options = CultMeshRudpSocketOptions {
+        resend_delay_ms: 25,
+        max_fragment_bytes: Some(1024),
+        max_pending_reliable_packets: Some(16),
+        ..CultMeshRudpSocketOptions::default()
+    };
+    let server = Arc::new(Mutex::new(CultMesh::create_rudp_server(
+        "rust-cultmesh-connected-server",
+        connection_id,
+        options.clone(),
+    )?));
+    let server_port = server
+        .lock()
+        .expect("RUDP server mutex poisoned")
+        .profile
+        .transports[0]
+        .port
+        .expect("RUDP server profile advertises its local port");
+    let endpoint = CultMesh::parse_rudp_endpoint(&format!("rudp://127.0.0.1:{server_port}"))?;
+    let peer = CultMeshPeerCard::new("rust-cultmesh-connected-server", "local", [endpoint.uri()])
+        .with_roles(["schema"])
+        .with_authority_lease_id("lease:rust-cultmesh-connected-server");
+    let mut peers = CultMesh::create_peer_catalog();
+    peers.upsert(peer)?;
+    let now = Utc::now();
+    let mut leases = CultMesh::create_authority_lease_catalog();
+    leases.upsert(CultMeshAuthorityLease {
+        lease_id: "lease:rust-cultmesh-connected-server".to_string(),
+        verse_id: "local".to_string(),
+        peer_id: "rust-cultmesh-connected-server".to_string(),
+        roles: vec!["schema".to_string()],
+        shard_ids: Vec::new(),
+        issuer_runtime_id: Some("odin".to_string()),
+        valid_from: now - Duration::minutes(1),
+        expires_at: now + Duration::minutes(1),
+    })?;
+
+    let done = Arc::new(AtomicBool::new(false));
+    let pump = pump_rudp_server_until_connected(server.clone(), done.clone());
+    let mut client = CultMesh::connect_rudp_client_for_authorized_peer(
+        "rust-cultmesh-connected-client",
+        connection_id,
+        &peers,
+        &leases,
+        "local",
+        "schema",
+        None,
+        now,
+        CultMeshRudpClientOptions {
+            socket_options: options,
+            connect_payload: b"join".to_vec(),
+            connect_timeout: StdDuration::from_secs(1),
+            poll_interval: StdDuration::from_millis(5),
+        },
+    )?;
+    done.store(true, Ordering::SeqCst);
+    pump.join()
+        .map_err(|_| anyhow::anyhow!("RUDP server pump panicked"))??;
+
+    assert!(client.connected());
+    assert!(
+        server
+            .lock()
+            .expect("RUDP server mutex poisoned")
+            .connected()
+    );
+    client.send_schema_message(&CultNetMessage::SchemaCatalogRequest {
+        message_id: "rust-cultmesh-rudp-schema-catalog".to_string(),
+        include_schema_json: Some(true),
+        schema_ids: None,
+        kinds: Some(vec![CultNetSchemaKind::DocumentPayload]),
+    })?;
+    let request = {
+        let mut server = server.lock().expect("RUDP server mutex poisoned");
+        receive_rudp_schema_message(&mut server)?
+    };
+    let CultNetMessage::SchemaCatalogRequest {
+        message_id, kinds, ..
+    } = request
+    else {
+        anyhow::bail!("RUDP schema message did not decode as schema catalog request");
+    };
+    assert_eq!(message_id, "rust-cultmesh-rudp-schema-catalog");
+    assert_eq!(kinds, Some(vec![CultNetSchemaKind::DocumentPayload]));
+    assert_eq!(
+        client.profile.transports[0].protocol,
+        CultNetTransportProtocol::Rudp
+    );
     Ok(())
 }
 

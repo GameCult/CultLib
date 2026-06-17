@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::CultNetRudpSocketMode;
 use crate::CultNetRudpSocketTransportConnection;
@@ -263,6 +265,25 @@ impl Default for CultMeshRudpSocketOptions {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CultMeshRudpClientOptions {
+    pub socket_options: CultMeshRudpSocketOptions,
+    pub connect_payload: Vec<u8>,
+    pub connect_timeout: Duration,
+    pub poll_interval: Duration,
+}
+
+impl Default for CultMeshRudpClientOptions {
+    fn default() -> Self {
+        Self {
+            socket_options: CultMeshRudpSocketOptions::default(),
+            connect_payload: Vec::new(),
+            connect_timeout: Duration::from_secs(1),
+            poll_interval: Duration::from_millis(5),
+        }
+    }
+}
+
 pub struct CultMesh;
 
 impl CultMesh {
@@ -372,6 +393,76 @@ impl CultMesh {
                 anyhow!("No authorized RUDP peer for role {role} in Verse {verse_id}")
             })?;
         Self::create_rudp_client_for_peer(runtime_id, connection_id, &peer, options)
+    }
+
+    pub fn connect_rudp_client(
+        runtime_id: impl Into<String>,
+        connection_id: u32,
+        endpoint: &CultNetRudpEndpoint,
+        options: CultMeshRudpClientOptions,
+    ) -> Result<CultNetRudpSocketTransportConnection> {
+        let runtime_id = runtime_id.into();
+        let mut client = Self::create_rudp_client(
+            runtime_id.clone(),
+            connection_id,
+            endpoint,
+            options.socket_options,
+        )?;
+        client.connect(options.connect_payload)?;
+        let deadline = Instant::now() + options.connect_timeout;
+        while Instant::now() < deadline {
+            let _ = client.receive_once()?;
+            client.poll_resends()?;
+            if client.connected() {
+                return Ok(client);
+            }
+            thread::sleep(options.poll_interval);
+        }
+        if client.connected() {
+            return Ok(client);
+        }
+        Err(anyhow!(
+            "Timed out waiting for RUDP client {runtime_id} to connect"
+        ))
+    }
+
+    pub fn connect_rudp_client_for_endpoint(
+        runtime_id: impl Into<String>,
+        connection_id: u32,
+        endpoint: &str,
+        options: CultMeshRudpClientOptions,
+    ) -> Result<CultNetRudpSocketTransportConnection> {
+        let endpoint = Self::parse_rudp_endpoint(endpoint)?;
+        Self::connect_rudp_client(runtime_id, connection_id, &endpoint, options)
+    }
+
+    pub fn connect_rudp_client_for_peer(
+        runtime_id: impl Into<String>,
+        connection_id: u32,
+        peer: &CultMeshPeerCard,
+        options: CultMeshRudpClientOptions,
+    ) -> Result<CultNetRudpSocketTransportConnection> {
+        let endpoint = peer.rudp_endpoint()?;
+        Self::connect_rudp_client(runtime_id, connection_id, &endpoint, options)
+    }
+
+    pub fn connect_rudp_client_for_authorized_peer(
+        runtime_id: impl Into<String>,
+        connection_id: u32,
+        peers: &CultMeshPeerCatalog,
+        leases: &CultMeshAuthorityLeaseCatalog,
+        verse_id: &str,
+        role: &str,
+        shard_id: Option<&str>,
+        at: DateTime<Utc>,
+        options: CultMeshRudpClientOptions,
+    ) -> Result<CultNetRudpSocketTransportConnection> {
+        let peer = peers
+            .first_authorized(verse_id, role, leases, shard_id, at)
+            .ok_or_else(|| {
+                anyhow!("No authorized RUDP peer for role {role} in Verse {verse_id}")
+            })?;
+        Self::connect_rudp_client_for_peer(runtime_id, connection_id, &peer, options)
     }
 }
 

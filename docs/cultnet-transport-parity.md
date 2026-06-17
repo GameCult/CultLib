@@ -405,10 +405,12 @@ Current progress:
   first peer authorized by the authority lease catalog for a Verse role. The
   facade delegates to the existing Rust schema registry, shard catalog, and RUDP
   socket transport owners; discovery contact remains separate from trust, which
-  is still gated by the authority lease catalog. Rust RUDP transports now also
-  send and receive typed `cultnet.schema.v0` messages on the reliable ordered
-  `schema` channel, so callers do not have to hand-encode MessagePack payloads
-  before using the shared RUDP pipe.
+  is still gated by the authority lease catalog. The facade can now also return
+  a connected RUDP client from a direct endpoint, peer card, or authorized peer
+  lookup. Rust RUDP transports now also send and receive typed
+  `cultnet.schema.v0` messages on the reliable ordered `schema` channel, so
+  callers do not have to hand-encode MessagePack payloads or hand-roll the
+  client handshake before using the shared RUDP pipe.
 - Rust now also has substrate-shaped shard catalog helpers:
   `CultNetShardDescriptor`, `CultNetShardCatalog`, request filtering by schema
   id and record key, response creation, response application, and built-in
