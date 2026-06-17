@@ -228,13 +228,14 @@ branded entrypoint to select an authorized RUDP peer for a Verse role:
 val peers = CultMesh.createPeerCatalog()
 val leases = CultMesh.createAuthorityLeaseCatalog()
 
-val client = CultMesh.createRudpClientForAuthorizedPeer(
+val client = CultMesh.connectRudpClientForAuthorizedPeer(
     runtimeId = "kotlin-client",
     connectionId = 0x10203040,
     peers = peers,
     leases = leases,
     verseId = "local",
     role = "schema",
+    connectPayload = "join".toByteArray(),
 )
 ```
 
@@ -242,13 +243,16 @@ The helper uses `CultMeshPeerCatalog.firstAuthorized(...)`, which delegates
 trust to `CultMeshAuthorityLeaseCatalog.isAuthorized(...)`; peer endpoints
 remain contact hints, not authority.
 
-The sugar delegates to the same `CultNetRudpSocketTransportConnection` and
+The connected helper delegates to the same `CultNetRudpSocketTransportConnection`
+after authorized peer selection and handshake. The lower-level
+`createRudpClient...` helpers remain available when a caller intentionally owns
+the handshake or in-process polling loop. The sugar delegates to the same
+transport and
 `cultnet.transport.rudp.v0` packet codec used by the cross-runtime interop
 harness. `sendSchema`, `sendLatest`, and `sendRealtime` select the shared
-channel semantics; they do not create a Kotlin-only dialect. For a remote peer
-that already has its own receive loop, use `connectAndWait(...)`; for two
-same-process transports, use `pumpRudpPairUntilConnected(...)` to drive both
-sides through the handshake. Because RUDP also implements
+channel semantics; they do not create a Kotlin-only dialect. For two
+same-process transports, use `pumpRudpPairUntilConnected(...)` or an explicit
+server pump to drive both sides through the handshake. Because RUDP also implements
 `CultNetSchemaMessageTransport`, it uses the same catalog helpers as WebSocket,
 with timeout-aware receive loops: `fetchSchemaCatalog`,
 `fetchSchemaDescriptors`, `syncSchemaCatalog`, `fetchShardCatalog`,

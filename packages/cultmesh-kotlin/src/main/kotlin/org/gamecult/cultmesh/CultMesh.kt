@@ -23,6 +23,7 @@ import java.time.Instant
 import java.util.ArrayDeque
 import java.util.Base64
 import java.util.TreeMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 interface CultDocumentCodec<T> {
     val documentType: String
@@ -395,6 +396,104 @@ object CultMesh {
         val peer = peers.firstAuthorized(verseId, role, leases, shardId, at)
             ?: throw IOException("No authorized RUDP peer for role $role in Verse $verseId")
         return createRudpClientForPeer(runtimeId, connectionId, peer, bindHost, bindPort, tuning)
+    }
+
+    fun connectRudpClient(
+        runtimeId: String,
+        connectionId: Long,
+        endpoint: CultNetRudpEndpoint,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+        connectPayload: ByteArray = ByteArray(0),
+        timeoutMs: Long = 1_000,
+        pollIntervalMs: Long = 5,
+    ): CultNetRudpSocketTransportConnection {
+        val client = createRudpClient(runtimeId, connectionId, endpoint, bindHost, bindPort, tuning)
+        if (!client.connectAndWait(connectPayload, timeoutMs, pollIntervalMs)) {
+            client.close()
+            throw IOException("Timed out waiting for RUDP client $runtimeId to connect")
+        }
+        return client
+    }
+
+    fun connectRudpClient(
+        runtimeId: String,
+        connectionId: Long,
+        endpoint: String,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+        connectPayload: ByteArray = ByteArray(0),
+        timeoutMs: Long = 1_000,
+        pollIntervalMs: Long = 5,
+    ): CultNetRudpSocketTransportConnection = connectRudpClient(
+        runtimeId = runtimeId,
+        connectionId = connectionId,
+        endpoint = parseRudpEndpoint(endpoint),
+        bindHost = bindHost,
+        bindPort = bindPort,
+        tuning = tuning,
+        connectPayload = connectPayload,
+        timeoutMs = timeoutMs,
+        pollIntervalMs = pollIntervalMs,
+    )
+
+    fun connectRudpClientForPeer(
+        runtimeId: String,
+        connectionId: Long,
+        peer: CultMeshPeerCard,
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+        connectPayload: ByteArray = ByteArray(0),
+        timeoutMs: Long = 1_000,
+        pollIntervalMs: Long = 5,
+    ): CultNetRudpSocketTransportConnection {
+        val endpoint = peer.endpoints.firstOrNull { it.startsWith("rudp://", ignoreCase = true) }
+            ?: throw IOException("Peer ${peer.peerId} does not advertise a RUDP endpoint")
+        return connectRudpClient(
+            runtimeId,
+            connectionId,
+            endpoint,
+            bindHost,
+            bindPort,
+            tuning,
+            connectPayload,
+            timeoutMs,
+            pollIntervalMs,
+        )
+    }
+
+    fun connectRudpClientForAuthorizedPeer(
+        runtimeId: String,
+        connectionId: Long,
+        peers: CultMeshPeerCatalog,
+        leases: CultMeshAuthorityLeaseCatalog,
+        verseId: String,
+        role: String,
+        shardId: String? = null,
+        at: Instant = Instant.now(),
+        bindHost: String = "127.0.0.1",
+        bindPort: Int = 0,
+        tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
+        connectPayload: ByteArray = ByteArray(0),
+        timeoutMs: Long = 1_000,
+        pollIntervalMs: Long = 5,
+    ): CultNetRudpSocketTransportConnection {
+        val peer = peers.firstAuthorized(verseId, role, leases, shardId, at)
+            ?: throw IOException("No authorized RUDP peer for role $role in Verse $verseId")
+        return connectRudpClientForPeer(
+            runtimeId,
+            connectionId,
+            peer,
+            bindHost,
+            bindPort,
+            tuning,
+            connectPayload,
+            timeoutMs,
+            pollIntervalMs,
+        )
     }
 
     fun createRudpReconnectLoop(
@@ -3983,17 +4082,36 @@ private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
                 expiresAt = Instant.now().plusSeconds(60),
             ),
         )
-        CultMesh.createRudpClientForAuthorizedPeer(
-            runtimeId = "kotlin-rudp-sugar-client",
-            connectionId = connectionId,
-            peers = peers,
-            leases = leases,
-            verseId = "local",
-            role = "schema",
-            tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
-        ).use { client ->
-            client.connect("join")
-            check(pumpRudpPairUntilConnected(client, server))
+        val serverPumpDone = AtomicBoolean(false)
+        val serverPump = Thread {
+            while (!server.connected && !serverPumpDone.get()) {
+                server.receiveOnce()
+                server.pollResends()
+                Thread.sleep(5)
+            }
+        }
+        serverPump.isDaemon = true
+        serverPump.start()
+
+        val client = try {
+            CultMesh.connectRudpClientForAuthorizedPeer(
+                runtimeId = "kotlin-rudp-sugar-client",
+                connectionId = connectionId,
+                peers = peers,
+                leases = leases,
+                verseId = "local",
+                role = "schema",
+                tuning = CultNetRudpSocketTuning(resendDelayMs = 25, maxFragmentBytes = 1024, maxPendingReliablePackets = 16),
+                connectPayload = "join".toByteArray(StandardCharsets.UTF_8),
+            )
+        } finally {
+            serverPumpDone.set(true)
+            serverPump.join(1_000)
+        }
+
+        client.use {
+            check(client.connected)
+            check(server.connected)
             val schemaCatalog = CultNetSchemaCatalog()
             schemaCatalog.upsert(
                 defineCultNetSchemaDescriptor(
