@@ -45,8 +45,9 @@ Implemented:
 - epoch-aware raw put/delete messages
 - routing hints on shard authority errors
 - injectable non-primary write forwarding policy
-- schema-v0 write forwarder that dials advertised `cultnet://host:port`
-  primary endpoints
+- schema-v0 write forwarder that dials advertised `rudp://host:port` primary
+  endpoints, while keeping `cultnet://host:port` as the LiteNetLib compatibility
+  lane
 - in-memory per-shard mutation logs with sequence numbers, epochs, mutation
   kind, schema id, key, and document references
 - mutation-log catch-up by last seen sequence
@@ -56,7 +57,8 @@ Implemented:
   idempotent replay
 - shard log replicator that pulls non-primary shards from catalog-advertised
   primary endpoints
-- schema-v0 shard log fetcher for `cultnet://host:port` endpoints
+- schema-v0 shard log fetcher for `rudp://host:port` endpoints, while keeping
+  `cultnet://host:port` as the LiteNetLib compatibility lane
 - restart-safe replica cursor store, including a local MessagePack file-backed
   implementation
 - durable authoritative shard-log storage behind
