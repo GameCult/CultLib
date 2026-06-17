@@ -1942,6 +1942,368 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Options for a multi-peer CultNet RUDP UDP listener.
+    /// </summary>
+    public sealed class CultNetRudpSocketTransportServerOptions
+    {
+        /// <summary>
+        /// Gets or sets the runtime id advertised by this listener.
+        /// </summary>
+        public string RuntimeId { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the bound UDP socket.
+        /// </summary>
+        public Socket Socket { get; set; } = null!;
+        /// <summary>
+        /// Gets or sets the RUDP connection/session binding id accepted by this listener.
+        /// </summary>
+        public uint ConnectionId { get; set; }
+        /// <summary>
+        /// Gets or sets the first local packet sequence for each accepted peer session.
+        /// </summary>
+        public uint InitialSequence { get; set; } = 100;
+        /// <summary>
+        /// Gets or sets the resend delay in milliseconds.
+        /// </summary>
+        public long ResendDelayMs { get; set; } = 250;
+        /// <summary>
+        /// Gets or sets the advertised transport id.
+        /// </summary>
+        public string TransportId { get; set; } = "rudp";
+        /// <summary>
+        /// Gets or sets the maximum payload size for RUDP channels.
+        /// </summary>
+        public int? MaxPayloadBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum fragment size for RUDP channels.
+        /// </summary>
+        public int? MaxFragmentBytes { get; set; }
+        /// <summary>
+        /// Gets or sets the maximum pending reliable packet count for RUDP channels.
+        /// </summary>
+        public int? MaxPendingReliablePackets { get; set; }
+        /// <summary>
+        /// Gets or sets the advertised reconnect policy for this RUDP listener.
+        /// </summary>
+        public CultNetReconnectPolicy? ReconnectPolicy { get; set; }
+        /// <summary>
+        /// Gets or sets the payload sent with accept packets.
+        /// </summary>
+        public byte[]? AcceptPayload { get; set; }
+    }
+
+    /// <summary>
+    /// Peer context owned by a multi-peer CultNet RUDP listener.
+    /// </summary>
+    public sealed class CultNetRudpSocketServerPeer
+    {
+        internal CultNetRudpSocketServerPeer(EndPoint remoteEndPoint, CultNetRudpSession session)
+        {
+            RemoteEndPoint = remoteEndPoint;
+            Session = session;
+        }
+
+        internal CultNetRudpSession Session { get; }
+
+        /// <summary>
+        /// Gets the UDP endpoint for this peer.
+        /// </summary>
+        public EndPoint RemoteEndPoint { get; }
+        /// <summary>
+        /// Gets whether the peer RUDP handshake has completed.
+        /// </summary>
+        public bool Connected => Session.Connected;
+        /// <summary>
+        /// Gets the last transport-level remote disconnect reason, if one was received.
+        /// </summary>
+        public byte[]? DisconnectReason { get; internal set; }
+    }
+
+    /// <summary>
+    /// A frame delivered by a multi-peer CultNet RUDP listener.
+    /// </summary>
+    public sealed class CultNetRudpSocketServerFrame
+    {
+        /// <summary>
+        /// Gets the peer that delivered the frame.
+        /// </summary>
+        public CultNetRudpSocketServerPeer Peer { get; set; } = null!;
+        /// <summary>
+        /// Gets the delivered transport frame.
+        /// </summary>
+        public CultNetTransportFrame Frame { get; set; } = new CultNetTransportFrame();
+    }
+
+    /// <summary>
+    /// Multi-peer UDP socket listener for CultNet RUDP sessions.
+    /// </summary>
+    public sealed class CultNetRudpSocketTransportServer : IDisposable
+    {
+        private readonly Socket _socket;
+        private readonly uint _connectionId;
+        private readonly uint _initialSequence;
+        private readonly long _resendDelayMs;
+        private readonly int? _maxFragmentBytes;
+        private readonly int? _maxPendingReliablePackets;
+        private readonly byte[] _acceptPayload;
+        private readonly CultNetTransportStats _stats = new CultNetTransportStats();
+        private readonly Dictionary<string, CultNetRudpSocketServerPeer> _peers = new Dictionary<string, CultNetRudpSocketServerPeer>(StringComparer.Ordinal);
+        private readonly Queue<CultNetRudpSocketServerFrame> _deliveredFrames = new Queue<CultNetRudpSocketServerFrame>();
+        private bool _disposed;
+
+        /// <summary>
+        /// Initializes a multi-peer UDP listener for CultNet RUDP sessions.
+        /// </summary>
+        public CultNetRudpSocketTransportServer(CultNetRudpSocketTransportServerOptions options)
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            if (string.IsNullOrWhiteSpace(options.RuntimeId)) throw new ArgumentException("Runtime id is required.", nameof(options));
+            _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
+            _connectionId = options.ConnectionId;
+            _initialSequence = options.InitialSequence;
+            _resendDelayMs = options.ResendDelayMs;
+            _maxFragmentBytes = options.MaxFragmentBytes;
+            _maxPendingReliablePackets = options.MaxPendingReliablePackets;
+            _acceptPayload = options.AcceptPayload ?? Array.Empty<byte>();
+
+            var local = _socket.LocalEndPoint as IPEndPoint;
+            Profile = CultNetTransportProfiles.CreateRudp(
+                options.RuntimeId,
+                new RudpTransportProfileOptions
+                {
+                    TransportId = options.TransportId,
+                    Host = local?.Address.ToString(),
+                    Port = local?.Port,
+                    MaxPayloadBytes = options.MaxPayloadBytes,
+                    MaxFragmentBytes = options.MaxFragmentBytes,
+                    MaxPendingReliablePackets = options.MaxPendingReliablePackets,
+                    ReconnectPolicy = options.ReconnectPolicy
+                });
+        }
+
+        /// <summary>
+        /// Gets the profile this listener implements.
+        /// </summary>
+        public CultNetTransportProfile Profile { get; }
+
+        /// <summary>
+        /// Gets currently tracked peers indexed by remote endpoint.
+        /// </summary>
+        public IReadOnlyCollection<CultNetRudpSocketServerPeer> Peers => _peers.Values.ToArray();
+
+        /// <summary>
+        /// Gets a snapshot of the current transfer counters.
+        /// </summary>
+        public CultNetTransportStats Stats => _stats.Snapshot();
+
+        /// <summary>
+        /// Sends a logical transport frame to a connected peer.
+        /// </summary>
+        public void Send(CultNetRudpSocketServerPeer peer, string channelId, byte[] payload)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            foreach (var packet in peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes))
+            {
+                SendPacket(peer.RemoteEndPoint, packet);
+            }
+            _stats.FramesSent++;
+        }
+
+        /// <summary>
+        /// Sends a reliable ordered schema-channel payload to a peer.
+        /// </summary>
+        public void SendSchema(CultNetRudpSocketServerPeer peer, byte[] payload)
+        {
+            Send(peer, "schema", payload);
+        }
+
+        /// <summary>
+        /// Sends a reliable ordered schema-channel UTF-8 payload to a peer.
+        /// </summary>
+        public void SendSchema(CultNetRudpSocketServerPeer peer, string payload)
+        {
+            SendSchema(peer, Encoding.UTF8.GetBytes(payload ?? string.Empty));
+        }
+
+        /// <summary>
+        /// Sends a CultNet schema-v0 message to a peer on the reliable ordered schema channel.
+        /// </summary>
+        public void SendSchemaMessage<TMessage>(CultNetRudpSocketServerPeer peer, TMessage message)
+            where TMessage : ICultNetSchemaMessage
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            SendSchema(peer, CultNetSchemaMessageSerialization.Serialize(message));
+        }
+
+        /// <summary>
+        /// Polls the UDP socket once and returns the next delivered peer frame if one is available.
+        /// </summary>
+        public CultNetRudpSocketServerFrame? ReceiveOnce()
+        {
+            if (_deliveredFrames.Count > 0)
+            {
+                return _deliveredFrames.Dequeue();
+            }
+
+            var buffer = new byte[65535];
+            EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+            int received;
+            try
+            {
+                if (!_socket.Poll(0, SelectMode.SelectRead))
+                {
+                    return null;
+                }
+
+                received = _socket.ReceiveFrom(buffer, ref remote);
+            }
+            catch (SocketException error) when (
+                error.SocketErrorCode == SocketError.WouldBlock ||
+                error.SocketErrorCode == SocketError.TimedOut)
+            {
+                return null;
+            }
+
+            _stats.BytesReceived += received;
+            var wire = new byte[received];
+            Array.Copy(buffer, wire, received);
+
+            CultNetRudpPacket packet;
+            try
+            {
+                packet = CultNetRudpPacketCodec.Decode(wire);
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+
+            if (packet.ConnectionId != _connectionId)
+            {
+                return null;
+            }
+
+            var peerKey = RemoteKey(remote);
+            if (packet.PacketType == CultNetRudpPacketType.Connect)
+            {
+                var peer = new CultNetRudpSocketServerPeer(
+                    CloneEndPoint(remote),
+                    new CultNetRudpSession(new CultNetRudpSessionOptions
+                    {
+                        ConnectionId = _connectionId,
+                        InitialSequence = _initialSequence,
+                        ResendDelayMs = _resendDelayMs,
+                        MaxPendingReliablePackets = _maxPendingReliablePackets
+                    }));
+                _peers[peerKey] = peer;
+                SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
+                return null;
+            }
+
+            if (!_peers.TryGetValue(peerKey, out var existingPeer))
+            {
+                return null;
+            }
+
+            var result = existingPeer.Session.Receive(packet, NowMs());
+            if (result.Reply != null)
+            {
+                SendPacket(existingPeer.RemoteEndPoint, result.Reply);
+            }
+            if (result.Disconnected)
+            {
+                existingPeer.DisconnectReason = result.DisconnectReason;
+                _peers.Remove(peerKey);
+                return null;
+            }
+
+            foreach (var frame in result.Delivered)
+            {
+                _deliveredFrames.Enqueue(new CultNetRudpSocketServerFrame
+                {
+                    Peer = existingPeer,
+                    Frame = new CultNetTransportFrame
+                    {
+                        ChannelId = frame.ChannelId,
+                        Payload = frame.Payload
+                    }
+                });
+                _stats.FramesReceived++;
+            }
+
+            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            if (packet.PacketType == CultNetRudpPacketType.Data || delivered != null)
+            {
+                SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.CreateAck());
+            }
+
+            return delivered;
+        }
+
+        /// <summary>
+        /// Sends any reliable packets whose resend timers are due for all peers.
+        /// </summary>
+        public void PollResends()
+        {
+            foreach (var peer in _peers.Values.ToArray())
+            {
+                foreach (var packet in peer.Session.DueResends(NowMs()))
+                {
+                    SendPacket(peer.RemoteEndPoint, packet);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _socket.Dispose();
+        }
+
+        private void SendPacket(EndPoint remoteEndPoint, CultNetRudpPacket packet)
+        {
+            var wire = CultNetRudpPacketCodec.Encode(packet);
+            var sent = _socket.SendTo(wire, remoteEndPoint);
+            _stats.BytesSent += sent;
+        }
+
+        private static string RemoteKey(EndPoint endpoint)
+        {
+            return endpoint.ToString() ?? string.Empty;
+        }
+
+        private static EndPoint CloneEndPoint(EndPoint endpoint)
+        {
+            if (endpoint is IPEndPoint ip)
+            {
+                return new IPEndPoint(ip.Address, ip.Port);
+            }
+
+            return endpoint;
+        }
+
+        private static CultNetRudpSendOptions ChannelSendOptions(string channelId)
+        {
+            return string.Equals(channelId, "schema", StringComparison.Ordinal)
+                ? new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = NowMs() }
+                : string.Equals(channelId, "latest", StringComparison.Ordinal)
+                    ? new CultNetRudpSendOptions { Sequenced = true, NowMs = NowMs() }
+                    : new CultNetRudpSendOptions { NowMs = NowMs() };
+        }
+
+        private static long NowMs()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+    }
+
+    /// <summary>
     /// Caller-owned reconnect loop for the socket-backed CultNet RUDP transport.
     /// </summary>
     public sealed class CultNetRudpReconnectLoop : IDisposable

@@ -1011,6 +1011,111 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSocketTransportServer_DemuxesMultiplePeers()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var firstClientSocket = BindUdpSocket();
+            using var secondClientSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203045;
+            using var server = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+            {
+                RuntimeId = "csharp-rudp-listener",
+                Socket = serverSocket,
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024,
+                AcceptPayload = Encoding.UTF8.GetBytes("accepted")
+            });
+            using var firstClient = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-listener-client-a",
+                Socket = firstClientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+            using var secondClient = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-listener-client-b",
+                Socket = secondClientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId,
+                InitialSequence = 10,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+
+            firstClient.Connect("join-a");
+            secondClient.Connect("join-b");
+            for (var attempt = 0; attempt < 40 && (!firstClient.Connected || !secondClient.Connected || server.Peers.Count != 2); attempt++)
+            {
+                server.ReceiveOnce();
+                firstClient.ReceiveOnce();
+                secondClient.ReceiveOnce();
+                server.PollResends();
+                firstClient.PollResends();
+                secondClient.PollResends();
+                Thread.Sleep(5);
+            }
+
+            Assert.That(firstClient.Connected, Is.True);
+            Assert.That(secondClient.Connected, Is.True);
+            Assert.That(server.Peers, Has.Count.EqualTo(2));
+
+            firstClient.SendSchema("first-payload");
+            secondClient.SendSchema("second-payload");
+            CultNetRudpSocketServerFrame? firstFrame = null;
+            CultNetRudpSocketServerFrame? secondFrame = null;
+            for (var attempt = 0; attempt < 40 && (firstFrame == null || secondFrame == null); attempt++)
+            {
+                var frame = server.ReceiveOnce();
+                if (frame != null)
+                {
+                    var payload = Encoding.UTF8.GetString(frame.Frame.Payload);
+                    if (payload == "first-payload")
+                    {
+                        firstFrame = frame;
+                    }
+                    else if (payload == "second-payload")
+                    {
+                        secondFrame = frame;
+                    }
+                }
+                firstClient.ReceiveOnce();
+                secondClient.ReceiveOnce();
+                server.PollResends();
+                firstClient.PollResends();
+                secondClient.PollResends();
+                Thread.Sleep(5);
+            }
+
+            Assert.That(firstFrame, Is.Not.Null);
+            Assert.That(secondFrame, Is.Not.Null);
+            Assert.That(firstFrame!.Peer.RemoteEndPoint, Is.Not.EqualTo(secondFrame!.Peer.RemoteEndPoint));
+            Assert.That(firstFrame.Frame.ChannelId, Is.EqualTo("schema"));
+            Assert.That(secondFrame.Frame.ChannelId, Is.EqualTo("schema"));
+
+            server.SendSchema(firstFrame.Peer, "reply-a");
+            server.SendSchema(secondFrame.Peer, "reply-b");
+            var firstReply = firstClient.ReceiveSchema(TimeSpan.FromSeconds(1));
+            var secondReply = secondClient.ReceiveSchema(TimeSpan.FromSeconds(1));
+
+            Assert.That(firstReply, Is.Not.Null);
+            Assert.That(secondReply, Is.Not.Null);
+            Assert.That(Encoding.UTF8.GetString(firstReply!), Is.EqualTo("reply-a"));
+            Assert.That(Encoding.UTF8.GetString(secondReply!), Is.EqualTo("reply-b"));
+            Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(server.Stats.FramesReceived, Is.EqualTo(2));
+            Assert.That(server.Stats.FramesSent, Is.EqualTo(2));
+        }
+
+        [Test]
         public void RudpSocketTransport_ErgonomicHelpersCarryNamedChannels()
         {
             using var serverSocket = BindUdpSocket();

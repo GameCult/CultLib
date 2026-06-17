@@ -290,6 +290,12 @@ Current progress:
   `ReconnectIfDue(nowMs)` inside their own scheduler, and the shared controller
   owns retry delay/exhaustion state while the caller-owned factory opens the
   next `CultNetRudpSocketTransportConnection`.
+- C# now has `CultNetRudpSocketTransportServer`, a multi-peer UDP listener that
+  demultiplexes remote endpoints into separate RUDP sessions and delivers
+  `(peer, frame)` records to higher service owners. This is the production
+  server substrate cut: UDP/session ownership is no longer limited to the
+  single-peer interop/client helper, but authentication and game-session
+  authority still remain above the transport.
 - C# `GameCult.Mesh` now mirrors the branded RUDP facade shape used by
   TypeScript, Python, Kotlin, and Rust: it parses `rudp://host:port` endpoints,
   creates RUDP client/server transports from endpoint or peer-card contact
