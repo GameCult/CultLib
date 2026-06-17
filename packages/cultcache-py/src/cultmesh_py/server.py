@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,8 +10,16 @@ import msgpack
 
 from cultnet_py import (
     CultNetSimulationObservationHub,
+    CultNetRudpPacket,
+    CultNetRudpPacketType,
+    CultNetRudpSendOptions,
+    CultNetRudpSession,
+    CultNetRudpSessionOptions,
     TcpFramedTransportConnection,
+    create_rudp_transport_profile,
     create_tcp_framed_transport_profile,
+    decode_rudp_packet,
+    encode_rudp_packet,
     wire_message_schema_descriptors,
 )
 
@@ -39,6 +48,12 @@ class _DatabaseSubscription:
 
 
 @dataclass
+class _RudpPeerConnection:
+    session: CultNetRudpSession
+    subscriptions: dict[str, _DatabaseSubscription] = field(default_factory=dict)
+
+
+@dataclass
 class CultMeshLocalServer:
     node: CultMeshNode
     verse_catalog: CultMeshVerseCatalog = field(default_factory=CultMeshVerseCatalog)
@@ -50,9 +65,14 @@ class CultMeshLocalServer:
     runtime_kind: str = "python"
     max_snapshot_documents: int | None = None
     max_snapshot_bytes: int | None = None
+    enable_rudp: bool = True
+    rudp_connection_id: int = 0x43554C54
+    rudp_resend_delay_ms: int = 25
     _socket: socket.socket | None = field(default=None, init=False, repr=False)
+    _rudp_socket: socket.socket | None = field(default=None, init=False, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _rudp_thread: threading.Thread | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
@@ -73,10 +93,24 @@ class CultMeshLocalServer:
         self._stop.clear()
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
+        if self.enable_rudp:
+            rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rudp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            rudp_socket.bind((self.host, self.port))
+            rudp_socket.settimeout(0.02)
+            self._rudp_socket = rudp_socket
+            self._rudp_thread = threading.Thread(target=self._rudp_loop, daemon=True)
+            self._rudp_thread.start()
         return self
 
     def stop(self) -> None:
         self._stop.set()
+        if self._rudp_socket is not None:
+            try:
+                self._rudp_socket.close()
+            except OSError:
+                pass
+            self._rudp_socket = None
         if self._socket is not None:
             try:
                 self._socket.close()
@@ -86,6 +120,9 @@ class CultMeshLocalServer:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._rudp_thread is not None:
+            self._rudp_thread.join(timeout=2.0)
+            self._rudp_thread = None
 
     def __enter__(self) -> "CultMeshLocalServer":
         return self.start()
@@ -162,6 +199,106 @@ class CultMeshLocalServer:
                 responses = self._handle_connection_message(message, subscriptions)
                 for response in responses:
                     transport.send("schema", msgpack.packb(response, use_bin_type=True))
+
+    def _rudp_loop(self) -> None:
+        rudp_socket = self._rudp_socket
+        if rudp_socket is None:
+            return
+        peers: dict[tuple[str, int], _RudpPeerConnection] = {}
+        while not self._stop.is_set():
+            try:
+                wire, remote_addr = rudp_socket.recvfrom(65535)
+            except TimeoutError:
+                self._poll_rudp_resends(rudp_socket, peers)
+                continue
+            except OSError:
+                return
+
+            try:
+                packet = decode_rudp_packet(wire)
+            except ValueError:
+                continue
+            if packet.connection_id != self.rudp_connection_id:
+                continue
+
+            now_ms = _now_ms()
+            peer = peers.get(remote_addr)
+            if packet.packet_type == CultNetRudpPacketType.CONNECT:
+                peer = _RudpPeerConnection(
+                    CultNetRudpSession(
+                        CultNetRudpSessionOptions(
+                            connection_id=self.rudp_connection_id,
+                            resend_delay_ms=self.rudp_resend_delay_ms,
+                        )
+                    )
+                )
+                peers[remote_addr] = peer
+                self._send_rudp_packet(
+                    rudp_socket,
+                    remote_addr,
+                    peer.session.accept_connect(packet, now_ms, b"cultmesh-local-rudp"),
+                )
+                continue
+            if peer is None:
+                continue
+
+            result = peer.session.receive(packet, now_ms)
+            if result.reply is not None:
+                self._send_rudp_packet(rudp_socket, remote_addr, result.reply)
+            if result.disconnected:
+                peers.pop(remote_addr, None)
+                continue
+            for delivered in result.delivered:
+                if delivered.channel_id != "schema":
+                    continue
+                try:
+                    message = msgpack.unpackb(delivered.payload, raw=False)
+                except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                responses = self._handle_connection_message(message, peer.subscriptions)
+                for response in responses:
+                    self._send_rudp_schema_frame(
+                        rudp_socket,
+                        remote_addr,
+                        peer.session,
+                        msgpack.packb(response, use_bin_type=True),
+                    )
+            if packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
+                self._send_rudp_packet(rudp_socket, remote_addr, peer.session.create_ack())
+
+    def _poll_rudp_resends(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+    ) -> None:
+        now_ms = _now_ms()
+        for remote_addr, peer in list(peers.items()):
+            for packet in peer.session.due_resends(now_ms):
+                self._send_rudp_packet(rudp_socket, remote_addr, packet)
+
+    def _send_rudp_schema_frame(
+        self,
+        rudp_socket: socket.socket,
+        remote_addr: tuple[str, int],
+        session: CultNetRudpSession,
+        payload: bytes,
+    ) -> None:
+        for packet in session.send_many(
+            "schema",
+            payload,
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=_now_ms()),
+        ):
+            self._send_rudp_packet(rudp_socket, remote_addr, packet)
+
+    @staticmethod
+    def _send_rudp_packet(
+        rudp_socket: socket.socket,
+        remote_addr: tuple[str, int],
+        packet: CultNetRudpPacket,
+    ) -> None:
+        rudp_socket.sendto(encode_rudp_packet(packet), remote_addr)
 
     def _handle_connection_message(
         self,
@@ -328,7 +465,19 @@ class CultMeshLocalServer:
                     transport_id="cultmesh-local-tcp",
                     host=self.host,
                     port=self.port,
-                )
+                ),
+                *(
+                    [
+                        create_rudp_transport_profile(
+                            self.node.runtime_id,
+                            transport_id="cultmesh-local-rudp",
+                            host=self.host,
+                            port=self.port,
+                        )
+                    ]
+                    if self.enable_rudp
+                    else []
+                ),
             ],
             "supportsSchemaCatalog": True,
         }
@@ -467,3 +616,7 @@ class CultMeshLocalServer:
             "messageId": request.get("messageId", ""),
             "shards": shards,
         }
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)

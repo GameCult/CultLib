@@ -447,8 +447,9 @@ Current receipts:
   Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
   helper shapes, raw snapshot/shard-log application, simulation claim hashing,
   consensus aggregation, game-session fact commits, local prediction
-  reconciliation, committed simulation fact payload slots, and witness artifact
-  bundle payload slots.
+  reconciliation, committed simulation fact payload slots, the local CultMesh
+  server's TCP and RUDP schema request paths, and witness artifact bundle
+  payload slots.
 - `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
   downstream type checkers can inspect the package surface instead of treating
   the runtime as an untyped xenos swamp.

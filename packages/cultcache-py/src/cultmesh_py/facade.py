@@ -292,6 +292,9 @@ class CultMesh:
         display_name: str | None = None,
         max_snapshot_documents: int | None = None,
         max_snapshot_bytes: int | None = None,
+        enable_rudp: bool = True,
+        rudp_connection_id: int = 0x43554C54,
+        rudp_resend_delay_ms: int = 25,
     ) -> CultMeshLocalServer:
         return CultMeshLocalServer(
             node=node,
@@ -303,6 +306,9 @@ class CultMesh:
             display_name=display_name,
             max_snapshot_documents=max_snapshot_documents,
             max_snapshot_bytes=max_snapshot_bytes,
+            enable_rudp=enable_rudp,
+            rudp_connection_id=rudp_connection_id,
+            rudp_resend_delay_ms=rudp_resend_delay_ms,
         ).start()
 
     @staticmethod

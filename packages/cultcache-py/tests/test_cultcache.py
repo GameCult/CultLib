@@ -4853,6 +4853,20 @@ class CultCacheTests(unittest.TestCase):
             raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
             hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
             schema_response = raw_client.fetch_schema_catalog(schema_ids=["mesh.server_note.v1"], include_schema_json=True)
+            rudp_client = CultMesh.create_client(
+                endpoint=f"rudp://127.0.0.1:{server.port}",
+                timeout_seconds=2.0,
+                connection_id=server.rudp_connection_id,
+                runtime_id="rudp-probe",
+            )
+            rudp_hello_response = rudp_client.request(
+                hello(runtime_id="rudp-probe"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            rudp_schema_response = rudp_client.fetch_schema_catalog(
+                schema_ids=["mesh.server_note.v1"],
+                include_schema_json=True,
+            )
             wire_schema_response = raw_client.fetch_schema_catalog(kinds=["wire_message"], include_schema_json=True)
             synced_schema_catalog = CultNetSchemaCatalog()
             synced_wire_descriptors = raw_client.sync_schema_catalog(
@@ -4934,6 +4948,15 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(hello_response["supportedMutationContracts"][0]["documentType"], "mesh.server_note")
         self.assertIn("documentDelete", hello_response["supportedMutationContracts"][0]["operations"])
         self.assertIn("shardLog", hello_response["supportedMutationContracts"][0]["operations"])
+        advertised_transports = {
+            transport["protocol"]: transport
+            for profile in hello_response["transportProfiles"]
+            for transport in profile["transports"]
+        }
+        self.assertEqual(advertised_transports["tcp_framed"]["port"], server.port)
+        self.assertEqual(advertised_transports["rudp"]["port"], server.port)
+        self.assertEqual(rudp_hello_response["runtimeId"], "mesh-server")
+        self.assertEqual(rudp_schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
         self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
         self.assertIn("schemaJson", schema_response["schemas"][0])
         self.assertIn("cultnet.document_delete.v0", schema_response["schemas"][0]["wireContracts"])

@@ -317,7 +317,11 @@ Current progress:
   endpoint or peer-card contact hints while leaving packet/session semantics in
   `cultnet_py`. Python peer catalogs also expose authorized-peer lookup, and
   the branded facade can create a RUDP client from the first peer authorized by
-  the authority lease catalog for a Verse role.
+  the authority lease catalog for a Verse role. `CultMeshLocalServer` now also
+  starts a RUDP listener beside the TCP-framed listener by default and advertises
+  both transport profiles in `cultnet.hello.v0`; the RUDP listener keeps schema
+  request handling in the same server authority while demultiplexing per-remote
+  `CultNetRudpSession` state.
 - Rust now has a poll-driven `CultNetRudpReconnectLoop` for substrate callers:
   service loops report closure, ask `reconnect_if_due(now_ms)` inside their own
   reactor, and the shared controller owns retry delay/exhaustion state while the
