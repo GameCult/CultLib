@@ -80,6 +80,9 @@ static async Task ServeAsync(ServeConfig config)
 
     using var udpSocket = CreateDiscoverySocket(config.DiscoveryPort, config.DiscoveryGroup);
     using var tcpListener = new TcpListener(IPAddress.Parse(config.BindHost), config.TcpPort);
+    using var rudpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    rudpSocket.Bind(new IPEndPoint(IPAddress.Parse(config.BindHost), config.RudpPort));
+    rudpSocket.ReceiveTimeout = 20;
     tcpListener.Start();
 
     var cancellationSource = new CancellationTokenSource();
@@ -92,6 +95,7 @@ static async Task ServeAsync(ServeConfig config)
 
     _ = RunDiscoveryServerAsync(udpSocket, config, cancellationSource.Token);
     _ = RunTcpServerAsync(tcpListener, config, cache, documentRegistry, customSchemaRegistry, cancellationSource.Token);
+    _ = RunRudpServerAsync(rudpSocket, config, cache, documentRegistry, customSchemaRegistry, cancellationSource.Token);
 
     WriteJsonLine(new
     {
@@ -100,6 +104,7 @@ static async Task ServeAsync(ServeConfig config)
         runtimeId = config.RuntimeId,
         runtimeKind = config.RuntimeKind,
         tcpPort = config.TcpPort,
+        rudpPort = config.RudpPort,
         discoveryPort = config.DiscoveryPort,
         discoveryGroup = config.DiscoveryGroup.ToString()
     });
@@ -192,12 +197,8 @@ static async Task DialAsync(DialConfig config)
             payloadDeserializer: DeserializeInteropNotePayload));
     RegisterCapabilityBindings(documentRegistry);
 
-    using var client = new TcpClient();
-    await client.ConnectAsync(config.TargetHost, config.TargetPort);
-    using var stream = client.GetStream();
-    var transport = new TcpFramedTransportConnection(
-        stream,
-        CreateTcpFramedTransportProfile(config.RuntimeId, config.TargetHost, config.TargetPort));
+    using var transport = await OpenDialTransportAsync(config);
+    var transportName = config.TargetRudpPort.HasValue ? "rudp" : "tcp_framed";
 
     await SendMessageAsync(transport, new CultNetHelloMessage
     {
@@ -209,6 +210,7 @@ static async Task DialAsync(DialConfig config)
         SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
         SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
         SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
+        TransportProfiles = CreateDialTransportProfiles(config),
         SupportsSchemaCatalog = true
     });
     var remoteHello = await ExpectMessageAsync<CultNetHelloMessage>(transport, CultNetSchemaVersions.Hello);
@@ -245,9 +247,10 @@ static async Task DialAsync(DialConfig config)
     WriteJsonLine(new
     {
         mode = "dial",
+        transport = transportName,
         runtimeId = config.RuntimeId,
         targetHost = config.TargetHost,
-        targetPort = config.TargetPort,
+        targetPort = config.TargetRudpPort ?? config.TargetPort,
         remoteHello = new
         {
             schemaVersion = remoteHello.SchemaVersion,
@@ -276,7 +279,7 @@ static async Task DialAsync(DialConfig config)
 }
 
 static async Task<object> MutateRemoteNoteAsync(
-    TcpFramedTransportConnection transport,
+    ISchemaMessageTransport transport,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
     string runtimeId,
@@ -311,7 +314,7 @@ static async Task<object> MutateRemoteNoteAsync(
 }
 
 static async Task<object> FireRemoteWeaponAsync(
-    TcpFramedTransportConnection transport,
+    ISchemaMessageTransport transport,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
     string runtimeId,
@@ -379,7 +382,7 @@ static async Task RunDiscoveryServerAsync(Socket socket, ServeConfig config, Can
                 TcpPort = config.TcpPort,
                 WireContract = CultNetWireContracts.SchemaV0,
                 SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
-                TransportProfiles = [CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort)],
+                TransportProfiles = CreateInteropTransportProfiles(config.RuntimeId, config.AdvertiseHost, config.TcpPort, config.RudpPort),
                 SupportsSchemaCatalog = true
             };
             var announceBytes = MessagePackSerializer.Serialize(announce, CultNetSchemaMessageSerialization.Options);
@@ -426,61 +429,22 @@ static async Task RunTcpServerAsync(
             try
             {
                 using var stream = ownedClient.GetStream();
-                var transport = new TcpFramedTransportConnection(
+                using var transport = new TcpSchemaMessageTransport(new TcpFramedTransportConnection(
                     stream,
-                    CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort));
+                    CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort)));
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     ICultNetSchemaMessage message;
                     try
                     {
-                        message = await ReadMessageAsync(transport, cancellationToken);
+                        message = await transport.ReadMessageAsync(cancellationToken);
                     }
                     catch (EndOfStreamException)
                     {
                         break;
                     }
 
-                    switch (message)
-                    {
-                        case CultNetHelloMessage:
-                            await SendMessageAsync(transport, new CultNetHelloMessage
-                            {
-                                RuntimeId = config.RuntimeId,
-                                RuntimeKind = config.RuntimeKind,
-                                AgentId = config.AgentId,
-                                Role = "peer",
-                                DisplayName = config.DisplayName,
-                                SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
-                                SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
-                                SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
-                                TransportProfiles = [CreateTcpFramedTransportProfile(config.RuntimeId, config.AdvertiseHost, config.TcpPort)],
-                                SupportsSchemaCatalog = true
-                            }, cancellationToken);
-                            break;
-                        case CultNetSchemaCatalogRequestMessage catalogRequest:
-                            await SendMessageAsync(transport, CreateCatalogResponse(customSchemaRegistry, catalogRequest), cancellationToken);
-                            break;
-                        case CultNetSnapshotRequestMessage snapshotRequest:
-                            await SendMessageAsync(
-                                transport,
-                                documentRegistry.CreateRawSnapshotResponse(
-                                    cache,
-                                    snapshotRequest.MessageId,
-                                    snapshotRequest,
-                                    new CultNetDocumentMessageOptions
-                                    {
-                                        SourceRuntimeId = config.RuntimeId,
-                                        SourceAgentId = config.AgentId,
-                                        SourceRole = "peer",
-                                        Tags = ["interop", config.RuntimeId]
-                                    }),
-                                cancellationToken);
-                            break;
-                        case CultNetDocumentPutRawMessage rawPut:
-                            await HandleRawPutAsync(transport, config, cache, documentRegistry, rawPut, cancellationToken);
-                            break;
-                    }
+                    await HandleServerMessageAsync(transport, message, config, cache, documentRegistry, customSchemaRegistry, cancellationToken);
                 }
             }
             catch (Exception error)
@@ -491,8 +455,163 @@ static async Task RunTcpServerAsync(
     }
 }
 
+static Task RunRudpServerAsync(
+    Socket socket,
+    ServeConfig config,
+    CultCache cache,
+    CultNetDocumentRegistry documentRegistry,
+    CultNetSchemaRegistry customSchemaRegistry,
+    CancellationToken cancellationToken)
+{
+    return Task.Run(async () =>
+    {
+        var peers = new Dictionary<string, RudpPeerSession>(StringComparer.Ordinal);
+        var buffer = new byte[65535];
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                var received = socket.ReceiveFrom(buffer, ref remote);
+                var remoteKey = remote.ToString() ?? string.Empty;
+                var packetBytes = new byte[received];
+                Array.Copy(buffer, packetBytes, received);
+                CultNetRudpPacket packet;
+                try
+                {
+                    packet = CultNetRudpPacketCodec.Decode(packetBytes);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (packet.ConnectionId != InteropPeerShared.RudpInteropConnectionId)
+                {
+                    continue;
+                }
+
+                if (!peers.TryGetValue(remoteKey, out var peer))
+                {
+                    peer = new RudpPeerSession(remote, new CultNetRudpSession(new CultNetRudpSessionOptions
+                    {
+                        ConnectionId = InteropPeerShared.RudpInteropConnectionId,
+                        InitialSequence = 100,
+                        ResendDelayMs = InteropPeerShared.RudpInteropResendDelayMs
+                    }));
+                    peers[remoteKey] = peer;
+                }
+
+                if (packet.PacketType == CultNetRudpPacketType.Connect)
+                {
+                    InteropRudpRuntime.SendPacket(socket, peer.RemoteEndPoint, peer.Session.AcceptConnect(
+                        packet,
+                        InteropRudpRuntime.NowMs(),
+                        Encoding.UTF8.GetBytes("cultnet-interop-rudp")));
+                    continue;
+                }
+
+                var result = peer.Session.Receive(packet, InteropRudpRuntime.NowMs());
+                if (result.Reply != null)
+                {
+                    InteropRudpRuntime.SendPacket(socket, peer.RemoteEndPoint, result.Reply);
+                }
+                if (packet.PacketType == CultNetRudpPacketType.Data)
+                {
+                    InteropRudpRuntime.SendPacket(socket, peer.RemoteEndPoint, peer.Session.CreateAck());
+                }
+
+                foreach (var frame in result.Delivered)
+                {
+                    if (!string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var message = CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
+                    var transport = new RudpSessionSchemaSender(socket, peer.RemoteEndPoint, peer.Session);
+                    await HandleServerMessageAsync(transport, message, config, cache, documentRegistry, customSchemaRegistry, cancellationToken);
+                }
+            }
+            catch (SocketException error) when (
+                error.SocketErrorCode == SocketError.TimedOut ||
+                error.SocketErrorCode == SocketError.WouldBlock ||
+                error.SocketErrorCode == SocketError.ConnectionReset)
+            {
+                var now = InteropRudpRuntime.NowMs();
+                foreach (var peer in peers.Values)
+                {
+                    foreach (var packet in peer.Session.DueResends(now))
+                    {
+                        InteropRudpRuntime.SendPacket(socket, peer.RemoteEndPoint, packet);
+                    }
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (Exception error)
+            {
+                WriteLog("rudpServeError", new { runtimeId = config.RuntimeId, error = error.Message });
+            }
+        }
+    }, cancellationToken);
+}
+
+static async Task HandleServerMessageAsync(
+    ISchemaMessageSender transport,
+    ICultNetSchemaMessage message,
+    ServeConfig config,
+    CultCache cache,
+    CultNetDocumentRegistry documentRegistry,
+    CultNetSchemaRegistry customSchemaRegistry,
+    CancellationToken cancellationToken)
+{
+    switch (message)
+    {
+        case CultNetHelloMessage:
+            await SendMessageAsync(transport, new CultNetHelloMessage
+            {
+                RuntimeId = config.RuntimeId,
+                RuntimeKind = config.RuntimeKind,
+                AgentId = config.AgentId,
+                Role = "peer",
+                DisplayName = config.DisplayName,
+                SupportedDocumentTypes = [InteropPeerShared.InteropDocumentType],
+                SupportedMutationContracts = [InteropPeerShared.InteractionContract()],
+                SupportedMessageVersions = [InteropPeerShared.InteropSchemaVersion],
+                TransportProfiles = CreateInteropTransportProfiles(config.RuntimeId, config.AdvertiseHost, config.TcpPort, config.RudpPort),
+                SupportsSchemaCatalog = true
+            }, cancellationToken);
+            break;
+        case CultNetSchemaCatalogRequestMessage catalogRequest:
+            await SendMessageAsync(transport, CreateCatalogResponse(customSchemaRegistry, catalogRequest), cancellationToken);
+            break;
+        case CultNetSnapshotRequestMessage snapshotRequest:
+            await SendMessageAsync(
+                transport,
+                documentRegistry.CreateRawSnapshotResponse(
+                    cache,
+                    snapshotRequest.MessageId,
+                    snapshotRequest,
+                    new CultNetDocumentMessageOptions
+                    {
+                        SourceRuntimeId = config.RuntimeId,
+                        SourceAgentId = config.AgentId,
+                        SourceRole = "peer",
+                        Tags = ["interop", config.RuntimeId]
+                    }),
+                cancellationToken);
+            break;
+        case CultNetDocumentPutRawMessage rawPut:
+            await HandleRawPutAsync(transport, config, cache, documentRegistry, rawPut, cancellationToken);
+            break;
+    }
+}
+
 static async Task HandleRawPutAsync(
-    TcpFramedTransportConnection transport,
+    ISchemaMessageSender transport,
     ServeConfig config,
     CultCache cache,
     CultNetDocumentRegistry documentRegistry,
@@ -566,6 +685,18 @@ static CultNetSchemaCatalogResponseMessage CreateCatalogResponse(
         .Concat(custom.Where(entry => builtIn.All(candidate => !string.Equals(candidate.SchemaId, entry.SchemaId, StringComparison.Ordinal))))
         .ToArray();
 
+    foreach (var schema in schemas)
+    {
+        schema.SchemaVersion = string.IsNullOrWhiteSpace(schema.SchemaVersion)
+            ? schema.SchemaId
+            : schema.SchemaVersion;
+        schema.DocumentType = string.IsNullOrWhiteSpace(schema.DocumentType)
+            ? schema.Kind
+            : schema.DocumentType;
+        schema.Title ??= string.Empty;
+        schema.SchemaJson ??= string.Empty;
+    }
+
     return new CultNetSchemaCatalogResponseMessage
     {
         MessageId = request.MessageId,
@@ -575,12 +706,107 @@ static CultNetSchemaCatalogResponseMessage CreateCatalogResponse(
 
 static CultNetTransportProfile CreateTcpFramedTransportProfile(string runtimeId, string host, int port)
 {
-    return CultNetTransportProfiles.CreateTcpFramed(runtimeId, new TcpFramedTransportProfileOptions
+    return NormalizeInteropTransportProfile(CultNetTransportProfiles.CreateTcpFramed(runtimeId, new TcpFramedTransportProfileOptions
     {
         TransportId = "interop-tcp",
         Host = host,
         Port = port
-    });
+    }));
+}
+
+static CultNetTransportProfile CreateRudpTransportProfile(string runtimeId, string host, int port)
+{
+    return NormalizeInteropTransportProfile(CultNetTransportProfiles.CreateRudp(runtimeId, new RudpTransportProfileOptions
+    {
+        TransportId = "interop-rudp",
+        Host = host,
+        Port = port,
+        MaxFragmentBytes = InteropPeerShared.RudpInteropMaxFragmentBytes
+    }));
+}
+
+static CultNetTransportProfile NormalizeInteropTransportProfile(CultNetTransportProfile profile)
+{
+    foreach (var transport in profile.Transports)
+    {
+        transport.Host ??= string.Empty;
+        transport.Path ??= "/";
+        transport.DiscoveryGroup ??= "none";
+        transport.ReconnectPolicy ??= CultNetReconnectPolicies.CreateDefault();
+        transport.ReconnectPolicy.MaxAttempts ??= 1;
+        foreach (var channel in transport.Channels)
+        {
+            channel.MaxPayloadBytes ??= 65535;
+            channel.MaxFragmentBytes ??= 65535;
+            channel.MaxPendingReliablePackets ??= 1024;
+        }
+    }
+    return profile;
+}
+
+static CultNetTransportProfile[] CreateInteropTransportProfiles(string runtimeId, string host, int tcpPort, int rudpPort)
+{
+    return
+    [
+        CreateTcpFramedTransportProfile(runtimeId, host, tcpPort),
+        CreateRudpTransportProfile(runtimeId, host, rudpPort)
+    ];
+}
+
+static CultNetTransportProfile[] CreateDialTransportProfiles(DialConfig config)
+{
+    var profiles = new List<CultNetTransportProfile>();
+    if (config.TargetPort.HasValue)
+    {
+        profiles.Add(CreateTcpFramedTransportProfile(config.RuntimeId, config.TargetHost, config.TargetPort.Value));
+    }
+    if (config.TargetRudpPort.HasValue)
+    {
+        profiles.Add(CreateRudpTransportProfile(config.RuntimeId, config.TargetHost, config.TargetRudpPort.Value));
+    }
+    return profiles.ToArray();
+}
+
+static async Task<ISchemaMessageTransport> OpenDialTransportAsync(DialConfig config)
+{
+    if (config.TargetRudpPort.HasValue)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        socket.ReceiveTimeout = 20;
+        var transport = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+        {
+            RuntimeId = $"{config.RuntimeId}-interop-rudp-dial",
+            Socket = socket,
+            Mode = CultNetRudpSocketMode.Client,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse(config.TargetHost), config.TargetRudpPort.Value),
+            ConnectionId = InteropPeerShared.RudpInteropConnectionId,
+            InitialSequence = 1,
+            ResendDelayMs = InteropPeerShared.RudpInteropResendDelayMs,
+            TransportId = "interop-rudp",
+            MaxFragmentBytes = InteropPeerShared.RudpInteropMaxFragmentBytes
+        });
+        transport.Connect(Encoding.UTF8.GetBytes("cultnet-interop-rudp"));
+        if (!transport.AwaitConnected(TimeSpan.FromSeconds(5)))
+        {
+            transport.Dispose();
+            throw new TimeoutException("Timed out waiting for RUDP connect.");
+        }
+        return new RudpSocketSchemaTransport(transport);
+    }
+
+    if (!config.TargetPort.HasValue)
+    {
+        throw new InvalidOperationException("dial mode requires --target-port or --target-rudp-port.");
+    }
+
+    var client = new TcpClient();
+    await client.ConnectAsync(config.TargetHost, config.TargetPort.Value);
+    return new TcpSchemaMessageTransport(
+        new TcpFramedTransportConnection(
+            client.GetStream(),
+            CreateTcpFramedTransportProfile(config.RuntimeId, config.TargetHost, config.TargetPort.Value)),
+        client);
 }
 
 static void RudpServeOnce(Dictionary<string, string> options)
@@ -842,21 +1068,21 @@ static void RequireRudpFrameBytes(CultNetTransportFrame frame, string expectedCh
 }
 
 static async Task SendMessageAsync<TMessage>(
-    TcpFramedTransportConnection transport,
+    ISchemaMessageSender transport,
     TMessage message,
     CancellationToken cancellationToken = default)
     where TMessage : ICultNetSchemaMessage
 {
     var payload = CultNetSchemaMessageSerialization.Serialize(message);
-    await transport.SendAsync("schema", payload, cancellationToken);
+    await transport.SendMessageAsync(payload, cancellationToken);
 }
 
 static async Task<TMessage> ExpectMessageAsync<TMessage>(
-    TcpFramedTransportConnection transport,
+    ISchemaMessageTransport transport,
     string expectedSchemaVersion)
     where TMessage : class, ICultNetSchemaMessage
 {
-    var message = await ReadMessageAsync(transport, CancellationToken.None);
+    var message = await transport.ReadMessageAsync(CancellationToken.None);
     if (!string.Equals(message.SchemaVersion, expectedSchemaVersion, StringComparison.Ordinal))
     {
         throw new InvalidOperationException($"Expected {expectedSchemaVersion} but received {message.SchemaVersion}.");
@@ -864,14 +1090,6 @@ static async Task<TMessage> ExpectMessageAsync<TMessage>(
 
     return message as TMessage
         ?? throw new InvalidOperationException($"Expected {typeof(TMessage).Name} but received {message.GetType().Name}.");
-}
-
-static async Task<ICultNetSchemaMessage> ReadMessageAsync(
-    TcpFramedTransportConnection transport,
-    CancellationToken cancellationToken)
-{
-    var frame = await transport.ReceiveAsync(cancellationToken);
-    return CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
 }
 
 static Socket CreateDiscoverySocket(int port, IPAddress multicastGroup)
@@ -1041,6 +1259,7 @@ static int ParseOptionalIntArg(Dictionary<string, string> options, string name, 
 
 static ServeConfig ParseServeConfig(Dictionary<string, string> options)
 {
+    var tcpPort = ParseIntArg(options, "tcp-port");
     return new ServeConfig(
         RequireArg(options, "runtime-id"),
         RequireArg(options, "runtime-kind"),
@@ -1048,7 +1267,8 @@ static ServeConfig ParseServeConfig(Dictionary<string, string> options)
         RequireArg(options, "agent-id"),
         options.TryGetValue("bind-host", out var bindHost) ? bindHost : "127.0.0.1",
         RequireArg(options, "advertise-host"),
-        ParseIntArg(options, "tcp-port"),
+        tcpPort,
+        ParseOptionalIntArg(options, "rudp-port", tcpPort),
         ParseIntArg(options, "discovery-port"),
         IPAddress.Parse(RequireArg(options, "discovery-group")),
         RequireArg(options, "schema-path"));
@@ -1062,7 +1282,12 @@ static DialConfig ParseDialConfig(Dictionary<string, string> options)
         RequireArg(options, "display-name"),
         RequireArg(options, "agent-id"),
         RequireArg(options, "target-host"),
-        ParseIntArg(options, "target-port"),
+        options.TryGetValue("target-port", out var targetPort)
+            ? int.Parse(targetPort, CultureInfo.InvariantCulture)
+            : null,
+        options.TryGetValue("target-rudp-port", out var targetRudpPort)
+            ? int.Parse(targetRudpPort, CultureInfo.InvariantCulture)
+            : null,
         RequireArg(options, "schema-path"));
 }
 
@@ -1085,6 +1310,120 @@ static void WriteLog(string @event, object payload)
     }, InteropPeerShared.JsonOptions));
 }
 
+interface ISchemaMessageSender
+{
+    Task SendMessageAsync(byte[] payload, CancellationToken cancellationToken = default);
+}
+
+interface ISchemaMessageTransport : ISchemaMessageSender, IDisposable
+{
+    Task<ICultNetSchemaMessage> ReadMessageAsync(CancellationToken cancellationToken = default);
+}
+
+sealed class TcpSchemaMessageTransport : ISchemaMessageTransport
+{
+    private readonly TcpFramedTransportConnection _transport;
+    private readonly TcpClient? _client;
+
+    public TcpSchemaMessageTransport(TcpFramedTransportConnection transport, TcpClient? client = null)
+    {
+        _transport = transport;
+        _client = client;
+    }
+
+    public Task SendMessageAsync(byte[] payload, CancellationToken cancellationToken = default)
+    {
+        return _transport.SendAsync("schema", payload, cancellationToken);
+    }
+
+    public async Task<ICultNetSchemaMessage> ReadMessageAsync(CancellationToken cancellationToken = default)
+    {
+        var frame = await _transport.ReceiveAsync(cancellationToken);
+        return CultNetSchemaMessageSerialization.Deserialize(frame.Payload);
+    }
+
+    public void Dispose()
+    {
+        _client?.Dispose();
+    }
+}
+
+sealed class RudpSocketSchemaTransport : ISchemaMessageTransport
+{
+    private readonly CultNetRudpSocketTransportConnection _transport;
+
+    public RudpSocketSchemaTransport(CultNetRudpSocketTransportConnection transport)
+    {
+        _transport = transport;
+    }
+
+    public Task SendMessageAsync(byte[] payload, CancellationToken cancellationToken = default)
+    {
+        _transport.Send("schema", payload);
+        return Task.CompletedTask;
+    }
+
+    public Task<ICultNetSchemaMessage> ReadMessageAsync(CancellationToken cancellationToken = default)
+    {
+        var message = _transport.ReceiveSchemaMessage(TimeSpan.FromSeconds(15))
+            ?? throw new TimeoutException("Timed out waiting for RUDP schema message.");
+        return Task.FromResult(message);
+    }
+
+    public void Dispose()
+    {
+        _transport.Dispose();
+    }
+}
+
+sealed class RudpSessionSchemaSender : ISchemaMessageSender
+{
+    private readonly Socket _socket;
+    private readonly EndPoint _remoteEndPoint;
+    private readonly CultNetRudpSession _session;
+
+    public RudpSessionSchemaSender(Socket socket, EndPoint remoteEndPoint, CultNetRudpSession session)
+    {
+        _socket = socket;
+        _remoteEndPoint = remoteEndPoint;
+        _session = session;
+    }
+
+    public Task SendMessageAsync(byte[] payload, CancellationToken cancellationToken = default)
+    {
+        foreach (var packet in _session.SendMany(
+            "schema",
+            payload,
+            new CultNetRudpSendOptions
+            {
+                Reliable = true,
+                Ordered = true,
+                Sequenced = false,
+                NowMs = InteropRudpRuntime.NowMs()
+            },
+            InteropPeerShared.RudpInteropMaxFragmentBytes))
+        {
+            InteropRudpRuntime.SendPacket(_socket, _remoteEndPoint, packet);
+        }
+        return Task.CompletedTask;
+    }
+}
+
+sealed record RudpPeerSession(EndPoint RemoteEndPoint, CultNetRudpSession Session);
+
+static class InteropRudpRuntime
+{
+    public static void SendPacket(Socket socket, EndPoint remoteEndPoint, CultNetRudpPacket packet)
+    {
+        socket.SendTo(CultNetRudpPacketCodec.Encode(packet), remoteEndPoint);
+    }
+
+    public static long NowMs()
+    {
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+}
+
 sealed record ServeConfig(
     string RuntimeId,
     string RuntimeKind,
@@ -1093,6 +1432,7 @@ sealed record ServeConfig(
     string BindHost,
     string AdvertiseHost,
     int TcpPort,
+    int RudpPort,
     int DiscoveryPort,
     IPAddress DiscoveryGroup,
     string SchemaPath);
@@ -1103,7 +1443,8 @@ sealed record DialConfig(
     string DisplayName,
     string AgentId,
     string TargetHost,
-    int TargetPort,
+    int? TargetPort,
+    int? TargetRudpPort,
     string SchemaPath);
 
 static class InteropPeerShared
@@ -1124,6 +1465,9 @@ static class InteropPeerShared
     public const string FireReceiptSchemaVersion = "cultnet.interop_fire_weapon_receipt.v0";
     public const string DiscoveryProbeSchemaVersion = "cultnet.discovery_probe.v0";
     public const string DiscoveryAnnounceSchemaVersion = "cultnet.discovery_announce.v0";
+    public const uint RudpInteropConnectionId = 0x43554C54;
+    public const int RudpInteropMaxFragmentBytes = 1024;
+    public const long RudpInteropResendDelayMs = 25;
 
     public static readonly JsonSerializerOptions JsonOptions = new()
     {

@@ -1808,6 +1808,106 @@ test("CultNet Kotlin and TypeScript exchange schema-v0 MessagePack messages over
   }
 });
 
+test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP", async (t) => {
+  logInteropPhase("ts-csharp-full-rudp", "build csharp peer");
+  await buildCSharpInteropPeer();
+  cleanInteropStores([
+    "ts-csharp-rudp-peer",
+    "ts-csharp-rudp-client-dial",
+  ]);
+
+  const csharpTcpPort = await getFreePort();
+  const csharpRudpPort = await getFreePort();
+  const tsTcpPort = await getFreePort();
+  const tsRudpPort = await getFreePort();
+  const discoveryPort = await getFreePort();
+  const advertiseHost = findAdvertiseHost();
+  const servers: RunningServeProcess[] = [];
+  servers.push(await spawnServeProcess("csharp-rudp", {
+    command: dotnetCommand,
+    args: [
+      csharpDllPath,
+      "serve",
+      "--runtime-id", "csharp-rudp-peer",
+      "--runtime-kind", "dotnet",
+      "--display-name", "CSharp RUDP Peer",
+      "--agent-id", "csharp-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(csharpTcpPort),
+      "--rudp-port", String(csharpRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultLibRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  servers.push(await spawnServeProcess("ts-csharp-rudp", {
+    command: process.execPath,
+    args: [
+      tsPeerScript,
+      "serve",
+      "--runtime-id", "ts-csharp-rudp-peer",
+      "--runtime-kind", "node",
+      "--display-name", "TypeScript CSharp RUDP Peer",
+      "--agent-id", "ts-csharp-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(tsTcpPort),
+      "--rudp-port", String(tsRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultNetTsRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
+  logInteropPhase("ts-csharp-full-rudp", "typescript dials csharp over rudp");
+  const tsRudpDial = await runJsonCommand("ts-csharp-rudp-dial", process.execPath, [
+    tsPeerScript,
+    "dial",
+    "--runtime-id", "ts-csharp-rudp-client",
+    "--runtime-kind", "node",
+    "--display-name", "TS CSharp RUDP Dialer",
+    "--agent-id", "ts-csharp-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(csharpRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultNetTsRoot);
+  assert.equal(tsRudpDial.transport, "rudp");
+  assert.equal(tsRudpDial.remoteHello.runtimeId, "csharp-rudp-peer");
+  assert.equal(tsRudpDial.hasInteropSchema, true);
+  assert.equal(tsRudpDial.retrievedNote.authorRuntimeId, "csharp-rudp-peer");
+  assert.ok(tsRudpDial.mutatedNote.tags.includes("decorated:ts-csharp-rudp-client"));
+  assert.equal(tsRudpDial.fireReceipt.accepted, true);
+
+  logInteropPhase("ts-csharp-full-rudp", "csharp dials typescript over rudp");
+  const csharpRudpDial = await runJsonCommand("csharp-rudp-dial", dotnetCommand, [
+    csharpDllPath,
+    "dial",
+    "--runtime-id", "csharp-rudp-client",
+    "--runtime-kind", "dotnet",
+    "--display-name", "CSharp RUDP Dialer",
+    "--agent-id", "csharp-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(tsRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultLibRoot);
+  assert.equal(csharpRudpDial.transport, "rudp");
+  assert.equal(csharpRudpDial.remoteHello.runtimeId, "ts-csharp-rudp-peer");
+  assert.equal(csharpRudpDial.hasInteropSchema, true);
+  assert.equal(csharpRudpDial.retrievedNote.authorRuntimeId, "ts-csharp-rudp-peer");
+  assert.ok(csharpRudpDial.mutatedNote.tags.includes("decorated:csharp-rudp-client"));
+  assert.equal(csharpRudpDial.fireReceipt.accepted, true);
+});
+
 test("CultNet RUDP reliable schema delivery survives one dropped client data packet across runtimes", async () => {
   for (const peer of rudpServerInteropPeers()) {
     await peer.build();
