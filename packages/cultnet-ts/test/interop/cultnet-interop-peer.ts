@@ -10,13 +10,22 @@ import { CultCache, SingleFileMessagePackBackingStore, defineDocumentType, type 
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
+  CultNetRudpPacket,
+  CultNetRudpSession,
+  CultNetRudpSocketTransportConnection,
   CultNetSchemaRegistry,
   TcpFramedTransportConnection,
   cultNetBuiltinSchemaRegistry,
+  createRudpTransportProfile,
   createTcpFramedTransportProfile,
+  decodeRudpPacket,
   defineCultNetDocumentBinding,
+  encodeCultNetMessageForWire,
+  encodeRudpPacket,
+  parseCultNetMessage,
   type CultNetDocumentBinding,
   type CultNetDocumentPutRawMessage,
+  type CultNetHelloMessage,
   type CultNetMessage,
   type CultNetSchemaCatalogRequestMessage,
   type CultNetSchemaCatalogResponseMessage,
@@ -67,6 +76,9 @@ import {
   type InteropNote,
 } from "./cultnet-interop-shared";
 
+const RUDP_CONNECTION_ID = 0x43554c54;
+const textEncoder = new TextEncoder();
+
 async function main(): Promise<void> {
   const [mode, ...rest] = process.argv.slice(2);
   if (!mode) {
@@ -98,12 +110,13 @@ async function serve(args: Map<string, string>): Promise<void> {
   const advertiseHost = requireArg(args, "advertise-host");
   const bindHost = args.get("bind-host") ?? "127.0.0.1";
   const tcpPort = optionalIntArg(args, "tcp-port");
+  const rudpPort = optionalIntArg(args, "rudp-port", tcpPort ?? undefined);
   const discoveryPort = optionalIntArg(args, "discovery-port");
   const discoveryGroup = requireArg(args, "discovery-group");
   const schemaPath = requireArg(args, "schema-path");
 
-  if (!tcpPort || !discoveryPort) {
-    throw new Error("serve mode requires --tcp-port and --discovery-port");
+  if (!tcpPort || !rudpPort || !discoveryPort) {
+    throw new Error("serve mode requires --tcp-port, --rudp-port, and --discovery-port");
   }
 
   const interopSchema = await loadInteropSchemaRegistration(schemaPath);
@@ -156,6 +169,7 @@ async function serve(args: Map<string, string>): Promise<void> {
           agentId,
           advertiseHost,
           tcpPort,
+          rudpPort,
           cache,
           documentRegistry,
           customSchemas,
@@ -185,10 +199,26 @@ async function serve(args: Map<string, string>): Promise<void> {
         agentId,
         advertiseHost,
         tcpPort,
+        rudpPort,
       });
     } catch {
       // ignore unrelated multicast noise instead of becoming dramatic about it
     }
+  });
+
+  const rudpSocket = await startRudpInteropServer({
+    runtimeId,
+    runtimeKind,
+    displayName,
+    agentId,
+    advertiseHost,
+    tcpPort,
+    rudpPort,
+    bindHost,
+    cache,
+    documentRegistry,
+    customSchemas,
+    noteSchemaId: interopSchema.schemaId,
   });
 
   await Promise.all([
@@ -213,18 +243,26 @@ async function serve(args: Map<string, string>): Promise<void> {
     runtimeId,
     runtimeKind,
     tcpPort,
+    rudpPort,
     discoveryPort,
     discoveryGroup,
   });
 
   await waitForTermination(async () => {
+    rudpSocket.close();
     udpSocket.close();
     await closeServer(tcpServer);
   });
 }
 
+interface SchemaPeer {
+  send(message: CultNetMessage): void;
+  sendHello(message: CultNetHelloMessage): void;
+  sendSchemaCatalogResponse(message: CultNetSchemaCatalogResponseMessage): void;
+}
+
 async function handleServerMessage(input: {
-  peer: CultNetPeer;
+  peer: SchemaPeer;
   message: CultNetMessage;
   runtimeId: string;
   runtimeKind: string;
@@ -232,6 +270,7 @@ async function handleServerMessage(input: {
   agentId: string;
   advertiseHost: string;
   tcpPort: number;
+  rudpPort: number;
   cache: CultCache;
   documentRegistry: CultNetDocumentRegistry;
   customSchemas: CultNetSchemaRegistry;
@@ -246,6 +285,7 @@ async function handleServerMessage(input: {
     agentId,
     advertiseHost,
     tcpPort,
+    rudpPort,
     cache,
     documentRegistry,
     customSchemas,
@@ -274,6 +314,10 @@ async function handleServerMessage(input: {
           transportId: "interop-tcp",
           host: advertiseHost,
           port: tcpPort,
+        }), createRudpTransportProfile(runtimeId, {
+          transportId: "interop-rudp",
+          host: advertiseHost,
+          port: rudpPort,
         })],
         supportsSchemaCatalog: true,
       });
@@ -301,7 +345,7 @@ async function handleServerMessage(input: {
 }
 
 async function handleRawPut(input: {
-  peer: CultNetPeer;
+  peer: Pick<SchemaPeer, "send">;
   message: CultNetDocumentPutRawMessage;
   runtimeId: string;
   agentId: string;
@@ -369,6 +413,155 @@ async function handleRawPut(input: {
   }
 }
 
+interface RudpInteropServerOptions {
+  runtimeId: string;
+  runtimeKind: string;
+  displayName: string;
+  agentId: string;
+  advertiseHost: string;
+  tcpPort: number;
+  rudpPort: number;
+  bindHost: string;
+  cache: CultCache;
+  documentRegistry: CultNetDocumentRegistry;
+  customSchemas: CultNetSchemaRegistry;
+  noteSchemaId: string;
+}
+
+interface RudpInteropRemote {
+  session: CultNetRudpSession;
+}
+
+async function startRudpInteropServer(options: RudpInteropServerOptions): Promise<DgramSocket> {
+  const socket = createSocket("udp4");
+  const remotes = new Map<string, RudpInteropRemote>();
+  socket.on("error", (error) => writeLog("rudpError", { runtimeId: options.runtimeId, error: error.message }));
+  socket.on("message", (wire, remote) => {
+    void handleRudpDatagram(socket, remotes, options, wire, remote);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    socket.once("error", reject);
+    socket.bind(options.rudpPort, options.bindHost, () => resolve());
+  });
+
+  const resendTimer = setInterval(() => {
+    for (const [remoteKey, peer] of remotes) {
+      const [host, portValue] = remoteKey.split(":");
+      const port = Number(portValue);
+      for (const packet of peer.session.dueResends(Date.now())) {
+        sendRudpPacket(socket, host ?? "", port, packet);
+      }
+    }
+  }, 25);
+  resendTimer.unref?.();
+  socket.once("close", () => clearInterval(resendTimer));
+  return socket;
+}
+
+async function handleRudpDatagram(
+  socket: DgramSocket,
+  remotes: Map<string, RudpInteropRemote>,
+  options: RudpInteropServerOptions,
+  wire: Buffer,
+  remote: RemoteInfo,
+): Promise<void> {
+  let packet: CultNetRudpPacket;
+  try {
+    packet = decodeRudpPacket(wire);
+  } catch {
+    return;
+  }
+  if (packet.connectionId !== RUDP_CONNECTION_ID) {
+    return;
+  }
+
+  const remoteKey = `${remote.address}:${remote.port}`;
+  let peer = remotes.get(remoteKey);
+  if (packet.packetType === "connect") {
+    peer = {
+      session: new CultNetRudpSession({
+        connectionId: RUDP_CONNECTION_ID,
+        resendDelayMs: 25,
+      }),
+    };
+    remotes.set(remoteKey, peer);
+    sendRudpPacket(socket, remote.address, remote.port, peer.session.acceptConnect(packet, Date.now(), encodeText("cultnet-interop-rudp")));
+    return;
+  }
+  if (!peer) {
+    return;
+  }
+
+  try {
+    const result = peer.session.receive(packet, Date.now());
+    if (result.reply) {
+      sendRudpPacket(socket, remote.address, remote.port, result.reply);
+    }
+    if (result.disconnected) {
+      remotes.delete(remoteKey);
+      return;
+    }
+    const schemaPeer = new RudpSchemaPeer(socket, remote, peer.session);
+    for (const frame of result.delivered) {
+      if (frame.channelId !== "schema") {
+        continue;
+      }
+      const message = parseCultNetMessage(decode(frame.payload), INTEROP_WIRE_CONTRACT);
+      await handleServerMessage({
+        peer: schemaPeer,
+        message,
+        runtimeId: options.runtimeId,
+        runtimeKind: options.runtimeKind,
+        displayName: options.displayName,
+        agentId: options.agentId,
+        advertiseHost: options.advertiseHost,
+        tcpPort: options.tcpPort,
+        rudpPort: options.rudpPort,
+        cache: options.cache,
+        documentRegistry: options.documentRegistry,
+        customSchemas: options.customSchemas,
+        noteSchemaId: options.noteSchemaId,
+      });
+    }
+    if (packet.packetType === "data" || result.delivered.length > 0) {
+      sendRudpPacket(socket, remote.address, remote.port, peer.session.createAck());
+    }
+  } catch (error) {
+    writeLog("rudpMessageError", {
+      runtimeId: options.runtimeId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+class RudpSchemaPeer implements SchemaPeer {
+  constructor(
+    private readonly socket: DgramSocket,
+    private readonly remote: RemoteInfo,
+    private readonly session: CultNetRudpSession,
+  ) {}
+
+  send(message: CultNetMessage): void {
+    const payload = encode(encodeCultNetMessageForWire(message, INTEROP_WIRE_CONTRACT));
+    for (const packet of this.session.sendMany("schema", payload, {
+      reliable: true,
+      ordered: true,
+      nowMs: Date.now(),
+    })) {
+      sendRudpPacket(this.socket, this.remote.address, this.remote.port, packet);
+    }
+  }
+
+  sendHello(message: CultNetHelloMessage): void {
+    this.send(message);
+  }
+
+  sendSchemaCatalogResponse(message: CultNetSchemaCatalogResponseMessage): void {
+    this.send(message);
+  }
+}
+
 function createCatalogResponse(
   customSchemas: CultNetSchemaRegistry,
   request: CultNetSchemaCatalogRequestMessage,
@@ -407,6 +600,7 @@ async function respondToProbe(input: {
   agentId: string;
   advertiseHost: string;
   tcpPort: number;
+  rudpPort: number;
 }): Promise<void> {
   const {
     socket,
@@ -418,6 +612,7 @@ async function respondToProbe(input: {
     agentId,
     advertiseHost,
     tcpPort,
+    rudpPort,
   } = input;
 
   const announceMessage: DiscoveryAnnounce = {
@@ -435,6 +630,10 @@ async function respondToProbe(input: {
       transportId: "interop-tcp",
       host: advertiseHost,
       port: tcpPort,
+    }), createRudpTransportProfile(runtimeId, {
+      transportId: "interop-rudp",
+      host: advertiseHost,
+      port: rudpPort,
     })],
     supportsSchemaCatalog: true,
   };
@@ -519,11 +718,12 @@ async function dial(args: Map<string, string>): Promise<void> {
   const agentId = requireArg(args, "agent-id");
   const targetHost = requireArg(args, "target-host");
   const targetPort = optionalIntArg(args, "target-port");
+  const targetRudpPort = optionalIntArg(args, "target-rudp-port");
   const schemaPath = requireArg(args, "schema-path");
   const timeoutMs = optionalIntArg(args, "timeout-ms", 4000) ?? 4000;
 
-  if (!targetPort) {
-    throw new Error("dial mode requires --target-port");
+  if (!targetPort && !targetRudpPort) {
+    throw new Error("dial mode requires --target-port or --target-rudp-port");
   }
 
   const interopSchema = await loadInteropSchemaRegistration(schemaPath);
@@ -538,16 +738,9 @@ async function dial(args: Map<string, string>): Promise<void> {
     .build();
   const documentRegistry = new CultNetDocumentRegistry(Object.values(documents));
 
-  const socket = await connectTo(targetHost, targetPort);
-  const transport = new TcpFramedTransportConnection(
-    socket,
-    createTcpFramedTransportProfile(runtimeId, {
-      transportId: "interop-tcp",
-      host: targetHost,
-      port: targetPort,
-    }),
-  );
-  const peer = new CultNetPeer(transport, { wireContract: INTEROP_WIRE_CONTRACT });
+  const peer = targetRudpPort
+    ? await connectRudpPeer(runtimeId, targetHost, targetRudpPort, timeoutMs)
+    : await connectTcpPeer(runtimeId, targetHost, targetPort ?? raise("missing TCP target port"));
 
   writeTrace("dialSendHello", { runtimeId });
   const remoteHelloWait = waitForMessage(peer, (message) => message.schemaVersion === "cultnet.hello.v0", timeoutMs);
@@ -643,7 +836,8 @@ async function dial(args: Map<string, string>): Promise<void> {
     mode: "dial",
     runtimeId,
     targetHost,
-    targetPort,
+    targetPort: targetRudpPort ?? targetPort,
+    transport: targetRudpPort ? "rudp" : "tcp_framed",
     remoteHello,
     hasInteropSchema,
     retrievedNote: note,
@@ -755,6 +949,64 @@ async function connectTo(host: string, port: number): Promise<TcpSocket> {
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
   });
+}
+
+async function connectTcpPeer(runtimeId: string, targetHost: string, targetPort: number): Promise<CultNetPeer> {
+  const socket = await connectTo(targetHost, targetPort);
+  const transport = new TcpFramedTransportConnection(
+    socket,
+    createTcpFramedTransportProfile(runtimeId, {
+      transportId: "interop-tcp",
+      host: targetHost,
+      port: targetPort,
+    }),
+  );
+  return new CultNetPeer(transport, { wireContract: INTEROP_WIRE_CONTRACT });
+}
+
+async function connectRudpPeer(
+  runtimeId: string,
+  targetHost: string,
+  targetPort: number,
+  timeoutMs: number,
+): Promise<CultNetPeer> {
+  const socket = createSocket("udp4");
+  await new Promise<void>((resolve, reject) => {
+    socket.once("error", reject);
+    socket.bind(0, "127.0.0.1", () => resolve());
+  });
+  const transport = new CultNetRudpSocketTransportConnection({
+    runtimeId,
+    socket,
+    mode: "client",
+    remoteHost: targetHost,
+    remotePort: targetPort,
+    connectionId: RUDP_CONNECTION_ID,
+    transportId: "interop-rudp",
+    resendDelayMs: 25,
+  });
+  transport.connect(encodeText("cultnet-interop-rudp"));
+  await waitUntil(() => transport.connected, timeoutMs, "RUDP interop dial handshake");
+  return new CultNetPeer(transport, { wireContract: INTEROP_WIRE_CONTRACT });
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number, label: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+
+function sendRudpPacket(socket: DgramSocket, host: string, port: number, packet: CultNetRudpPacket): void {
+  socket.send(encodeRudpPacket(packet), port, host);
+}
+
+function encodeText(value: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(textEncoder.encode(value));
 }
 
 async function closeServer(server: Server): Promise<void> {

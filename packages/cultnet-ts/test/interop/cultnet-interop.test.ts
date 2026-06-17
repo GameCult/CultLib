@@ -398,6 +398,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     "rust-client-dial",
     "ts-peer",
     "ts-client-dial",
+    "ts-rudp-client-dial",
     "ts-rust-dial",
     "ts-csharp-dial",
     "python-peer",
@@ -518,6 +519,25 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.ok(tsDial.mutatedNote.tags.includes("decorated:ts-client"));
   assert.equal(tsDial.mutationReceipt.accepted, true);
   assert.equal(tsDial.fireReceipt.shotsFired, 1);
+
+  logInteropPhase("schema-v0", "typescript dials typescript over rudp");
+  const tsRudpDial = await runJsonCommand("ts-rudp-dial", process.execPath, [
+    tsPeerScript,
+    "dial",
+    "--runtime-id", "ts-rudp-client",
+    "--runtime-kind", "node",
+    "--display-name", "TS RUDP Dialer",
+    "--agent-id", "ts-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(tsPort),
+    "--schema-path", interopSchemaPath,
+  ], cultNetTsRoot);
+  assert.equal(tsRudpDial.transport, "rudp");
+  assert.equal(tsRudpDial.remoteHello.runtimeId, "ts-peer");
+  assert.equal(tsRudpDial.hasInteropSchema, true);
+  assert.equal(tsRudpDial.retrievedNote.authorRuntimeId, "ts-peer");
+  assert.ok(tsRudpDial.mutatedNote.tags.includes("decorated:ts-rudp-client"));
+  assert.equal(tsRudpDial.fireReceipt.accepted, true);
 
   logInteropPhase("schema-v0", "rust dials csharp");
   const rustDial = await runJsonCommand("rust-dial", rustBinaryPath, [

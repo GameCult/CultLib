@@ -350,7 +350,9 @@ Current progress:
   Verse role. The facade can now also create a connected `CultNetPeer` from a
   direct RUDP endpoint, peer card, or authorized peer lookup, so schema and shard
   catalog request helpers ride the RUDP transport without callers hand-wrapping
-  the socket transport.
+  the socket transport. The TypeScript interop peer now also serves and dials
+  the schema-v0 interop flow over `interop-rudp` while keeping TCP-framed as the
+  compatibility lane; discovery and hello responses advertise both profiles.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.

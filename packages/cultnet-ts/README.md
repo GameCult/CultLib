@@ -254,6 +254,9 @@ maps them back to the exact C# union payload shape at the wire boundary.
   `createTcpFramedCultNetPeer(...)` wraps a Node `Duplex` in the shared
   `tcp_framed` profile before schema messages reach `CultNetPeer`. Passing a
   raw `Duplex` to `CultNetPeer` remains as compatibility for older callers.
+- The interop peer still keeps the TCP-framed lane for compatibility, but its
+  serve and dial commands also exercise schema-v0 over the shared RUDP socket
+  transport and advertise both transport profiles.
 
 ## Development
 
