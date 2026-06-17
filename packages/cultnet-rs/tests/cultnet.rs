@@ -100,6 +100,18 @@ fn receive_rudp_frame(
     anyhow::bail!("RUDP socket frame was not delivered")
 }
 
+fn receive_rudp_schema_message(
+    transport: &mut CultNetRudpSocketTransportConnection,
+) -> Result<CultNetMessage> {
+    for _ in 0..20 {
+        if let Some(message) = transport.receive_schema_message_once()? {
+            return Ok(message);
+        }
+        thread::sleep(StdDuration::from_millis(5));
+    }
+    anyhow::bail!("RUDP schema message was not delivered")
+}
+
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
 #[cultcache(
     type = "ghostlight.agent-state",
@@ -1077,12 +1089,41 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
     let client_frame = receive_rudp_frame(&mut client)?;
     assert_eq!(client_frame.channel_id, "schema");
     assert_eq!(client_frame.payload, b"server-state");
+
+    client.send_schema_message(&CultNetMessage::Hello {
+        runtime_id: "rust-rudp-client".to_string(),
+        runtime_kind: "rust-worker".to_string(),
+        agent_id: None,
+        role: Some("schema".to_string()),
+        display_name: None,
+        supported_document_types: None,
+        supported_mutation_contracts: None,
+        supported_message_versions: None,
+        transport_profiles: Some(vec![client.profile.clone()]),
+        supports_schema_catalog: Some(true),
+    })?;
+    let message = receive_rudp_schema_message(&mut server)?;
+    let CultNetMessage::Hello {
+        runtime_id,
+        transport_profiles,
+        supports_schema_catalog,
+        ..
+    } = message
+    else {
+        anyhow::bail!("RUDP schema message did not decode as hello");
+    };
+    assert_eq!(runtime_id, "rust-rudp-client");
+    assert_eq!(supports_schema_catalog, Some(true));
+    assert_eq!(
+        transport_profiles.expect("hello advertises transport")[0].transports[0].protocol,
+        CultNetTransportProtocol::Rudp
+    );
     assert_eq!(
         server.profile.transports[0].protocol,
         CultNetTransportProtocol::Rudp
     );
-    assert_eq!(client.stats().frames_sent, 1);
-    assert_eq!(server.stats().frames_received, 1);
+    assert_eq!(client.stats().frames_sent, 2);
+    assert_eq!(server.stats().frames_received, 2);
 
     Ok(())
 }

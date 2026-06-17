@@ -124,7 +124,8 @@ contact and authority ergonomics:
 
 ```rust
 use cultnet_rs::{
-    CultMesh, CultMeshAuthorityLease, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetSchemaKind,
+    CultMesh, CultMeshAuthorityLease, CultMeshPeerCard, CultMeshRudpSocketOptions, CultNetMessage,
+    CultNetSchemaKind,
 };
 use chrono::{Duration, Utc};
 
@@ -177,6 +178,12 @@ let mut client = CultMesh::create_rudp_client_for_authorized_peer(
     CultMeshRudpSocketOptions::default(),
 )?;
 client.connect(b"join".to_vec())?;
+client.send_schema_message(&CultNetMessage::SchemaCatalogRequest {
+    message_id: "rust-schema-catalog".to_string(),
+    include_schema_json: Some(false),
+    schema_ids: None,
+    kinds: Some(vec![CultNetSchemaKind::DocumentPayload]),
+})?;
 ```
 
 For caller-owned reconnect loops, `CultNetRudpReconnectLoop` keeps transport

@@ -9,6 +9,7 @@ use std::net::UdpSocket;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::CultNetMessage;
 use crate::CultNetReconnectController;
 use crate::CultNetReconnectDecision;
 use crate::CultNetReconnectPolicy;
@@ -20,7 +21,10 @@ use crate::CultNetTransportOrdering;
 use crate::CultNetTransportProfile;
 use crate::CultNetTransportProtocol;
 use crate::CultNetTransportStats;
+use crate::CultNetWireContract;
 use crate::create_reconnect_policy;
+use crate::decode_cultnet_message_from_slice;
+use crate::encode_cultnet_message_to_vec;
 
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
@@ -933,6 +937,27 @@ impl CultNetRudpSocketTransportConnection {
         }
         self.stats.frames_sent += 1;
         Ok(())
+    }
+
+    pub fn send_schema_message(&mut self, message: &CultNetMessage) -> Result<()> {
+        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+        self.send("schema", payload)
+    }
+
+    pub fn receive_schema_message_once(&mut self) -> Result<Option<CultNetMessage>> {
+        let Some(frame) = self.receive_once()? else {
+            return Ok(None);
+        };
+        if frame.channel_id != "schema" {
+            return Err(anyhow!(
+                "Expected RUDP schema frame, received channel {}",
+                frame.channel_id
+            ));
+        }
+        Ok(Some(decode_cultnet_message_from_slice(
+            &frame.payload,
+            CultNetWireContract::CultNetSchemaV0,
+        )?))
     }
 
     pub fn disconnect(&mut self, reason: Vec<u8>) -> Result<()> {
