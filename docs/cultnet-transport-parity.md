@@ -162,7 +162,11 @@ Current progress:
   service wrappers now enter their built-in handlers through
   `CultNetServerPeer`, a transport-aware server peer context. Responses send
   through that context instead of reaching around the per-peer adapter with
-  direct `NetPeer` extension sends.
+  direct `NetPeer` extension sends. The C# schema-client port now also has an
+  RUDP adapter; shard log fetch, shard snapshot fetch, and shard write
+  forwarding select it for `rudp://` primary endpoints and keep LiteNetLib for
+  `cultnet://` endpoints, so those service clients no longer need custom
+  injection to leave the LiteNetLib lane.
 - TypeScript has the first narrow transport connection port:
   `TcpFramedTransportConnection` owns length-prefixed frame delivery, exposes
   frame/close/error events, `send(channel, payload)`, `close`, and transfer

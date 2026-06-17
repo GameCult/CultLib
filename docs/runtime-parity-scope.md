@@ -73,8 +73,10 @@ server body, is deliberately not made.
   `NetPeer` callbacks, and TypeScript TCP peer creation has a transport-first
   helper. C# Verse discovery, peer exchange, shard-log fetch, shard-snapshot
   fetch, and shard write forwarding clients now consume a schema-client
-  transport port with the LiteNetLib client as the default adapter; broader
-  daemon adoption remains the unclaimed layer.
+  transport port; shard log fetch, shard snapshot fetch, and shard write
+  forwarding now select the C# RUDP schema client for `rudp://` endpoints while
+  keeping LiteNetLib for `cultnet://` endpoints. Broader daemon adoption remains
+  the unclaimed layer.
 - Extend RUDP adoption through daemon/socket reconnect loops. RUDP profiles now
   advertise the portable reconnect policy, runtime-local tests prove the shared
   controller across the targeted runtimes, and the C# LiteNetLib client plus

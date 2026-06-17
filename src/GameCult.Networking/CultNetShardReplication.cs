@@ -395,7 +395,8 @@ namespace GameCult.Networking
         public Action<Client>? ConfigureClient { get; set; }
 
         /// <summary>
-        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// Gets or sets the schema-v0 client factory. Defaults to an endpoint-aware adapter:
+        /// rudp:// endpoints use the C# RUDP schema client and cultnet:// endpoints use LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
@@ -428,7 +429,7 @@ namespace GameCult.Networking
             var completion = new TaskCompletionSource<CultNetShardLogResponseMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
-            using var client = CreateClient();
+            using var client = CreateClient(endpoint);
             client.OnCultNet<CultNetShardLogResponseMessage>(response =>
             {
                 if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
@@ -453,10 +454,10 @@ namespace GameCult.Networking
             return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
         }
 
-        private ICultNetSchemaClient CreateClient()
+        private ICultNetSchemaClient CreateClient(string endpoint)
         {
             return _options.CreateClient?.Invoke()
-                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+                   ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 
         private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)
@@ -521,7 +522,8 @@ namespace GameCult.Networking
         public Action<Client>? ConfigureClient { get; set; }
 
         /// <summary>
-        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// Gets or sets the schema-v0 client factory. Defaults to an endpoint-aware adapter:
+        /// rudp:// endpoints use the C# RUDP schema client and cultnet:// endpoints use LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
@@ -551,7 +553,7 @@ namespace GameCult.Networking
             var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
-            using var client = CreateClient();
+            using var client = CreateClient(endpoint);
             client.OnCultNet<CultNetSnapshotResponseRawMessage>(response =>
             {
                 if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
@@ -575,10 +577,10 @@ namespace GameCult.Networking
             return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
         }
 
-        private ICultNetSchemaClient CreateClient()
+        private ICultNetSchemaClient CreateClient(string endpoint)
         {
             return _options.CreateClient?.Invoke()
-                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+                   ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 
         private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)

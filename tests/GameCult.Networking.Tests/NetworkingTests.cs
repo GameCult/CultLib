@@ -85,6 +85,44 @@ namespace GameCult.Networking.Tests
             throw new InvalidOperationException("Unreachable.");
         }
 
+        private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
+        {
+            var deadline = DateTimeOffset.UtcNow + timeout;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                if (predicate())
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(5));
+            }
+
+            Assert.Fail("Condition was not satisfied before timeout.");
+        }
+
+        private static async Task<T> AwaitWithTimeout<T>(Task<T> task, TimeSpan timeout)
+        {
+            var completed = await Task.WhenAny(task, Task.Delay(timeout));
+            if (completed != task)
+            {
+                Assert.Fail("Task did not complete before timeout.");
+            }
+
+            return await task;
+        }
+
+        private static async Task AwaitWithTimeout(Task task, TimeSpan timeout)
+        {
+            var completed = await Task.WhenAny(task, Task.Delay(timeout));
+            if (completed != task)
+            {
+                Assert.Fail("Task did not complete before timeout.");
+            }
+
+            await task;
+        }
+
         [Test]
         public void EncryptDecrypt_Roundtrip()
         {
@@ -1693,11 +1731,109 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaWriteForwarder_Parses_RudpEndpoints()
+        {
+            var parsed = CultNetSchemaWriteForwarder.ParseEndpoint("rudp://primary.example.test:5075");
+
+            Assert.That(parsed.Host, Is.EqualTo("primary.example.test"));
+            Assert.That(parsed.Port, Is.EqualTo(5075));
+        }
+
+        [Test]
         public void CultNetSchemaWriteForwarder_Rejects_InvalidEndpoint()
         {
             Assert.That(
                 () => CultNetSchemaWriteForwarder.ParseEndpoint("http://primary.example.test:3075"),
                 Throws.TypeOf<FormatException>());
+        }
+
+        [Test]
+        public void CultNetSchemaClients_CreateForEndpoint_Selects_RudpClient()
+        {
+            using var rudp = CultNetSchemaClients.CreateForEndpoint("rudp://127.0.0.1:5075");
+            using var liteNetLib = CultNetSchemaClients.CreateForEndpoint(
+                "cultnet://127.0.0.1:3075",
+                DevelopmentClientSecurity);
+
+            Assert.That(rudp, Is.TypeOf<RudpCultNetSchemaClient>());
+            Assert.That(liteNetLib, Is.TypeOf<LiteNetLibCultNetSchemaClient>());
+        }
+
+        [Test]
+        public async Task RudpCultNetSchemaClient_Carries_SchemaMessages()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-schema-server",
+                Mode = CultNetRudpSocketMode.Server,
+                Socket = serverSocket,
+                ConnectionId = 0x43554c54,
+                InitialSequence = 100,
+                TransportId = "schema-rudp",
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+            var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!serverDone.Task.IsCompleted)
+                    {
+                        var request = server.ReceiveSchemaMessageOnce<CultNetSchemaCatalogRequestMessage>();
+                        server.PollResends();
+                        if (request == null)
+                        {
+                            Thread.Sleep(5);
+                            continue;
+                        }
+
+                        server.SendSchemaMessage(new CultNetSchemaCatalogResponseMessage
+                        {
+                            MessageId = request.MessageId,
+                            Schemas =
+                            [
+                                new CultNetSchemaDescriptor
+                                {
+                                    SchemaId = "rudp.schema.test",
+                                    Kind = "wire_message",
+                                    SchemaVersion = "rudp.schema.test.v0",
+                                    WireContracts = ["cultnet.schema.v0"]
+                                }
+                            ]
+                        });
+                        serverDone.TrySetResult();
+                        return;
+                    }
+                }
+                catch (Exception error)
+                {
+                    serverDone.TrySetException(error);
+                }
+            })
+            {
+                IsBackground = true
+            };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp(runtimeId: "csharp-rudp-schema-client");
+            var responseCompletion = new TaskCompletionSource<CultNetSchemaCatalogResponseMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            client.OnCultNet<CultNetSchemaCatalogResponseMessage>(response => responseCompletion.TrySetResult(response));
+            client.Connect("127.0.0.1", ((IPEndPoint)serverSocket.LocalEndPoint!).Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetSchemaCatalogRequestMessage
+            {
+                MessageId = "rudp-schema-client-test",
+                IncludeSchemaJson = false
+            });
+
+            var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
+            await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(response.MessageId, Is.EqualTo("rudp-schema-client-test"));
+            Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.test"));
         }
 
         [Test]

@@ -57,7 +57,8 @@ namespace GameCult.Networking
         public Action<Client>? ConfigureClient { get; set; }
 
         /// <summary>
-        /// Gets or sets the schema-v0 client factory. Defaults to the C# LiteNetLib adapter.
+        /// Gets or sets the schema-v0 client factory. Defaults to an endpoint-aware adapter:
+        /// rudp:// endpoints use the C# RUDP schema client and cultnet:// endpoints use LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
     }
@@ -108,10 +109,10 @@ namespace GameCult.Networking
             }
 
             if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ||
-                !string.Equals(uri.Scheme, "cultnet", StringComparison.OrdinalIgnoreCase) ||
+                !IsSupportedSchemaEndpointScheme(uri.Scheme) ||
                 string.IsNullOrWhiteSpace(uri.Host))
             {
-                throw new FormatException($"CultNet endpoint '{endpoint}' must use cultnet://host:port.");
+                throw new FormatException($"CultNet endpoint '{endpoint}' must use cultnet://host:port or rudp://host:port.");
             }
 
             return (uri.Host, uri.IsDefaultPort ? 3075 : uri.Port);
@@ -120,16 +121,22 @@ namespace GameCult.Networking
         private async Task SendAsync<T>(string endpoint, T message) where T : ICultNetSchemaMessage
         {
             var (host, port) = ParseEndpoint(endpoint);
-            using var client = CreateClient();
+            using var client = CreateClient(endpoint);
             client.Connect(host, port);
             await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
             client.SendCultNet(message);
         }
 
-        private ICultNetSchemaClient CreateClient()
+        private ICultNetSchemaClient CreateClient(string endpoint)
         {
             return _options.CreateClient?.Invoke()
-                   ?? CultNetSchemaClients.CreateLiteNetLib(_options.Security, _options.ConfigureClient);
+                   ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
+        }
+
+        private static bool IsSupportedSchemaEndpointScheme(string scheme)
+        {
+            return string.Equals(scheme, "cultnet", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(scheme, "rudp", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)
