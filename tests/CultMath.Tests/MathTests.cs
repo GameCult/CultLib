@@ -116,4 +116,41 @@ public sealed class MathTests
         Assert.True(colors[1].r > colors[1].g);
         Assert.True(colors[2].r > 120 && colors[2].g > 120 && colors[2].b > 120);
     }
+
+    [Fact]
+    public void BatchRadialFalloffAccelerationMatchesScalarContract()
+    {
+        var xs = new[] { 0.0f, 5.0f, 10.0f };
+        var ys = new[] { 0.0f, 0.0f, 0.0f };
+        var ax = new float[xs.Length];
+        var ay = new float[xs.Length];
+
+        BatchMath.AddRadialFalloffAcceleration2D(xs, ys, 10.0f, 0.0f, 10.0f, 20.0f, ax, ay);
+
+        Assert.True(BatchMath.LaneCount >= 4);
+        Assert.Equal(5.0f, ax[0], precision: 5);
+        Assert.Equal(7.5f, ax[1], precision: 5);
+        Assert.Equal(0.0f, ax[2], precision: 5);
+        Assert.Equal(0.0f, ay[0], precision: 5);
+    }
+
+    [Fact]
+    public void BatchEulerIntegrationHonorsDynamicMask()
+    {
+        var dynamicMask = new[] { 1.0f, 0.0f };
+        var px = new[] { 0.0f, 0.0f };
+        var py = new[] { 0.0f, 0.0f };
+        var vx = new[] { 1.0f, 1.0f };
+        var vy = new[] { 0.0f, 0.0f };
+        var ax = new[] { 2.0f, 2.0f };
+        var ay = new[] { 0.0f, 4.0f };
+
+        BatchMath.IntegrateSemiImplicitEuler2D(0.5f, dynamicMask, px, py, vx, vy, ax, ay);
+
+        Assert.Equal(2.0f, vx[0], precision: 5);
+        Assert.Equal(1.0f, px[0], precision: 5);
+        Assert.Equal(1.0f, vx[1], precision: 5);
+        Assert.Equal(0.0f, px[1], precision: 5);
+        Assert.Equal(0.0f, py[1], precision: 5);
+    }
 }

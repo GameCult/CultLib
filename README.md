@@ -15,6 +15,9 @@ shader semantics.
 - scalar-to-vector splats
 - swizzles for common lanes
 - conversions to and from `System.Numerics`
+- `BatchMath` SoA kernels over `Span<float>` / `ReadOnlySpan<float>` using
+  `System.Numerics.Vector<float>` when available, including radial falloff
+  acceleration and semi-implicit Euler integration
 - `math` intrinsics: `radians`, `degrees`, `abs`, `floor`, `ceil`, `frac`,
   `min`, `max`, `clamp`, `saturate`, `lerp`, `step`, `smoothstep`, `dot`,
   `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, exponential
