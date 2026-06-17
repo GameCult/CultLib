@@ -1908,6 +1908,108 @@ test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP"
   assert.equal(csharpRudpDial.fireReceipt.accepted, true);
 });
 
+test("CultNet TypeScript and Kotlin full interop peers exchange schema-v0 over RUDP", async (t) => {
+  logInteropPhase("ts-kotlin-full-rudp", "build kotlin peer");
+  await buildKotlinInteropPeer();
+  cleanInteropStores([
+    "ts-kotlin-rudp-peer",
+    "ts-kotlin-rudp-client-dial",
+  ]);
+
+  const kotlinTcpPort = await getFreePort();
+  const kotlinRudpPort = await getFreePort();
+  const tsTcpPort = await getFreePort();
+  const tsRudpPort = await getFreePort();
+  const discoveryPort = await getFreePort();
+  const advertiseHost = findAdvertiseHost();
+  const servers: RunningServeProcess[] = [];
+  servers.push(await spawnServeProcess("kotlin-rudp", {
+    command: kotlinJavaCommand,
+    args: [
+      "-cp", kotlinClasspath,
+      "org.gamecult.cultmesh.CultMeshKt",
+      "serve",
+      "--runtime-id", "kotlin-rudp-peer",
+      "--runtime-kind", "kotlin",
+      "--display-name", "Kotlin RUDP Peer",
+      "--agent-id", "kotlin-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(kotlinTcpPort),
+      "--rudp-port", String(kotlinRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultLibRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  servers.push(await spawnServeProcess("ts-kotlin-rudp", {
+    command: process.execPath,
+    args: [
+      tsPeerScript,
+      "serve",
+      "--runtime-id", "ts-kotlin-rudp-peer",
+      "--runtime-kind", "node",
+      "--display-name", "TypeScript Kotlin RUDP Peer",
+      "--agent-id", "ts-kotlin-rudp-agent",
+      "--bind-host", "127.0.0.1",
+      "--advertise-host", advertiseHost,
+      "--tcp-port", String(tsTcpPort),
+      "--rudp-port", String(tsRudpPort),
+      "--discovery-port", String(discoveryPort),
+      "--discovery-group", discoveryGroup,
+      "--schema-path", interopSchemaPath,
+    ],
+    cwd: cultNetTsRoot,
+  }));
+  await servers[servers.length - 1].ready;
+
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
+  logInteropPhase("ts-kotlin-full-rudp", "typescript dials kotlin over rudp");
+  const tsRudpDial = await runJsonCommand("ts-kotlin-rudp-dial", process.execPath, [
+    tsPeerScript,
+    "dial",
+    "--runtime-id", "ts-kotlin-rudp-client",
+    "--runtime-kind", "node",
+    "--display-name", "TS Kotlin RUDP Dialer",
+    "--agent-id", "ts-kotlin-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(kotlinRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultNetTsRoot);
+  assert.equal(tsRudpDial.transport, "rudp");
+  assert.equal(tsRudpDial.remoteHello.runtimeId, "kotlin-rudp-peer");
+  assert.equal(tsRudpDial.hasInteropSchema, true);
+  assert.equal(tsRudpDial.retrievedNote.authorRuntimeId, "kotlin-rudp-peer");
+  assert.ok(tsRudpDial.mutatedNote.tags.includes("decorated:ts-kotlin-rudp-client"));
+  assert.equal(tsRudpDial.fireReceipt.accepted, true);
+
+  logInteropPhase("ts-kotlin-full-rudp", "kotlin dials typescript over rudp");
+  const kotlinRudpDial = await runJsonCommand("kotlin-rudp-dial", kotlinJavaCommand, [
+    "-cp", kotlinClasspath,
+    "org.gamecult.cultmesh.CultMeshKt",
+    "dial",
+    "--runtime-id", "kotlin-rudp-client",
+    "--runtime-kind", "kotlin",
+    "--display-name", "Kotlin RUDP Dialer",
+    "--agent-id", "kotlin-rudp-client-agent",
+    "--target-host", "127.0.0.1",
+    "--target-rudp-port", String(tsRudpPort),
+    "--schema-path", interopSchemaPath,
+  ], cultLibRoot);
+  assert.equal(kotlinRudpDial.transport, "rudp");
+  assert.equal(kotlinRudpDial.remoteHello.runtimeId, "ts-kotlin-rudp-peer");
+  assert.equal(kotlinRudpDial.hasInteropSchema, true);
+  assert.equal(kotlinRudpDial.retrievedNote.authorRuntimeId, "ts-kotlin-rudp-peer");
+  assert.ok(kotlinRudpDial.mutatedNote.tags.includes("decorated:kotlin-rudp-client"));
+  assert.equal(kotlinRudpDial.fireReceipt.accepted, true);
+});
+
 test("CultNet RUDP reliable schema delivery survives one dropped client data packet across runtimes", async () => {
   for (const peer of rudpServerInteropPeers()) {
     await peer.build();

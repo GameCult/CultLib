@@ -3,7 +3,9 @@ package org.gamecult.cultmesh
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.EOFException
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -2953,6 +2955,8 @@ fun main(args: Array<String>) {
         "rudp-dial-once" -> rudpDialOnce(options)
         "rudp-serve-message-once" -> rudpServeSchemaMessageOnce(options)
         "rudp-dial-message-once" -> rudpDialSchemaMessageOnce(options)
+        "serve" -> interopServe(options)
+        "dial" -> interopDial(options)
         else -> error("Unknown mode ${args[0]}")
     }
 }
@@ -3192,6 +3196,785 @@ private fun cultNetReconnectControllerSchedulesAttemptsAndReset() {
     check(controller.nextAttemptAtMs == null)
     check(!controller.exhausted)
     check(controller.canAttempt(99_000))
+}
+
+private const val interopDocumentType = "cultnet.interop-note"
+private const val interopSchemaVersion = "cultnet.interop_note.v0"
+private const val interopMutationIntentType = "cultnet.interop-note-mutation-intent"
+private const val interopMutationIntentSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-intent.schema.json"
+private const val interopMutationIntentSchemaVersion = "cultnet.interop_note_mutation_intent.v0"
+private const val interopMutationReceiptType = "cultnet.interop-note-mutation-receipt"
+private const val interopMutationReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-receipt.schema.json"
+private const val interopMutationReceiptSchemaVersion = "cultnet.interop_note_mutation_receipt.v0"
+private const val interopFireCommandType = "cultnet.interop-fire-weapon-command"
+private const val interopFireCommandSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-command.schema.json"
+private const val interopFireCommandSchemaVersion = "cultnet.interop_fire_weapon_command.v0"
+private const val interopFireReceiptType = "cultnet.interop-fire-weapon-receipt"
+private const val interopFireReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-receipt.schema.json"
+private const val interopFireReceiptSchemaVersion = "cultnet.interop_fire_weapon_receipt.v0"
+private const val rudpInteropConnectionId = 0x43554c54L
+private const val rudpInteropMaxFragmentBytes = 1024
+private const val rudpInteropResendDelayMs = 25L
+private val interopReadTimeoutMs = 15_000L
+
+private data class InteropServeConfig(
+    val runtimeId: String,
+    val runtimeKind: String,
+    val displayName: String,
+    val agentId: String,
+    val bindHost: String,
+    val advertiseHost: String,
+    val tcpPort: Int,
+    val rudpPort: Int,
+    val discoveryPort: Int,
+    val discoveryGroup: String,
+    val schemaPath: String,
+)
+
+private data class InteropDialConfig(
+    val runtimeId: String,
+    val runtimeKind: String,
+    val displayName: String,
+    val agentId: String,
+    val targetHost: String,
+    val targetPort: Int?,
+    val targetRudpPort: Int?,
+    val schemaPath: String,
+)
+
+private data class InteropSchemaRegistration(val schemaId: String, val title: String?, val schemaJson: String)
+private data class InteropDocuments(
+    val note: CultDocumentDefinition<InteropNote>,
+    val mutationIntent: CultDocumentDefinition<InteropMutationIntent>,
+    val mutationReceipt: CultDocumentDefinition<InteropMutationReceipt>,
+    val fireCommand: CultDocumentDefinition<InteropFireCommand>,
+    val fireReceipt: CultDocumentDefinition<InteropFireReceipt>,
+)
+
+private data class InteropNote(
+    val schemaVersion: String = interopSchemaVersion,
+    val documentId: String,
+    val authorRuntimeId: String,
+    val title: String,
+    val body: String,
+    val tags: List<String>,
+)
+
+private data class InteropMutationIntent(
+    val schemaVersion: String = interopMutationIntentSchemaVersion,
+    val intentId: String,
+    val targetDocumentId: String,
+    val appendBody: String,
+    val appendTag: String,
+)
+
+private data class InteropMutationReceipt(
+    val schemaVersion: String = interopMutationReceiptSchemaVersion,
+    val intentId: String,
+    val accepted: Boolean,
+    val documentId: String,
+    val body: String,
+    val tags: List<String>,
+)
+
+private data class InteropFireCommand(
+    val schemaVersion: String = interopFireCommandSchemaVersion,
+    val commandId: String,
+    val characterId: String,
+    val weaponId: String,
+)
+
+private data class InteropFireReceipt(
+    val schemaVersion: String = interopFireReceiptSchemaVersion,
+    val commandId: String,
+    val accepted: Boolean,
+    val characterId: String,
+    val weaponId: String,
+    val shotsFired: Long,
+    val ammoRemaining: Long,
+)
+
+private class InteropCodec<T : Any>(
+    override val documentType: String,
+    override val schemaVersion: String,
+    private val encodeValue: (T) -> List<Any?>,
+    private val decodeValue: (List<Any?>) -> T,
+) : CultDocumentCodec<T> {
+    override fun encode(value: T): ByteArray = MessagePackWriter().value(encodeValue(value)).toByteArray()
+    override fun decode(payload: ByteArray): T = decodeValue(anyList(MessagePackReader(payload).readAny()))
+}
+
+private fun interopServe(options: Map<String, String>) {
+    val config = parseInteropServeConfig(options)
+    val registration = loadInteropSchemaRegistration(config.schemaPath)
+    val documents = defineInteropDocuments(registration.schemaId)
+    val cache = CultCache()
+    registerInteropDocuments(cache, documents)
+    val schemaCatalog = CultNetSchemaCatalog()
+    schemaCatalog.upsert(
+        defineCultNetSchemaDescriptor(
+            schemaId = registration.schemaId,
+            kind = "document_payload",
+            schemaVersion = interopSchemaVersion,
+            documentType = interopDocumentType,
+            title = registration.title,
+            wireContracts = listOf("cultnet.schema.v0"),
+            schemaJson = registration.schemaJson,
+        ),
+    )
+    cache.put(documents.note, "note:${config.runtimeId}", buildInteropNote(config.runtimeId, config.displayName))
+
+    startInteropTcpServer(config, cache, documents, schemaCatalog)
+    startInteropRudpServer(config, cache, documents, schemaCatalog)
+
+    println(jsonLine(linkedMapOf(
+        "status" to "ready",
+        "mode" to "serve",
+        "runtimeId" to config.runtimeId,
+        "runtimeKind" to config.runtimeKind,
+        "tcpPort" to config.tcpPort,
+        "rudpPort" to config.rudpPort,
+        "discoveryPort" to config.discoveryPort,
+        "discoveryGroup" to config.discoveryGroup,
+    )))
+
+    while (true) Thread.sleep(3_600_000)
+}
+
+private fun interopDial(options: Map<String, String>) {
+    val config = parseInteropDialConfig(options)
+    val registration = loadInteropSchemaRegistration(config.schemaPath)
+    val documents = defineInteropDocuments(registration.schemaId)
+    val cache = CultCache()
+    registerInteropDocuments(cache, documents)
+    val transportName = if (config.targetRudpPort != null) "rudp" else "tcp_framed"
+    val transport = openInteropDialTransport(config)
+    transport.use {
+        it.sendSchemaMessage(
+            cultNetHello(
+                runtimeId = config.runtimeId,
+                runtimeKind = config.runtimeKind,
+                displayName = config.displayName,
+                supportedDocumentTypes = listOf(interopDocumentType),
+                supportedMutationContracts = listOf(interopMutationContract()),
+                supportedMessageVersions = listOf(interopSchemaVersion),
+                transportProfiles = dialInteropTransportProfiles(config),
+                supportsSchemaCatalog = true,
+            ),
+        )
+        val remoteHello = requireSchemaResponse(it.receiveSchemaMessage(interopReadTimeoutMs, 5), "cultnet.hello.v0", "interop hello")
+        val remoteRuntimeId = requireWireString(remoteHello.body, "runtimeId")
+
+        it.sendSchemaMessage(
+            CultNetMessage(
+                "cultnet.schema_catalog_request.v0",
+                linkedMapOf("messageId" to "${config.runtimeId}-catalog", "includeSchemaJson" to true),
+            ),
+        )
+        val catalogResponse = requireSchemaResponse(it.receiveSchemaMessage(interopReadTimeoutMs, 5), "cultnet.schema_catalog_response.v0", "interop schema catalog")
+        val hasInteropSchema = mapList(catalogResponse.body["schemas"]).any {
+            it["schemaId"] == registration.schemaId && it["documentType"] == interopDocumentType
+        }
+
+        it.sendSchemaMessage(CultNetMessage("cultnet.snapshot_request.v0", linkedMapOf("messageId" to "${config.runtimeId}-snapshot")))
+        val snapshotResponse = requireSchemaResponse(it.receiveSchemaMessage(interopReadTimeoutMs, 5), "cultnet.snapshot_response_raw.v0", "interop snapshot")
+        val snapshotDocuments = mapList(snapshotResponse.body["documents"]).map { rawDocumentRecordFromWire(it) }
+        val decodedSnapshotNotes = snapshotDocuments
+            .mapNotNull { document -> runCatching { documents.note.codec.decode(document.payload) }.getOrNull() }
+        val note = cache.applyRawSnapshotResponse(snapshotResponse)
+            .filterIsInstance<InteropNote>()
+            .firstOrNull { candidate -> candidate.authorRuntimeId == remoteRuntimeId }
+            ?: decodedSnapshotNotes.firstOrNull { candidate -> candidate.authorRuntimeId == remoteRuntimeId }
+            ?: throw IOException(
+                "did not receive an interop note from $remoteRuntimeId; snapshotDocuments=${snapshotDocuments.size}; " +
+                    "schemaIds=${snapshotDocuments.map { document -> document.schemaId }}; " +
+                    "decodedAuthors=${decodedSnapshotNotes.map { decoded -> decoded.authorRuntimeId }}",
+            )
+
+        val mutationIntent = InteropMutationIntent(
+            intentId = "${config.runtimeId}-decorate",
+            targetDocumentId = note.documentId,
+            appendBody = " Decorated by ${config.runtimeId}.",
+            appendTag = "decorated:${config.runtimeId}",
+        )
+        it.sendSchemaMessage(rawPut("${config.runtimeId}-decorate-put", interopMutationIntentSchemaId, mutationIntent.intentId, documents.mutationIntent.codec.encode(mutationIntent)))
+        val mutationReceiptMessage = readDocumentPutFor(it, interopMutationReceiptSchemaId)
+        val mutationReceipt = cache.applyRawDocumentPut(mutationReceiptMessage) as InteropMutationReceipt
+        val mutatedNoteMessage = readDocumentPutFor(it, registration.schemaId)
+        val mutatedNote = cache.applyRawDocumentPut(mutatedNoteMessage) as InteropNote
+
+        val fireCommand = InteropFireCommand(
+            commandId = "${config.runtimeId}-fire",
+            characterId = remoteRuntimeId,
+            weaponId = "interop-rifle",
+        )
+        it.sendSchemaMessage(rawPut("${config.runtimeId}-fire-put", interopFireCommandSchemaId, fireCommand.commandId, documents.fireCommand.codec.encode(fireCommand)))
+        val fireReceipt = cache.applyRawDocumentPut(readDocumentPutFor(it, interopFireReceiptSchemaId)) as InteropFireReceipt
+
+        println(jsonLine(linkedMapOf(
+            "mode" to "dial",
+            "runtimeId" to config.runtimeId,
+            "targetHost" to config.targetHost,
+            "targetPort" to (config.targetRudpPort ?: config.targetPort),
+            "transport" to transportName,
+            "remoteHello" to linkedMapOf("schemaVersion" to "cultnet.hello.v0", "runtimeId" to remoteRuntimeId),
+            "hasInteropSchema" to hasInteropSchema,
+            "retrievedNote" to interopNoteWire(note),
+            "mutatedNote" to interopNoteWire(mutatedNote),
+            "mutationReceipt" to interopMutationReceiptWire(mutationReceipt),
+            "fireReceipt" to interopFireReceiptWire(fireReceipt),
+        )))
+    }
+}
+
+private fun startInteropTcpServer(
+    config: InteropServeConfig,
+    cache: CultCache,
+    documents: InteropDocuments,
+    schemaCatalog: CultNetSchemaCatalog,
+) {
+    val server = ServerSocket(config.tcpPort, 50, InetAddress.getByName(config.bindHost))
+    val thread = Thread {
+        while (true) {
+            try {
+                val socket = server.accept()
+                Thread {
+                    try {
+                        InteropTcpFramedTransport(
+                            socket,
+                            createTcpFramedInteropProfile(config.runtimeId, config.advertiseHost, config.tcpPort),
+                        ).use { transport ->
+                            while (true) {
+                                val message = transport.receiveSchemaMessage(interopReadTimeoutMs, 5) ?: break
+                                handleInteropServerMessage(transport, message, config, cache, documents, schemaCatalog)
+                            }
+                        }
+                    } catch (error: Throwable) {
+                        System.err.println("kotlin interop tcp error: ${error.message}")
+                    }
+                }.also { it.isDaemon = true; it.start() }
+            } catch (error: Throwable) {
+                System.err.println("kotlin interop tcp accept error: ${error.message}")
+            }
+        }
+    }
+    thread.isDaemon = true
+    thread.start()
+}
+
+private fun startInteropRudpServer(
+    config: InteropServeConfig,
+    cache: CultCache,
+    documents: InteropDocuments,
+    schemaCatalog: CultNetSchemaCatalog,
+) {
+    val socket = DatagramSocket(config.rudpPort, InetAddress.getByName(config.bindHost)).also { it.soTimeout = 20 }
+    val sessions = linkedMapOf<InetSocketAddress, CultNetRudpSession>()
+    val thread = Thread {
+        val buffer = ByteArray(65535)
+        while (true) {
+            try {
+                val datagram = DatagramPacket(buffer, buffer.size)
+                socket.receive(datagram)
+                val remote = InetSocketAddress(datagram.address, datagram.port)
+                val packet = try {
+                    decodeRudpPacket(buffer.copyOf(datagram.length))
+                } catch (_: IOException) {
+                    continue
+                }
+                if (packet.connectionId != rudpInteropConnectionId) continue
+                val session = sessions.getOrPut(remote) {
+                    CultNetRudpSession(CultNetRudpSessionOptions(rudpInteropConnectionId, 100, rudpInteropResendDelayMs))
+                }
+                if (packet.packetType == CultNetRudpPacketType.Connect) {
+                    sendInteropRudpPacket(socket, remote, session.acceptConnect(packet, nowMs(), "cultnet-interop-rudp".toByteArray(StandardCharsets.UTF_8)))
+                    continue
+                }
+                val result = session.receive(packet, nowMs())
+                result.reply?.let { sendInteropRudpPacket(socket, remote, it) }
+                if (packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAck())
+                for (frame in result.delivered) {
+                    if (frame.channelId != "schema") continue
+                    val sender = InteropRudpSessionSender(socket, remote, session)
+                    handleInteropServerMessage(sender, parseCultNetMessage(frame.payload), config, cache, documents, schemaCatalog)
+                }
+            } catch (_: SocketTimeoutException) {
+                val now = nowMs()
+                for ((remote, session) in sessions) {
+                    session.dueResends(now).forEach { sendInteropRudpPacket(socket, remote, it) }
+                }
+            } catch (error: Throwable) {
+                System.err.println("kotlin interop rudp error: ${error.message}")
+            }
+        }
+    }
+    thread.isDaemon = true
+    thread.start()
+}
+
+private fun handleInteropServerMessage(
+    transport: CultNetSchemaMessageTransport,
+    message: CultNetMessage,
+    config: InteropServeConfig,
+    cache: CultCache,
+    documents: InteropDocuments,
+    schemaCatalog: CultNetSchemaCatalog,
+) {
+    synchronized(cache) {
+        when (message.schemaVersion) {
+            "cultnet.hello.v0" -> transport.sendSchemaMessage(
+                cultNetHello(
+                    runtimeId = config.runtimeId,
+                    runtimeKind = config.runtimeKind,
+                    displayName = config.displayName,
+                    supportedDocumentTypes = listOf(interopDocumentType),
+                    supportedMutationContracts = listOf(interopMutationContract()),
+                    supportedMessageVersions = listOf(interopSchemaVersion),
+                    transportProfiles = listOf(
+                        createTcpFramedInteropProfile(config.runtimeId, config.advertiseHost, config.tcpPort),
+                        createRudpTransportProfile(config.runtimeId, transportId = "interop-rudp", host = config.advertiseHost, port = config.rudpPort, maxFragmentBytes = rudpInteropMaxFragmentBytes),
+                    ),
+                    supportsSchemaCatalog = true,
+                ),
+            )
+            "cultnet.schema_catalog_request.v0" -> transport.sendSchemaMessage(schemaCatalog.createResponse(message))
+            "cultnet.snapshot_request.v0" -> {
+                val response = cache.createRawSnapshotResponse(message, sourceRuntimeId = config.runtimeId)
+                val documentsWithSource = mapList(response.body["documents"]).map {
+                    rawDocumentRecordFromWire(it).copy(
+                        sourceRuntimeId = config.runtimeId,
+                        sourceAgentId = config.agentId,
+                        sourceRole = "peer",
+                        tags = listOf("interop", config.runtimeId),
+                    )
+                }
+                transport.sendSchemaMessage(cultNetSnapshotResponseRaw(response.body["messageId"] as? String ?: "", documentsWithSource))
+            }
+            "cultnet.document_put_raw.v0" -> handleInteropRawPut(transport, message, config, cache, documents)
+        }
+    }
+}
+
+private fun handleInteropRawPut(
+    transport: CultNetSchemaMessageTransport,
+    message: CultNetMessage,
+    config: InteropServeConfig,
+    cache: CultCache,
+    documents: InteropDocuments,
+) {
+    val document = rawDocumentRecordFromWire(mapValue(message.body["document"]))
+    when (document.schemaId) {
+        interopMutationIntentSchemaId -> {
+            val intent = cache.applyRawDocumentPut(message) as InteropMutationIntent
+            val note = cache.getRequired(documents.note, intent.targetDocumentId)
+            val mutated = note.copy(
+                body = note.body + intent.appendBody,
+                tags = note.tags + intent.appendTag,
+            )
+            cache.put(documents.note, mutated.documentId, mutated)
+            val receipt = InteropMutationReceipt(
+                intentId = intent.intentId,
+                accepted = true,
+                documentId = mutated.documentId,
+                body = mutated.body,
+                tags = mutated.tags,
+            )
+            transport.sendSchemaMessage(rawPut("${config.runtimeId}-mutation-receipt", interopMutationReceiptSchemaId, receipt.intentId, documents.mutationReceipt.codec.encode(receipt), config, "mutation"))
+            transport.sendSchemaMessage(rawPut("${config.runtimeId}-mutated-note", documents.note.schemaVersion, mutated.documentId, documents.note.codec.encode(mutated), config, "mutation"))
+        }
+        interopFireCommandSchemaId -> {
+            val command = cache.applyRawDocumentPut(message) as InteropFireCommand
+            val receipt = InteropFireReceipt(
+                commandId = command.commandId,
+                accepted = true,
+                characterId = command.characterId,
+                weaponId = command.weaponId,
+                shotsFired = 1,
+                ammoRemaining = 29,
+            )
+            transport.sendSchemaMessage(rawPut("${config.runtimeId}-fire-receipt", interopFireReceiptSchemaId, receipt.commandId, documents.fireReceipt.codec.encode(receipt), config, "side-effect"))
+        }
+    }
+}
+
+private class InteropTcpFramedTransport(
+    private val socket: Socket,
+    override val profile: CultNetTransportProfile,
+) : CultNetSchemaMessageTransport {
+    private val input = DataInputStream(socket.getInputStream())
+    private val output = DataOutputStream(socket.getOutputStream())
+    override var stats: CultNetTransportStats = CultNetTransportStats()
+        private set
+
+    override fun sendSchemaMessage(message: CultNetMessage) {
+        val payload = message.toBytes()
+        synchronized(output) {
+            output.writeInt(payload.size)
+            output.write(payload)
+            output.flush()
+        }
+        stats = stats.copy(bytesSent = stats.bytesSent + payload.size + 4, framesSent = stats.framesSent + 1)
+    }
+
+    override fun receiveSchemaMessage(timeoutMs: Long, pollIntervalMs: Long): CultNetMessage? {
+        val previousTimeout = socket.soTimeout
+        socket.soTimeout = timeoutMs.coerceAtLeast(1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return try {
+            val length = input.readInt()
+            val payload = ByteArray(length)
+            input.readFully(payload)
+            stats = stats.copy(bytesReceived = stats.bytesReceived + payload.size + 4, framesReceived = stats.framesReceived + 1)
+            parseCultNetMessage(payload)
+        } catch (_: SocketTimeoutException) {
+            null
+        } catch (_: EOFException) {
+            null
+        } finally {
+            socket.soTimeout = previousTimeout
+        }
+    }
+
+    override fun close() {
+        socket.close()
+    }
+}
+
+private class InteropRudpSessionSender(
+    private val socket: DatagramSocket,
+    private val remote: InetSocketAddress,
+    private val session: CultNetRudpSession,
+) : CultNetSchemaMessageTransport {
+    override val profile: CultNetTransportProfile = createRudpTransportProfile("kotlin-interop-rudp-session", transportId = "interop-rudp")
+    override val stats: CultNetTransportStats = CultNetTransportStats()
+
+    override fun sendSchemaMessage(message: CultNetMessage) {
+        session.sendMany("schema", message.toBytes(), CultNetRudpSendOptions(reliable = true, ordered = true, nowMs = nowMs()), rudpInteropMaxFragmentBytes)
+            .forEach { sendInteropRudpPacket(socket, remote, it) }
+    }
+
+    override fun receiveSchemaMessage(timeoutMs: Long, pollIntervalMs: Long): CultNetMessage? = null
+    override fun close() {}
+}
+
+private fun openInteropDialTransport(config: InteropDialConfig): CultNetSchemaMessageTransport {
+    val rudpPort = config.targetRudpPort
+    if (rudpPort != null) {
+        val transport = cultNetRudpClient(
+            runtimeId = "${config.runtimeId}-interop-rudp-dial",
+            connectionId = rudpInteropConnectionId,
+            remoteHost = config.targetHost,
+            remotePort = rudpPort,
+            tuning = CultNetRudpSocketTuning(resendDelayMs = rudpInteropResendDelayMs, maxFragmentBytes = rudpInteropMaxFragmentBytes),
+        )
+        if (!transport.connectAndWait("cultnet-interop-rudp", timeoutMs = 5_000, pollIntervalMs = 5)) {
+            throw IOException("timed out waiting for RUDP interop connect")
+        }
+        return transport
+    }
+    val tcpPort = config.targetPort ?: throw IOException("dial requires --target-port or --target-rudp-port")
+    val socket = Socket(config.targetHost, tcpPort)
+    return InteropTcpFramedTransport(socket, createTcpFramedInteropProfile(config.runtimeId, config.targetHost, tcpPort))
+}
+
+private fun createTcpFramedInteropProfile(runtimeId: String, host: String, port: Int): CultNetTransportProfile =
+    CultNetTransportProfile(
+        runtimeId = runtimeId,
+        transports = listOf(
+            CultNetTransportDescriptor(
+                transportId = "interop-tcp",
+                protocol = "tcp_framed",
+                wireContracts = listOf("cultnet.schema.v0"),
+                host = host,
+                port = port,
+                channels = listOf(CultNetTransportChannel("schema", "reliable", "ordered")),
+            ),
+        ),
+    )
+
+private fun dialInteropTransportProfiles(config: InteropDialConfig): List<CultNetTransportProfile> {
+    val profiles = mutableListOf<CultNetTransportProfile>()
+    if (config.targetPort != null) profiles.add(createTcpFramedInteropProfile(config.runtimeId, config.targetHost, config.targetPort))
+    if (config.targetRudpPort != null) profiles.add(createRudpTransportProfile(config.runtimeId, transportId = "interop-rudp", host = config.targetHost, port = config.targetRudpPort, maxFragmentBytes = rudpInteropMaxFragmentBytes))
+    return profiles
+}
+
+private fun sendInteropRudpPacket(socket: DatagramSocket, remote: InetSocketAddress, packet: CultNetRudpPacket) {
+    val wire = encodeRudpPacket(packet)
+    socket.send(DatagramPacket(wire, wire.size, remote.address, remote.port))
+}
+
+private fun readDocumentPutFor(transport: CultNetSchemaMessageTransport, schemaId: String): CultNetMessage {
+    val deadline = nowMs() + interopReadTimeoutMs
+    while (nowMs() < deadline) {
+        val message = transport.receiveSchemaMessage(250, 5) ?: continue
+        if (message.schemaVersion == "cultnet.document_put_raw.v0") {
+            val document = mapValue(message.body["document"])
+            if (document["schemaId"] == schemaId) return message
+        }
+    }
+    throw IOException("timed out waiting for document put $schemaId")
+}
+
+private fun rawPut(
+    messageId: String,
+    schemaId: String,
+    recordKey: String,
+    payload: ByteArray,
+    config: InteropServeConfig? = null,
+    tag: String? = null,
+): CultNetMessage = cultNetDocumentPutRaw(
+    messageId = messageId,
+    document = CultNetRawDocumentRecord(
+        schemaId = schemaId,
+        recordKey = recordKey,
+        storedAt = Instant.now().toString(),
+        payload = payload,
+        sourceRuntimeId = config?.runtimeId,
+        sourceAgentId = config?.agentId,
+        sourceRole = config?.let { "peer" },
+        tags = listOfNotNull(tag, config?.runtimeId),
+    ),
+)
+
+private fun defineInteropDocuments(noteSchemaId: String): InteropDocuments {
+    val note = CultDocumentDefinition(InteropCodec(interopDocumentType, noteSchemaId, ::interopNoteSlots, ::interopNoteFromSlots))
+    val mutationIntent = CultDocumentDefinition(InteropCodec(interopMutationIntentType, interopMutationIntentSchemaId, ::interopMutationIntentSlots, ::interopMutationIntentFromSlots))
+    val mutationReceipt = CultDocumentDefinition(InteropCodec(interopMutationReceiptType, interopMutationReceiptSchemaId, ::interopMutationReceiptSlots, ::interopMutationReceiptFromSlots))
+    val fireCommand = CultDocumentDefinition(InteropCodec(interopFireCommandType, interopFireCommandSchemaId, ::interopFireCommandSlots, ::interopFireCommandFromSlots))
+    val fireReceipt = CultDocumentDefinition(InteropCodec(interopFireReceiptType, interopFireReceiptSchemaId, ::interopFireReceiptSlots, ::interopFireReceiptFromSlots))
+    return InteropDocuments(note, mutationIntent, mutationReceipt, fireCommand, fireReceipt)
+}
+
+private fun registerInteropDocuments(cache: CultCache, documents: InteropDocuments) {
+    cache.register(documents.note)
+    cache.register(documents.mutationIntent)
+    cache.register(documents.mutationReceipt)
+    cache.register(documents.fireCommand)
+    cache.register(documents.fireReceipt)
+}
+
+private fun buildInteropNote(runtimeId: String, displayName: String): InteropNote = InteropNote(
+    documentId = "note:$runtimeId",
+    authorRuntimeId = runtimeId,
+    title = "$displayName keeps a little note",
+    body = "$runtimeId can move CultNet state without begging the gods for translation.",
+    tags = listOf(runtimeId, "interop", "cultnet"),
+)
+
+private fun interopMutationContract(): Map<String, Any?> = linkedMapOf(
+    "documentType" to interopDocumentType,
+    "payloadSchemaVersion" to interopSchemaVersion,
+    "operations" to listOf("snapshot", "documentPut", "intentSubmit", "receiptWatch"),
+    "authority" to "runtime",
+    "intentDocumentTypes" to listOf(interopMutationIntentType, interopFireCommandType),
+    "receiptDocumentTypes" to listOf(interopMutationReceiptType, interopFireReceiptType),
+)
+
+private fun loadInteropSchemaRegistration(schemaPath: String): InteropSchemaRegistration {
+    val schemaJson = File(schemaPath).readText(StandardCharsets.UTF_8)
+    return InteropSchemaRegistration(
+        schemaId = extractJsonString(schemaJson, "\$id") ?: throw IOException("schema $schemaPath is missing \$id"),
+        title = extractJsonString(schemaJson, "title"),
+        schemaJson = schemaJson,
+    )
+}
+
+private fun extractJsonString(json: String, field: String): String? {
+    val pattern = Regex(""""${Regex.escape(field)}"\s*:\s*"((?:\\.|[^"\\])*)"""")
+    return pattern.find(json)?.groupValues?.get(1)?.replace("\\\"", "\"")
+}
+
+private fun parseInteropServeConfig(options: Map<String, String>): InteropServeConfig {
+    val tcpPort = requiredIntArg(options, "tcp-port")
+    return InteropServeConfig(
+        runtimeId = requiredArg(options, "runtime-id"),
+        runtimeKind = requiredArg(options, "runtime-kind"),
+        displayName = requiredArg(options, "display-name"),
+        agentId = requiredArg(options, "agent-id"),
+        bindHost = options["bind-host"] ?: "127.0.0.1",
+        advertiseHost = requiredArg(options, "advertise-host"),
+        tcpPort = tcpPort,
+        rudpPort = options["rudp-port"]?.toInt() ?: tcpPort,
+        discoveryPort = requiredIntArg(options, "discovery-port"),
+        discoveryGroup = requiredArg(options, "discovery-group"),
+        schemaPath = requiredArg(options, "schema-path"),
+    )
+}
+
+private fun parseInteropDialConfig(options: Map<String, String>): InteropDialConfig = InteropDialConfig(
+    runtimeId = requiredArg(options, "runtime-id"),
+    runtimeKind = requiredArg(options, "runtime-kind"),
+    displayName = requiredArg(options, "display-name"),
+    agentId = requiredArg(options, "agent-id"),
+    targetHost = requiredArg(options, "target-host"),
+    targetPort = options["target-port"]?.toInt(),
+    targetRudpPort = options["target-rudp-port"]?.toInt(),
+    schemaPath = requiredArg(options, "schema-path"),
+).also {
+    if (it.targetPort == null && it.targetRudpPort == null) throw IOException("dial requires --target-port or --target-rudp-port")
+}
+
+private fun requiredArg(options: Map<String, String>, name: String): String =
+    options[name] ?: throw IOException("missing --$name")
+
+private fun requiredIntArg(options: Map<String, String>, name: String): Int =
+    requiredArg(options, name).toInt()
+
+private fun interopNoteWire(value: InteropNote): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to value.schemaVersion,
+    "documentId" to value.documentId,
+    "authorRuntimeId" to value.authorRuntimeId,
+    "title" to value.title,
+    "body" to value.body,
+    "tags" to value.tags,
+)
+
+private fun interopNoteSlots(value: InteropNote): List<Any?> = listOf(
+    value.schemaVersion,
+    value.documentId,
+    value.authorRuntimeId,
+    value.title,
+    value.body,
+    value.tags,
+)
+
+private fun interopNoteFromSlots(slots: List<Any?>): InteropNote = InteropNote(
+    schemaVersion = slots.stringAt(0, interopSchemaVersion),
+    documentId = slots.requiredStringAt(1, "documentId"),
+    authorRuntimeId = slots.requiredStringAt(2, "authorRuntimeId"),
+    title = slots.requiredStringAt(3, "title"),
+    body = slots.requiredStringAt(4, "body"),
+    tags = stringList(slots.getOrNull(5)),
+)
+
+private fun interopMutationIntentWire(value: InteropMutationIntent): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to value.schemaVersion,
+    "intentId" to value.intentId,
+    "targetDocumentId" to value.targetDocumentId,
+    "appendBody" to value.appendBody,
+    "appendTag" to value.appendTag,
+)
+
+private fun interopMutationIntentSlots(value: InteropMutationIntent): List<Any?> = listOf(
+    value.schemaVersion,
+    value.intentId,
+    value.targetDocumentId,
+    value.appendBody,
+    value.appendTag,
+)
+
+private fun interopMutationIntentFromSlots(slots: List<Any?>): InteropMutationIntent = InteropMutationIntent(
+    schemaVersion = slots.stringAt(0, interopMutationIntentSchemaVersion),
+    intentId = slots.requiredStringAt(1, "intentId"),
+    targetDocumentId = slots.requiredStringAt(2, "targetDocumentId"),
+    appendBody = slots.requiredStringAt(3, "appendBody"),
+    appendTag = slots.requiredStringAt(4, "appendTag"),
+)
+
+private fun interopMutationReceiptWire(value: InteropMutationReceipt): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to value.schemaVersion,
+    "intentId" to value.intentId,
+    "accepted" to value.accepted,
+    "documentId" to value.documentId,
+    "body" to value.body,
+    "tags" to value.tags,
+)
+
+private fun interopMutationReceiptSlots(value: InteropMutationReceipt): List<Any?> = listOf(
+    value.schemaVersion,
+    value.intentId,
+    value.accepted,
+    value.documentId,
+    value.body,
+    value.tags,
+)
+
+private fun interopMutationReceiptFromSlots(slots: List<Any?>): InteropMutationReceipt = InteropMutationReceipt(
+    schemaVersion = slots.stringAt(0, interopMutationReceiptSchemaVersion),
+    intentId = slots.requiredStringAt(1, "intentId"),
+    accepted = slots.getOrNull(2) == true,
+    documentId = slots.requiredStringAt(3, "documentId"),
+    body = slots.requiredStringAt(4, "body"),
+    tags = stringList(slots.getOrNull(5)),
+)
+
+private fun interopFireCommandWire(value: InteropFireCommand): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to value.schemaVersion,
+    "commandId" to value.commandId,
+    "characterId" to value.characterId,
+    "weaponId" to value.weaponId,
+)
+
+private fun interopFireCommandSlots(value: InteropFireCommand): List<Any?> = listOf(
+    value.schemaVersion,
+    value.commandId,
+    value.characterId,
+    value.weaponId,
+)
+
+private fun interopFireCommandFromSlots(slots: List<Any?>): InteropFireCommand = InteropFireCommand(
+    schemaVersion = slots.stringAt(0, interopFireCommandSchemaVersion),
+    commandId = slots.requiredStringAt(1, "commandId"),
+    characterId = slots.requiredStringAt(2, "characterId"),
+    weaponId = slots.requiredStringAt(3, "weaponId"),
+)
+
+private fun interopFireReceiptWire(value: InteropFireReceipt): Map<String, Any?> = linkedMapOf(
+    "schemaVersion" to value.schemaVersion,
+    "commandId" to value.commandId,
+    "accepted" to value.accepted,
+    "characterId" to value.characterId,
+    "weaponId" to value.weaponId,
+    "shotsFired" to value.shotsFired,
+    "ammoRemaining" to value.ammoRemaining,
+)
+
+private fun interopFireReceiptSlots(value: InteropFireReceipt): List<Any?> = listOf(
+    value.schemaVersion,
+    value.commandId,
+    value.accepted,
+    value.characterId,
+    value.weaponId,
+    value.shotsFired,
+    value.ammoRemaining,
+)
+
+private fun interopFireReceiptFromSlots(slots: List<Any?>): InteropFireReceipt = InteropFireReceipt(
+    schemaVersion = slots.stringAt(0, interopFireReceiptSchemaVersion),
+    commandId = slots.requiredStringAt(1, "commandId"),
+    accepted = slots.getOrNull(2) == true,
+    characterId = slots.requiredStringAt(3, "characterId"),
+    weaponId = slots.requiredStringAt(4, "weaponId"),
+    shotsFired = (slots.getOrNull(5) as? Number)?.toLong() ?: 0,
+    ammoRemaining = (slots.getOrNull(6) as? Number)?.toLong() ?: 0,
+)
+
+private fun anyList(value: Any?): List<Any?> = when (value) {
+    is Iterable<*> -> value.toList()
+    is Array<*> -> value.toList()
+    else -> throw IOException("Expected MessagePack array")
+}
+
+private fun List<Any?>.requiredStringAt(index: Int, fieldName: String): String {
+    val value = getOrNull(index)
+    if (value !is String || value.isBlank()) throw IOException("$fieldName must be a non-empty string")
+    return value
+}
+
+private fun List<Any?>.stringAt(index: Int, fallback: String): String =
+    (getOrNull(index) as? String)?.takeIf { it.isNotBlank() } ?: fallback
+
+private fun jsonLine(value: Map<String, Any?>): String = jsonValue(value)
+
+private fun jsonValue(value: Any?): String = when (value) {
+    null -> "null"
+    is String -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
+    is Boolean -> if (value) "true" else "false"
+    is Number -> value.toString()
+    is Map<*, *> -> value.entries.joinToString(prefix = "{", postfix = "}") { (key, nested) -> jsonValue(key.toString()) + ":" + jsonValue(nested) }
+    is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]") { jsonValue(it) }
+    is Array<*> -> value.joinToString(prefix = "[", postfix = "]") { jsonValue(it) }
+    else -> jsonValue(value.toString())
 }
 
 private fun cultNetRudpReconnectLoopConsumesSharedController() {

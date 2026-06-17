@@ -32,7 +32,7 @@ CultNet owns cross-runtime transport semantics:
 | TypeScript `cultnet-ts` | `CultNetPeer` over any Node `Duplex`, TCP-framed transport, or single-peer RUDP socket transport; interop uses TCP | UDP multicast probe/announce in the interop peer | First UDP socket binding for the shared RUDP reliability owner |
 | Rust `cultnet-rs` | Interop example serves and dials schema-v0 MessagePack over TCP-framed or shared RUDP transport; single-peer RUDP socket transport exists in the library | UDP multicast probe/announce with TCP and RUDP transport profiles | UDP socket binding for the shared RUDP reliability owner |
 | Python `cultcache-py` | TCP sockets with 4-byte length-prefixed MessagePack frames for local CultMesh/CultNet server and client; single-peer RUDP socket transport exists in the library | Endpoint lists and CultMesh peer/Verse catalogs | UDP socket binding for the shared RUDP reliability owner |
-| Kotlin `cultmesh-kotlin` | Channel-aware WebSocket transport connection for reliable ordered `schema` frames; single-peer RUDP socket transport exists in the library | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | WebSocket adapter plus UDP socket binding for the shared RUDP reliability owner, with build-script self-test |
+| Kotlin `cultmesh-kotlin` | Channel-aware WebSocket transport connection for reliable ordered `schema` frames; single-peer RUDP socket transport exists in the library; interop CLI serves and dials schema-v0 MessagePack over TCP-framed or shared RUDP transport | CultMesh Verse and peer catalogs, plus endpoint lists carried in schema-v0 catalog messages | WebSocket/TCP adapters plus UDP socket binding for the shared RUDP reliability owner, with build-script and TypeScript harness proof |
 
 The live split is therefore: payload language and the native RUDP packet/session
 language now converge across the targeted runtimes, while production service
@@ -360,6 +360,12 @@ Current progress:
   the socket transport. The TypeScript interop peer now also serves and dials
   the schema-v0 interop flow over `interop-rudp` while keeping TCP-framed as the
   compatibility lane; discovery and hello responses advertise both profiles.
+- Kotlin now has the same full interop RUDP proof shape as the other targeted
+  runtimes: the JVM CLI can serve schema-v0 hello/catalog/snapshot/mutation/fire
+  over `interop-rudp`, and it can dial a TypeScript full peer over the same
+  shared RUDP connection id and reliable ordered `schema` channel. TCP-framed
+  remains a compatibility lane for the interop peer; WebSocket remains the
+  JVM/Android-friendly client transport surface.
 - TypeScript now also has a `CultNetSchemaCatalog` for remote schema
   descriptors plus `CultNetPeer` request/fetch/sync helpers for
   `cultnet.schema_catalog_request.v0` / `cultnet.schema_catalog_response.v0`.
