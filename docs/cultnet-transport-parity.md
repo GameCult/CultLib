@@ -296,6 +296,12 @@ Current progress:
   server substrate cut: UDP/session ownership is no longer limited to the
   single-peer interop/client helper, but authentication and game-session
   authority still remain above the transport.
+- C# now also has `RudpCultNetSchemaServer`, a multi-peer schema-v0 service
+  host over that listener. Service code can register `OnCultNet<T>` handlers
+  and reply through `peer.SendCultNet(...)` without owning UDP demux or RUDP
+  session state. Database, Verse discovery, peer exchange, and simulation
+  bridges still need to adopt the shared schema-server peer port before the
+  old LiteNetLib `Server` bridge can be demoted.
 - C# `GameCult.Mesh` now mirrors the branded RUDP facade shape used by
   TypeScript, Python, Kotlin, and Rust: it parses `rudp://host:port` endpoints,
   creates RUDP client/server transports from endpoint or peer-card contact

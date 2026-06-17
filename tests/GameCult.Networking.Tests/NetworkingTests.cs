@@ -1116,6 +1116,78 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task RudpCultNetSchemaServer_Dispatches_SchemaMessages()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-schema-host",
+                Socket = BindUdpSocket(),
+                ConnectionId = 0x43554c54,
+                InitialSequence = 100,
+                ResendDelayMs = 25,
+                MaxFragmentBytes = 1024
+            });
+            var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.OnCultNet<CultNetSchemaCatalogRequestMessage>((request, peer) =>
+            {
+                peer.SendCultNet(new CultNetSchemaCatalogResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    Schemas =
+                    [
+                        new CultNetSchemaDescriptor
+                        {
+                            SchemaId = "rudp.schema.host",
+                            Kind = "wire_message",
+                            SchemaVersion = "rudp.schema.host.v0",
+                            WireContracts = ["cultnet.schema.v0"]
+                        }
+                    ]
+                });
+                serverDone.TrySetResult();
+            });
+
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!serverDone.Task.IsCompleted)
+                    {
+                        _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                        Thread.Sleep(5);
+                    }
+                }
+                catch (Exception error)
+                {
+                    serverDone.TrySetException(error);
+                }
+            })
+            {
+                IsBackground = true
+            };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp(runtimeId: "csharp-rudp-schema-host-client");
+            var responseCompletion = new TaskCompletionSource<CultNetSchemaCatalogResponseMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            client.OnCultNet<CultNetSchemaCatalogResponseMessage>(response => responseCompletion.TrySetResult(response));
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetSchemaCatalogRequestMessage
+            {
+                MessageId = "rudp-schema-host-test",
+                IncludeSchemaJson = false
+            });
+
+            var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
+            await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(response.MessageId, Is.EqualTo("rudp-schema-host-test"));
+            Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.host"));
+            Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+        }
+
+        [Test]
         public void RudpSocketTransport_ErgonomicHelpersCarryNamedChannels()
         {
             using var serverSocket = BindUdpSocket();
