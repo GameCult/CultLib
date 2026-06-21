@@ -18,12 +18,16 @@ The stack is less a single product than a set of capabilities:
 - typed geometry domain/chunk documents for distributed CSG and LOD streaming
 - low-latency stream catalogs and frame-handle negotiation for media, tensors,
   and runtime-native buffers
+- Eve/CultUI daemon-published surfaces that lower into GUI, TUI, web, native,
+  overlay, or agent-facing clients
 - declarative Unity UI composition and reflective runtime inspector tooling
 
 The practical pitch: a runtime can persist typed state, exchange it with peers,
 discover compatible schemas, join a Verse, publish observations, reconcile
 canonical state, and expose an operator surface without translating through a
-bespoke JSON bridge at every boundary.
+bespoke JSON bridge at every boundary. A frontend is just another CultMesh
+client: the daemon publishes a typed Eve/CultUI surface, and any compatible
+runtime can lower that surface where it needs to live.
 
 ## Which Package Do I Want?
 
@@ -37,6 +41,7 @@ and pretending the label makes it furniture.
 | Network transport and database plumbing | `GameCult.Networking` / CultNet | Native RUDP sessions, LiteNetLib/TCP/WebSocket adapters, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, reliable UDP, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
 | Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
 | Realtime media/frame streams | `GameCult.Mesh` / CultMesh streaming mode | Stream identity, authority, clock metadata, body transport negotiation, frame cursors, and backpressure state | Audio/video/tensor frames need to move between runtimes through shared memory, GPU handles, platform buffers, or CultCache page refs | Durable document mutation, mesh consensus facts, or pretending inline bytes are zero-copy |
+| Daemon-published UI | Eve / CultUI | Typed operator and user-facing surfaces over CultMesh state | A daemon should expose controls, inspection, or workflow UI that can lower into GUI, TUI, web, native, overlay, or agent clients | One-off vendor dashboards, untyped debug panels, or runtime-local UI that cannot travel with the daemon |
 
 Quick rule:
 
@@ -49,6 +54,8 @@ Quick rule:
   realtime state across a mesh?"
 - Choose CultMesh streaming mode when the problem is "how do these runtimes move
   audio/video frames while the mesh owns identity, clocks, cursors, and pressure?"
+- Choose Eve/CultUI when the problem is "how does this daemon publish its own
+  operable surface instead of waiting for a hosted admin console?"
 
 CultMesh sits on CultNet, and CultNet distributes CultCache documents. That is
 the stack. If a design needs another peer-to-peer category, first check whether
