@@ -1204,6 +1204,14 @@ pub fn create_rudp_transport_profile(
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
                 },
+                CultNetTransportChannel {
+                    channel_id: "media".to_string(),
+                    delivery: CultNetTransportDelivery::Reliable,
+                    ordering: CultNetTransportOrdering::Unordered,
+                    max_payload_bytes: options.max_payload_bytes,
+                    max_fragment_bytes: options.max_fragment_bytes,
+                    max_pending_reliable_packets: options.max_pending_reliable_packets,
+                },
             ],
         }],
     }
@@ -1323,6 +1331,12 @@ fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions
             reliable: false,
             ordered: false,
             sequenced: true,
+            now_ms,
+        },
+        "media" => CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            sequenced: false,
             now_ms,
         },
         _ => CultNetRudpSendOptions {

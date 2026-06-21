@@ -1,6 +1,10 @@
 # GameCult.Networking
 
-`GameCult.Networking` provides client/server messaging over LiteNetLib with encrypted credential exchange and signed session tokens.
+`GameCult.Networking` provides CultNet: schema-aware client/server messaging,
+database replication contracts, encrypted credential exchange, signed session
+tokens, and reliable transport surfaces including CultLib's native
+cross-runtime RUDP pipe. LiteNetLib remains supported as the C# production
+adapter for legacy clients, but it is no longer the protocol boundary.
 
 It is intended for game or game-service scenarios where you want a compact transport layer with a small set of built-in authentication flows rather than a full HTTP stack.
 
@@ -12,8 +16,9 @@ just sample application messages riding that organ.
 The library currently includes:
 
 - a shared message contract model
-- a client wrapper around LiteNetLib
-- a server wrapper around LiteNetLib
+- native RUDP packet/session contracts with reliable ordered schema frames
+- client and server wrappers for the legacy LiteNetLib lane
+- TCP-framed and WebSocket adapter surfaces used by non-C# runtimes
 - encrypted login, register, and verify flows
 - signed session-token generation and validation
 - `PlayerData` integration with `CultCache`
@@ -205,7 +210,7 @@ state.
 
 The built-in flow is:
 
-1. client connects with the shared LiteNetLib connection key
+1. client connects through a configured CultNet transport profile
 2. credentials are encrypted with AES-GCM using a per-message nonce
 3. server validates credentials and issues a signed session token
 4. client stores the encrypted session token and can send `VerifyMessage` on reconnect
@@ -366,14 +371,14 @@ The client:
 - automatically re-verifies using the stored signed session token
 - exposes reconnect state for UI/operator surfaces
 
-`Client.TransportProfile` and `Server.TransportProfile` describe the production
-LiteNetLib lane as a `litenetlib` transport adapter with reliable ordered
-`schema` and `legacy` channels. Discovery and operators can inspect the active
-pipe without treating LiteNetLib as an implicit protocol truth. `NetPeer`
-send helpers route through `LiteNetLibTransportConnection`, keeping outbound
-schema and legacy messages behind that channel-aware adapter surface. Inbound
-LiteNetLib payloads are classified through the same adapter before the client
-or server dispatches schema-v0 or legacy messages.
+`Client.TransportProfile` and `Server.TransportProfile` describe the active
+transport as a profile with reliable ordered `schema` and, where needed,
+`legacy` channels. The old C# path is now explicitly a `litenetlib` adapter,
+not an implicit specification. Discovery and operators can inspect whether a
+peer is using native RUDP, TCP-framed schema messages, WebSocket transport, or
+LiteNetLib without changing the message contract above it. `NetPeer` send
+helpers route through `LiteNetLibTransportConnection`, keeping legacy outbound
+schema and union messages behind the same channel-aware adapter surface.
 
 The native RUDP socket path also exposes `CultNetRudpReconnectLoop` for
 caller-owned game or service loops. The caller reports closure, calls
@@ -389,7 +394,8 @@ in `GameCult.Networking`.
 
 - `Server` currently centers on `PlayerData` as the built-in account model.
 - Message authorization is based on the built-in verify/login/register flow.
-- Transport is LiteNetLib, so this is not a drop-in substitute for HTTP or WebSocket stacks.
+- CultNet is not a drop-in substitute for HTTP. It is a schema-aware realtime
+  pipe for trusted game, mesh, and service runtimes.
 
 Sensitive payload logging is gated. Raw message JSON should only appear when a
 caller explicitly opts into diagnostic logging instead of accidentally bleeding

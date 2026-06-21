@@ -377,6 +377,12 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 CultNetTransportOrdering::Unordered,
                 Some(64)
             ),
+            (
+                "media",
+                CultNetTransportDelivery::Reliable,
+                CultNetTransportOrdering::Unordered,
+                Some(64)
+            ),
         ]
     );
 }

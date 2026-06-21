@@ -52,7 +52,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Peer context for a schema-v0 RUDP server.
     /// </summary>
-    public sealed class RudpCultNetSchemaServerPeer
+    public sealed class RudpCultNetSchemaServerPeer : ICultNetSchemaServerPeer
     {
         private readonly RudpCultNetSchemaServer _server;
 
@@ -86,11 +86,12 @@ namespace GameCult.Networking
     /// <summary>
     /// Multi-peer schema-v0 host over the native CultNet RUDP transport.
     /// </summary>
-    public sealed class RudpCultNetSchemaServer : IDisposable
+    public sealed class RudpCultNetSchemaServer : ICultNetSchemaServer, IDisposable
     {
         private readonly Socket _socket;
         private readonly CultNetRudpSocketTransportServer _transport;
         private readonly ConcurrentDictionary<Type, Delegate> _handlers = new();
+        private readonly ConcurrentDictionary<Delegate, Delegate> _schemaPeerAdapters = new();
         private bool _disposed;
 
         /// <summary>
@@ -165,6 +166,41 @@ namespace GameCult.Networking
                 callback(message, peer);
                 return Task.CompletedTask;
             });
+        }
+
+        /// <inheritdoc />
+        public void OnCultNet<TMessage>(Func<TMessage, ICultNetSchemaServerPeer, Task> callback)
+            where TMessage : ICultNetSchemaMessage
+        {
+            if (callback == null) throw new ArgumentNullException(nameof(callback));
+            Func<TMessage, RudpCultNetSchemaServerPeer, Task> adapter = (message, peer) => callback(message, peer);
+            _schemaPeerAdapters[callback] = adapter;
+            OnCultNet(adapter);
+        }
+
+        /// <inheritdoc />
+        public void RemoveCultNetMessageListener<TMessage>(Delegate callback)
+            where TMessage : ICultNetSchemaMessage
+        {
+            if (_schemaPeerAdapters.TryRemove(callback, out var adapter))
+            {
+                callback = adapter;
+            }
+
+            if (!_handlers.TryGetValue(typeof(TMessage), out var current))
+            {
+                return;
+            }
+
+            var next = Delegate.Remove(current, callback);
+            if (next == null)
+            {
+                _handlers.TryRemove(typeof(TMessage), out _);
+            }
+            else
+            {
+                _handlers[typeof(TMessage)] = next;
+            }
         }
 
         /// <summary>

@@ -8,8 +8,8 @@ CultMesh sits over:
 
 - `GameCult.Caching` for typed domain documents, local indexes, persistence, and
   file-compatible cache storage.
-- `GameCult.Networking` for LiteNetLib transport, schema-v0 wire messages, and
-  secure client/server sessions.
+- `GameCult.Networking` for CultNet schema-v0 wire messages, native RUDP,
+  transport adapters, and secure client/server sessions.
 
 The intent is direct: a game can treat a mesh of clients and servers as one
 reactive database for persistent state, prediction-friendly input state, and

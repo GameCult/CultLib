@@ -1,15 +1,29 @@
 # CultLib
 
-CultLib is a set of reusable C# libraries for game backends, game-adjacent services, and Unity-integrated tooling, including a declarative runtime UI composition framework for Unity.
+CultLib is GameCult's shared state, transport, and runtime substrate. It started
+as reusable C# game infrastructure, but the useful thing now is larger: typed
+`.cc` persistence, schema-stable wire formats, ergonomic reliable-UDP
+networking, distributed database sync, simulation witness consensus, streaming
+surfaces, and UI/runtime affordances that can be used from C#, TypeScript, Rust,
+Python, and Kotlin without each runtime inventing its own local folklore.
 
-The libraries cover three main areas:
+The stack is less a single product than a set of capabilities:
 
 - logging primitives and implementations
-- a typed in-memory cache with pluggable persistence
-- LiteNetLib-based networking with encrypted credential exchange and signed session tokens
-- CultMesh distributed realtime database and simulation-consensus primitives
+- CultCache typed documents, `.cc` persistence, and SoA memory access
+- CultNet schema-v0 messages over TCP, WebSocket, LiteNetLib adapters, and
+  CultLib's native cross-runtime RUDP pipe
+- CultMesh distributed realtime database, Verse discovery, authority leases,
+  shard replication, and witness-authoritative simulation consensus
 - typed geometry domain/chunk documents for distributed CSG and LOD streaming
+- low-latency stream catalogs and frame-handle negotiation for media, tensors,
+  and runtime-native buffers
 - declarative Unity UI composition and reflective runtime inspector tooling
+
+The practical pitch: a runtime can persist typed state, exchange it with peers,
+discover compatible schemas, join a Verse, publish observations, reconcile
+canonical state, and expose an operator surface without translating through a
+bespoke JSON bridge at every boundary.
 
 ## Which Package Do I Want?
 
@@ -20,7 +34,7 @@ and pretending the label makes it furniture.
 | --- | --- | --- | --- | --- |
 | Local typed state | `GameCult.Caching` / CultCache | Document identity, schema compatibility, record keys, indexes, globals, and local persistence | You need a typed cache, file-compatible save data, local reactive reads, or a stable domain document model | Peer discovery, transport security, shard routing, or mesh consensus |
 | Procedural geometry state | `GameCult.Geometry` | CultCache-native domain trees, LOD build requests, selected-cut diagnostics, and chunk artifact payloads | Rust, Unity, or remote workers need to share CSG/LOD geometry and graph metadata as typed state | Transport policy, peer discovery, or gameplay authority |
-| Network transport and database plumbing | `GameCult.Networking` / CultNet | LiteNetLib transport, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
+| Network transport and database plumbing | `GameCult.Networking` / CultNet | Native RUDP sessions, LiteNetLib/TCP/WebSocket adapters, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, reliable UDP, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
 | Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
 | Realtime media/frame streams | `GameCult.Mesh` / CultMesh streaming mode | Stream identity, authority, clock metadata, body transport negotiation, frame cursors, and backpressure state | Audio/video/tensor frames need to move between runtimes through shared memory, GPU handles, platform buffers, or CultCache page refs | Durable document mutation, mesh consensus facts, or pretending inline bytes are zero-copy |
 
@@ -59,7 +73,7 @@ The solution includes:
 - `GameCult.Caching.MessagePack.Generator`: source generator for MessagePack formatters for cache models
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
 - `GameCult.Geometry`: CultCache-native geometry domain, selected-cut, and chunk artifact documents for VibeGeometry/Fensalir-style pipelines
-- `GameCult.Networking`: encrypted login/register/verify flows and message dispatch over LiteNetLib
+- `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
 - `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
@@ -70,6 +84,7 @@ The solution includes:
 - `packages/cultcache-py`: Python CultCache/CultNet/CultMesh package with CultCache v1 wire parity
 - `packages/cultcache-rs`: Rust CultCache and derive macro
 - `packages/cultnet-rs`: Rust CultNet contracts, framing, discovery, and interop peer
+- `packages/cultmesh-kotlin`: Kotlin/JVM CultMesh and CultNet surface for Android-adjacent runtimes
 
 ## Repository Layout
 
@@ -94,6 +109,7 @@ packages/
   cultcache-ts/
   cultnet-ts/
   cultmesh-ts/
+  cultmesh-kotlin/
   cultcache-py/
   cultcache-rs/
   cultnet-rs/
@@ -125,6 +141,12 @@ Rust package tests:
 ```powershell
 cargo test --manifest-path packages/cultcache-rs/Cargo.toml
 cargo test --manifest-path packages/cultnet-rs/Cargo.toml
+```
+
+Kotlin package build:
+
+```powershell
+.\packages\cultmesh-kotlin\build.ps1
 ```
 
 ## Common Concepts

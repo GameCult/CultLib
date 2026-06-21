@@ -17,7 +17,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Hosts the server-side authentication, session, and message dispatch pipeline.
     /// </summary>
-    public class Server : IDisposable
+    public class Server : ICultNetSchemaServer, IDisposable
     {
         private const string EmailPattern =
             @"^([0-9a-zA-Z]([\+\-_\.][0-9a-zA-Z]+)*)+@(([0-9a-zA-Z][-\w]*[0-9a-zA-Z]*\.)+[a-zA-Z0-9]{2,17})$";
@@ -31,6 +31,7 @@ namespace GameCult.Networking
         private readonly ConcurrentDictionary<Type, Delegate> _messageDelegates = new();
         private readonly ConcurrentDictionary<Type, Delegate> _cultNetMessageDelegates = new();
         private readonly ConcurrentDictionary<Type, Delegate> _cultNetServerPeerMessageDelegates = new();
+        private readonly ConcurrentDictionary<Delegate, Delegate> _cultNetSchemaPeerAdapters = new();
         private readonly ConcurrentDictionary<long, User> _users = new();
         private readonly ConcurrentDictionary<string, Queue<DateTimeOffset>> _connectionAttempts = new();
         private readonly ConcurrentDictionary<string, object> _connectionAttemptLocks = new();
@@ -225,6 +226,16 @@ namespace GameCult.Networking
             AddCultNetMessageListener(callback);
         }
 
+        /// <inheritdoc />
+        public void OnCultNet<T>(Func<T, ICultNetSchemaServerPeer, Task> callback)
+            where T : ICultNetSchemaMessage
+        {
+            if (callback == null) throw new ArgumentNullException(nameof(callback));
+            Func<T, CultNetServerPeer, Task> adapter = (message, peer) => callback(message, peer);
+            _cultNetSchemaPeerAdapters[callback] = adapter;
+            AddCultNetMessageListener(adapter);
+        }
+
         /// <summary>
         /// Sends a legacy GameCult.Networking union message through this server's per-peer LiteNetLib adapter.
         /// </summary>
@@ -282,6 +293,11 @@ namespace GameCult.Networking
         /// </summary>
         public void RemoveCultNetMessageListener<T>(Delegate callback) where T : ICultNetSchemaMessage
         {
+            if (_cultNetSchemaPeerAdapters.TryRemove(callback, out var adapter))
+            {
+                callback = adapter;
+            }
+
             if (_cultNetMessageDelegates.TryGetValue(typeof(T), out var currentDelegate))
             {
                 var newDelegate = Delegate.Remove(currentDelegate, callback);
@@ -799,7 +815,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Transport-aware server peer context for built-in CultNet service bodies.
     /// </summary>
-    public sealed class CultNetServerPeer
+    public sealed class CultNetServerPeer : ICultNetSchemaServerPeer
     {
         internal CultNetServerPeer(NetPeer peer, LiteNetLibTransportConnection transport)
         {
