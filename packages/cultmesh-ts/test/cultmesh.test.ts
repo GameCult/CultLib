@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { encode } from "@msgpack/msgpack";
 import { z } from "zod";
 import { defineDocumentType } from "cultcache-ts";
-import { CultNetPeer, cultNetBuiltinSchemaRegistry } from "cultnet-ts";
+import { CultNetDocumentRegistry, CultNetPeer, cultNetBuiltinSchemaRegistry } from "cultnet-ts";
 import { CultMesh } from "../src/index";
 
 const noteDocument = defineDocumentType({
@@ -379,6 +380,92 @@ test("CultMesh TS creates connected RUDP schema peers for catalog requests", asy
   } finally {
     clientPeer?.close();
     serverPeer.close();
+  }
+});
+
+test("CultMesh TS RUDP document server accepts raw document puts from multiple peers", async () => {
+  const connectionId = 0x10203046;
+  const received: string[] = [];
+  const server = CultMesh.createRudpDocumentServer(
+    "cultmesh-ts-document-server",
+    connectionId,
+    {
+      documents: new CultNetDocumentRegistry(),
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+      onDocumentPutRaw: (document) => {
+        received.push(`${document.sourceRuntimeId}:${document.recordKey}:${document.payload}`);
+      },
+    },
+  );
+
+  let firstPeer: CultNetPeer | undefined;
+  let secondPeer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    firstPeer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-document-client-a",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+    secondPeer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-document-client-b",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+
+    firstPeer.send({
+      schemaVersion: "cultnet.document_put_raw.v0",
+      messageId: "raw-put-a",
+      document: {
+        schemaId: "cultmesh.note.v0",
+        recordKey: "note:a",
+        storedAt: new Date().toISOString(),
+        payloadEncoding: "messagepack",
+        payload: encode("first"),
+        sourceRuntimeId: "client-a",
+      },
+    });
+    secondPeer.send({
+      schemaVersion: "cultnet.document_put_raw.v0",
+      messageId: "raw-put-b",
+      document: {
+        schemaId: "cultmesh.note.v0",
+        recordKey: "note:b",
+        storedAt: new Date().toISOString(),
+        payloadEncoding: "messagepack",
+        payload: encode("second"),
+        sourceRuntimeId: "client-b",
+      },
+    });
+
+    await waitFor(() => received.length === 2, "two RUDP document puts");
+    assert.deepEqual(received.sort(), [
+      "client-a:note:a:first",
+      "client-b:note:b:second",
+    ]);
+  } finally {
+    firstPeer?.close();
+    secondPeer?.close();
+    server.close();
   }
 });
 

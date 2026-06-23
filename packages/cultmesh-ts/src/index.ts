@@ -1,4 +1,5 @@
 import { createSocket, type Socket } from "node:dgram";
+import { decode, encode } from "@msgpack/msgpack";
 
 import {
   CultCache,
@@ -9,13 +10,20 @@ import {
 } from "cultcache-ts";
 import {
   CultNetDocumentRegistry,
+  CultNetRudpSession,
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
   CultNetSchemaCatalog,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
+  decodeRudpPacket,
   defineCultNetDocumentBinding,
+  encodeCultNetMessageForWire,
+  encodeRudpPacket,
+  parseCultNetMessage,
   type CultNetDocumentBinding,
+  type CultNetMessage,
+  type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
   type CultNetWireContract,
@@ -107,6 +115,37 @@ export interface CultMeshPeerCard {
   roles?: readonly string[];
   shardIds?: readonly string[];
   authorityLeaseId?: string;
+}
+
+export interface CultMeshRudpDocumentPut {
+  schemaId: string;
+  recordKey: string;
+  storedAt: string;
+  payload: unknown;
+  sourceRuntimeId: string | null;
+  sourceAgentId: string | null;
+  sourceRole: string | null;
+  tags: string[];
+  remote: {
+    address: string;
+    family: string;
+    port: number;
+  };
+}
+
+export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
+  documents: CultNetDocumentRegistry;
+  getCache?: () => Promise<CultCache> | CultCache;
+  onError?: (error: Error) => void;
+  onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) => void | Promise<void>;
+  wireContract?: CultNetWireContract;
+  sessionTimeoutMs?: number;
+}
+
+export interface CultMeshRudpDocumentServer {
+  readonly bind: { host: string; port: number };
+  start(): Promise<void>;
+  close(): void;
 }
 
 export interface CultMeshRudpEndpoint {
@@ -565,6 +604,183 @@ export class CultMesh {
     return new CultNetShardCatalog();
   }
 
+  public static createRudpDocumentServer(
+    runtimeId: string,
+    connectionId: number,
+    options: CultMeshRudpDocumentServerOptions,
+  ): CultMeshRudpDocumentServer {
+    requireNonEmpty(runtimeId, "runtimeId");
+    if (!options.documents) {
+      throw new Error("CultMesh RUDP document server requires a document registry.");
+    }
+
+    const host = options.bindHost ?? "127.0.0.1";
+    const port = options.bindPort ?? 0;
+    const bind = { host, port };
+    const socket = options.socket ?? createSocket(host.includes(":") ? "udp6" : "udp4");
+    const sessions = new Map<string, {
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+    }>();
+    const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
+    const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
+    const wireContract = options.wireContract ?? "cultnet.schema.v0";
+    let resendTimer: NodeJS.Timeout | undefined;
+
+    function reportError(error: unknown): void {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (options.onError) {
+        options.onError(normalized);
+        return;
+      }
+      console.error(`CultMesh RUDP document server error: ${normalized.message}`);
+    }
+
+    socket.on("message", (wire, remote) => {
+      try {
+        const packet = decodeRudpPacket(wire);
+        const key = `${remote.address}:${remote.port}`;
+        const nowMs = Date.now();
+        let record = sessions.get(key);
+
+        if (packet.packetType === "connect") {
+          record = {
+            remote: { address: remote.address, family: remote.family, port: remote.port },
+            session: new CultNetRudpSession({
+              connectionId,
+              initialSequence: options.initialSequence,
+              resendDelayMs: options.resendDelayMs,
+              maxPendingReliablePackets: options.maxPendingReliablePackets,
+            }),
+          };
+          sessions.set(key, record);
+          socket.send(encodeRudpPacket(record.session.acceptConnect(packet, nowMs)), remote.port, remote.address);
+          return;
+        }
+
+        if (!record) {
+          return;
+        }
+
+        const result = record.session.receive(packet, nowMs);
+        if (result.reply) {
+          socket.send(encodeRudpPacket(result.reply), record.remote.port, record.remote.address);
+        }
+        for (const frame of result.delivered) {
+          if (frame.channelId !== "schema") {
+            continue;
+          }
+          handleDocumentServerFrame(record, frame.payload).catch((error) => {
+            reportError(error);
+          });
+        }
+        if (result.disconnected) {
+          sessions.delete(key);
+          return;
+        }
+        if (packet.packetType === "accept" || result.delivered.length > 0) {
+          socket.send(encodeRudpPacket(record.session.createAck()), record.remote.port, record.remote.address);
+        }
+      } catch (error) {
+        reportError(error);
+      }
+    });
+    socket.on("error", reportError);
+
+    async function handleDocumentServerFrame(
+      record: { remote: { address: string; family: string; port: number }; session: CultNetRudpSession },
+      payload: Uint8Array,
+    ): Promise<void> {
+      const message = parseCultNetMessage(decode(payload), wireContract);
+      switch (message.schemaVersion) {
+        case "cultnet.snapshot_request.v0": {
+          if (!options.getCache) {
+            sendSchemaMessage(record, {
+              schemaVersion: "cultnet.error.v0",
+              error: "CultMesh RUDP document server has no cache for snapshot requests.",
+            });
+            return;
+          }
+          try {
+            const cache = await options.getCache();
+            sendSchemaMessage(record, options.documents.createRawSnapshotResponse(cache, message.messageId, message));
+          } catch (error) {
+            sendSchemaMessage(record, {
+              schemaVersion: "cultnet.error.v0",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          return;
+        }
+        case "cultnet.schema_catalog_request.v0":
+          sendSchemaMessage(record, cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
+          return;
+        case "cultnet.document_put_raw.v0":
+          if (options.onDocumentPutRaw) {
+            await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
+          }
+          return;
+        default:
+          sendSchemaMessage(record, {
+            schemaVersion: "cultnet.error.v0",
+            error: `Unsupported CultMesh RUDP document request ${message.schemaVersion}.`,
+          });
+      }
+    }
+
+    function sendSchemaMessage(
+      record: { remote: { address: string; port: number }; session: CultNetRudpSession },
+      message: CultNetMessage,
+    ): void {
+      const payload = encode(encodeCultNetMessageForWire(message, wireContract));
+      for (const packet of record.session.sendMany("schema", payload, {
+        reliable: true,
+        ordered: true,
+        nowMs: Date.now(),
+      })) {
+        socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+      }
+    }
+
+    return {
+      bind,
+      async start(): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("error", reject);
+          socket.bind(port, host, () => {
+            socket.off("error", reject);
+            const address = socket.address();
+            if (typeof address === "object") {
+              bind.port = address.port;
+            }
+            resolve();
+          });
+        });
+        resendTimer = setInterval(() => {
+          const nowMs = Date.now();
+          for (const [key, record] of sessions) {
+            if (record.session.checkTimeout(nowMs, sessionTimeoutMs)) {
+              sessions.delete(key);
+              continue;
+            }
+            for (const packet of record.session.dueResends(nowMs)) {
+              socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+            }
+          }
+        }, resendPollMs);
+        resendTimer.unref?.();
+      },
+      close(): void {
+        if (resendTimer) {
+          clearInterval(resendTimer);
+          resendTimer = undefined;
+        }
+        sessions.clear();
+        socket.close();
+      },
+    };
+  }
+
   public static parseRudpEndpoint(endpoint: string): CultMeshRudpEndpoint {
     requireNonEmpty(endpoint, "endpoint");
     const parsed = new URL(endpoint);
@@ -741,6 +957,33 @@ function requireNonEmpty(value: string, name: string): void {
   if (!value || value.trim().length === 0) {
     throw new Error(`${name} must be non-empty.`);
   }
+}
+
+function normalizeRudpDocumentPut(
+  message: CultNetMessage,
+  remote: { address: string; family: string; port: number },
+): CultMeshRudpDocumentPut {
+  if (message.schemaVersion !== "cultnet.document_put_raw.v0") {
+    throw new Error(`Expected cultnet.document_put_raw.v0, received ${message.schemaVersion}.`);
+  }
+  const document: CultNetRawDocumentRecord = message.document;
+  if (!document.schemaId || !document.recordKey) {
+    throw new Error("Raw document put is missing schemaId or recordKey.");
+  }
+  if (document.payloadEncoding !== "messagepack") {
+    throw new Error(`Unsupported raw payload encoding ${document.payloadEncoding}.`);
+  }
+  return {
+    schemaId: document.schemaId,
+    recordKey: document.recordKey,
+    storedAt: document.storedAt ?? new Date().toISOString(),
+    payload: decode(document.payload),
+    sourceRuntimeId: document.sourceRuntimeId ?? null,
+    sourceAgentId: document.sourceAgentId ?? null,
+    sourceRole: document.sourceRole ?? null,
+    tags: Array.isArray(document.tags) ? document.tags : [],
+    remote,
+  };
 }
 
 async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socket> {
