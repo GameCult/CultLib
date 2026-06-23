@@ -6,7 +6,12 @@ import assert from "node:assert/strict";
 import { encode } from "@msgpack/msgpack";
 import { z } from "zod";
 import { defineDocumentType } from "cultcache-ts";
-import { CultNetDocumentRegistry, CultNetPeer, cultNetBuiltinSchemaRegistry } from "cultnet-ts";
+import {
+  CultNetDocumentRegistry,
+  CultNetPeer,
+  cultNetBuiltinSchemaRegistry,
+  defineCultNetDocumentBinding,
+} from "cultnet-ts";
 import { CultMesh } from "../src/index";
 
 const noteDocument = defineDocumentType({
@@ -465,6 +470,69 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
   } finally {
     firstPeer?.close();
     secondPeer?.close();
+    server.close();
+  }
+});
+
+test("CultMesh TS publishes one registered document to a RUDP catalog", async () => {
+  const connectionId = 0x10203047;
+  let received: { schemaId: string; recordKey: string; payload: unknown; sourceRuntimeId: string | null } | undefined;
+  const server = CultMesh.createRudpDocumentServer(
+    "cultmesh-ts-odin-catalog",
+    connectionId,
+    {
+      documents: new CultNetDocumentRegistry(),
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+      onDocumentPutRaw: (document) => {
+        received = {
+          schemaId: document.schemaId,
+          recordKey: document.recordKey,
+          payload: document.payload,
+          sourceRuntimeId: document.sourceRuntimeId,
+        };
+      },
+    },
+  );
+
+  try {
+    await server.start();
+    await CultMesh.publishRudpDocumentOnce(
+      "cultmesh-ts-muninn",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      defineCultNetDocumentBinding({ definition: noteDocument }),
+      "note:odin",
+      {
+        noteId: "note:odin",
+        body: "pay respects once",
+      },
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+        flushTimeoutMs: 25,
+        sourceRole: "test-provider",
+      },
+    );
+
+    await waitFor(() => received !== undefined, "published RUDP document");
+    assert.deepEqual(received, {
+      schemaId: "cultmesh.note.v0",
+      recordKey: "note:odin",
+      payload: {
+        noteId: "note:odin",
+        body: "pay respects once",
+      },
+      sourceRuntimeId: "cultmesh-ts-muninn",
+    });
+  } finally {
     server.close();
   }
 });

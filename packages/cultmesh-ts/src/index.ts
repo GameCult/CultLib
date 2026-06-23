@@ -148,6 +148,15 @@ export interface CultMeshRudpDocumentServer {
   close(): void;
 }
 
+export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOptions {
+  messageId?: string;
+  sourceRuntimeId?: string;
+  sourceAgentId?: string;
+  sourceRole?: string;
+  tags?: string[];
+  flushTimeoutMs?: number;
+}
+
 export interface CultMeshRudpEndpoint {
   host: string;
   port: number;
@@ -798,6 +807,38 @@ export class CultMesh {
     const uriHost =
       host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
     return { host, port, uri: `rudp://${uriHost}:${port}` };
+  }
+
+  public static async publishRudpDocumentOnce<TDefinition extends AnyCultCacheDocumentDefinition>(
+    runtimeId: string,
+    connectionId: number,
+    endpoint: string | CultMeshRudpEndpoint,
+    binding: CultNetDocumentBinding<TDefinition>,
+    recordKey: string,
+    value: CultCacheDocumentValue<TDefinition>,
+    options: CultMeshRudpDocumentPublishOptions = {},
+  ): Promise<void> {
+    requireNonEmpty(runtimeId, "runtimeId");
+    requireNonEmpty(recordKey, "recordKey");
+    const registry = new CultNetDocumentRegistry([binding]);
+    const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
+    try {
+      peer.send(registry.createRawDocumentPutMessage(
+        binding,
+        options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`,
+        recordKey,
+        value,
+        {
+          sourceRuntimeId: options.sourceRuntimeId ?? runtimeId,
+          sourceAgentId: options.sourceAgentId,
+          sourceRole: options.sourceRole,
+          tags: options.tags,
+        },
+      ));
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, options.flushTimeoutMs ?? 150)));
+    } finally {
+      peer.close();
+    }
   }
 
   public static async createRudpServer(
