@@ -3673,6 +3673,39 @@ export class CultMeshNode {
     return cultMeshDocumentFromCache(this.cache, definition, key, options);
   }
 
+  public reactiveDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    options: {
+      context?: CultMeshQueryContext | string;
+      watch?: boolean;
+      debounceMs?: number;
+      onError?: (error: unknown) => void;
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshReactiveDocument<CultCacheDocumentValue<TDefinition> & object> {
+    const {
+      documentId,
+      routeHint,
+      pollMs,
+      ...reactiveOptions
+    } = options;
+    const schema = cultMeshSchemaFromDefinition(definition);
+    const binding =
+      this.documents.get(definition.type) ??
+      (schema.schemaId ? this.documents.getBySchemaId(schema.schemaId) : undefined);
+    const document = binding
+      ? this.document(binding.definition, key, { documentId, routeHint, pollMs })
+        .asSchemaAlias<CultCacheDocumentValue<TDefinition>>(schema, {
+          parse: value => definition.schema.parse(value),
+        })
+      : this.document(definition, key, { documentId, routeHint, pollMs });
+
+    return document.reactive<CultCacheDocumentValue<TDefinition> & object>(reactiveOptions);
+  }
+
   public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     options: {
@@ -4588,6 +4621,23 @@ export class CultMesh {
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
     return cultMeshGlobalDocumentFromCache(cache, definition, options);
+  }
+
+  public static reactiveDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+    node: CultMeshNode,
+    definition: TDefinition,
+    key: string,
+    options: {
+      context?: CultMeshQueryContext | string;
+      watch?: boolean;
+      debounceMs?: number;
+      onError?: (error: unknown) => void;
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshReactiveDocument<CultCacheDocumentValue<TDefinition> & object> {
+    return node.reactiveDocument(definition, key, options);
   }
 
   public static documents(

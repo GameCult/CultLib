@@ -240,6 +240,43 @@ test("CultMesh TS reactive documents submit predictions from member writes", asy
   assert.deepEqual(predictions, ["member-write-prediction-final"]);
 });
 
+test("CultMesh TS node opens reactive same-schema aliases with one call", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-node-reactive-")), "node.ccmp");
+  const node = await CultMesh.startNode(filePath, {
+    documents: [noteDocument],
+  });
+  await node.put(noteDocument, "note:node-reactive", {
+    noteId: "note:node-reactive",
+    body: "initial",
+  });
+
+  const reactive = node.reactiveDocument(noteAliasDocument, "note:node-reactive", {
+    context: CultMesh.queryContext("browser-client"),
+    watch: false,
+  });
+  await reactive.ready;
+  reactive.current.body = "edited-through-node-helper";
+  await waitFor(
+    () => node.getRequired(noteDocument, "note:node-reactive").body === "edited-through-node-helper",
+    "node-level reactive alias write",
+  );
+
+  assert.equal(reactive.current.noteId, "note:node-reactive");
+  assert.equal(
+    node.document(noteDocument, "note:node-reactive").asSchemaAlias(noteAliasDocument, {
+      parse: value => noteAliasDocument.schema.parse(value),
+    }).canSet,
+    true,
+  );
+  assert.equal(
+    (await CultMesh.reactiveDocument(node, noteAliasDocument, "note:node-reactive", {
+      watch: false,
+    }).ready).body,
+    "edited-through-node-helper",
+  );
+  reactive.dispose();
+});
+
 test("CultMesh TS reactive documents store reconciliation deltas after misprediction", async () => {
   let current = {
     noteId: "note:reconcile",
