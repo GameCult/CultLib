@@ -427,6 +427,21 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Binds a mutable predicted typed document live feed to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerseContext context,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task> replace,
+            Func<TDocument, Task> submitPrediction)
+            where TDocument : class
+        {
+            if (replace == null) throw new ArgumentNullException(nameof(replace));
+            if (submitPrediction == null) throw new ArgumentNullException(nameof(submitPrediction));
+            return new CultMeshDocumentHandle<TDocument>(BindLiveFeed(context, feed), replace, submitPrediction);
+        }
+
+        /// <summary>
         /// Binds a typed document live feed to a Verse.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
@@ -449,6 +464,20 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return BindDocument(verse.Context, feed, replace);
+        }
+
+        /// <summary>
+        /// Binds a mutable predicted typed document live feed to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerse verse,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task> replace,
+            Func<TDocument, Task> submitPrediction)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindDocument(verse.Context, feed, replace, submitPrediction);
         }
 
         /// <summary>
@@ -936,6 +965,32 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a mutable predicted typed document handle from snapshot/watch/replace/prediction delegates and binds it to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerseContext context,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            Func<TDocument, Task> replace,
+            Func<TDocument, Task> submitPrediction,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (replace == null) throw new ArgumentNullException(nameof(replace));
+            if (submitPrediction == null) throw new ArgumentNullException(nameof(submitPrediction));
+
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
+                documentId,
+                (_parameters, queryContext) => latest(queryContext),
+                (_parameters, queryContext) => watch(queryContext),
+                sources,
+                routeHint);
+            return BindDocument(context, feed, replace, submitPrediction);
+        }
+
+        /// <summary>
         /// Creates a typed document handle from snapshot/watch delegates and binds it to a Verse.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
@@ -966,6 +1021,24 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return Document(documentId, verse.Context, latest, watch, replace, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a mutable predicted typed document handle from snapshot/watch/replace/prediction delegates and binds it to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerse verse,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            Func<TDocument, Task> replace,
+            Func<TDocument, Task> submitPrediction,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document(documentId, verse.Context, latest, watch, replace, submitPrediction, sources, routeHint);
         }
 
         /// <summary>
@@ -1067,6 +1140,10 @@ namespace GameCult.Mesh
                 async value =>
                 {
                     await database.PutAsync(key, value).ConfigureAwait(false);
+                },
+                async value =>
+                {
+                    await database.PutPredictedAsync(key, value).ConfigureAwait(false);
                 },
                 sourceList,
                 route);

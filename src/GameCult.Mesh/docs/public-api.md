@@ -163,13 +163,16 @@ portable machinery that makes it feel native.
 - `CultMeshDocumentHandle<TDocument>` is the typed reactive document edge for
   CultCache/CultNet state. It exposes document metadata, one coherent
   `LatestAsync()` read, a `Watch()` stream, and `ReplaceAsync(...)` when the
-  handle is backed by mutable state. Callers can bind a projected live feed, a
-  local `CultCache` record, a distributed `CultNetDatabase` record, or a
+  handle is backed by mutable state. Distributed `CultNetDatabase` handles also
+  expose `SubmitPredictionAsync(...)`, which applies a local prediction through
+  the database's configured client-authority scope and later reconciles through
+  the normal shard log. Callers can bind a projected live feed, a local
+  `CultCache` record, a distributed `CultNetDatabase` record, or a
   `CultMeshNode` record through the same surface instead of walking transport
   and projection layers themselves. Same-schema CLR aliases can be requested
   with `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
   `[CultDocument(schemaName, schemaVersion)]` identity and uses the shared
-  CultCache MessagePack codec for read/watch/replace conversion.
+  CultCache MessagePack codec for read/watch/replace/prediction conversion.
 - `CultMeshDocumentCatalog` is the schema-aware lookup edge for a set of
   document handles. It indexes handles by CLR document type, schema name, and
   schema version, and resolves same-schema CLR aliases by delegating to
@@ -487,8 +490,10 @@ methods. Subscriptions receive domain changes rather than storage envelopes.
 ### Client Prediction
 
 `CultNetClientAuthorityScope` declares input documents a runtime may predict.
-`PutPredictedAsync` writes local state and emits `Predicted`. When the
-authoritative log arrives, the database emits `Reconciled`.
+CultMesh document handles opened over a `CultNetDatabase` expose
+`SubmitPredictionAsync(...)`, which writes local state and emits `Predicted`
+through the configured database authority policy. When the authoritative log
+arrives, the database emits `Reconciled`.
 
 ### Replica Catch-Up
 

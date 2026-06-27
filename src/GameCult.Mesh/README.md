@@ -155,13 +155,14 @@ the record.
 
 ```csharp
 var db = node.Database;
+var input = CultMesh.Document<PlayerInput>(db, inputKey, verse);
 
-await db.PutPredictedAsync(inputKey, inputState);
+await input.SubmitPredictionAsync(inputState);
 
-using var sub = db.WatchRecord<PlayerInput>(inputKey)
-    .Subscribe(change =>
+using var sub = input.Watch()
+    .Subscribe(latest =>
     {
-        ReconcilePrediction(change);
+        ReconcilePrediction(latest);
     });
 ```
 

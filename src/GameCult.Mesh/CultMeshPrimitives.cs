@@ -900,6 +900,9 @@ namespace GameCult.Mesh
         /// <summary>Gets whether this handle can replace the underlying document value.</summary>
         bool CanReplace { get; }
 
+        /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
+        bool CanSubmitPrediction { get; }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
@@ -915,14 +918,17 @@ namespace GameCult.Mesh
 
         private readonly CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> _feed;
         private readonly Func<TDocument, Task>? _replace;
+        private readonly Func<TDocument, Task>? _submitPrediction;
 
         /// <summary>Creates a document handle from a Verse-bound live feed.</summary>
         public CultMeshDocumentHandle(
             CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
-            Func<TDocument, Task>? replace = null)
+            Func<TDocument, Task>? replace = null,
+            Func<TDocument, Task>? submitPrediction = null)
         {
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
             _replace = replace;
+            _submitPrediction = submitPrediction;
         }
 
         /// <summary>Gets the semantic document id.</summary>
@@ -954,6 +960,9 @@ namespace GameCult.Mesh
 
         /// <summary>Gets whether this handle can replace the underlying document value.</summary>
         public bool CanReplace => _replace != null;
+
+        /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
+        public bool CanSubmitPrediction => _submitPrediction != null;
 
         /// <summary>Reads one coherent document snapshot.</summary>
         public Task<TDocument> LatestAsync()
@@ -992,6 +1001,18 @@ namespace GameCult.Mesh
             return _replace(value);
         }
 
+        /// <summary>Submits a locally predicted document value when this handle is backed by client-authoritative state.</summary>
+        public Task SubmitPredictionAsync(TDocument value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            if (_submitPrediction == null)
+            {
+                throw new NotSupportedException($"Document handle '{DocumentId}' does not accept client predictions.");
+            }
+
+            return _submitPrediction(value);
+        }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         public CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
         {
@@ -1018,8 +1039,11 @@ namespace GameCult.Mesh
             Func<TAlias, Task>? replace = _replace == null
                 ? null
                 : value => _replace(ConvertDocument<TAlias, TDocument>(value));
+            Func<TAlias, Task>? submitPrediction = _submitPrediction == null
+                ? null
+                : value => _submitPrediction(ConvertDocument<TAlias, TDocument>(value));
 
-            return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context), replace);
+            return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context), replace, submitPrediction);
         }
 
         private static TTarget ConvertDocument<TSource, TTarget>(TSource document)

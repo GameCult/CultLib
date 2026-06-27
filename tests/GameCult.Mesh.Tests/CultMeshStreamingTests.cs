@@ -754,6 +754,8 @@ public sealed class CultMeshStreamingTests
 
         handle.CanReplace.Should().BeTrue();
         alias.CanReplace.Should().BeTrue();
+        handle.CanSubmitPrediction.Should().BeFalse();
+        alias.CanSubmitPrediction.Should().BeFalse();
         handle.DocumentId.Should().Be(key.Value);
         handle.Sources.Should().ContainSingle().Which.SchemaId.Should().Be(handle.SchemaId);
 
@@ -772,6 +774,66 @@ public sealed class CultMeshStreamingTests
         cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("cache-replaced");
         observed.Text.Should().Be("cache-replaced");
         observed.Revision.Should().Be(2);
+
+        Func<Task> act = () => alias.SubmitPredictionAsync(new MeshNoteAliasDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "cache-predicted",
+            Revision = 3
+        });
+        await act.Should().ThrowAsync<NotSupportedException>();
+    }
+
+    [Test]
+    public async Task DocumentHandle_SubmitsPredictionsThroughCultNetDatabase()
+    {
+        var cache = new CultCache();
+        var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
+        var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+        {
+            RuntimeId = "pilot-a",
+            Shards = new[]
+            {
+                new CultNetShardDescriptor(
+                    "pilot-inputs",
+                    "server",
+                    epoch: 1,
+                    isPrimary: false,
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:")
+            },
+            ClientAuthorityScopes = new[]
+            {
+                new CultNetClientAuthorityScope(
+                    "pilot-a",
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:pilot-a")
+            }
+        });
+        var key = new CultRecordKey("input:pilot-a:thermal");
+
+        var handle = CultMesh.Document<MeshNoteDocument>(
+            database,
+            key,
+            CultMesh.Verse("starbridge", "pilot-a"));
+        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
+
+        handle.CanReplace.Should().BeTrue();
+        alias.CanSubmitPrediction.Should().BeTrue();
+
+        MeshNoteDocument observed = null!;
+        using var subscription = handle.Watch(value => observed = value);
+        await alias.SubmitPredictionAsync(new MeshNoteAliasDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "predicted-thermal",
+            Revision = 5
+        });
+
+        cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("predicted-thermal");
+        observed.Text.Should().Be("predicted-thermal");
+        observed.Revision.Should().Be(5);
+        (await handle.LatestAsync()).Text.Should().Be("predicted-thermal");
     }
 
     [Test]
