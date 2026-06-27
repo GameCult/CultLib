@@ -2366,6 +2366,75 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotEndpoint_SyncsCompatibleForeignSchemaIdIntoLocalCache()
+    {
+        var key = new CultRecordKey("mesh-note:snapshot-sync-foreign-schema");
+        var snapshot = new CultNetSnapshotResponseRawMessage
+        {
+            MessageId = "foreign-schema-sync",
+            Documents = new[]
+            {
+                new CultNetRawDocumentRecord
+                {
+                    SchemaId = "runtime.generated.mesh-note.ui.84",
+                    RecordKey = key.Value,
+                    StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                    PayloadEncoding = "messagepack",
+                    Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                        new MeshNoteDocument
+                        {
+                            Schema = "tests.mesh_note.v1",
+                            Text = "foreign-schema-synced",
+                            Revision = 45
+                        },
+                        typeof(MeshNoteDocument))
+                }
+            }
+        };
+        var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(
+            typeof(MeshNoteDocument),
+            typeof(MeshNoteAliasDocument));
+        var registry = CultMesh.CreateCultNetDocumentRegistry(
+            new[] { typeof(MeshNoteDocument), typeof(MeshNoteAliasDocument) },
+            cacheRegistry);
+        var endpoint = CultMesh.SnapshotEndpoint(
+            "cultnet://foreign-schema.test:3075",
+            new CultMeshSnapshotEndpointOptions
+            {
+                DocumentRegistry = registry,
+                Request = new CultMeshSnapshotRequestOptions
+                {
+                    CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                    {
+                        snapshot.MessageId = request.MessageId;
+                        return snapshot;
+                    })
+                }
+            });
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(Path.GetTempPath(), $"cultmesh-foreign-schema-sync-{Guid.NewGuid():N}.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = cacheRegistry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+
+        var synced = await endpoint.SyncDocumentAsync<MeshNoteAliasDocument>(node, key.Value);
+
+        synced.Text.Should().Be("foreign-schema-synced");
+        node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("foreign-schema-synced");
+        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(45);
+    }
+
+    [Test]
     public async Task DocumentRegistryHelpers_CreateTypedNetworkRegistriesForAliases()
     {
         var sourceCache = new CultCache();

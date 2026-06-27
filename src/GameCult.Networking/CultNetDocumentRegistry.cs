@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using MessagePack;
 
 namespace GameCult.Networking
 {
@@ -344,7 +345,7 @@ namespace GameCult.Networking
             var binding = GetBySchemaId(message.Document.SchemaId);
             var descriptor = binding != null
                 ? _documents.GetRequired(binding.DocumentType)
-                : _documents.GetRequiredBySchemaId(message.Document.SchemaId);
+                : ResolveDescriptorForRawDocument(message.Document);
             binding ??= new CultNetDocumentBinding(
                 descriptor.DocumentType,
                 descriptor.SchemaId,
@@ -392,6 +393,96 @@ namespace GameCult.Networking
             }
 
             return applied;
+        }
+
+        private CultDocumentDescriptor ResolveDescriptorForRawDocument(CultNetRawDocumentRecord document)
+        {
+            try
+            {
+                return _documents.GetRequiredBySchemaId(document.SchemaId);
+            }
+            catch (InvalidOperationException) when (TryResolveDescriptorByPayloadSchema(document.Payload) is { } descriptor)
+            {
+                return descriptor;
+            }
+        }
+
+        private CultDocumentDescriptor? TryResolveDescriptorByPayloadSchema(byte[] payload)
+        {
+            var schemaVersion = TryReadSchemaVersion(payload);
+            if (string.IsNullOrWhiteSpace(schemaVersion))
+                return null;
+
+            var candidates = ResolvePayloadSchemaCandidates().ToArray();
+            var descriptor = candidates.FirstOrDefault(candidate =>
+                string.Equals(candidate.SchemaVersion, schemaVersion, StringComparison.Ordinal));
+            if (descriptor != null)
+                return descriptor;
+
+            var schemaName = InferSchemaName(schemaVersion!);
+            return string.IsNullOrWhiteSpace(schemaName)
+                ? null
+                : candidates.FirstOrDefault(candidate =>
+                    string.Equals(candidate.SchemaName, schemaName, StringComparison.Ordinal));
+        }
+
+        private IEnumerable<CultDocumentDescriptor> ResolvePayloadSchemaCandidates()
+        {
+            if (_bindingsBySchemaId.Count == 0 && _bindingsByType.Count == 0)
+                return _documents.AllDescriptors;
+
+            return _bindingsBySchemaId.Values
+                .Concat(_bindingsByType.Values)
+                .Select(binding => _documents.GetRequired(binding.DocumentType))
+                .GroupBy(descriptor => descriptor.DocumentType)
+                .Select(group => group.First());
+        }
+
+        private static string? TryReadSchemaVersion(byte[] payload)
+        {
+            try
+            {
+                var array = MessagePackSerializer.Deserialize<object[]>(
+                    payload,
+                    CultNetSchemaMessageSerialization.Options);
+                if (array.Length > 0 && array[0] is string schemaVersion)
+                    return schemaVersion;
+            }
+            catch (Exception)
+            {
+                // Fall through to map decoding; different runtimes may encode object-like payloads.
+            }
+
+            try
+            {
+                var map = MessagePackSerializer.Deserialize<IReadOnlyDictionary<string, object?>>(
+                    payload,
+                    CultNetSchemaMessageSerialization.Options);
+                if (map.TryGetValue("schemaVersion", out var schemaVersion) &&
+                    schemaVersion is string schemaVersionText)
+                    return schemaVersionText;
+                if (map.TryGetValue("schema_version", out var snakeSchemaVersion) &&
+                    snakeSchemaVersion is string snakeSchemaVersionText)
+                    return snakeSchemaVersionText;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            return null;
+        }
+
+        private static string? InferSchemaName(string schemaVersion)
+        {
+            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
+            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
+                return null;
+
+            var version = schemaVersion.Substring(marker + 2);
+            return version.All(char.IsDigit)
+                ? schemaVersion.Substring(0, marker)
+                : null;
         }
 
         /// <summary>
