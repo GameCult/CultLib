@@ -170,9 +170,11 @@ portable machinery that makes it feel native.
   `CultCache` record, a distributed `CultNetDatabase` record, or a
   `CultMeshNode` record through the same surface instead of walking transport
   and projection layers themselves. Same-schema CLR aliases can be requested
-  with `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
-  `[CultDocument(schemaName, schemaVersion)]` identity and uses the shared
-  CultCache MessagePack codec for read/watch/replace/prediction conversion.
+  directly from node/database/snapshot surfaces; CultMesh resolves the canonical
+  registered document by shared `[CultDocument(schemaName, schemaVersion)]`
+  identity and uses the shared CultCache MessagePack codec for
+  read/watch/replace/prediction conversion. `AsSchemaAlias<TAlias>()` remains
+  available when a caller already has a handle and wants to project it.
 - `CultMeshDocumentCatalog` is the schema-aware lookup edge for a set of
   document handles. It indexes handles by CLR document type, schema name, and
   schema version, and resolves same-schema CLR aliases by delegating to
@@ -236,19 +238,19 @@ var objects = await visibleObjects.ExecuteAsync(viewportRequest);
 await movePilot.InvokeAsync(moveRequest, idempotencyKey);
 ```
 
-A single typed document can be surfaced the same way:
+A single typed document can be surfaced the same way. The caller asks for the
+typed view it wants; if that type is a same-schema alias of the registered
+canonical document, CultMesh still opens the correct backing record:
 
 ```csharp
-var stationStock = CultMesh.Document<StationStockDocument>(
+var stockForUi = CultMesh.Document<StationStockUiDocument>(
     node,
     new CultRecordKey("station:starbridge:stock"),
     verse);
 
-var stock = await stationStock.LatestAsync();
-using var watch = stationStock.Watch(RenderStock);
-
-var uiAlias = stationStock.AsSchemaAlias<StationStockUiDocument>();
-await uiAlias.ReplaceAsync(updatedStockFromUi);
+var stock = await stockForUi.LatestAsync();
+using var watch = stockForUi.Watch(RenderStock);
+await stockForUi.SetAsync(updatedStockFromUi);
 ```
 
 Projected or derived documents can use the same handle shape with explicit
@@ -293,7 +295,8 @@ read when another runtime generated a different schema id for a compatible
 schema alias. The decode path prefers exact schema id matches when present and
 falls back to the requested record key.
 
-A domain facade can collect handles into one schema-aware catalog:
+A domain facade can still collect existing handles into one schema-aware
+catalog when it is composing pre-built surfaces:
 
 ```csharp
 var documents = CultMesh.Documents(
@@ -340,20 +343,16 @@ const station = await CultMesh.startNode(statePath, {
   documents: [stationStockDocument, currentDockingDocument],
 });
 
-const stock = station.document(stationStockDocument, "station:starbridge:stock");
+const stock = station.document(stationStockUiDocument, "station:starbridge:stock");
 const docking = station.document(currentDockingDocument, "player:raven:docking");
 const catalog = CultMesh.documents(stock, docking);
 
-const stockUi = catalog.document(stationStockUiDocument, {
-  parse: value => stationStockUiDocument.schema.parse(value),
-});
-
-const currentStock = await stockUi.latest();
-const unsubscribe = stockUi.watch(next => renderStock(next));
-await stockUi.replace(updatedStock);
+const currentStock = await stock.latest();
+const unsubscribe = stock.watch(next => renderStock(next));
+await stock.set(updatedStock);
 unsubscribe();
 
-const pilots = station.collection(playerShipDocument);
+const pilots = station.collection(playerShipUiDocument);
 const currentPilots = await pilots.latest();
 const stopRoster = pilots.watchChanges(change => refreshRoster(change));
 

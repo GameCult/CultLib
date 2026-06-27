@@ -300,6 +300,20 @@ delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="
 shard_log_response = node.database.build_shard_log_response(shard_id="interop", shard_epoch=1)
 shard_log_wire = node.database.create_shard_log_response(shard_id="interop", shard_epoch=1)
 
+station_stock_doc = define_database_entry_type(
+    "aetheria.station_stock",
+    [("missiles", 0), ("coolant", 1)],
+    schema_id="gamecult.aetheria.station_stock.v1",
+)
+station_stock_ui_doc = define_database_entry_type(
+    "aetheria.station_stock.ui",
+    [("missiles", 0), ("coolant", 1)],
+    schema_id="gamecult.aetheria.station_stock.v1",
+)
+node.database.register_document(station_stock_doc)
+node.database.put(station_stock_ui_doc, "station:starbridge:stock", {"missiles": 24, "coolant": 80})
+stock = node.database.get_required(station_stock_ui_doc, "station:starbridge:stock")
+
 peers = CultMesh.create_peer_catalog()
 response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
 lease_verifier = CultMeshHmacAuthorityLeaseVerifier({"odin": b"shared-lease-key"})

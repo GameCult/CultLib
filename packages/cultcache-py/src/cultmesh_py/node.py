@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from cultcache_py import CultCache, CultCacheEnvelope, SingleFileMessagePackBackingStore
+from cultcache_py.cache import CultCacheError
 from cultcache_py.documents import DocumentDefinition, extract_value
 from cultnet_py import (
     CultNetAppliedRecord,
@@ -268,6 +269,7 @@ class CultMeshDatabase:
         key: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
+        document = self._resolve_document_alias(document)
         return self.watch(callback, document=document, key=key)
 
     def watch_global(
@@ -283,6 +285,7 @@ class CultMeshDatabase:
         name: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
+        document = self._resolve_document_alias(document)
         if not name:
             raise ValueError("Name watch values must be non-empty")
         if document.name is None:
@@ -301,6 +304,7 @@ class CultMeshDatabase:
         value: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
+        document = self._resolve_document_alias(document)
         if not index:
             raise ValueError("Index watch aliases must be non-empty")
         if not value:
@@ -329,9 +333,11 @@ class CultMeshDatabase:
         self._shard_log_store = store
 
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
-        previous = self.cache.get(document, key)
-        self.cache.put(document, key, value)
-        self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
+        registered = self._resolve_document_alias(document)
+        parsed = document.decode_payload(document.encode_payload(value))
+        previous = self.cache.get(registered, key)
+        self.cache.put(registered, key, parsed)
+        self._publish_local_change(registered, key, "added" if previous is None else "updated", parsed, previous)
 
     def put_global(self, document: DocumentDefinition[Any], value: Any) -> None:
         self.put(document, self.cache.GLOBAL_KEY, value)
@@ -346,17 +352,19 @@ class CultMeshDatabase:
         shard_id: str | None = None,
         shard_epoch: int | None = None,
     ) -> CultNetMessage:
-        catalog_entry = document.catalog_entry()
-        previous = self.cache.get(document, key)
+        registered = self._resolve_document_alias(document)
+        parsed = document.decode_payload(document.encode_payload(value))
+        catalog_entry = registered.catalog_entry()
+        previous = self.cache.get(registered, key)
         envelope = CultCacheEnvelope.create(
             key=key,
-            type=document.type,
-            payload=document.encode_payload(value),
+            type=registered.type,
+            payload=registered.encode_payload(parsed),
             schema_id=catalog_entry.schema_id,
             catalog_entry=catalog_entry,
         )
-        value = self.cache.put_envelope(document, envelope)
-        self._publish_local_change(document, key, "added" if previous is None else "updated", value, previous)
+        value = self.cache.put_envelope(registered, envelope)
+        self._publish_local_change(registered, key, "added" if previous is None else "updated", value, previous)
         message = document_put_raw(
             message_id=message_id,
             key=key,
@@ -371,22 +379,27 @@ class CultMeshDatabase:
         return message
 
     def get(self, document: DocumentDefinition[Any], key: str) -> Any:
-        return self.cache.get(document, key)
+        value = self.cache.get(self._resolve_document_alias(document), key)
+        return None if value is None else document.decode_payload(document.encode_payload(value))
 
     def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
-        return self.cache.get_required(document, key)
+        value = self.get(document, key)
+        if value is None:
+            raise CultCacheError(f"Missing {document.type}:{key}")
+        return value
 
     def get_global(self, document: DocumentDefinition[Any]) -> Any:
-        return self.cache.get_global(document)
+        return self.get(document, self.cache.GLOBAL_KEY)
 
     def get_required_global(self, document: DocumentDefinition[Any]) -> Any:
-        return self.cache.get_required_global(document)
+        return self.get_required(document, self.cache.GLOBAL_KEY)
 
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
-        previous = self.cache.get(document, key)
-        self.cache.delete(document, key)
+        registered = self._resolve_document_alias(document)
+        previous = self.cache.get(registered, key)
+        self.cache.delete(registered, key)
         if previous is not None:
-            self._publish_local_change(document, key, "removed", None, previous)
+            self._publish_local_change(registered, key, "removed", None, previous)
 
     def delete_global(self, document: DocumentDefinition[Any]) -> None:
         self.delete(document, self.cache.GLOBAL_KEY)
@@ -400,7 +413,8 @@ class CultMeshDatabase:
         shard_id: str | None = None,
         shard_epoch: int | None = None,
     ) -> CultNetMessage:
-        schema_id = document.catalog_entry().schema_id
+        registered = self._resolve_document_alias(document)
+        schema_id = registered.catalog_entry().schema_id
         self.delete(document, key)
         message = document_delete(
             message_id=message_id,
@@ -716,7 +730,7 @@ class CultMeshDatabase:
 
     def _publish(self, change: CultMeshDatabaseChange) -> None:
         for document, key, callback in list(self._subscribers):
-            if document is not None and document.type != change.document.type:
+            if document is not None and not self._documents_alias(document, change.document):
                 continue
             if key is not None and key != change.record_key:
                 continue
@@ -827,6 +841,29 @@ class CultMeshDatabase:
             if schema_id == entry.schema_id or schema_id in entry.compatible_schema_ids:
                 return document
         return None
+
+    def _resolve_document_alias(self, document: DocumentDefinition[Any]) -> DocumentDefinition[Any]:
+        for registered in self.documents:
+            if self._documents_alias(document, registered):
+                return registered
+        return document
+
+    def _documents_alias(
+        self,
+        left: DocumentDefinition[Any],
+        right: DocumentDefinition[Any],
+    ) -> bool:
+        if left.type == right.type:
+            return True
+        left_entry = left.catalog_entry()
+        right_entry = right.catalog_entry()
+        if left_entry.schema_id == right_entry.schema_id:
+            return True
+        if left_entry.schema_name == right_entry.schema_name and left_entry.schema_version == right_entry.schema_version:
+            return True
+        if left_entry.schema_id in right_entry.compatible_schema_ids:
+            return True
+        return right_entry.schema_id in left_entry.compatible_schema_ids
 
     def _change_matches_extractor(
         self,

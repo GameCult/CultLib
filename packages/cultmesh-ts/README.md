@@ -87,6 +87,25 @@ await input.submitPrediction("pilot-a", predictedInput);
 const stop = input.watch("pilot-a", latest => reconcileInput(latest));
 ```
 
+Durable nodes resolve same-schema aliases at the boundary. Register the
+canonical document that owns storage and replication, then ask the node for the
+typed view the current runtime wants:
+
+```ts
+const station = await CultMesh.startNode(statePath, {
+  documents: [stationStockDocument],
+});
+
+const stock = station.document(stationStockUiDocument, "station:starbridge:stock");
+const current = await stock.latest();
+
+await stock.set(updatedStockFromUi);
+
+const reactive = station.reactiveDocument(stationStockUiDocument, "station:starbridge:stock");
+await reactive.ready;
+reactive.current.availableMissiles -= 4;
+```
+
 State pointers are the same kind of managed surface for UI and tools. They can
 advertise source documents, inherit a Verse route when bound, and resolve
 through that Verse without caller-side context plumbing:

@@ -2019,6 +2019,46 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(delete["shardId"], "mesh")
         self.assertEqual(delete["shardEpoch"], 1)
 
+    def test_cultmesh_node_resolves_same_schema_aliases_for_local_state(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_note",
+            [("body", 0)],
+            schema_id="mesh.alias_note.v1",
+            schema_name="mesh.alias_note",
+            schema_version="mesh.alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.alias_note.ui",
+            [("body", 0)],
+            schema_id="mesh.alias_note.v1",
+            schema_name="mesh.alias_note",
+            schema_version="mesh.alias_note.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        seen: list[CultMeshDatabaseChange] = []
+        node.database.watch_record(alias, "note:alias", seen.append)
+
+        node.put(alias, "note:alias", {"body": "from-alias-put"})
+        self.assertEqual(node.get_required(document, "note:alias")["body"], "from-alias-put")
+        self.assertEqual(node.get_required(alias, "note:alias")["body"], "from-alias-put")
+        self.assertEqual(seen[0].document.type, document.type)
+        self.assertEqual(seen[0].value["body"], "from-alias-put")
+
+        put = node.put_raw_message(
+            alias,
+            "note:alias",
+            {"body": "from-alias-raw-put"},
+            message_id="alias-put",
+        ).to_wire()
+        self.assertEqual(put["document"]["schemaId"], "mesh.alias_note.v1")
+        self.assertEqual(put["document"]["recordKey"], "note:alias")
+        self.assertEqual(node.get_required(alias, "note:alias")["body"], "from-alias-raw-put")
+
+        delete = node.delete_raw_message(alias, "note:alias", message_id="alias-delete").to_wire()
+        self.assertEqual(delete["schemaId"], "mesh.alias_note.v1")
+        self.assertIsNone(node.get(alias, "note:alias"))
+
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
             message_id="delete-1",
