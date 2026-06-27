@@ -1630,7 +1630,13 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     target.pull_all_backing_stores()?;
     let applied =
         registry.apply_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &snapshot)?;
+    let synced = registry.sync_document_from_snapshot_response::<GhostlightAgentStateFixture>(
+        &mut target,
+        &snapshot,
+        "epiphany.persona",
+    )?;
     assert_eq!(applied, vec![payload.clone()]);
+    assert_eq!(synced, payload);
     assert_eq!(
         target.get_required::<GhostlightAgentStateFixture>("epiphany.persona")?,
         payload
@@ -1739,19 +1745,23 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
     target.pull_all_backing_stores()?;
 
     let applied = alias_registry
-        .apply_raw_snapshot_response::<GhostlightAgentStateUiFixture>(&mut target, &raw_snapshot)?;
+        .sync_raw_document_from_snapshot_response::<GhostlightAgentStateUiFixture>(
+            &mut target,
+            &raw_snapshot,
+            "epiphany.persona",
+        )?;
 
     assert_eq!(
         applied,
-        vec![GhostlightAgentStateUiFixture {
+        GhostlightAgentStateUiFixture {
             schema_version: "ghostlight.agent_state.v0".to_string(),
             agent_id: "epiphany.persona".to_string(),
             display_name: "Persona".to_string(),
-        }]
+        }
     );
     assert_eq!(
         target.get_required::<GhostlightAgentStateUiFixture>("epiphany.persona")?,
-        applied[0]
+        applied
     );
     Ok(())
 }

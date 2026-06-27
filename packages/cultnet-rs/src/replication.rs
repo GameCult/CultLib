@@ -352,6 +352,40 @@ impl CultNetDocumentRegistry {
         Ok(applied)
     }
 
+    pub fn sync_document_from_snapshot_response<T>(
+        &self,
+        cache: &mut CultCache,
+        response: &CultNetMessage,
+        record_key: &str,
+    ) -> Result<T>
+    where
+        T: DatabaseEntry + Serialize + DeserializeOwned,
+    {
+        let CultNetMessage::SnapshotResponse { documents, .. } = response else {
+            return Err(anyhow!("expected cultnet.snapshot_response.v0"));
+        };
+        let binding = self.require_binding(T::TYPE)?;
+        let document = documents
+            .iter()
+            .find(|document| {
+                document.schema_id == binding.schema_id && document.record_key == record_key
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No CultNet snapshot document for schema {:?} and record key {:?}",
+                    binding.schema_id,
+                    record_key
+                )
+            })?;
+        self.apply_document_put_message::<T>(
+            cache,
+            &CultNetMessage::DocumentPut {
+                message_id: "snapshot-sync".to_string(),
+                document: document.clone(),
+            },
+        )
+    }
+
     pub fn apply_raw_snapshot_response<T>(
         &self,
         cache: &mut CultCache,
@@ -378,6 +412,40 @@ impl CultNetDocumentRegistry {
             )?);
         }
         Ok(applied)
+    }
+
+    pub fn sync_raw_document_from_snapshot_response<T>(
+        &self,
+        cache: &mut CultCache,
+        response: &CultNetMessage,
+        record_key: &str,
+    ) -> Result<T>
+    where
+        T: DatabaseEntry + Serialize + DeserializeOwned,
+    {
+        let CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
+            return Err(anyhow!("expected cultnet.snapshot_response_raw.v0"));
+        };
+        let binding = self.require_binding(T::TYPE)?;
+        let document = documents
+            .iter()
+            .find(|document| {
+                document.schema_id == binding.schema_id && document.record_key == record_key
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No raw CultNet snapshot document for schema {:?} and record key {:?}",
+                    binding.schema_id,
+                    record_key
+                )
+            })?;
+        self.apply_raw_document_put_message::<T>(
+            cache,
+            &CultNetMessage::DocumentPutRaw {
+                message_id: "snapshot-sync-raw".to_string(),
+                document: document.clone(),
+            },
+        )
     }
 
     fn document_record_from_envelope(

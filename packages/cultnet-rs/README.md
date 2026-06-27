@@ -113,8 +113,8 @@ document without re-encoding the payload first.
 
 The receiving Rust type does not have to be the sender's concrete Rust type. If
 the local registry binds a different `DatabaseEntry` to the same schema id,
-`apply_raw_snapshot_response::<LocalAlias>(...)` hydrates the local alias type
-directly:
+`sync_raw_document_from_snapshot_response::<LocalAlias>(...)` hydrates one local
+alias type directly:
 
 ```rust
 let mut target_registry = CultNetDocumentRegistry::new();
@@ -123,9 +123,10 @@ target_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<UiNo
     "aetheria.note.v1".to_string(),
 ));
 
-let applied = target_registry.apply_raw_snapshot_response::<UiNote>(
+let note = target_registry.sync_raw_document_from_snapshot_response::<UiNote>(
     &mut target_cache,
     &snapshot_response,
+    "note:bridge",
 )?;
 ```
 
