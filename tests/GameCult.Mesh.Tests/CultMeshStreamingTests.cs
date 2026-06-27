@@ -1061,6 +1061,120 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_DetectsAndCoalescesDirectCurrentMemberWrites()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.direct-members",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMilliseconds(25)
+            });
+
+        reactive.Current.Text = "direct-member-one";
+        reactive.Current.Text = "direct-member-two";
+        reactive.Current.Revision = 2;
+
+        await WaitForAsync(() => predictions.Count == 1);
+
+        predictions[0].Text.Should().Be("direct-member-two");
+        predictions[0].Revision.Should().Be(2);
+        current.Text.Should().Be("direct-member-two");
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_QueuesDirectCurrentEditsWhileFlushIsInFlight()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var firstPredictionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstPrediction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.in-flight",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            async value =>
+            {
+                predictions.Add(value);
+                if (predictions.Count == 1)
+                {
+                    firstPredictionStarted.SetResult();
+                    await releaseFirstPrediction.Task.ConfigureAwait(false);
+                }
+
+                current = value;
+                subject.OnNext(value);
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Update(document =>
+        {
+            document.Text = "first-in-flight";
+            document.Revision = 2;
+        });
+        var flushTask = reactive.FlushAsync();
+        await firstPredictionStarted.Task;
+
+        reactive.Current.Text = "second-after-flight-started";
+        reactive.Current.Revision = 3;
+        releaseFirstPrediction.SetResult();
+
+        await flushTask;
+
+        predictions.Should().HaveCount(2);
+        predictions.Select(document => document.Text).Should().Equal(
+            "first-in-flight",
+            "second-after-flight-started");
+        current.Text.Should().Be("second-after-flight-started");
+        current.Revision.Should().Be(3);
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
     public async Task ReactiveDocument_UsesReplacementWhenPredictionIsUnavailable()
     {
         var subject = new Subject<MeshNoteDocument>();
