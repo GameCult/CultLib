@@ -37,6 +37,33 @@ class CultMeshDatabaseChange:
     previous_value: Any | None = None
 
 
+@dataclass(frozen=True)
+class CultMeshDocumentPublicationSource:
+    kind: str
+    client: CultNetRawClient | None = None
+    path: Path | None = None
+    shard_id: str | None = None
+    shard_epoch: int | None = None
+
+    @staticmethod
+    def peer_snapshot(
+        client: CultNetRawClient,
+        *,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> "CultMeshDocumentPublicationSource":
+        return CultMeshDocumentPublicationSource(
+            kind="peer_snapshot",
+            client=client,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
+    @staticmethod
+    def single_file(path: str | Path) -> "CultMeshDocumentPublicationSource":
+        return CultMeshDocumentPublicationSource(kind="single_file", path=Path(path))
+
+
 @dataclass
 class CultMeshNode:
     cache: CultCache = field(default_factory=CultCache)
@@ -196,6 +223,14 @@ class CultMeshNode:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+
+    def sync_document_from_publication(
+        self,
+        source: CultMeshDocumentPublicationSource,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> Any:
+        return self.database.sync_document_from_publication(source, document, key)
 
     def sync_shard_log(
         self,
@@ -669,6 +704,38 @@ class CultMeshDatabase:
             shard_epoch=shard_epoch,
         )
         return self.get_required(requested, key)
+
+    def sync_document_from_publication(
+        self,
+        source: CultMeshDocumentPublicationSource,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> Any:
+        if not key:
+            raise ValueError("key must be non-empty")
+        if source.kind == "peer_snapshot":
+            if source.client is None:
+                raise ValueError("peer snapshot publication sources require a client")
+            return self.sync_document(
+                source.client,
+                document,
+                key,
+                shard_id=source.shard_id,
+                shard_epoch=source.shard_epoch,
+            )
+        if source.kind == "single_file":
+            if source.path is None:
+                raise ValueError("single-file publication sources require a path")
+            registered = self._resolve_document_alias(document)
+            cache = CultCache()
+            cache.register_document_type(registered)
+            cache.add_generic_store(SingleFileMessagePackBackingStore(source.path))
+            cache.pull_all_backing_stores()
+            value = cache.get_required(registered, key)
+            requested = self._convert_document_value(value, registered, document)
+            self.put(document, key, requested)
+            return self.get_required(document, key)
+        raise ValueError(f"Unsupported CultMesh document publication source: {source.kind!r}")
 
     def sync_shard_log(
         self,

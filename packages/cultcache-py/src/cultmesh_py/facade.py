@@ -22,7 +22,7 @@ from cultnet_py import (
 )
 
 from .client import CultMeshDocumentSubscription, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
-from .node import CultMeshNode, CultMeshNodeOptions, create_node
+from .node import CultMeshDocumentPublicationSource, CultMeshNode, CultMeshNodeOptions, create_node
 from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
@@ -291,6 +291,32 @@ class CultMesh:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+
+    @staticmethod
+    def publication_source_from_peer_snapshot(
+        client: CultNetRawClient,
+        *,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> CultMeshDocumentPublicationSource:
+        return CultMeshDocumentPublicationSource.peer_snapshot(
+            client,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
+    @staticmethod
+    def publication_source_from_single_file(path: str | Path) -> CultMeshDocumentPublicationSource:
+        return CultMeshDocumentPublicationSource.single_file(path)
+
+    @staticmethod
+    def sync_document_from_publication(
+        node: CultMeshNode,
+        source: CultMeshDocumentPublicationSource,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> Any:
+        return node.sync_document_from_publication(source, document, key)
 
     @staticmethod
     def subscribe_document(

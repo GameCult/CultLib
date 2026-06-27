@@ -2136,6 +2136,136 @@ class CultCacheTests(unittest.TestCase):
             },
         ])
 
+    def test_cultmesh_node_sync_document_from_publication_returns_requested_alias_type(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.publication_alias_note.v1",
+            schema_name="mesh.publication_alias_note",
+            schema_version="mesh.publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.publication_alias_note.v1",
+            schema_name="mesh.publication_alias_note",
+            schema_version="mesh.publication_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-publication-node")
+        node.register_document(document)
+        requests: list[dict[str, Any]] = []
+
+        class SnapshotClient:
+            def fetch_snapshot_response(
+                self,
+                *,
+                schema_ids: list[str] | None = None,
+                record_keys: list[str] | None = None,
+                shard_id: str | None = None,
+                shard_epoch: int | None = None,
+            ) -> dict[str, Any]:
+                requests.append({
+                    "schema_ids": schema_ids,
+                    "record_keys": record_keys,
+                    "shard_id": shard_id,
+                    "shard_epoch": shard_epoch,
+                })
+                return {
+                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                    "messageId": "publication-sync-document",
+                    "documents": [
+                        {
+                            "schemaId": document.catalog_entry().schema_id,
+                            "recordKey": "note:published-peer",
+                            "storedAt": "2026-06-27T00:00:00Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(CanonicalNote("peer-publication-alias")),
+                        }
+                    ],
+                }
+
+        source = CultMesh.publication_source_from_peer_snapshot(
+            SnapshotClient(),
+            shard_id="notes",
+            shard_epoch=3,
+        )
+
+        synced = node.sync_document_from_publication(source, alias, "note:published-peer")
+        facade_synced = CultMesh.sync_document_from_publication(node, source, alias, "note:published-peer")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "peer-publication-alias")
+        self.assertIsInstance(facade_synced, UiNote)
+        self.assertEqual(facade_synced.body, "peer-publication-alias")
+        self.assertEqual(node.get_required(document, "note:published-peer").body, "peer-publication-alias")
+        self.assertEqual(requests, [
+            {
+                "schema_ids": ["mesh.publication_alias_note.v1"],
+                "record_keys": ["note:published-peer"],
+                "shard_id": "notes",
+                "shard_epoch": 3,
+            },
+            {
+                "schema_ids": ["mesh.publication_alias_note.v1"],
+                "record_keys": ["note:published-peer"],
+                "shard_id": "notes",
+                "shard_epoch": 3,
+            },
+        ])
+
+    def test_cultmesh_node_sync_document_from_single_file_publication_uses_node_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.file_publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.file_publication_alias_note.v1",
+            schema_name="mesh.file_publication_alias_note",
+            schema_version="mesh.file_publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.file_publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.file_publication_alias_note.v1",
+            schema_name="mesh.file_publication_alias_note",
+            schema_version="mesh.file_publication_alias_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "publication.ccmp"
+            writer = CultCache()
+            writer.register_document_type(document)
+            writer.add_generic_store(SingleFileMessagePackBackingStore(path))
+            writer.put(document, "note:published-file", CanonicalNote("file-publication-alias"))
+
+            node = create_node(runtime_id="python-file-publication-node")
+            node.register_document(document)
+            source = CultMesh.publication_source_from_single_file(path)
+
+            synced = CultMesh.sync_document_from_publication(node, source, alias, "note:published-file")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "file-publication-alias")
+        self.assertEqual(node.get_required(document, "note:published-file").body, "file-publication-alias")
+        self.assertIsInstance(node.get_required(alias, "note:published-file"), UiNote)
+
     def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
         document = define_database_entry_type(
             "mesh.emit_item",
