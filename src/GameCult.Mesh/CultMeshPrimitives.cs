@@ -897,6 +897,9 @@ namespace GameCult.Mesh
         /// <summary>Gets typed state sources this document handle depends on, when known.</summary>
         IReadOnlyList<CultMeshProjectionSource> Sources { get; }
 
+        /// <summary>Gets whether this handle can replace the underlying document value.</summary>
+        bool CanReplace { get; }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
@@ -911,11 +914,15 @@ namespace GameCult.Mesh
             CultDocumentRegistry.Shared.GetRequired<TDocument>();
 
         private readonly CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> _feed;
+        private readonly Func<TDocument, Task>? _replace;
 
         /// <summary>Creates a document handle from a Verse-bound live feed.</summary>
-        public CultMeshDocumentHandle(CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed)
+        public CultMeshDocumentHandle(
+            CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task>? replace = null)
         {
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
+            _replace = replace;
         }
 
         /// <summary>Gets the semantic document id.</summary>
@@ -945,6 +952,9 @@ namespace GameCult.Mesh
         /// <summary>Gets the underlying live feed used by this document handle.</summary>
         public CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> Feed => _feed.Feed;
 
+        /// <summary>Gets whether this handle can replace the underlying document value.</summary>
+        public bool CanReplace => _replace != null;
+
         /// <summary>Reads one coherent document snapshot.</summary>
         public Task<TDocument> LatestAsync()
         {
@@ -964,6 +974,18 @@ namespace GameCult.Mesh
             return Watch().Subscribe(onNext);
         }
 
+        /// <summary>Replaces the underlying document when this handle is backed by mutable state.</summary>
+        public Task ReplaceAsync(TDocument value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            if (_replace == null)
+            {
+                throw new NotSupportedException($"Document handle '{DocumentId}' is read-only.");
+            }
+
+            return _replace(value);
+        }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         public CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
         {
@@ -979,22 +1001,33 @@ namespace GameCult.Mesh
 
             var aliasFeed = new CultMeshLiveFeed<CultMeshDocumentQueryParameters, TAlias>(
                 DocumentId,
-                async (parameters, context) => ConvertDocument<TAlias>(
+                async (parameters, context) => ConvertDocument<TDocument, TAlias>(
                     await Feed.SnapshotAsync(parameters, context).ConfigureAwait(false)),
                 (parameters, context) => Feed
                     .Watch(parameters, context)
-                    .Select(ConvertDocument<TAlias>),
+                    .Select(ConvertDocument<TDocument, TAlias>),
                 Sources,
                 RouteHint);
 
-            return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context));
+            Func<TAlias, Task>? replace = _replace == null
+                ? null
+                : value => _replace(ConvertDocument<TAlias, TDocument>(value));
+
+            return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context), replace);
         }
 
-        private static TAlias ConvertDocument<TAlias>(TDocument document) where TAlias : class
+        private static TTarget ConvertDocument<TSource, TTarget>(TSource document)
+            where TSource : class
+            where TTarget : class
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
-            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument));
-            return (TAlias)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TAlias), payload);
+            if (document is TTarget alreadyTyped)
+            {
+                return alreadyTyped;
+            }
+
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TSource));
+            return (TTarget)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TTarget), payload);
         }
     }
 

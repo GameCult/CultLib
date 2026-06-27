@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
+using GameCult.Networking;
 using MessagePack;
 using NUnit.Framework;
 using R3;
@@ -698,6 +699,92 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentHandle_ReadsWatchesAndReplacesCultCacheRecords()
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:cache");
+        await cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "cache-initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+
+        var handle = CultMesh.Document<MeshNoteDocument>(
+            cache,
+            key,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
+
+        handle.CanReplace.Should().BeTrue();
+        alias.CanReplace.Should().BeTrue();
+        handle.DocumentId.Should().Be(key.Value);
+        handle.Sources.Should().ContainSingle().Which.SchemaId.Should().Be(handle.SchemaId);
+
+        var snapshot = await alias.LatestAsync();
+        snapshot.Text.Should().Be("cache-initial");
+
+        MeshNoteAliasDocument observed = null!;
+        using var subscription = alias.Watch(value => observed = value);
+        await alias.ReplaceAsync(new MeshNoteAliasDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "cache-replaced",
+            Revision = 2
+        });
+
+        cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("cache-replaced");
+        observed.Text.Should().Be("cache-replaced");
+        observed.Revision.Should().Be(2);
+    }
+
+    [Test]
+    public async Task DocumentHandle_ReplacesThroughCultMeshNodeDatabase()
+    {
+        using var directory = new TemporaryDirectory();
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(directory.Path, "mesh-node.cc"),
+            new CultMeshNodeOptions
+            {
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    RuntimeId = "node-runtime",
+                    Shards = new[]
+                    {
+                        new CultNetShardDescriptor(
+                            "mesh",
+                            "node-runtime",
+                            epoch: 1,
+                            isPrimary: true,
+                            schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId })
+                    }
+                },
+                StartServer = false
+            });
+        var key = new CultRecordKey("mesh-note:node");
+
+        var handle = CultMesh.Document<MeshNoteDocument>(
+            node,
+            key,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
+
+        MeshNoteDocument observed = null!;
+        using var subscription = handle.Watch(value => observed = value);
+        await alias.ReplaceAsync(new MeshNoteAliasDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "node-replaced",
+            Revision = 3
+        });
+
+        var snapshot = await handle.LatestAsync();
+        snapshot.Text.Should().Be("node-replaced");
+        observed.Text.Should().Be("node-replaced");
+        observed.Revision.Should().Be(3);
+    }
+
+    [Test]
     public void SurfaceCatalog_DescribesTypedRuntimeSurfaces()
     {
         var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located frame slab");
@@ -1037,6 +1124,27 @@ public sealed class CultMeshStreamingTests
             new CultMeshStreamClock("mimir:clock", "leap", confidence: 0.8d),
             new[] { CultMeshStreamBodyTransport.SharedMemory, CultMeshStreamBodyTransport.CultCachePage }));
         return catalog;
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "cultmesh-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+        }
     }
 
     [CultDocument("tests.mesh_managed_player", "tests.mesh_managed_player.v1")]

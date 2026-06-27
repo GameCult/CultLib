@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using GameCult.Networking;
+using R3;
 
 namespace GameCult.Mesh
 {
@@ -413,6 +414,19 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Binds a mutable typed document live feed to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerseContext context,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task> replace)
+            where TDocument : class
+        {
+            if (replace == null) throw new ArgumentNullException(nameof(replace));
+            return new CultMeshDocumentHandle<TDocument>(BindLiveFeed(context, feed), replace);
+        }
+
+        /// <summary>
         /// Binds a typed document live feed to a Verse.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
@@ -422,6 +436,19 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return BindDocument(verse.Context, feed);
+        }
+
+        /// <summary>
+        /// Binds a mutable typed document live feed to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerse verse,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task> replace)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindDocument(verse.Context, feed, replace);
         }
 
         /// <summary>
@@ -885,6 +912,30 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a mutable typed document handle from snapshot/watch/replace delegates and binds it to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerseContext context,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            Func<TDocument, Task> replace,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (replace == null) throw new ArgumentNullException(nameof(replace));
+
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
+                documentId,
+                (_parameters, queryContext) => latest(queryContext),
+                (_parameters, queryContext) => watch(queryContext),
+                sources,
+                routeHint);
+            return BindDocument(context, feed, replace);
+        }
+
+        /// <summary>
         /// Creates a typed document handle from snapshot/watch delegates and binds it to a Verse.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
@@ -898,6 +949,175 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return Document(documentId, verse.Context, latest, watch, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a mutable typed document handle from snapshot/watch/replace delegates and binds it to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerse verse,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            Func<TDocument, Task> replace,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document(documentId, verse.Context, latest, watch, replace, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one CultCache record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultCache cache,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var descriptor = cache.Registry.GetRequired<TDocument>();
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(key.Value, descriptor.SchemaId, "CultCache record") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache document");
+            return Document<TDocument>(
+                ResolveDocumentId(documentId, key),
+                context,
+                _ => Task.FromResult(ReadRequired<TDocument>(cache, key)),
+                _ => cache.WatchRecord<TDocument>(key)
+                    .Where(change => change.Document != null)
+                    .Select(change => change.Document!),
+                async value =>
+                {
+                    await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false);
+                },
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one CultCache record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultCache cache,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document<TDocument>(cache, key, verse.Context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one CultCache record with a local Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultCache cache,
+            CultRecordKey key,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            return Document<TDocument>(
+                cache,
+                key,
+                Verse("local", "local", routeHint).Context,
+                documentId,
+                sources,
+                routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one distributed CultNet database record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (database == null) throw new ArgumentNullException(nameof(database));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(key.Value, descriptor.SchemaId, "CultNet database record") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Automatic, "CultNet database document");
+            return Document<TDocument>(
+                ResolveDocumentId(documentId, key),
+                context,
+                async _ => await ReadRequiredAsync<TDocument>(database, key).ConfigureAwait(false),
+                _ => database.WatchRecord<TDocument>(key)
+                    .Where(change => change.Document != null)
+                    .Select(change => change.Document!),
+                async value =>
+                {
+                    await database.PutAsync(key, value).ConfigureAwait(false);
+                },
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one distributed CultNet database record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document<TDocument>(database, key, verse.Context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one CultMesh node database record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultMeshNode node,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return Document<TDocument>(node.Database, key, context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle directly over one CultMesh node database record.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultMeshNode node,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document<TDocument>(node, key, verse.Context, documentId, sources, routeHint);
         }
 
         /// <summary>
@@ -1394,6 +1614,32 @@ namespace GameCult.Mesh
 
             return Dns.GetHostAddresses(host).FirstOrDefault()
                    ?? throw new InvalidOperationException($"Could not resolve RUDP host {host}.");
+        }
+
+        private static string ResolveDocumentId(string? documentId, CultRecordKey key)
+        {
+            return string.IsNullOrWhiteSpace(documentId)
+                ? key.Value
+                : documentId!;
+        }
+
+        private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)
+            where TDocument : class
+        {
+            return cache.Get<TDocument>(key)
+                   ?? throw new KeyNotFoundException(
+                       $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
+        }
+
+        private static async Task<TDocument> ReadRequiredAsync<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key)
+            where TDocument : class
+        {
+            var document = await database.GetAsync<TDocument>(key).ConfigureAwait(false);
+            return document
+                   ?? throw new KeyNotFoundException(
+                       $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
         }
     }
 }

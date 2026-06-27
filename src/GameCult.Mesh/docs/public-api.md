@@ -162,11 +162,14 @@ portable machinery that makes it feel native.
   `CultMeshVerse.BindLiveFeed(...)`.
 - `CultMeshDocumentHandle<TDocument>` is the typed reactive document edge for
   CultCache/CultNet state. It exposes document metadata, one coherent
-  `LatestAsync()` read, and a `Watch()` stream without forcing callers through
-  transport or projection layers. Same-schema CLR aliases can be requested with
-  `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
+  `LatestAsync()` read, a `Watch()` stream, and `ReplaceAsync(...)` when the
+  handle is backed by mutable state. Callers can bind a projected live feed, a
+  local `CultCache` record, a distributed `CultNetDatabase` record, or a
+  `CultMeshNode` record through the same surface instead of walking transport
+  and projection layers themselves. Same-schema CLR aliases can be requested
+  with `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
   `[CultDocument(schemaName, schemaVersion)]` identity and uses the shared
-  CultCache MessagePack codec for conversion.
+  CultCache MessagePack codec for read/watch/replace conversion.
 - `CultMeshProjectionRecipe<TParameters, TResult>` names a reusable projection
   from typed source state into derived state. It records source handles,
   route hints, and projection execution, and can be exposed as a typed query
@@ -215,6 +218,22 @@ await movePilot.InvokeAsync(moveRequest, idempotencyKey);
 ```
 
 A single typed document can be surfaced the same way:
+
+```csharp
+var stationStock = CultMesh.Document<StationStockDocument>(
+    node,
+    new CultRecordKey("station:starbridge:stock"),
+    verse);
+
+var stock = await stationStock.LatestAsync();
+using var watch = stationStock.Watch(RenderStock);
+
+var uiAlias = stationStock.AsSchemaAlias<StationStockUiDocument>();
+await uiAlias.ReplaceAsync(updatedStockFromUi);
+```
+
+Projected or derived documents can use the same handle shape with explicit
+snapshot/watch delegates:
 
 ```csharp
 var cockpit = CultMesh.Document(
