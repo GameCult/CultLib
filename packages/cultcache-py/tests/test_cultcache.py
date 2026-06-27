@@ -4420,6 +4420,62 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(target.database.get_required(document, "note:a")["body"], "from-a")
         self.assertEqual(target.database.get_required(document, "note:b")["body"], "from-b")
 
+    def test_cultmesh_discovery_client_sync_documents_returns_requested_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.snapshot_fanout_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.snapshot_fanout_alias_note.v1",
+            schema_name="mesh.snapshot_fanout_alias_note",
+            schema_version="mesh.snapshot_fanout_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.snapshot_fanout_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.snapshot_fanout_alias_note.v1",
+            schema_name="mesh.snapshot_fanout_alias_note",
+            schema_version="mesh.snapshot_fanout_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:alias", CanonicalNote("from-source"))
+        target = CultMesh.create_node(runtime_id="snapshot-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-alias-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+
+            values = CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0).sync_documents(
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                documents=[(alias, "note:alias")],
+            )
+        finally:
+            server.stop()
+
+        self.assertEqual(len(values), 1)
+        self.assertIsInstance(values[0], UiNote)
+        self.assertEqual(values[0].body, "from-source")
+        self.assertEqual(target.database.get_required(document, "note:alias").body, "from-source")
+        self.assertIsInstance(target.database.get_required(alias, "note:alias"), UiNote)
+
     def test_cultmesh_snapshot_fanout_syncs_once_and_reports_applied_records(self) -> None:
         document = define_database_entry_type(
             "mesh.snapshot_loop_note",

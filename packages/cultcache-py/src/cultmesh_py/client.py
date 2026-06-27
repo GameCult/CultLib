@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from cultcache_py.documents import DocumentDefinition
 from cultnet_py import CultNetRawClient, CultNetRawSnapshotResponse, hello
 
 from .wire import (
@@ -278,6 +279,41 @@ class CultMeshDiscoveryClient:
         ):
             applied.extend(database.apply_snapshot_response(response))
         return applied
+
+    def sync_documents(
+        self,
+        database: Any,
+        catalog: CultMeshPeerCatalog,
+        *,
+        verse_id: str,
+        documents: list[tuple[DocumentDefinition[Any], str]],
+        roles: list[str] | None = None,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+        on_error: Callable[[str, Exception], None] | None = None,
+    ) -> list[Any]:
+        if not documents:
+            return []
+        schema_ids = _distinct_non_empty([
+            document.catalog_entry().schema_id
+            for document, _key in documents
+        ])
+        record_keys = _distinct_non_empty([key for _document, key in documents])
+        self.sync_snapshots(
+            database,
+            catalog,
+            verse_id=verse_id,
+            roles=roles,
+            schema_ids=schema_ids,
+            record_keys=record_keys,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+            on_error=on_error,
+        )
+        return [
+            database.get_required(document, key)
+            for document, key in documents
+        ]
 
     def _fanout_endpoints(
         self,

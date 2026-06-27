@@ -381,6 +381,13 @@ verses = client.fetch_verses(transport_version="cultmesh.v0")
 mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
 client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
 client.fanout_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
+replica_notes = client.sync_documents(
+    node.database,
+    peers,
+    verse_id="python-interop",
+    roles=["read-replica"],
+    documents=[(note_doc, "note:remote")],
+)
 
 raw_client = CultNetRawClient("127.0.0.1", 3075)
 synced_note = node.database.sync_document(raw_client, note_doc, "note:remote")
