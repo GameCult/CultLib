@@ -115,6 +115,49 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   );
 });
 
+test("CultMesh TS document handles read schema publications from single-file stores", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-")), "publication.ccmp");
+  const node = await CultMesh.startNode(filePath, {
+    documents: [noteDocument],
+  });
+  await node.put(noteDocument, "note:publication", {
+    noteId: "note:publication",
+    body: "published",
+  });
+  await node.flush();
+
+  const document = CultMesh.documentFromSingleFile(filePath, "cultmesh.note.v0", {
+    documentId: "daemon:cultmesh.note.latest",
+    sourceId: "daemon:cultmesh.note.latest.v0",
+    pollMs: 50,
+  });
+  const observed: string[] = [];
+  const unsubscribe = document.watch(value => {
+    observed.push(noteDocument.schema.parse(value).body);
+  });
+
+  try {
+    assert.equal(noteDocument.schema.parse(await document.latest()).body, "published");
+
+    const republisher = await CultMesh.startNode(filePath, {
+      documents: [noteDocument],
+    });
+    await republisher.put(noteDocument, "note:publication", {
+      noteId: "note:publication",
+      body: "republished",
+    });
+    await waitFor(() => observed.includes("republished"), "single-file document watch update");
+  } finally {
+    unsubscribe();
+  }
+
+  assert.equal(document.documentId, "daemon:cultmesh.note.latest");
+  assert.equal(document.routeHint.kind, "shared-memory");
+  assert.deepEqual(document.sources.map(source => source.schemaId), [
+    "cultmesh.note.v0",
+  ]);
+});
+
 test("CultMesh TS collection handles expose typed snapshots and reset watches", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-coll-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {

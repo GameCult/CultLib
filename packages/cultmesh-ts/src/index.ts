@@ -1828,6 +1828,62 @@ export function cultMeshDocumentFromCache<TDefinition extends AnyCultCacheDocume
   );
 }
 
+export function cultMeshDocumentFromStore(
+  store: CacheBackingStore,
+  schemaId: string,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  } = {},
+): CultMeshDocumentHandle<unknown> {
+  requireNonEmpty(schemaId, "schemaId");
+  const documentId = options.documentId ?? schemaId;
+  const read = async () => {
+    const records = await store.pullAll();
+    const record = records.find(candidate => candidate.schemaId === schemaId);
+    if (!record) {
+      throw new Error(`CultMesh store document '${documentId}' did not contain schema ${schemaId}.`);
+    }
+    return decode(record.payload);
+  };
+
+  return cultMeshDocument(
+    documentId,
+    { schemaId },
+    async () => read(),
+    {
+      routeHint: options.routeHint ?? cultMeshRouteHint("in-process", "CultCache store"),
+      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId })],
+      watchDocument: cultMeshPollingDocumentWatcher(read, {
+        intervalMs: options.pollMs ?? 50,
+      }),
+    },
+  );
+}
+
+export function cultMeshDocumentFromSingleFile(
+  path: string,
+  schemaId: string,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  } = {},
+): CultMeshDocumentHandle<unknown> {
+  requireNonEmpty(path, "path");
+  return cultMeshDocumentFromStore(
+    new SingleFileMessagePackBackingStore(path),
+    schemaId,
+    {
+      ...options,
+      routeHint: options.routeHint ?? cultMeshRouteHint("shared-memory", path),
+    },
+  );
+}
+
 export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
   cache: CultCache,
   definition: TDefinition,
@@ -3507,6 +3563,32 @@ export class CultMesh {
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
     return cultMeshDocumentFromCache(cache, definition, key, options);
+  }
+
+  public static documentFromStore(
+    store: CacheBackingStore,
+    schemaId: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<unknown> {
+    return cultMeshDocumentFromStore(store, schemaId, options);
+  }
+
+  public static documentFromSingleFile(
+    path: string,
+    schemaId: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<unknown> {
+    return cultMeshDocumentFromSingleFile(path, schemaId, options);
   }
 
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(

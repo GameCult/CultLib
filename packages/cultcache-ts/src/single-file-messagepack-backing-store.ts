@@ -166,12 +166,38 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
     try {
       await writeFile(tempPath, encode(encodeSnapshot(entries)));
-      await rename(tempPath, this.filePath);
+      await renameWithRetry(tempPath, this.filePath);
     } catch (error) {
       await rm(tempPath, { force: true }).catch(() => undefined);
       throw error;
     }
   }
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  let delayMs = 10;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
+        throw error;
+      }
+
+      lastError = error;
+      await delay(delayMs);
+      delayMs *= 2;
+    }
+  }
+
+  throw lastError;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 type PersistedRecord = {
