@@ -344,7 +344,10 @@ namespace GameCult.Networking
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(string.Empty));
             var schemaId = (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? string.Empty;
-            if (!Matches(request, schemaId, key))
+            var documentType = changeType.IsGenericType ? changeType.GetGenericArguments()[0] : null;
+            var descriptor = documentType == null ? null : _database.Cache.Registry.GetRequired(documentType);
+            var binding = documentType == null ? null : _database.Documents.GetByDocumentType(documentType);
+            if (!Matches(request, schemaId, key, descriptor, binding))
             {
                 return null;
             }
@@ -387,15 +390,73 @@ namespace GameCult.Networking
             return ((CultNetDocumentPutRawMessage)message!).Document;
         }
 
-        private static bool Matches(CultNetDatabaseSubscribeMessage request, string schemaId, CultRecordKey key)
+        private static bool Matches(
+            CultNetDatabaseSubscribeMessage request,
+            string schemaId,
+            CultRecordKey key,
+            CultDocumentDescriptor? descriptor,
+            CultNetDocumentBinding? binding)
         {
-            var schemaMatches = request.SchemaIds == null ||
-                                request.SchemaIds.Length == 0 ||
-                                request.SchemaIds.Contains(schemaId, StringComparer.Ordinal);
+            var schemaMatches = MatchesSchema(request.SchemaIds, schemaId, descriptor, binding);
             var keyMatches = request.RecordKeys == null ||
                              request.RecordKeys.Length == 0 ||
                              request.RecordKeys.Contains(key.Value, StringComparer.Ordinal);
             return schemaMatches && keyMatches;
+        }
+
+        private static bool MatchesSchema(
+            string[]? requestedSchemaIds,
+            string schemaId,
+            CultDocumentDescriptor? descriptor,
+            CultNetDocumentBinding? binding)
+        {
+            if (requestedSchemaIds == null || requestedSchemaIds.Length == 0)
+            {
+                return true;
+            }
+
+            var requested = requestedSchemaIds.ToHashSet(StringComparer.Ordinal);
+            if (requested.Contains(schemaId))
+            {
+                return true;
+            }
+
+            if (descriptor == null)
+            {
+                return false;
+            }
+
+            if (requested.Contains(descriptor.SchemaId) ||
+                requested.Contains(descriptor.SchemaName) ||
+                requested.Contains(descriptor.SchemaVersion) ||
+                (binding != null && requested.Contains(binding.SchemaId)))
+            {
+                return true;
+            }
+
+            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requested.Contains))
+            {
+                return true;
+            }
+
+            return requested
+                .Select(InferSchemaName)
+                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
+                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
+        }
+
+        private static string? InferSchemaName(string schemaVersion)
+        {
+            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
+            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
+            {
+                return null;
+            }
+
+            var version = schemaVersion.Substring(marker + 2);
+            return version.All(char.IsDigit)
+                ? schemaVersion.Substring(0, marker)
+                : null;
         }
 
         private static string SubscriptionKey(NetPeer peer, string subscriptionId)

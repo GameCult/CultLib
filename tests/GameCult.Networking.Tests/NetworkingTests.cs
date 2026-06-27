@@ -4040,6 +4040,57 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetDatabaseServer_Creates_Filtered_SubscriptionChange_ForSchemaAlias()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var key = new CultRecordKey("network-note:alias-change");
+            var note = new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "alias change",
+                Revision = 11
+            };
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var change = new CultNetDatabaseChange<NetworkSchemaNote>(
+                CultNetDatabaseChangeKind.Added,
+                key,
+                descriptor.SchemaId,
+                database.Shards[0],
+                note,
+                previousDocument: null);
+            var method = typeof(CultNetDatabaseServer).GetMethod(
+                "CreateChangeMessage",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            var message = (CultNetDatabaseChangeRawMessage?)method.Invoke(databaseServer, new object[]
+            {
+                change,
+                "sub-alias",
+                new CultNetDatabaseSubscribeMessage
+                {
+                    SubscriptionId = "sub-alias",
+                    SchemaIds = ["tests.networking_note.v1"],
+                    RecordKeys = [key.Value]
+                }
+            });
+
+            Assert.That(message, Is.Not.Null);
+            Assert.That(message!.SubscriptionId, Is.EqualTo("sub-alias"));
+            Assert.That(message.ChangeKind, Is.EqualTo("added"));
+            Assert.That(message.Document, Is.Not.Null);
+            Assert.That(message.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(message.Document.Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+        }
+
+        [Test]
         public void CultNetSchemaRegistry_BuiltInCatalog_AdvertisesRawLane_AndSharedGhostlightContract()
         {
             var response = CultNetSchemaRegistry.BuiltIn.CreateCatalogResponse(
