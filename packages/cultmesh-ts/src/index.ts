@@ -3636,14 +3636,23 @@ export class CultMeshNode {
     definition: TDefinition,
     key: string,
   ): CultCacheDocumentValue<TDefinition> | undefined {
-    return this.cache.get(definition, key);
+    const registered = this.resolveCacheDefinition(definition);
+    const value = this.cache.get(registered, key);
+    return value === undefined
+      ? undefined
+      : this.parseDocumentValue(definition, value);
   }
 
   public getRequired<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
   ): CultCacheDocumentValue<TDefinition> {
-    return this.cache.getRequired(definition, key);
+    const value = this.get(definition, key);
+    if (value === undefined) {
+      throw new Error(`CultMesh node has no "${definition.type}" document at key "${key}".`);
+    }
+
+    return value;
   }
 
   public put<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3651,14 +3660,17 @@ export class CultMeshNode {
     key: string,
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
-    return this.cache.put(definition, key, value);
+    const registered = this.resolveCacheDefinition(definition);
+    return this.cache
+      .put(registered, key, this.parseDocumentValue(definition, value) as never)
+      .then(stored => this.parseDocumentValue(definition, stored));
   }
 
   public delete<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
   ): Promise<boolean> {
-    return this.cache.delete(definition, key);
+    return this.cache.delete(this.resolveCacheDefinition(definition), key);
   }
 
   public document<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3670,7 +3682,16 @@ export class CultMeshNode {
       pollMs?: number;
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
-    return cultMeshDocumentFromCache(this.cache, definition, key, options);
+    const documentId = options.documentId ?? `${definition.type}:${key}`;
+    return this.asRequestedDocument(
+      cultMeshDocumentFromCache(
+        this.cache,
+        this.resolveCacheDefinition(definition),
+        key,
+        { ...options, documentId },
+      ),
+      definition,
+    );
   }
 
   public reactiveDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3692,18 +3713,8 @@ export class CultMeshNode {
       pollMs,
       ...reactiveOptions
     } = options;
-    const schema = cultMeshSchemaFromDefinition(definition);
-    const binding =
-      this.documents.get(definition.type) ??
-      (schema.schemaId ? this.documents.getBySchemaId(schema.schemaId) : undefined);
-    const document = binding
-      ? this.document(binding.definition, key, { documentId, routeHint, pollMs })
-        .asSchemaAlias<CultCacheDocumentValue<TDefinition>>(schema, {
-          parse: value => definition.schema.parse(value),
-        })
-      : this.document(definition, key, { documentId, routeHint, pollMs });
-
-    return document.reactive<CultCacheDocumentValue<TDefinition> & object>(reactiveOptions);
+    return this.document(definition, key, { documentId, routeHint, pollMs })
+      .reactive<CultCacheDocumentValue<TDefinition> & object>(reactiveOptions);
   }
 
   public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3714,7 +3725,15 @@ export class CultMeshNode {
       pollMs?: number;
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
-    return cultMeshGlobalDocumentFromCache(this.cache, definition, options);
+    const documentId = options.documentId ?? `${definition.type}:global`;
+    return this.asRequestedDocument(
+      cultMeshGlobalDocumentFromCache(
+        this.cache,
+        this.resolveCacheDefinition(definition),
+        { ...options, documentId },
+      ),
+      definition,
+    );
   }
 
   public collection<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -3725,11 +3744,46 @@ export class CultMeshNode {
       pollMs?: number;
     } = {},
   ): CultMeshCollectionHandle<CultCacheDocumentValue<TDefinition>> {
-    return cultMeshCollectionFromCache(this.cache, definition, options);
+    const collectionId = options.collectionId ?? definition.type;
+    return cultMeshCollectionFromCache(
+      this.cache,
+      this.resolveCacheDefinition(definition),
+      { ...options, collectionId },
+    ).asSchemaAlias<CultCacheDocumentValue<TDefinition>>(
+      cultMeshSchemaFromDefinition(definition),
+      { parse: value => this.parseDocumentValue(definition, value) },
+    );
   }
 
   public async flush(soft = false): Promise<void> {
     await this.store.pushAll?.(this.cache.snapshot(), { soft });
+  }
+
+  private resolveCacheDefinition<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+  ): AnyCultCacheDocumentDefinition {
+    const schema = cultMeshSchemaFromDefinition(definition);
+    return (
+      this.documents.get(definition.type) ??
+      (schema.schemaId ? this.documents.getBySchemaId(schema.schemaId) : undefined)
+    )?.definition ?? definition;
+  }
+
+  private asRequestedDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+    document: CultMeshDocumentHandle<unknown>,
+    definition: TDefinition,
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return document.asSchemaAlias<CultCacheDocumentValue<TDefinition>>(
+      cultMeshSchemaFromDefinition(definition),
+      { parse: value => this.parseDocumentValue(definition, value) },
+    );
+  }
+
+  private parseDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    value: unknown,
+  ): CultCacheDocumentValue<TDefinition> {
+    return definition.schema.parse(value) as CultCacheDocumentValue<TDefinition>;
   }
 }
 

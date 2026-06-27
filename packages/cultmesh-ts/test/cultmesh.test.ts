@@ -240,7 +240,7 @@ test("CultMesh TS reactive documents submit predictions from member writes", asy
   assert.deepEqual(predictions, ["member-write-prediction-final"]);
 });
 
-test("CultMesh TS node opens reactive same-schema aliases with one call", async () => {
+test("CultMesh TS node opens same-schema aliases with one call", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-node-reactive-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {
     documents: [noteDocument],
@@ -249,6 +249,33 @@ test("CultMesh TS node opens reactive same-schema aliases with one call", async 
     noteId: "note:node-reactive",
     body: "initial",
   });
+
+  const aliasHandle = node.document(noteAliasDocument, "note:node-reactive", {
+    pollMs: 5,
+  });
+  assert.equal(aliasHandle.documentId, "cultmesh.note.ui:note:node-reactive");
+  assert.equal((await aliasHandle.latest()).body, "initial");
+  await aliasHandle.set({
+    noteId: "note:node-reactive",
+    body: "edited-through-alias-handle",
+  });
+  assert.equal(
+    node.getRequired(noteAliasDocument, "note:node-reactive").body,
+    "edited-through-alias-handle",
+  );
+
+  await node.put(noteAliasDocument, "note:node-reactive", {
+    noteId: "note:node-reactive",
+    body: "edited-through-alias-put",
+  });
+  assert.equal(
+    node.getRequired(noteDocument, "note:node-reactive").body,
+    "edited-through-alias-put",
+  );
+  assert.deepEqual(
+    (await node.collection(noteAliasDocument).latest()).map(note => note.body),
+    ["edited-through-alias-put"],
+  );
 
   const reactive = node.reactiveDocument(noteAliasDocument, "note:node-reactive", {
     context: CultMesh.queryContext("browser-client"),
