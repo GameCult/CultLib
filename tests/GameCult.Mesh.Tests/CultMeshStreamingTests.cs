@@ -1224,14 +1224,34 @@ public sealed class CultMeshStreamingTests
         var catalog = surface.Documents(
             CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value, "daemon:mesh-note:snapshot-endpoint"));
         var catalogAlias = await catalog.LatestAsync<MeshNoteAliasDocument>();
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "snapshot-endpoint-synced",
+            Revision = 20
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var syncedHandle = surface.SyncedDocument<MeshNoteAliasDocument>(node, key.Value);
+        var syncedLatest = await syncedHandle.LatestAsync();
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "snapshot-endpoint-catalog-synced",
+            Revision = 21
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var syncedCatalog = surface.SyncedDocuments(
+            node,
+            CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value));
+        var syncedCatalogAlias = await syncedCatalog.LatestAsync<MeshNoteAliasDocument>();
 
         fetchedAlias.Text.Should().Be("snapshot-endpoint");
         syncedAlias.Text.Should().Be("snapshot-endpoint");
-        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(19);
         aliasLatest.Revision.Should().Be(19);
         catalog.Document<MeshNoteDocument>().DocumentId.Should().Be("daemon:mesh-note:snapshot-endpoint");
         catalogAlias.Text.Should().Be("snapshot-endpoint");
-        requests.Should().HaveCount(4);
+        syncedLatest.Text.Should().Be("snapshot-endpoint-synced");
+        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(21);
+        syncedCatalogAlias.Text.Should().Be("snapshot-endpoint-catalog-synced");
+        requests.Should().HaveCount(6);
         requests.Should().OnlyContain(request =>
             request.SchemaIds!.SequenceEqual(new[]
             {

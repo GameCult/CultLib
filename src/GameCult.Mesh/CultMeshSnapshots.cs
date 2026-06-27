@@ -99,6 +99,9 @@ namespace GameCult.Mesh
 
         /// <summary>Binds this document request to an endpoint-backed handle.</summary>
         ICultMeshDocumentHandle Bind(CultMeshSnapshotEndpoint endpoint);
+
+        /// <summary>Binds this document request to an endpoint-backed handle that syncs into a local node before returning values.</summary>
+        ICultMeshDocumentHandle BindSynced(CultMeshSnapshotEndpoint endpoint, CultMeshNode node, bool flush);
     }
 
     /// <summary>
@@ -129,6 +132,13 @@ namespace GameCult.Mesh
         {
             if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
             return endpoint.Document<TDocument>(RecordKey, DocumentId);
+        }
+
+        /// <inheritdoc />
+        public ICultMeshDocumentHandle BindSynced(CultMeshSnapshotEndpoint endpoint, CultMeshNode node, bool flush)
+        {
+            if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
+            return endpoint.SyncedDocument<TDocument>(node, RecordKey, DocumentId, flush);
         }
     }
 
@@ -284,6 +294,34 @@ namespace GameCult.Mesh
                     $"CultNet snapshot endpoint '{Endpoint}' did not return {typeof(TDocument).FullName} record '{recordKey}'.");
         }
 
+        /// <summary>Creates a typed document handle that fetches one endpoint record and syncs it into a local node before returning values.</summary>
+        public CultMeshDocumentHandle<TDocument> SyncedDocument<TDocument>(
+            CultMeshNode node,
+            string recordKey,
+            string? documentId = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var sources = new[]
+            {
+                CultMesh.ProjectionSource($"{SourceId}:{recordKey}", descriptor.SchemaId, "synced CultNet snapshot endpoint")
+            };
+            var watch = CultMesh.PollingQueryWatcher<CultMeshDocumentQueryParameters, TDocument>(
+                async (_parameters, _context) => await SyncDocumentAsync<TDocument>(node, recordKey, flush).ConfigureAwait(false),
+                new CultMeshPollingWatchOptions<TDocument>(PollInterval));
+
+            return CultMesh.Document<TDocument>(
+                string.IsNullOrWhiteSpace(documentId) ? recordKey : documentId!,
+                Context,
+                _ => SyncDocumentAsync<TDocument>(node, recordKey, flush),
+                queryContext => watch(CultMeshDocumentQueryParameters.Empty, queryContext),
+                sources,
+                RouteHint);
+        }
+
         /// <summary>Creates a typed document handle over one remote endpoint record.</summary>
         public CultMeshDocumentHandle<TDocument> Document<TDocument>(
             string recordKey,
@@ -323,6 +361,29 @@ namespace GameCult.Mesh
             {
                 if (document == null) throw new ArgumentNullException(nameof(documents));
                 return document.Bind(this);
+            }));
+        }
+
+        /// <summary>Creates a schema-aware catalog from typed endpoint bindings that sync into a local node before returning values.</summary>
+        public CultMeshDocumentCatalog SyncedDocuments(
+            CultMeshNode node,
+            params ICultMeshSnapshotDocumentBinding[] documents)
+        {
+            return SyncedDocuments(node, flush: false, documents);
+        }
+
+        /// <summary>Creates a schema-aware catalog from typed endpoint bindings that sync into a local node before returning values.</summary>
+        public CultMeshDocumentCatalog SyncedDocuments(
+            CultMeshNode node,
+            bool flush = false,
+            params ICultMeshSnapshotDocumentBinding[] documents)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (documents == null) throw new ArgumentNullException(nameof(documents));
+            return CultMesh.Documents(documents.Select(document =>
+            {
+                if (document == null) throw new ArgumentNullException(nameof(documents));
+                return document.BindSynced(this, node, flush);
             }));
         }
 
