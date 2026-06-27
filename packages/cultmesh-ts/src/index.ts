@@ -143,6 +143,10 @@ export type CultMeshDocumentPredictionSubmitter<TDocument> = (
   value: TDocument,
 ) => Promise<void>;
 
+export type CultMeshDocumentUpdater<TDocument> = (
+  current: TDocument,
+) => TDocument | Promise<TDocument>;
+
 export type CultMeshCollectionSnapshot<TDocument> = readonly TDocument[];
 
 export type CultMeshCollectionChangeKind = "added" | "updated" | "removed" | "reset";
@@ -782,6 +786,10 @@ export class CultMeshDocumentHandle<TDocument> {
     return this.submitPredictionDocument !== undefined;
   }
 
+  public get canSet(): boolean {
+    return this.canSubmitPrediction || this.canReplace;
+  }
+
   public latest(context: CultMeshQueryContext | string = "local"): Promise<TDocument> {
     return this.snapshotDocument(
       this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
@@ -868,6 +876,59 @@ export class CultMeshDocumentHandle<TDocument> {
     return this.submitPredictionDocument(this.resolveContext(context), value);
   }
 
+  public set(value: TDocument): Promise<void>;
+  public set(context: CultMeshQueryContext | string, value: TDocument): Promise<void>;
+  public set(
+    contextOrValue: CultMeshQueryContext | string | TDocument,
+    maybeValue?: TDocument,
+  ): Promise<void> {
+    const hasContext =
+      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
+    const context = hasContext
+      ? typeof contextOrValue === "string"
+        ? cultMeshQueryContext(contextOrValue)
+        : contextOrValue as CultMeshQueryContext
+      : cultMeshQueryContext("local");
+    const value = hasContext ? maybeValue : contextOrValue as TDocument;
+    if (value === undefined) {
+      throw new Error(`Document '${this.documentId}' requires a value.`);
+    }
+
+    const resolved = this.resolveContext(context);
+    if (this.submitPredictionDocument) {
+      return this.submitPredictionDocument(resolved, value);
+    }
+    if (this.replaceDocument) {
+      return this.replaceDocument(resolved, value);
+    }
+
+    throw new Error(`Document '${this.documentId}' does not support mutation.`);
+  }
+
+  public update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument>;
+  public update(
+    context: CultMeshQueryContext | string,
+    update: CultMeshDocumentUpdater<TDocument>,
+  ): Promise<TDocument>;
+  public async update(
+    contextOrUpdate: CultMeshQueryContext | string | CultMeshDocumentUpdater<TDocument>,
+    maybeUpdate?: CultMeshDocumentUpdater<TDocument>,
+  ): Promise<TDocument> {
+    const hasContext =
+      typeof contextOrUpdate === "string" || isCultMeshQueryContext(contextOrUpdate);
+    const context = hasContext
+      ? contextOrUpdate as CultMeshQueryContext | string
+      : "local";
+    const update = hasContext ? maybeUpdate : contextOrUpdate as CultMeshDocumentUpdater<TDocument>;
+    if (!update) {
+      throw new Error(`Document '${this.documentId}' requires an update function.`);
+    }
+
+    const next = await update(await this.latest(context));
+    await this.set(context, next);
+    return next;
+  }
+
   public asSchemaAlias<TAlias>(
     schema: CultMeshDocumentSchemaDescriptor,
     options: { parse?: (value: unknown) => TAlias } = {},
@@ -937,6 +998,10 @@ export class CultMeshBoundDocumentHandle<TDocument> {
     return this.document.canSubmitPrediction;
   }
 
+  public get canSet(): boolean {
+    return this.document.canSet;
+  }
+
   public latest(): Promise<TDocument> {
     return this.document.latest(cultMeshQueryContextFromVerse(this.verse));
   }
@@ -955,6 +1020,14 @@ export class CultMeshBoundDocumentHandle<TDocument> {
 
   public submitPrediction(value: TDocument): Promise<void> {
     return this.document.submitPrediction(cultMeshQueryContextFromVerse(this.verse), value);
+  }
+
+  public set(value: TDocument): Promise<void> {
+    return this.document.set(cultMeshQueryContextFromVerse(this.verse), value);
+  }
+
+  public update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument> {
+    return this.document.update(cultMeshQueryContextFromVerse(this.verse), update);
   }
 
   public asSchemaAlias<TAlias>(
@@ -1072,6 +1145,10 @@ export class CultMeshDocumentCatalog {
     return this.tryDocument(schema)?.canSubmitPrediction ?? false;
   }
 
+  public canSet(schema: CultMeshDocumentSchemaDescriptor): boolean {
+    return this.tryDocument(schema)?.canSet ?? false;
+  }
+
   public submitPrediction<TDocument>(
     schema: CultMeshDocumentSchemaDescriptor,
     value: TDocument,
@@ -1097,6 +1174,62 @@ export class CultMeshDocumentCatalog {
     const value = hasContext ? valueOrOptions as TDocument : contextOrValue as TDocument;
     const options = hasContext ? maybeOptions : valueOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
     return this.document(schema, options).submitPrediction(context, value);
+  }
+
+  public set<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    value: TDocument,
+    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+  ): Promise<void>;
+  public set<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    context: CultMeshQueryContext | string,
+    value: TDocument,
+    options?: { parse?: (value: unknown) => TDocument },
+  ): Promise<void>;
+  public set<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    contextOrValue: CultMeshQueryContext | string | TDocument,
+    valueOrOptions?: TDocument | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
+  ): Promise<void> {
+    const hasContext =
+      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
+    const context = hasContext
+      ? contextOrValue as CultMeshQueryContext | string
+      : (valueOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
+    const value = hasContext ? valueOrOptions as TDocument : contextOrValue as TDocument;
+    const options = hasContext ? maybeOptions : valueOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
+    return this.document(schema, options).set(context, value);
+  }
+
+  public update<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    update: CultMeshDocumentUpdater<TDocument>,
+    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+  ): Promise<TDocument>;
+  public update<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    context: CultMeshQueryContext | string,
+    update: CultMeshDocumentUpdater<TDocument>,
+    options?: { parse?: (value: unknown) => TDocument },
+  ): Promise<TDocument>;
+  public update<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    contextOrUpdate: CultMeshQueryContext | string | CultMeshDocumentUpdater<TDocument>,
+    updateOrOptions?: CultMeshDocumentUpdater<TDocument> | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
+    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
+  ): Promise<TDocument> {
+    const hasContext =
+      typeof contextOrUpdate === "string" || isCultMeshQueryContext(contextOrUpdate);
+    const context = hasContext
+      ? contextOrUpdate as CultMeshQueryContext | string
+      : (updateOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
+    const update = hasContext
+      ? updateOrOptions as CultMeshDocumentUpdater<TDocument>
+      : contextOrUpdate as CultMeshDocumentUpdater<TDocument>;
+    const options = hasContext ? maybeOptions : updateOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
+    return this.document(schema, options).update(context, update);
   }
 
   public watch<TDocument>(

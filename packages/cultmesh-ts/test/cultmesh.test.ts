@@ -89,6 +89,7 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   assert.equal(document.documentId, "cultmesh.note:note:1");
   assert.equal(document.canReplace, true);
   assert.equal(document.canSubmitPrediction, false);
+  assert.equal(document.canSet, true);
   assert.equal((await bound.latest()).body, "initial");
 
   await bound.replace({
@@ -105,7 +106,8 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
 
   const catalog = CultMesh.documents(document);
   assert.equal(catalog.canReplace(noteAliasDocument), true);
-  await catalog.replace(noteAliasDocument, {
+  assert.equal(catalog.canSet(noteAliasDocument), true);
+  await catalog.set(noteAliasDocument, {
     noteId: "note:1",
     body: "catalog-updated",
   }, {
@@ -118,6 +120,12 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
     })).body,
     "catalog-updated",
   );
+  const incremented = await bound.update(value => ({
+    ...value,
+    body: `${value.body}:updated-through-bound-set`,
+  }));
+  assert.equal(incremented.body, "catalog-updated:updated-through-bound-set");
+  assert.equal((await document.latest()).body, "catalog-updated:updated-through-bound-set");
   assert.throws(
     () => document.asSchemaAlias({ schemaId: "cultmesh.other.v0" }),
     /not compatible/,
@@ -150,10 +158,13 @@ test("CultMesh TS document handles submit predictions through configured authori
 
   assert.equal(document.canReplace, false);
   assert.equal(document.canSubmitPrediction, true);
+  assert.equal(document.canSet, true);
   assert.equal(bound.canSubmitPrediction, true);
+  assert.equal(bound.canSet, true);
   assert.equal(catalog.canSubmitPrediction(noteAliasDocument), true);
+  assert.equal(catalog.canSet(noteAliasDocument), true);
 
-  await catalog.submitPrediction(noteAliasDocument, "pilot-a", {
+  await catalog.set(noteAliasDocument, "pilot-a", {
     noteId: "note:prediction",
     body: "predicted",
   }, {
@@ -168,13 +179,19 @@ test("CultMesh TS document handles submit predictions through configured authori
     parse: value => noteAliasDocument.schema.parse(value),
   });
   assert.equal(alias.canSubmitPrediction, true);
-  await alias.submitPrediction({
+  await alias.set({
     noteId: "note:prediction",
     body: "alias-predicted",
   });
 
   assert.deepEqual(predictions, ["predicted", "alias-predicted"]);
   assert.equal((await document.latest("pilot-a")).body, "alias-predicted");
+  const updated = await document.update("pilot-a", value => ({
+    ...value,
+    body: "updated-as-prediction",
+  }));
+  assert.equal(updated.body, "updated-as-prediction");
+  assert.deepEqual(predictions, ["predicted", "alias-predicted", "updated-as-prediction"]);
 
   assert.throws(
     () => document.replace({
