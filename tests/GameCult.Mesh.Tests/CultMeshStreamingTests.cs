@@ -1230,7 +1230,8 @@ public sealed class CultMeshStreamingTests
             Text = "snapshot-endpoint-synced",
             Revision = 20
         }, new CultRecordHandle<MeshNoteDocument>(key));
-        var syncedHandle = surface.SyncedDocument<MeshNoteAliasDocument>(node, key.Value);
+        var syncedEndpoint = surface.SyncTo(node);
+        var syncedHandle = syncedEndpoint.Document<MeshNoteAliasDocument>(key.Value);
         var syncedLatest = await syncedHandle.LatestAsync();
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
@@ -1238,8 +1239,7 @@ public sealed class CultMeshStreamingTests
             Text = "snapshot-endpoint-catalog-synced",
             Revision = 21
         }, new CultRecordHandle<MeshNoteDocument>(key));
-        var syncedCatalog = surface.SyncedDocuments(
-            node,
+        var syncedCatalog = syncedEndpoint.Documents(
             CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value));
         var syncedCatalogAlias = await syncedCatalog.LatestAsync<MeshNoteAliasDocument>();
 

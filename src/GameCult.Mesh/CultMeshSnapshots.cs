@@ -169,6 +169,46 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Snapshot endpoint view with a local node sync policy already bound.
+    /// </summary>
+    public sealed class CultMeshSyncedSnapshotEndpoint
+    {
+        internal CultMeshSyncedSnapshotEndpoint(
+            CultMeshSnapshotEndpoint endpoint,
+            CultMeshNode node,
+            bool flush)
+        {
+            Endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
+            Node = node ?? throw new ArgumentNullException(nameof(node));
+            Flush = flush;
+        }
+
+        /// <summary>Gets the remote endpoint that provides snapshots.</summary>
+        public CultMeshSnapshotEndpoint Endpoint { get; }
+
+        /// <summary>Gets the local node snapshots are synced into.</summary>
+        public CultMeshNode Node { get; }
+
+        /// <summary>Gets whether each sync should flush the local node afterward.</summary>
+        public bool Flush { get; }
+
+        /// <summary>Creates a typed document handle that syncs into the local node before returning values.</summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string recordKey,
+            string? documentId = null)
+            where TDocument : class
+        {
+            return Endpoint.SyncedDocument<TDocument>(Node, recordKey, documentId, Flush);
+        }
+
+        /// <summary>Creates a schema-aware catalog from typed endpoint bindings that sync into the local node before returning values.</summary>
+        public CultMeshDocumentCatalog Documents(params ICultMeshSnapshotDocumentBinding[] documents)
+        {
+            return Endpoint.SyncedDocuments(Node, Flush, documents);
+        }
+    }
+
+    /// <summary>
     /// Typed snapshot surface for one remote CultNet endpoint.
     /// </summary>
     public sealed class CultMeshSnapshotEndpoint
@@ -208,6 +248,12 @@ namespace GameCult.Mesh
 
         /// <summary>Gets the polling interval for watch fallback.</summary>
         public TimeSpan PollInterval { get; }
+
+        /// <summary>Returns a view of this endpoint whose typed document handles sync into the supplied local node.</summary>
+        public CultMeshSyncedSnapshotEndpoint SyncTo(CultMeshNode node, bool flush = false)
+        {
+            return new CultMeshSyncedSnapshotEndpoint(this, node, flush);
+        }
 
         /// <summary>Fetches one raw snapshot with this endpoint's configured request policy.</summary>
         public Task<CultNetSnapshotResponseRawMessage> FetchSnapshotAsync(
