@@ -1038,6 +1038,69 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotHelpers_FetchApplyAndDecodeScopedSnapshots()
+    {
+        var sourceCache = new CultCache();
+        var targetCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshPublicationNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:snapshot-helper");
+        await sourceCache.UpsertAsync(new MeshPublicationNoteDocument
+        {
+            Schema = "tests.mesh_publication_note.v1",
+            Text = "snapshot-helper",
+            Revision = 11
+        }, new CultRecordHandle<MeshPublicationNoteDocument>(key));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+        var endpoint = "cultnet://snapshot-helper.test:3075";
+        var options = new CultMeshSnapshotRequestOptions
+        {
+            RecordKeys = new[] { key.Value },
+            ShardId = "primary",
+            ShardEpoch = 7,
+            MessageIdPrefix = "mesh-test-scoped-snapshot",
+            CreateClient = () => new MeshSnapshotSchemaClient(request =>
+            {
+                requests.Add(request);
+                return registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request);
+            })
+        };
+
+        var snapshot = await CultMesh.FetchSnapshotAsync(endpoint, options);
+        var decoded = await CultMesh.FetchSnapshotDocumentsAsync<MeshPublicationNoteDocument>(
+            endpoint,
+            options,
+            registry);
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(Path.GetTempPath(), $"cultmesh-snapshot-helper-{Guid.NewGuid():N}.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = targetCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+        var applied = await CultMesh.ApplySnapshotAsync(node, endpoint, options);
+
+        snapshot.Documents.Should().ContainSingle().Which.RecordKey.Should().Be(key.Value);
+        decoded.Should().ContainSingle().Which.Text.Should().Be("snapshot-helper");
+        applied.Should().ContainSingle();
+        node.Cache.Get<MeshPublicationNoteDocument>(key)!.Revision.Should().Be(11);
+        requests.Should().HaveCount(3);
+        requests.Should().OnlyContain(request =>
+            request.RecordKeys!.SequenceEqual(new[] { key.Value }) &&
+            request.ShardId == "primary" &&
+            request.ShardEpoch == 7 &&
+            request.MessageId.StartsWith("mesh-test-scoped-snapshot:", StringComparison.Ordinal));
+    }
+
+    [Test]
     public async Task CollectionHandle_ReadsAndWatchesDatabaseCollectionsByIndex()
     {
         var cache = new CultCache();
