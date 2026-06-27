@@ -29,6 +29,2056 @@ import {
   type CultNetWireContract,
 } from "cultnet-ts";
 
+export interface CultMeshVec2 {
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface CultMeshRect {
+  readonly min: CultMeshVec2;
+  readonly max: CultMeshVec2;
+}
+
+export interface CultMeshViewportRequest {
+  readonly minX: number;
+  readonly minY: number;
+  readonly maxX: number;
+  readonly maxY: number;
+  readonly controlledEntityIndices?: readonly number[];
+}
+
+export type CultMeshLocalityKind =
+  | "automatic"
+  | "in-process"
+  | "shared-memory"
+  | "ipc"
+  | "network"
+  | "wasm";
+
+export interface CultMeshRouteHint {
+  readonly kind: CultMeshLocalityKind;
+  readonly description?: string;
+}
+
+export interface CultMeshRouteRecord {
+  readonly kind: string;
+  readonly description: string;
+}
+
+export interface CultMeshAuthorityClaim {
+  readonly role: string;
+  readonly shardId?: string;
+  readonly leaseId?: string;
+}
+
+export interface CultMeshVerseContext {
+  readonly verseId: string;
+  readonly runtimeId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly claims: readonly CultMeshAuthorityClaim[];
+}
+
+export interface CultMeshOperationContext {
+  readonly runtimeId: string;
+  readonly claims: readonly CultMeshAuthorityClaim[];
+  readonly routeHint: CultMeshRouteHint;
+  readonly idempotencyKey?: string;
+}
+
+export interface CultMeshOperationReceipt {
+  readonly operationId: string;
+  readonly accepted: boolean;
+  readonly route: CultMeshRouteHint;
+  readonly diagnostic?: string;
+}
+
+export interface CultMeshQueryContext {
+  readonly runtimeId: string;
+  readonly routeHint: CultMeshRouteHint;
+}
+
+export type CultMeshUnsubscribe = () => void;
+
+export type CultMeshStatePointerResolver<T> = (
+  context: CultMeshQueryContext,
+) => Promise<T | undefined>;
+
+export type CultMeshStatePointerWatcher<T> = (
+  context: CultMeshQueryContext,
+  callback: (value: T) => void,
+) => CultMeshUnsubscribe;
+
+export type CultMeshMutableStatePointerReplacer<T> = (
+  context: CultMeshQueryContext,
+  value: T,
+) => Promise<void>;
+
+export type CultMeshQueryWatcher<TParameters, TResult> = (
+  parameters: TParameters,
+  context: CultMeshQueryContext,
+  callback: (value: TResult) => void,
+) => CultMeshUnsubscribe;
+
+export type CultMeshLiveFeedWatcher<TParameters, TResult> = (
+  parameters: TParameters,
+  context: CultMeshQueryContext,
+  callback: (value: TResult) => void,
+) => CultMeshUnsubscribe;
+
+export interface CultMeshPollingWatchOptions<TResult> {
+  readonly intervalMs?: number;
+  readonly emitInitial?: boolean;
+  readonly equals?: (left: TResult, right: TResult) => boolean;
+}
+
+export interface CultMeshNativeSliceColumn {
+  readonly name: string;
+  readonly valueType: string;
+  readonly elementSizeBytes: number;
+}
+
+export interface CultMeshNativeSliceViewDescriptor {
+  readonly viewId: string;
+  readonly schemaId: string;
+  readonly rowCount: number;
+  readonly columns: readonly CultMeshNativeSliceColumn[];
+  readonly route: CultMeshRouteHint;
+  readonly nativeHandle?: string;
+}
+
+export interface CultMeshProjectionSource {
+  readonly sourceId: string;
+  readonly schemaId?: string;
+  readonly description?: string;
+}
+
+export interface CultMeshStateBindingDescriptor {
+  readonly targetProp: string;
+  readonly pointerId: string;
+  readonly sourceId?: string;
+  readonly schemaId?: string;
+  readonly routeHint: CultMeshRouteHint;
+}
+
+export interface CultMeshStateBindingRecord {
+  readonly targetProp: string;
+  readonly pointerId: string;
+  readonly sourceId: string;
+  readonly schemaId: string;
+  readonly routeKind: string;
+  readonly routeDescription: string;
+}
+
+export interface CultMeshOperationBindingDescriptor {
+  readonly operationId: string;
+  readonly label: string;
+  readonly schemaId: string;
+  readonly routeHint: CultMeshRouteHint;
+}
+
+export interface CultMeshOperationBindingRecord {
+  readonly operationId: string;
+  readonly label: string;
+  readonly schemaId: string;
+  readonly routeKind: string;
+  readonly routeDescription: string;
+}
+
+export interface CultMeshOperationInvocationDescriptor {
+  readonly operationId: string;
+  readonly schemaId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly idempotencyKey?: string;
+}
+
+export interface CultMeshOperationInvocationRecord {
+  readonly operationId: string;
+  readonly schemaId: string;
+  readonly routeKind: string;
+  readonly routeDescription: string;
+  readonly idempotencyKey: string;
+}
+
+export interface CultMeshOperationPayload {
+  readonly fields: Readonly<Record<string, string>>;
+  getString(key: string, defaultValue?: string): string;
+  getInt(key: string, defaultValue?: number): number;
+  getDouble(key: string, defaultValue?: number): number;
+  getBoolean(key: string, defaultValue?: boolean): boolean;
+  with(key: string, value: string | number | boolean): CultMeshOperationPayload;
+  toRecord(): Readonly<Record<string, string>>;
+}
+
+export interface CultMeshQuerySurfaceDiagnostic {
+  readonly queryId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export interface CultMeshOperationHandleDiagnostic {
+  readonly operationId: string;
+}
+
+export interface CultMeshStatePointerDiagnostic {
+  readonly pointerId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export interface CultMeshStateRefResolverDiagnostic {
+  readonly resolverId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export interface CultMeshProjectionRecipeDiagnostic {
+  readonly projectionId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export interface CultMeshLiveFeedDiagnostic {
+  readonly feedId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export type CultMeshSurfaceKind =
+  | "query"
+  | "projection-recipe"
+  | "live-feed"
+  | "operation"
+  | "state-pointer"
+  | "native-slice-view";
+
+export interface CultMeshSurfaceDiagnostic {
+  readonly kind: CultMeshSurfaceKind;
+  readonly surfaceId: string;
+  readonly routeHint: CultMeshRouteHint;
+  readonly sources: readonly CultMeshProjectionSource[];
+}
+
+export interface CultMeshSurfaceCatalogDiagnostic {
+  readonly catalogId: string;
+  readonly surfaces: readonly CultMeshSurfaceDiagnostic[];
+}
+
+export interface CultMeshSurfaceCatalogIndexDiagnostic {
+  readonly catalogId: string;
+  readonly queries: readonly CultMeshSurfaceDiagnostic[];
+  readonly projectionRecipes: readonly CultMeshSurfaceDiagnostic[];
+  readonly liveFeeds: readonly CultMeshSurfaceDiagnostic[];
+  readonly operations: readonly CultMeshSurfaceDiagnostic[];
+  readonly statePointers: readonly CultMeshSurfaceDiagnostic[];
+  readonly nativeSliceViews: readonly CultMeshSurfaceDiagnostic[];
+}
+
+export interface CultMeshNativeSliceViewDiagnostic {
+  readonly viewId: string;
+  readonly schemaId: string;
+  readonly rowCount: number;
+  readonly columns: readonly CultMeshNativeSliceColumn[];
+  readonly route: CultMeshRouteHint;
+  readonly nativeHandle?: string;
+  readonly denseRowStrideBytes: number;
+}
+
+export class CultMeshOperationContextBuilder {
+  readonly #runtimeId: string;
+  #claims: CultMeshAuthorityClaim[] = [];
+  #routeHint: CultMeshRouteHint = cultMeshRouteHint();
+  #idempotencyKey: string | undefined;
+
+  public constructor(runtimeId: string) {
+    requireNonEmpty(runtimeId, "runtimeId");
+    this.#runtimeId = runtimeId;
+  }
+
+  public claim(
+    role: string,
+    options: { shardId?: string; leaseId?: string } = {},
+  ): this {
+    this.#claims.push(cultMeshAuthorityClaim(role, options));
+    return this;
+  }
+
+  public claims(claims: readonly CultMeshAuthorityClaim[]): this {
+    this.#claims.push(...claims);
+    return this;
+  }
+
+  public route(kind: CultMeshLocalityKind, description?: string): this {
+    this.#routeHint = cultMeshRouteHint(kind, description);
+    return this;
+  }
+
+  public idempotency(key: string): this {
+    requireNonEmpty(key, "idempotencyKey");
+    this.#idempotencyKey = key;
+    return this;
+  }
+
+  public build(): CultMeshOperationContext {
+    return cultMeshOperationContext(this.#runtimeId, {
+      claims: this.#claims,
+      routeHint: this.#routeHint,
+      idempotencyKey: this.#idempotencyKey,
+    });
+  }
+}
+
+export class CultMeshQueryContextBuilder {
+  readonly #runtimeId: string;
+  #routeHint: CultMeshRouteHint = cultMeshRouteHint();
+
+  public constructor(runtimeId: string) {
+    requireNonEmpty(runtimeId, "runtimeId");
+    this.#runtimeId = runtimeId;
+  }
+
+  public route(kind: CultMeshLocalityKind, description?: string): this {
+    this.#routeHint = cultMeshRouteHint(kind, description);
+    return this;
+  }
+
+  public build(): CultMeshQueryContext {
+    return cultMeshQueryContext(this.#runtimeId, {
+      routeHint: this.#routeHint,
+    });
+  }
+}
+
+export class CultMeshVerse {
+  public constructor(public readonly context: CultMeshVerseContext) {
+    requireNonEmpty(context.verseId, "verseId");
+    requireNonEmpty(context.runtimeId, "runtimeId");
+  }
+
+  public get verseId(): string {
+    return this.context.verseId;
+  }
+
+  public get runtimeId(): string {
+    return this.context.runtimeId;
+  }
+
+  public use<TSchema>(schemaFactory: (context: CultMeshVerseContext) => TSchema): TSchema {
+    return schemaFactory(this.context);
+  }
+
+  public withRoute(kind: CultMeshLocalityKind, description?: string): CultMeshVerse {
+    return new CultMeshVerse({
+      ...this.context,
+      routeHint: cultMeshRouteHint(kind, description),
+    });
+  }
+
+  public withClaim(role: string, options: { shardId?: string; leaseId?: string } = {}): CultMeshVerse {
+    return new CultMeshVerse({
+      ...this.context,
+      claims: [...this.context.claims, cultMeshAuthorityClaim(role, options)],
+    });
+  }
+
+  public operationContext(options: { idempotencyKey?: string } = {}): CultMeshOperationContext {
+    return cultMeshOperationContextFromVerse(this.context, options);
+  }
+
+  public queryContext(): CultMeshQueryContext {
+    return cultMeshQueryContextFromVerse(this.context);
+  }
+
+  public bindOperation<TRequest, TResponse>(
+    operation: CultMeshOperationHandle<TRequest, TResponse>,
+  ): CultMeshBoundOperationHandle<TRequest, TResponse> {
+    return cultMeshBindOperation(this.context, operation);
+  }
+
+  public bindQuery<TParameters, TResult>(
+    query: CultMeshQuerySurface<TParameters, TResult>,
+  ): CultMeshBoundQuerySurface<TParameters, TResult> {
+    return cultMeshBindQuery(this.context, query);
+  }
+
+  public bindLiveFeed<TParameters, TResult>(
+    feed: CultMeshLiveFeed<TParameters, TResult>,
+  ): CultMeshBoundLiveFeed<TParameters, TResult> {
+    return cultMeshBindLiveFeed(this.context, feed);
+  }
+
+  public bindStatePointer<T>(
+    pointer: CultMeshStatePointer<T>,
+  ): CultMeshBoundStatePointer<T> {
+    return cultMeshBindStatePointer(this.context, pointer);
+  }
+
+  public bindMutableStatePointer<T>(
+    pointer: CultMeshMutableStatePointer<T>,
+  ): CultMeshBoundMutableStatePointer<T> {
+    return cultMeshBindMutableStatePointer(this.context, pointer);
+  }
+}
+
+export class CultMeshOperationHandle<TRequest, TResponse> {
+  public constructor(
+    public readonly operationId: string,
+    private readonly invokeOperation: (
+      request: TRequest,
+      context: CultMeshOperationContext,
+    ) => Promise<TResponse>,
+  ) {
+    requireNonEmpty(operationId, "operationId");
+  }
+
+  public invoke(
+    request: TRequest,
+    context: CultMeshOperationContext | string,
+  ): Promise<TResponse> {
+    return this.invokeOperation(
+      request,
+      typeof context === "string" ? cultMeshOperationContext(context) : context,
+    );
+  }
+
+  public bind(
+    verse: CultMeshVerseContext | CultMeshVerse,
+  ): CultMeshBoundOperationHandle<TRequest, TResponse> {
+    return cultMeshBindOperation(verse, this);
+  }
+}
+
+export class CultMeshBoundOperationHandle<TRequest, TResponse> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly operation: CultMeshOperationHandle<TRequest, TResponse>,
+  ) {}
+
+  public get operationId(): string {
+    return this.operation.operationId;
+  }
+
+  public invoke(
+    request: TRequest,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<TResponse> {
+    return this.operation.invoke(
+      request,
+      cultMeshOperationContextFromVerse(this.verse, options),
+    );
+  }
+}
+
+export class CultMeshQuerySurface<TParameters, TResult> {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly queryId: string,
+    private readonly executeQuery: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchQuery?: CultMeshQueryWatcher<TParameters, TResult>;
+    } = {},
+  ) {
+    requireNonEmpty(queryId, "queryId");
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+    this.watchQuery = options.watchQuery;
+  }
+
+  private readonly watchQuery: CultMeshQueryWatcher<TParameters, TResult> | undefined;
+
+  public execute(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+  ): Promise<TResult> {
+    return this.executeQuery(
+      parameters,
+      typeof context === "string" ? cultMeshQueryContext(context) : context,
+    );
+  }
+
+  public query(parameters: TParameters, context: CultMeshQueryContext | string): Promise<TResult> {
+    return this.execute(parameters, context);
+  }
+
+  public watch(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+    callback: (value: TResult) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchQuery) {
+      throw new Error(`Query surface '${this.queryId}' does not support watches.`);
+    }
+
+    return this.watchQuery(
+      parameters,
+      typeof context === "string" ? cultMeshQueryContext(context) : context,
+      callback,
+    );
+  }
+
+  public bind(
+    verse: CultMeshVerseContext | CultMeshVerse,
+  ): CultMeshBoundQuerySurface<TParameters, TResult> {
+    return cultMeshBindQuery(verse, this);
+  }
+}
+
+export class CultMeshBoundQuerySurface<TParameters, TResult> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly query: CultMeshQuerySurface<TParameters, TResult>,
+  ) {}
+
+  public get queryId(): string {
+    return this.query.queryId;
+  }
+
+  public get sources(): readonly CultMeshProjectionSource[] {
+    return this.query.sources;
+  }
+
+  public get routeHint(): CultMeshRouteHint {
+    return this.query.routeHint;
+  }
+
+  public execute(parameters: TParameters): Promise<TResult> {
+    return this.query.execute(parameters, cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public queryOnce(parameters: TParameters): Promise<TResult> {
+    return this.execute(parameters);
+  }
+
+  public watch(
+    parameters: TParameters,
+    callback: (value: TResult) => void,
+  ): CultMeshUnsubscribe {
+    return this.query.watch(parameters, cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+}
+
+export class CultMeshLiveFeed<TParameters, TResult> {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly feedId: string,
+    private readonly snapshotFeed: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchFeed?: CultMeshLiveFeedWatcher<TParameters, TResult>;
+    } = {},
+  ) {
+    requireNonEmpty(feedId, "feedId");
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+    this.watchFeed = options.watchFeed;
+  }
+
+  private readonly watchFeed: CultMeshLiveFeedWatcher<TParameters, TResult> | undefined;
+
+  public snapshot(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+  ): Promise<TResult> {
+    return this.snapshotFeed(
+      parameters,
+      this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
+    );
+  }
+
+  public watch(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+    callback: (value: TResult) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchFeed) {
+      throw new Error(`Live feed '${this.feedId}' does not support watches.`);
+    }
+
+    return this.watchFeed(
+      parameters,
+      this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
+      callback,
+    );
+  }
+
+  public bind(
+    verse: CultMeshVerseContext | CultMeshVerse,
+  ): CultMeshBoundLiveFeed<TParameters, TResult> {
+    return cultMeshBindLiveFeed(verse, this);
+  }
+
+  private resolveContext(context: CultMeshQueryContext): CultMeshQueryContext {
+    if (context.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return context;
+    }
+
+    return cultMeshQueryContext(context.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export class CultMeshBoundLiveFeed<TParameters, TResult> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly feed: CultMeshLiveFeed<TParameters, TResult>,
+  ) {}
+
+  public get feedId(): string {
+    return this.feed.feedId;
+  }
+
+  public get sources(): readonly CultMeshProjectionSource[] {
+    return this.feed.sources;
+  }
+
+  public get routeHint(): CultMeshRouteHint {
+    return this.feed.routeHint;
+  }
+
+  public snapshot(parameters: TParameters): Promise<TResult> {
+    return this.feed.snapshot(parameters, cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public watch(
+    parameters: TParameters,
+    callback: (value: TResult) => void,
+  ): CultMeshUnsubscribe {
+    return this.feed.watch(parameters, cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+}
+
+export class CultMeshStatePointer<T> {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly pointerId: string,
+    private readonly resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+    private readonly watchPointer?:
+      | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+      | CultMeshStatePointerWatcher<T>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ) {
+    requireNonEmpty(pointerId, "pointerId");
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+  }
+
+  public resolve(context?: CultMeshQueryContext | string): Promise<T | undefined> {
+    return (this.resolvePointer as CultMeshStatePointerResolver<T>)(
+      this.resolveContext(
+        typeof context === "string" ? cultMeshQueryContext(context) : context,
+      ),
+    );
+  }
+
+  public watch(callback: (value: T) => void): CultMeshUnsubscribe;
+  public watch(context: CultMeshQueryContext | string, callback: (value: T) => void): CultMeshUnsubscribe;
+  public watch(
+    contextOrCallback: CultMeshQueryContext | string | ((value: T) => void),
+    maybeCallback?: (value: T) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchPointer) {
+      throw new Error(`State pointer '${this.pointerId}' does not support watches.`);
+    }
+
+    const callback =
+      typeof contextOrCallback === "function" ? contextOrCallback : maybeCallback;
+    if (!callback) {
+      throw new Error(`State pointer '${this.pointerId}' requires a watch callback.`);
+    }
+
+    if (this.watchPointer.length <= 1) {
+      return (this.watchPointer as (callback: (value: T) => void) => CultMeshUnsubscribe)(callback);
+    }
+
+    const context =
+      typeof contextOrCallback === "function"
+        ? undefined
+        : typeof contextOrCallback === "string"
+          ? cultMeshQueryContext(contextOrCallback)
+          : contextOrCallback;
+    return (this.watchPointer as CultMeshStatePointerWatcher<T>)(
+      this.resolveContext(context),
+      callback,
+    );
+  }
+
+  public bind(
+    verse: CultMeshVerseContext | CultMeshVerse,
+  ): CultMeshBoundStatePointer<T> {
+    return cultMeshBindStatePointer(verse, this);
+  }
+
+  private resolveContext(context?: CultMeshQueryContext): CultMeshQueryContext {
+    const resolved = context ?? cultMeshQueryContext("local");
+    if (resolved.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return resolved;
+    }
+
+    return cultMeshQueryContext(resolved.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export class CultMeshBoundStatePointer<T> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly pointer: CultMeshStatePointer<T>,
+  ) {}
+
+  public get pointerId(): string {
+    return this.pointer.pointerId;
+  }
+
+  public get sources(): readonly CultMeshProjectionSource[] {
+    return this.pointer.sources;
+  }
+
+  public get routeHint(): CultMeshRouteHint {
+    return this.pointer.routeHint;
+  }
+
+  public resolve(): Promise<T | undefined> {
+    return this.pointer.resolve(cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public watch(callback: (value: T) => void): CultMeshUnsubscribe {
+    return this.pointer.watch(cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+}
+
+export class CultMeshMutableStatePointer<T> {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly pointerId: string,
+    private readonly resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+    private readonly watchPointer:
+      | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+      | CultMeshStatePointerWatcher<T>,
+    private readonly replacePointer:
+      | ((value: T) => Promise<void>)
+      | CultMeshMutableStatePointerReplacer<T>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ) {
+    requireNonEmpty(pointerId, "pointerId");
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+  }
+
+  public resolve(context?: CultMeshQueryContext | string): Promise<T | undefined> {
+    return (this.resolvePointer as CultMeshStatePointerResolver<T>)(
+      this.resolveContext(
+        typeof context === "string" ? cultMeshQueryContext(context) : context,
+      ),
+    );
+  }
+
+  public read(context?: CultMeshQueryContext | string): Promise<T | undefined> {
+    return this.resolve(context);
+  }
+
+  public replace(value: T): Promise<void>;
+  public replace(context: CultMeshQueryContext | string, value: T): Promise<void>;
+  public replace(
+    contextOrValue: CultMeshQueryContext | string | T,
+    maybeValue?: T,
+  ): Promise<void> {
+    if (this.replacePointer.length <= 1) {
+      return (this.replacePointer as (value: T) => Promise<void>)(
+        contextOrValue as T,
+      );
+    }
+
+    const context =
+      typeof contextOrValue === "string"
+        ? cultMeshQueryContext(contextOrValue)
+        : isCultMeshQueryContext(contextOrValue)
+          ? contextOrValue
+          : undefined;
+    const value = context ? maybeValue : (contextOrValue as T);
+    if (value === undefined) {
+      throw new Error(`Mutable state pointer '${this.pointerId}' requires a replacement value.`);
+    }
+
+    return (this.replacePointer as CultMeshMutableStatePointerReplacer<T>)(
+      this.resolveContext(context),
+      value,
+    );
+  }
+
+  public watch(callback: (value: T) => void): CultMeshUnsubscribe;
+  public watch(context: CultMeshQueryContext | string, callback: (value: T) => void): CultMeshUnsubscribe;
+  public watch(
+    contextOrCallback: CultMeshQueryContext | string | ((value: T) => void),
+    maybeCallback?: (value: T) => void,
+  ): CultMeshUnsubscribe {
+    const callback =
+      typeof contextOrCallback === "function" ? contextOrCallback : maybeCallback;
+    if (!callback) {
+      throw new Error(`Mutable state pointer '${this.pointerId}' requires a watch callback.`);
+    }
+
+    if (this.watchPointer.length <= 1) {
+      return (this.watchPointer as (callback: (value: T) => void) => CultMeshUnsubscribe)(callback);
+    }
+
+    const context =
+      typeof contextOrCallback === "function"
+        ? undefined
+        : typeof contextOrCallback === "string"
+          ? cultMeshQueryContext(contextOrCallback)
+          : contextOrCallback;
+    return (this.watchPointer as CultMeshStatePointerWatcher<T>)(
+      this.resolveContext(context),
+      callback,
+    );
+  }
+
+  public asStatePointer(): CultMeshStatePointer<T> {
+    return cultMeshStatePointer(
+      this.pointerId,
+      (context) => this.resolve(context),
+      (context, callback) => this.watch(context, callback),
+      {
+        routeHint: this.routeHint,
+        sources: this.sources,
+      },
+    );
+  }
+
+  public bind(
+    verse: CultMeshVerseContext | CultMeshVerse,
+  ): CultMeshBoundMutableStatePointer<T> {
+    return cultMeshBindMutableStatePointer(verse, this);
+  }
+
+  private resolveContext(context?: CultMeshQueryContext): CultMeshQueryContext {
+    const resolved = context ?? cultMeshQueryContext("local");
+    if (resolved.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return resolved;
+    }
+
+    return cultMeshQueryContext(resolved.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export class CultMeshBoundMutableStatePointer<T> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly pointer: CultMeshMutableStatePointer<T>,
+  ) {}
+
+  public get pointerId(): string {
+    return this.pointer.pointerId;
+  }
+
+  public get sources(): readonly CultMeshProjectionSource[] {
+    return this.pointer.sources;
+  }
+
+  public get routeHint(): CultMeshRouteHint {
+    return this.pointer.routeHint;
+  }
+
+  public resolve(): Promise<T | undefined> {
+    return this.pointer.resolve(cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public read(): Promise<T | undefined> {
+    return this.resolve();
+  }
+
+  public replace(value: T): Promise<void> {
+    return this.pointer.replace(cultMeshQueryContextFromVerse(this.verse), value);
+  }
+
+  public watch(callback: (value: T) => void): CultMeshUnsubscribe {
+    return this.pointer.watch(cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+
+  public asStatePointer(): CultMeshBoundStatePointer<T> {
+    return cultMeshBindStatePointer(this.verse, this.pointer.asStatePointer());
+  }
+}
+
+export class CultMeshProjectionRecipe<TParameters, TResult> {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly projectionId: string,
+    sources: readonly CultMeshProjectionSource[],
+    private readonly projectProjection: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      watchProjection?: (
+        parameters: TParameters,
+        context: CultMeshQueryContext,
+        callback: (value: TResult) => void,
+      ) => CultMeshUnsubscribe;
+    } = {},
+  ) {
+    requireNonEmpty(projectionId, "projectionId");
+    this.sources = [...sources];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+    this.watchProjection = options.watchProjection;
+  }
+
+  private readonly watchProjection:
+    | ((
+        parameters: TParameters,
+        context: CultMeshQueryContext,
+        callback: (value: TResult) => void,
+      ) => CultMeshUnsubscribe)
+    | undefined;
+
+  public project(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+  ): Promise<TResult> {
+    return this.projectProjection(
+      parameters,
+      this.resolveContext(
+        typeof context === "string" ? cultMeshQueryContext(context) : context,
+      ),
+    );
+  }
+
+  public watch(
+    parameters: TParameters,
+    context: CultMeshQueryContext | string,
+    callback: (value: TResult) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchProjection) {
+      throw new Error(`Projection recipe '${this.projectionId}' does not support watches.`);
+    }
+
+    return this.watchProjection(
+      parameters,
+      this.resolveContext(
+        typeof context === "string" ? cultMeshQueryContext(context) : context,
+      ),
+      callback,
+    );
+  }
+
+  public asQuerySurface(): CultMeshQuerySurface<TParameters, TResult> {
+    return cultMeshQuery(this.projectionId, (parameters, context) =>
+      this.project(parameters, context),
+      {
+        sources: this.sources,
+        routeHint: this.routeHint,
+        watchQuery: this.watchProjection
+          ? (parameters, context, callback) => this.watch(parameters, context, callback)
+          : undefined,
+      },
+    );
+  }
+
+  private resolveContext(context: CultMeshQueryContext): CultMeshQueryContext {
+    if (context.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return context;
+    }
+
+    return cultMeshQueryContext(context.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export function cultMeshOperationContextFor(runtimeId: string): CultMeshOperationContextBuilder {
+  return new CultMeshOperationContextBuilder(runtimeId);
+}
+
+export function cultMeshQueryContextFor(runtimeId: string): CultMeshQueryContextBuilder {
+  return new CultMeshQueryContextBuilder(runtimeId);
+}
+
+export function cultMeshVec2(x: number, y: number): CultMeshVec2 {
+  return { x, y };
+}
+
+export function cultMeshRect(min: CultMeshVec2, max: CultMeshVec2): CultMeshRect {
+  return {
+    min: cultMeshVec2(Math.min(min.x, max.x), Math.min(min.y, max.y)),
+    max: cultMeshVec2(Math.max(min.x, max.x), Math.max(min.y, max.y)),
+  };
+}
+
+export function cultMeshRectFromBounds(
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): CultMeshRect {
+  return cultMeshRect(cultMeshVec2(minX, minY), cultMeshVec2(maxX, maxY));
+}
+
+export function cultMeshViewportRequest(
+  viewport: CultMeshRect,
+  controlledEntityIndices?: readonly number[],
+): CultMeshViewportRequest {
+  return {
+    minX: viewport.min.x,
+    minY: viewport.min.y,
+    maxX: viewport.max.x,
+    maxY: viewport.max.y,
+    controlledEntityIndices,
+  };
+}
+
+export function cultMeshRouteHint(
+  kind: CultMeshLocalityKind = "automatic",
+  description?: string,
+): CultMeshRouteHint {
+  return description ? { kind, description } : { kind };
+}
+
+export function cultMeshRouteRecord(
+  routeHint?: CultMeshRouteHint,
+): CultMeshRouteRecord;
+export function cultMeshRouteRecord(
+  kind?: string,
+  description?: string,
+): CultMeshRouteRecord;
+export function cultMeshRouteRecord(
+  routeOrKind?: CultMeshRouteHint | string,
+  description = "",
+): CultMeshRouteRecord {
+  if (typeof routeOrKind === "string" || routeOrKind === undefined) {
+    return {
+      kind: routeOrKind ?? "",
+      description,
+    };
+  }
+
+  return {
+    kind: routeOrKind.kind,
+    description: routeOrKind.description ?? "",
+  };
+}
+
+export function cultMeshRouteFromRecord(
+  record: Partial<CultMeshRouteRecord>,
+  fallback: CultMeshRouteHint = cultMeshRouteHint(),
+): CultMeshRouteHint {
+  return cultMeshRouteHint(
+    parseCultMeshLocalityKind(record.kind, fallback.kind),
+    nonBlankOr(record.description, fallback.description),
+  );
+}
+
+export function cultMeshAuthorityClaim(
+  role: string,
+  options: { shardId?: string; leaseId?: string } = {},
+): CultMeshAuthorityClaim {
+  requireNonEmpty(role, "role");
+  return {
+    role,
+    shardId: options.shardId,
+    leaseId: options.leaseId,
+  };
+}
+
+export function cultMeshVerseContext(
+  verseId: string,
+  runtimeId: string,
+  options: {
+    routeHint?: CultMeshRouteHint;
+    claims?: readonly CultMeshAuthorityClaim[];
+  } = {},
+): CultMeshVerseContext {
+  requireNonEmpty(verseId, "verseId");
+  requireNonEmpty(runtimeId, "runtimeId");
+  return {
+    verseId,
+    runtimeId,
+    routeHint: options.routeHint ?? cultMeshRouteHint(),
+    claims: options.claims ? [...options.claims] : [],
+  };
+}
+
+export function cultMeshVerse(
+  verseId: string,
+  runtimeId: string,
+  options: {
+    routeHint?: CultMeshRouteHint;
+    claims?: readonly CultMeshAuthorityClaim[];
+  } = {},
+): CultMeshVerse {
+  return new CultMeshVerse(cultMeshVerseContext(verseId, runtimeId, options));
+}
+
+export function cultMeshOperationContextFromVerse(
+  context: CultMeshVerseContext,
+  options: { idempotencyKey?: string } = {},
+): CultMeshOperationContext {
+  return cultMeshOperationContext(context.runtimeId, {
+    claims: context.claims,
+    routeHint: context.routeHint,
+    idempotencyKey: options.idempotencyKey,
+  });
+}
+
+export function cultMeshQueryContextFromVerse(
+  context: CultMeshVerseContext,
+): CultMeshQueryContext {
+  return cultMeshQueryContext(context.runtimeId, {
+    routeHint: context.routeHint,
+  });
+}
+
+export function cultMeshBindOperation<TRequest, TResponse>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  operation: CultMeshOperationHandle<TRequest, TResponse>,
+): CultMeshBoundOperationHandle<TRequest, TResponse> {
+  return new CultMeshBoundOperationHandle(resolveCultMeshVerseContext(verse), operation);
+}
+
+export function cultMeshBindQuery<TParameters, TResult>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  query: CultMeshQuerySurface<TParameters, TResult>,
+): CultMeshBoundQuerySurface<TParameters, TResult> {
+  return new CultMeshBoundQuerySurface(resolveCultMeshVerseContext(verse), query);
+}
+
+export function cultMeshBindLiveFeed<TParameters, TResult>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  feed: CultMeshLiveFeed<TParameters, TResult>,
+): CultMeshBoundLiveFeed<TParameters, TResult> {
+  return new CultMeshBoundLiveFeed(resolveCultMeshVerseContext(verse), feed);
+}
+
+export function cultMeshBindStatePointer<T>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  pointer: CultMeshStatePointer<T>,
+): CultMeshBoundStatePointer<T> {
+  return new CultMeshBoundStatePointer(resolveCultMeshVerseContext(verse), pointer);
+}
+
+export function cultMeshBindMutableStatePointer<T>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  pointer: CultMeshMutableStatePointer<T>,
+): CultMeshBoundMutableStatePointer<T> {
+  return new CultMeshBoundMutableStatePointer(resolveCultMeshVerseContext(verse), pointer);
+}
+
+function resolveCultMeshVerseContext(verse: CultMeshVerseContext | CultMeshVerse): CultMeshVerseContext {
+  return verse instanceof CultMeshVerse ? verse.context : verse;
+}
+
+function isCultMeshQueryContext(value: unknown): value is CultMeshQueryContext {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const maybeContext = value as Partial<CultMeshQueryContext>;
+  return typeof maybeContext.runtimeId === "string" &&
+    typeof maybeContext.routeHint === "object" &&
+    maybeContext.routeHint !== null;
+}
+
+export function cultMeshOperationContext(
+  runtimeId: string,
+  options: {
+    claims?: readonly CultMeshAuthorityClaim[];
+    routeHint?: CultMeshRouteHint;
+    idempotencyKey?: string;
+  } = {},
+): CultMeshOperationContext {
+  requireNonEmpty(runtimeId, "runtimeId");
+  return {
+    runtimeId,
+    claims: options.claims ? [...options.claims] : [],
+    routeHint: options.routeHint ?? cultMeshRouteHint(),
+    idempotencyKey: options.idempotencyKey,
+  };
+}
+
+export function cultMeshQueryContext(
+  runtimeId: string,
+  options: { routeHint?: CultMeshRouteHint } = {},
+): CultMeshQueryContext {
+  requireNonEmpty(runtimeId, "runtimeId");
+  return {
+    runtimeId,
+    routeHint: options.routeHint ?? cultMeshRouteHint(),
+  };
+}
+
+export function cultMeshOperationReceipt(
+  operationId: string,
+  accepted: boolean,
+  options: { route?: CultMeshRouteHint; diagnostic?: string } = {},
+): CultMeshOperationReceipt {
+  requireNonEmpty(operationId, "operationId");
+  return {
+    operationId,
+    accepted,
+    route: options.route ?? cultMeshRouteHint(),
+    diagnostic: options.diagnostic,
+  };
+}
+
+export function cultMeshOperation<TRequest, TResponse>(
+  operationId: string,
+  invokeOperation: (
+    request: TRequest,
+    context: CultMeshOperationContext,
+  ) => Promise<TResponse>,
+): CultMeshOperationHandle<TRequest, TResponse> {
+  return new CultMeshOperationHandle(operationId, invokeOperation);
+}
+
+export function cultMeshQuery<TParameters, TResult>(
+  queryId: string,
+  executeQuery: (
+    parameters: TParameters,
+    context: CultMeshQueryContext,
+  ) => Promise<TResult>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+    watchQuery?: CultMeshQueryWatcher<TParameters, TResult>;
+  } = {},
+): CultMeshQuerySurface<TParameters, TResult> {
+  return new CultMeshQuerySurface(queryId, executeQuery, options);
+}
+
+export function cultMeshDescribeQuerySurface(
+  query: {
+    readonly queryId: string;
+    readonly routeHint: CultMeshRouteHint;
+    readonly sources: readonly CultMeshProjectionSource[];
+  },
+): CultMeshQuerySurfaceDiagnostic {
+  return {
+    queryId: query.queryId,
+    routeHint: query.routeHint,
+    sources: [...query.sources],
+  };
+}
+
+export function cultMeshDescribeOperationHandle(
+  operation: {
+    readonly operationId: string;
+  },
+): CultMeshOperationHandleDiagnostic {
+  return {
+    operationId: operation.operationId,
+  };
+}
+
+export function cultMeshDescribeStatePointer(
+  pointer: {
+    readonly pointerId: string;
+    readonly routeHint?: CultMeshRouteHint;
+    readonly sources?: readonly CultMeshProjectionSource[];
+  },
+): CultMeshStatePointerDiagnostic {
+  return {
+    pointerId: pointer.pointerId,
+    routeHint: pointer.routeHint ?? cultMeshRouteHint(),
+    sources: [...(pointer.sources ?? [])],
+  };
+}
+
+export function cultMeshLiveFeed<TParameters, TResult>(
+  feedId: string,
+  snapshotFeed: (
+    parameters: TParameters,
+    context: CultMeshQueryContext,
+  ) => Promise<TResult>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+    watchFeed?: CultMeshLiveFeedWatcher<TParameters, TResult>;
+  } = {},
+): CultMeshLiveFeed<TParameters, TResult> {
+  return new CultMeshLiveFeed(feedId, snapshotFeed, options);
+}
+
+export function cultMeshDescribeLiveFeed(
+  feed: {
+    readonly feedId: string;
+    readonly routeHint: CultMeshRouteHint;
+    readonly sources: readonly CultMeshProjectionSource[];
+  },
+): CultMeshLiveFeedDiagnostic {
+  return {
+    feedId: feed.feedId,
+    routeHint: feed.routeHint,
+    sources: [...feed.sources],
+  };
+}
+
+export function cultMeshPollingQueryWatcher<TParameters, TResult>(
+  executeQuery: (
+    parameters: TParameters,
+    context: CultMeshQueryContext,
+  ) => Promise<TResult>,
+  options: CultMeshPollingWatchOptions<TResult> = {},
+): CultMeshQueryWatcher<TParameters, TResult> {
+  const intervalMs = Math.max(1, options.intervalMs ?? 50);
+  const emitInitial = options.emitInitial ?? true;
+  return (parameters, context, callback) => {
+    let disposed = false;
+    let running = false;
+    let last: TResult | undefined;
+    let hasLast = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    const poll = async () => {
+      if (disposed || running) {
+        return;
+      }
+
+      running = true;
+      try {
+        const next = await executeQuery(parameters, context);
+        const changed = !hasLast || !(options.equals?.(last as TResult, next) ?? Object.is(last, next));
+        const shouldEmit = hasLast ? changed : emitInitial;
+        last = next;
+        hasLast = true;
+        if (shouldEmit) {
+          callback(next);
+        }
+      } finally {
+        running = false;
+      }
+    };
+
+    void poll();
+    timer = setInterval(() => {
+      void poll();
+    }, intervalMs);
+
+    return () => {
+      disposed = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  };
+}
+
+export function cultMeshStatePointer<T>(
+  pointerId: string,
+  resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+  watchPointer?:
+    | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+    | CultMeshStatePointerWatcher<T>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+  } = {},
+): CultMeshStatePointer<T> {
+  return new CultMeshStatePointer(pointerId, resolvePointer, watchPointer, options);
+}
+
+export function cultMeshMutableStatePointer<T>(
+  pointerId: string,
+  resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+  watchPointer:
+    | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+    | CultMeshStatePointerWatcher<T>,
+  replacePointer:
+    | ((value: T) => Promise<void>)
+    | CultMeshMutableStatePointerReplacer<T>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+  } = {},
+): CultMeshMutableStatePointer<T> {
+  return new CultMeshMutableStatePointer(
+    pointerId,
+    resolvePointer,
+    watchPointer,
+    replacePointer,
+    options,
+  );
+}
+
+export function cultMeshProjectionSource(
+  sourceId: string,
+  options: { schemaId?: string; description?: string } = {},
+): CultMeshProjectionSource {
+  requireNonEmpty(sourceId, "sourceId");
+  return {
+    sourceId,
+    schemaId: options.schemaId,
+    description: options.description,
+  };
+}
+
+export class CultMeshStateRefResolver {
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly resolverId: string,
+    private readonly resolveRef: (stateRef: string, context: CultMeshQueryContext) => string | undefined,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ) {
+    requireNonEmpty(resolverId, "resolverId");
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+  }
+
+  public resolve(stateRef: string, context: CultMeshQueryContext | string = "local"): string {
+    if (!stateRef.trim()) {
+      return "";
+    }
+    return (
+      this.resolveRef(
+        stateRef,
+        this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
+      ) ?? ""
+    );
+  }
+
+  public tryResolve(
+    stateRef: string,
+    context: CultMeshQueryContext | string = "local",
+  ): { resolved: boolean; value: string } {
+    const value = this.resolve(stateRef, context);
+    return { resolved: value.length > 0, value };
+  }
+
+  public or(fallback: CultMeshStateRefResolver): CultMeshStateRefResolver {
+    return new CultMeshStateRefResolver(
+      `${this.resolverId}|${fallback.resolverId}`,
+      (stateRef, context) => {
+        const value = this.resolve(stateRef, context);
+        return value.length > 0 ? value : fallback.resolve(stateRef, context);
+      },
+      {
+        sources: [...this.sources, ...fallback.sources],
+        routeHint: this.routeHint.kind === "automatic" ? fallback.routeHint : this.routeHint,
+      },
+    );
+  }
+
+  public asFunction(): (stateRef: string) => string {
+    return (stateRef) => this.resolve(stateRef);
+  }
+
+  private resolveContext(context: CultMeshQueryContext): CultMeshQueryContext {
+    if (context.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return context;
+    }
+    return cultMeshQueryContext(context.runtimeId, { routeHint: this.routeHint });
+  }
+}
+
+export function cultMeshStateRefResolver(
+  resolverId: string,
+  resolveRef:
+    | ((stateRef: string) => string | undefined)
+    | ((stateRef: string, context: CultMeshQueryContext) => string | undefined),
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+  } = {},
+): CultMeshStateRefResolver {
+  return new CultMeshStateRefResolver(
+    resolverId,
+    (stateRef, context) =>
+      resolveRef.length <= 1
+        ? (resolveRef as (stateRef: string) => string | undefined)(stateRef)
+        : (resolveRef as (stateRef: string, context: CultMeshQueryContext) => string | undefined)(
+            stateRef,
+            context,
+          ),
+    options,
+  );
+}
+
+export function cultMeshDescribeStateRefResolver(
+  resolver: CultMeshStateRefResolver,
+): CultMeshStateRefResolverDiagnostic {
+  return {
+    resolverId: resolver.resolverId,
+    routeHint: resolver.routeHint,
+    sources: [...resolver.sources],
+  };
+}
+
+export function cultMeshStateBinding(
+  targetProp: string,
+  pointer:
+    | {
+        readonly pointerId: string;
+        readonly routeHint?: CultMeshRouteHint;
+        readonly sources?: readonly CultMeshProjectionSource[];
+      }
+    | string,
+  options: {
+    sourceId?: string;
+    schemaId?: string;
+    routeHint?: CultMeshRouteHint;
+  } = {},
+): CultMeshStateBindingDescriptor {
+  requireNonEmpty(targetProp, "targetProp");
+  if (typeof pointer === "string") {
+    requireNonEmpty(pointer, "pointerId");
+    return {
+      targetProp,
+      pointerId: pointer,
+      sourceId: options.sourceId,
+      schemaId: options.schemaId,
+      routeHint: options.routeHint ?? cultMeshRouteHint(),
+    };
+  }
+
+  requireNonEmpty(pointer.pointerId, "pointerId");
+  const source = pointer.sources?.[0];
+  return {
+    targetProp,
+    pointerId: pointer.pointerId,
+    sourceId: options.sourceId ?? source?.sourceId,
+    schemaId: options.schemaId ?? source?.schemaId,
+    routeHint: options.routeHint ?? pointer.routeHint ?? cultMeshRouteHint(),
+  };
+}
+
+export function cultMeshStateBindingRecord(
+  binding?: Partial<CultMeshStateBindingDescriptor>,
+): CultMeshStateBindingRecord;
+export function cultMeshStateBindingRecord(
+  targetProp?: string,
+  pointerId?: string,
+  sourceId?: string,
+  schemaId?: string,
+  routeKind?: string,
+  routeDescription?: string,
+): CultMeshStateBindingRecord;
+export function cultMeshStateBindingRecord(
+  bindingOrTargetProp?: Partial<CultMeshStateBindingDescriptor> | string,
+  pointerId?: string,
+  sourceId?: string,
+  schemaId?: string,
+  routeKind?: string,
+  routeDescription?: string,
+): CultMeshStateBindingRecord {
+  if (typeof bindingOrTargetProp === "object" || bindingOrTargetProp === undefined) {
+    const binding = bindingOrTargetProp;
+    const route = cultMeshRouteRecord(binding?.routeHint);
+    return {
+      targetProp: binding?.targetProp?.trim() || "value",
+      pointerId: binding?.pointerId ?? "",
+      sourceId: binding?.sourceId ?? "",
+      schemaId: binding?.schemaId ?? "",
+      routeKind: route.kind,
+      routeDescription: route.description,
+    };
+  }
+
+  return {
+    targetProp: bindingOrTargetProp?.trim() || "value",
+    pointerId: pointerId ?? "",
+    sourceId: sourceId ?? "",
+    schemaId: schemaId ?? "",
+    routeKind: routeKind ?? "",
+    routeDescription: routeDescription ?? "",
+  };
+}
+
+export function cultMeshStateBindingFromRecord(
+  record: Partial<CultMeshStateBindingRecord>,
+  options: {
+    fallbackRouteHint?: CultMeshRouteHint;
+    fallbackTargetProp?: string;
+  } = {},
+): CultMeshStateBindingDescriptor {
+  const targetProp = record.targetProp?.trim() || options.fallbackTargetProp?.trim() || "value";
+  return {
+    targetProp,
+    pointerId: record.pointerId?.trim() || `${targetProp}.unknown`,
+    sourceId: record.sourceId ?? "",
+    schemaId: record.schemaId ?? "",
+    routeHint: cultMeshRouteFromRecord(
+      {
+        kind: record.routeKind,
+        description: record.routeDescription,
+      },
+      options.fallbackRouteHint,
+    ),
+  };
+}
+
+export function cultMeshOperationBinding(
+  operation:
+    | {
+        readonly operationId: string;
+      }
+    | string,
+  options: {
+    label?: string;
+    schemaId?: string;
+    routeHint?: CultMeshRouteHint;
+  } = {},
+): CultMeshOperationBindingDescriptor {
+  const operationId = typeof operation === "string" ? operation : operation.operationId;
+  requireNonEmpty(operationId, "operationId");
+  return {
+    operationId,
+    label: options.label ?? "",
+    schemaId: options.schemaId ?? "",
+    routeHint: options.routeHint ?? cultMeshRouteHint(),
+  };
+}
+
+export function cultMeshOperationBindingRecord(
+  binding?: Partial<CultMeshOperationBindingDescriptor>,
+): CultMeshOperationBindingRecord;
+export function cultMeshOperationBindingRecord(
+  operationId?: string,
+  label?: string,
+  schemaId?: string,
+  routeKind?: string,
+  routeDescription?: string,
+): CultMeshOperationBindingRecord;
+export function cultMeshOperationBindingRecord(
+  bindingOrOperationId?: Partial<CultMeshOperationBindingDescriptor> | string,
+  label?: string,
+  schemaId?: string,
+  routeKind?: string,
+  routeDescription?: string,
+): CultMeshOperationBindingRecord {
+  if (typeof bindingOrOperationId === "object" || bindingOrOperationId === undefined) {
+    const binding = bindingOrOperationId;
+    const route = cultMeshRouteRecord(binding?.routeHint);
+    return {
+      operationId: binding?.operationId ?? "",
+      label: binding?.label ?? "",
+      schemaId: binding?.schemaId ?? "",
+      routeKind: route.kind,
+      routeDescription: route.description,
+    };
+  }
+
+  return {
+    operationId: bindingOrOperationId ?? "",
+    label: label ?? "",
+    schemaId: schemaId ?? "",
+    routeKind: routeKind ?? "",
+    routeDescription: routeDescription ?? "",
+  };
+}
+
+export function cultMeshOperationBindingFromRecord(
+  record: Partial<CultMeshOperationBindingRecord>,
+  options: {
+    fallbackRouteHint?: CultMeshRouteHint;
+    fallbackOperationId?: string;
+  } = {},
+): CultMeshOperationBindingDescriptor {
+  return {
+    operationId: record.operationId?.trim() || options.fallbackOperationId || "",
+    label: record.label ?? "",
+    schemaId: record.schemaId ?? "",
+    routeHint: cultMeshRouteFromRecord(
+      {
+        kind: record.routeKind,
+        description: record.routeDescription,
+      },
+      options.fallbackRouteHint,
+    ),
+  };
+}
+
+export function cultMeshOperationInvocation(
+  operation:
+    | {
+        readonly operationId: string;
+        readonly schemaId?: string;
+        readonly routeHint?: CultMeshRouteHint;
+      }
+    | string,
+  options: {
+    schemaId?: string;
+    routeHint?: CultMeshRouteHint;
+    idempotencyKey?: string;
+  } = {},
+): CultMeshOperationInvocationDescriptor {
+  const operationId = typeof operation === "string" ? operation : operation.operationId;
+  requireNonEmpty(operationId, "operationId");
+  return {
+    operationId,
+    schemaId: options.schemaId ?? (typeof operation === "string" ? "" : operation.schemaId) ?? "",
+    routeHint:
+      options.routeHint ??
+      (typeof operation === "string" ? undefined : operation.routeHint) ??
+      cultMeshRouteHint(),
+    idempotencyKey: options.idempotencyKey,
+  };
+}
+
+export function cultMeshOperationInvocationRecord(
+  invocation?: CultMeshOperationInvocationDescriptor,
+  options: {
+    fallbackOperationId?: string;
+    fallbackSchemaId?: string;
+    fallbackRouteHint?: CultMeshRouteHint;
+    fallbackIdempotencyKey?: string;
+  } = {},
+): CultMeshOperationInvocationRecord {
+  const route = cultMeshRouteRecord(invocation?.routeHint ?? options.fallbackRouteHint);
+  return {
+    operationId: nonBlankOr(invocation?.operationId, options.fallbackOperationId),
+    schemaId: nonBlankOr(invocation?.schemaId, options.fallbackSchemaId),
+    routeKind: route.kind,
+    routeDescription: route.description,
+    idempotencyKey: nonBlankOr(invocation?.idempotencyKey, options.fallbackIdempotencyKey),
+  };
+}
+
+export function cultMeshOperationInvocationFromRecord(
+  record: Partial<CultMeshOperationInvocationRecord>,
+  options: {
+    fallbackOperationId?: string;
+    fallbackSchemaId?: string;
+    fallbackRouteHint?: CultMeshRouteHint;
+    fallbackIdempotencyKey?: string;
+  } = {},
+): CultMeshOperationInvocationDescriptor {
+  const operationId = nonBlankOr(record.operationId, options.fallbackOperationId);
+  requireNonEmpty(operationId, "operationId");
+  const fallbackRoute = options.fallbackRouteHint ?? cultMeshRouteHint();
+  const route = cultMeshRouteFromRecord(
+    {
+      kind: record.routeKind,
+      description: record.routeDescription,
+    },
+    fallbackRoute,
+  );
+  return {
+    operationId,
+    schemaId: nonBlankOr(record.schemaId, options.fallbackSchemaId),
+    routeHint: route,
+    idempotencyKey: nonBlankOr(record.idempotencyKey, options.fallbackIdempotencyKey) || undefined,
+  };
+}
+
+export function cultMeshOperationPayload(
+  fields: Readonly<Record<string, string | number | boolean | undefined>> = {},
+): CultMeshOperationPayload {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!key.trim() || value === undefined) {
+      continue;
+    }
+    normalized[key] = String(value);
+  }
+
+  return {
+    fields: Object.freeze({ ...normalized }),
+    getString(key, defaultValue = "") {
+      return normalized[key] ?? defaultValue;
+    },
+    getInt(key, defaultValue = 0) {
+      const raw = normalized[key];
+      if (raw === undefined || raw.trim() === "") {
+        return defaultValue;
+      }
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isNaN(parsed) ? defaultValue : parsed;
+    },
+    getDouble(key, defaultValue = 0) {
+      const raw = normalized[key];
+      if (raw === undefined || raw.trim() === "") {
+        return defaultValue;
+      }
+      const parsed = Number.parseFloat(raw);
+      return Number.isNaN(parsed) ? defaultValue : parsed;
+    },
+    getBoolean(key, defaultValue = false) {
+      const raw = normalized[key]?.toLowerCase();
+      if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") {
+        return true;
+      }
+      if (raw === "false" || raw === "0" || raw === "no" || raw === "off") {
+        return false;
+      }
+      return defaultValue;
+    },
+    with(key, value) {
+      requireNonEmpty(key, "key");
+      return cultMeshOperationPayload({
+        ...normalized,
+        [key]: value,
+      });
+    },
+    toRecord() {
+      return Object.freeze({ ...normalized });
+    },
+  };
+}
+
+export function cultMeshProjectionRecipe<TParameters, TResult>(
+  projectionId: string,
+  sources: readonly CultMeshProjectionSource[],
+  projectProjection: (
+    parameters: TParameters,
+    context: CultMeshQueryContext,
+  ) => Promise<TResult>,
+  options: {
+    routeHint?: CultMeshRouteHint;
+    watchProjection?: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+      callback: (value: TResult) => void,
+    ) => CultMeshUnsubscribe;
+  } = {},
+): CultMeshProjectionRecipe<TParameters, TResult> {
+  return new CultMeshProjectionRecipe(
+    projectionId,
+    sources,
+    projectProjection,
+    options,
+  );
+}
+
+export function cultMeshDescribeProjectionRecipe(
+  recipe: {
+    readonly projectionId: string;
+    readonly routeHint: CultMeshRouteHint;
+    readonly sources: readonly CultMeshProjectionSource[];
+  },
+): CultMeshProjectionRecipeDiagnostic {
+  return {
+    projectionId: recipe.projectionId,
+    routeHint: recipe.routeHint,
+    sources: [...recipe.sources],
+  };
+}
+
+export function cultMeshDescribeSurface(
+  surface:
+    | {
+        readonly queryId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly operationId: string;
+      }
+    | {
+        readonly projectionId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly feedId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly pointerId: string;
+        readonly routeHint?: CultMeshRouteHint;
+        readonly sources?: readonly CultMeshProjectionSource[];
+      }
+    | CultMeshNativeSliceViewDescriptor,
+): CultMeshSurfaceDiagnostic {
+  if ("queryId" in surface) {
+    return cultMeshSurfaceDiagnostic("query", surface.queryId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    });
+  }
+
+  if ("operationId" in surface) {
+    return cultMeshSurfaceDiagnostic("operation", surface.operationId);
+  }
+
+  if ("pointerId" in surface) {
+    return cultMeshSurfaceDiagnostic("state-pointer", surface.pointerId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    });
+  }
+
+  if ("viewId" in surface) {
+    return cultMeshSurfaceDiagnostic("native-slice-view", surface.viewId, {
+      routeHint: surface.route,
+    });
+  }
+
+  if ("projectionId" in surface) {
+    return cultMeshSurfaceDiagnostic("projection-recipe", surface.projectionId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    });
+  }
+
+  return cultMeshSurfaceDiagnostic("live-feed", surface.feedId, {
+    routeHint: surface.routeHint,
+    sources: surface.sources,
+  });
+}
+
+export function cultMeshSurfaceDiagnostic(
+  kind: CultMeshSurfaceKind,
+  surfaceId: string,
+  options: {
+    routeHint?: CultMeshRouteHint;
+    sources?: readonly CultMeshProjectionSource[];
+  } = {},
+): CultMeshSurfaceDiagnostic {
+  requireNonEmpty(surfaceId, "surfaceId");
+  return {
+    kind,
+    surfaceId,
+    routeHint: options.routeHint ?? cultMeshRouteHint(),
+    sources: [...(options.sources ?? [])],
+  };
+}
+
+export function cultMeshDescribeSurfaceCatalog(
+  catalogId: string,
+  surfaces: readonly CultMeshSurfaceDiagnostic[],
+): CultMeshSurfaceCatalogDiagnostic {
+  requireNonEmpty(catalogId, "catalogId");
+  return {
+    catalogId,
+    surfaces: surfaces.map(surface => cultMeshSurfaceDiagnostic(surface.kind, surface.surfaceId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    })),
+  };
+}
+
+export function cultMeshFindSurface(
+  catalog: CultMeshSurfaceCatalogDiagnostic,
+  surfaceId: string,
+): CultMeshSurfaceDiagnostic | undefined {
+  requireNonEmpty(surfaceId, "surfaceId");
+  return catalog.surfaces.find(surface => surface.surfaceId === surfaceId);
+}
+
+export function cultMeshSurfacesByKind(
+  catalog: CultMeshSurfaceCatalogDiagnostic,
+  kind: CultMeshSurfaceKind,
+): CultMeshSurfaceDiagnostic[] {
+  return catalog.surfaces
+    .filter(surface => surface.kind === kind)
+    .map(surface => cultMeshSurfaceDiagnostic(surface.kind, surface.surfaceId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    }));
+}
+
+export function cultMeshSurfaceCatalogIndex(
+  catalog: CultMeshSurfaceCatalogDiagnostic,
+): CultMeshSurfaceCatalogIndexDiagnostic {
+  return {
+    catalogId: catalog.catalogId,
+    queries: cultMeshSurfacesByKind(catalog, "query"),
+    projectionRecipes: cultMeshSurfacesByKind(catalog, "projection-recipe"),
+    liveFeeds: cultMeshSurfacesByKind(catalog, "live-feed"),
+    operations: cultMeshSurfacesByKind(catalog, "operation"),
+    statePointers: cultMeshSurfacesByKind(catalog, "state-pointer"),
+    nativeSliceViews: cultMeshSurfacesByKind(catalog, "native-slice-view"),
+  };
+}
+
+export function cultMeshNativeSliceColumn(
+  name: string,
+  valueType: string,
+  elementSizeBytes: number,
+): CultMeshNativeSliceColumn {
+  requireNonEmpty(name, "name");
+  requireNonEmpty(valueType, "valueType");
+  if (!Number.isInteger(elementSizeBytes) || elementSizeBytes <= 0) {
+    throw new Error("elementSizeBytes must be a positive integer.");
+  }
+
+  return { name, valueType, elementSizeBytes };
+}
+
+export function cultMeshNativeSliceView(
+  viewId: string,
+  schemaId: string,
+  rowCount: number,
+  columns: readonly CultMeshNativeSliceColumn[],
+  options: { route?: CultMeshRouteHint; nativeHandle?: string } = {},
+): CultMeshNativeSliceViewDescriptor {
+  requireNonEmpty(viewId, "viewId");
+  requireNonEmpty(schemaId, "schemaId");
+  if (!Number.isInteger(rowCount) || rowCount < 0) {
+    throw new Error("rowCount must be a non-negative integer.");
+  }
+
+  return {
+    viewId,
+    schemaId,
+    rowCount,
+    columns: [...columns],
+    route: options.route ?? cultMeshRouteHint(),
+    nativeHandle: options.nativeHandle,
+  };
+}
+
+export function cultMeshDenseRowStrideBytes(
+  view: CultMeshNativeSliceViewDescriptor,
+): number {
+  return view.columns.reduce((sum, column) => sum + column.elementSizeBytes, 0);
+}
+
+export function cultMeshFindNativeSliceColumn(
+  view: CultMeshNativeSliceViewDescriptor,
+  name: string,
+): CultMeshNativeSliceColumn | undefined {
+  requireNonEmpty(name, "name");
+  return view.columns.find((column) => column.name === name);
+}
+
+export function cultMeshDescribeNativeSliceView(
+  view: CultMeshNativeSliceViewDescriptor,
+): CultMeshNativeSliceViewDiagnostic {
+  return {
+    viewId: view.viewId,
+    schemaId: view.schemaId,
+    rowCount: view.rowCount,
+    columns: [...view.columns],
+    route: view.route,
+    nativeHandle: view.nativeHandle,
+    denseRowStrideBytes: cultMeshDenseRowStrideBytes(view),
+  };
+}
+
 export interface CultMeshNodeOptions {
   documents?: Iterable<AnyCultCacheDocumentDefinition>;
   bindings?: Iterable<CultNetDocumentBinding>;
@@ -544,6 +2594,622 @@ export class CultMeshStreamCatalog {
 }
 
 export class CultMesh {
+  public static vec2(x: number, y: number): CultMeshVec2 {
+    return cultMeshVec2(x, y);
+  }
+
+  public static rect(min: CultMeshVec2, max: CultMeshVec2): CultMeshRect {
+    return cultMeshRect(min, max);
+  }
+
+  public static rectFromBounds(
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number,
+  ): CultMeshRect {
+    return cultMeshRectFromBounds(minX, minY, maxX, maxY);
+  }
+
+  public static viewportRequest(
+    viewport: CultMeshRect,
+    controlledEntityIndices?: readonly number[],
+  ): CultMeshViewportRequest {
+    return cultMeshViewportRequest(viewport, controlledEntityIndices);
+  }
+
+  public static routeHint(
+    kind: CultMeshLocalityKind = "automatic",
+    description?: string,
+  ): CultMeshRouteHint {
+    return cultMeshRouteHint(kind, description);
+  }
+
+  public static routeRecord(routeHint?: CultMeshRouteHint): CultMeshRouteRecord;
+  public static routeRecord(kind?: string, description?: string): CultMeshRouteRecord;
+  public static routeRecord(
+    routeOrKind?: CultMeshRouteHint | string,
+    description = "",
+  ): CultMeshRouteRecord {
+    return typeof routeOrKind === "string" || routeOrKind === undefined
+      ? cultMeshRouteRecord(routeOrKind, description)
+      : cultMeshRouteRecord(routeOrKind);
+  }
+
+  public static routeFromRecord(
+    record: Partial<CultMeshRouteRecord>,
+    fallback: CultMeshRouteHint = cultMeshRouteHint(),
+  ): CultMeshRouteHint {
+    return cultMeshRouteFromRecord(record, fallback);
+  }
+
+  public static authorityClaim(
+    role: string,
+    options: { shardId?: string; leaseId?: string } = {},
+  ): CultMeshAuthorityClaim {
+    return cultMeshAuthorityClaim(role, options);
+  }
+
+  public static verseContext(
+    verseId: string,
+    runtimeId: string,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      claims?: readonly CultMeshAuthorityClaim[];
+    } = {},
+  ): CultMeshVerseContext {
+    return cultMeshVerseContext(verseId, runtimeId, options);
+  }
+
+  public static verse(
+    verseId: string,
+    runtimeId: string,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      claims?: readonly CultMeshAuthorityClaim[];
+    } = {},
+  ): CultMeshVerse {
+    return cultMeshVerse(verseId, runtimeId, options);
+  }
+
+  public static async connectVerse(
+    verseId: string,
+    runtimeId: string,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      claims?: readonly CultMeshAuthorityClaim[];
+    } = {},
+  ): Promise<CultMeshVerse> {
+    return cultMeshVerse(verseId, runtimeId, options);
+  }
+
+  public static operationContextFromVerse(
+    context: CultMeshVerseContext,
+    options: { idempotencyKey?: string } = {},
+  ): CultMeshOperationContext {
+    return cultMeshOperationContextFromVerse(context, options);
+  }
+
+  public static queryContextFromVerse(
+    context: CultMeshVerseContext,
+  ): CultMeshQueryContext {
+    return cultMeshQueryContextFromVerse(context);
+  }
+
+  public static bindOperation<TRequest, TResponse>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    operation: CultMeshOperationHandle<TRequest, TResponse>,
+  ): CultMeshBoundOperationHandle<TRequest, TResponse> {
+    return cultMeshBindOperation(verse, operation);
+  }
+
+  public static bindQuery<TParameters, TResult>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    query: CultMeshQuerySurface<TParameters, TResult>,
+  ): CultMeshBoundQuerySurface<TParameters, TResult> {
+    return cultMeshBindQuery(verse, query);
+  }
+
+  public static bindLiveFeed<TParameters, TResult>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    feed: CultMeshLiveFeed<TParameters, TResult>,
+  ): CultMeshBoundLiveFeed<TParameters, TResult> {
+    return cultMeshBindLiveFeed(verse, feed);
+  }
+
+  public static operationContext(
+    runtimeId: string,
+    options: {
+      claims?: readonly CultMeshAuthorityClaim[];
+      routeHint?: CultMeshRouteHint;
+      idempotencyKey?: string;
+    } = {},
+  ): CultMeshOperationContext {
+    return cultMeshOperationContext(runtimeId, options);
+  }
+
+  public static operationContextFor(runtimeId: string): CultMeshOperationContextBuilder {
+    return cultMeshOperationContextFor(runtimeId);
+  }
+
+  public static queryContext(
+    runtimeId: string,
+    options: { routeHint?: CultMeshRouteHint } = {},
+  ): CultMeshQueryContext {
+    return cultMeshQueryContext(runtimeId, options);
+  }
+
+  public static queryContextFor(runtimeId: string): CultMeshQueryContextBuilder {
+    return cultMeshQueryContextFor(runtimeId);
+  }
+
+  public static operationReceipt(
+    operationId: string,
+    accepted: boolean,
+    options: { route?: CultMeshRouteHint; diagnostic?: string } = {},
+  ): CultMeshOperationReceipt {
+    return cultMeshOperationReceipt(operationId, accepted, options);
+  }
+
+  public static operation<TRequest, TResponse>(
+    operationId: string,
+    invokeOperation: (
+      request: TRequest,
+      context: CultMeshOperationContext,
+    ) => Promise<TResponse>,
+  ): CultMeshOperationHandle<TRequest, TResponse> {
+    return cultMeshOperation(operationId, invokeOperation);
+  }
+
+  public static query<TParameters, TResult>(
+    queryId: string,
+    executeQuery: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchQuery?: CultMeshQueryWatcher<TParameters, TResult>;
+    } = {},
+  ): CultMeshQuerySurface<TParameters, TResult> {
+    return cultMeshQuery(queryId, executeQuery, options);
+  }
+
+  public static describeQuerySurface(
+    query: {
+      readonly queryId: string;
+      readonly routeHint: CultMeshRouteHint;
+      readonly sources: readonly CultMeshProjectionSource[];
+    },
+  ): CultMeshQuerySurfaceDiagnostic {
+    return cultMeshDescribeQuerySurface(query);
+  }
+
+  public static describeOperationHandle(
+    operation: {
+      readonly operationId: string;
+    },
+  ): CultMeshOperationHandleDiagnostic {
+    return cultMeshDescribeOperationHandle(operation);
+  }
+
+  public static describeStatePointer(
+    pointer: {
+      readonly pointerId: string;
+      readonly routeHint?: CultMeshRouteHint;
+      readonly sources?: readonly CultMeshProjectionSource[];
+    },
+  ): CultMeshStatePointerDiagnostic {
+    return cultMeshDescribeStatePointer(pointer);
+  }
+
+  public static liveFeed<TParameters, TResult>(
+    feedId: string,
+    snapshotFeed: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchFeed?: CultMeshLiveFeedWatcher<TParameters, TResult>;
+    } = {},
+  ): CultMeshLiveFeed<TParameters, TResult> {
+    return cultMeshLiveFeed(feedId, snapshotFeed, options);
+  }
+
+  public static describeLiveFeed(
+    feed: {
+      readonly feedId: string;
+      readonly routeHint: CultMeshRouteHint;
+      readonly sources: readonly CultMeshProjectionSource[];
+    },
+  ): CultMeshLiveFeedDiagnostic {
+    return cultMeshDescribeLiveFeed(feed);
+  }
+
+  public static pollingQueryWatcher<TParameters, TResult>(
+    executeQuery: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: CultMeshPollingWatchOptions<TResult> = {},
+  ): CultMeshQueryWatcher<TParameters, TResult> {
+    return cultMeshPollingQueryWatcher(executeQuery, options);
+  }
+
+  public static statePointer<T>(
+    pointerId: string,
+    resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+    watchPointer?:
+      | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+      | CultMeshStatePointerWatcher<T>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ): CultMeshStatePointer<T> {
+    return cultMeshStatePointer(pointerId, resolvePointer, watchPointer, options);
+  }
+
+  public static mutableStatePointer<T>(
+    pointerId: string,
+    resolvePointer: (() => Promise<T | undefined>) | CultMeshStatePointerResolver<T>,
+    watchPointer:
+      | ((callback: (value: T) => void) => CultMeshUnsubscribe)
+      | CultMeshStatePointerWatcher<T>,
+    replacePointer:
+      | ((value: T) => Promise<void>)
+      | CultMeshMutableStatePointerReplacer<T>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ): CultMeshMutableStatePointer<T> {
+    return cultMeshMutableStatePointer(
+      pointerId,
+      resolvePointer,
+      watchPointer,
+      replacePointer,
+      options,
+    );
+  }
+
+  public static bindStatePointer<T>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    pointer: CultMeshStatePointer<T>,
+  ): CultMeshBoundStatePointer<T> {
+    return cultMeshBindStatePointer(verse, pointer);
+  }
+
+  public static bindMutableStatePointer<T>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    pointer: CultMeshMutableStatePointer<T>,
+  ): CultMeshBoundMutableStatePointer<T> {
+    return cultMeshBindMutableStatePointer(verse, pointer);
+  }
+
+  public static projectionSource(
+    sourceId: string,
+    options: { schemaId?: string; description?: string } = {},
+  ): CultMeshProjectionSource {
+    return cultMeshProjectionSource(sourceId, options);
+  }
+
+  public static stateRefResolver(
+    resolverId: string,
+    resolveRef:
+      | ((stateRef: string) => string | undefined)
+      | ((stateRef: string, context: CultMeshQueryContext) => string | undefined),
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ): CultMeshStateRefResolver {
+    return cultMeshStateRefResolver(resolverId, resolveRef, options);
+  }
+
+  public static describeStateRefResolver(
+    resolver: CultMeshStateRefResolver,
+  ): CultMeshStateRefResolverDiagnostic {
+    return cultMeshDescribeStateRefResolver(resolver);
+  }
+
+  public static stateBinding(
+    targetProp: string,
+    pointer:
+      | {
+          readonly pointerId: string;
+          readonly routeHint?: CultMeshRouteHint;
+          readonly sources?: readonly CultMeshProjectionSource[];
+        }
+      | string,
+    options: {
+      sourceId?: string;
+      schemaId?: string;
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ): CultMeshStateBindingDescriptor {
+    return cultMeshStateBinding(targetProp, pointer, options);
+  }
+
+  public static stateBindingRecord(
+    binding?: Partial<CultMeshStateBindingDescriptor>,
+  ): CultMeshStateBindingRecord;
+  public static stateBindingRecord(
+    targetProp?: string,
+    pointerId?: string,
+    sourceId?: string,
+    schemaId?: string,
+    routeKind?: string,
+    routeDescription?: string,
+  ): CultMeshStateBindingRecord;
+  public static stateBindingRecord(
+    bindingOrTargetProp?: Partial<CultMeshStateBindingDescriptor> | string,
+    pointerId?: string,
+    sourceId?: string,
+    schemaId?: string,
+    routeKind?: string,
+    routeDescription?: string,
+  ): CultMeshStateBindingRecord {
+    return typeof bindingOrTargetProp === "object" || bindingOrTargetProp === undefined
+      ? cultMeshStateBindingRecord(bindingOrTargetProp)
+      : cultMeshStateBindingRecord(
+          bindingOrTargetProp,
+          pointerId,
+          sourceId,
+          schemaId,
+          routeKind,
+          routeDescription,
+        );
+  }
+
+  public static stateBindingFromRecord(
+    record: Partial<CultMeshStateBindingRecord>,
+    options: {
+      fallbackRouteHint?: CultMeshRouteHint;
+      fallbackTargetProp?: string;
+    } = {},
+  ): CultMeshStateBindingDescriptor {
+    return cultMeshStateBindingFromRecord(record, options);
+  }
+
+  public static operationBinding(
+    operation:
+      | {
+          readonly operationId: string;
+        }
+      | string,
+    options: {
+      label?: string;
+      schemaId?: string;
+      routeHint?: CultMeshRouteHint;
+    } = {},
+  ): CultMeshOperationBindingDescriptor {
+    return cultMeshOperationBinding(operation, options);
+  }
+
+  public static operationBindingRecord(
+    binding?: Partial<CultMeshOperationBindingDescriptor>,
+  ): CultMeshOperationBindingRecord;
+  public static operationBindingRecord(
+    operationId?: string,
+    label?: string,
+    schemaId?: string,
+    routeKind?: string,
+    routeDescription?: string,
+  ): CultMeshOperationBindingRecord;
+  public static operationBindingRecord(
+    bindingOrOperationId?: Partial<CultMeshOperationBindingDescriptor> | string,
+    label?: string,
+    schemaId?: string,
+    routeKind?: string,
+    routeDescription?: string,
+  ): CultMeshOperationBindingRecord {
+    return typeof bindingOrOperationId === "object" || bindingOrOperationId === undefined
+      ? cultMeshOperationBindingRecord(bindingOrOperationId)
+      : cultMeshOperationBindingRecord(
+          bindingOrOperationId,
+          label,
+          schemaId,
+          routeKind,
+          routeDescription,
+        );
+  }
+
+  public static operationBindingFromRecord(
+    record: Partial<CultMeshOperationBindingRecord>,
+    options: {
+      fallbackRouteHint?: CultMeshRouteHint;
+      fallbackOperationId?: string;
+    } = {},
+  ): CultMeshOperationBindingDescriptor {
+    return cultMeshOperationBindingFromRecord(record, options);
+  }
+
+  public static operationInvocation(
+    operation:
+      | {
+          readonly operationId: string;
+          readonly schemaId?: string;
+          readonly routeHint?: CultMeshRouteHint;
+        }
+      | string,
+    options: {
+      schemaId?: string;
+      routeHint?: CultMeshRouteHint;
+      idempotencyKey?: string;
+    } = {},
+  ): CultMeshOperationInvocationDescriptor {
+    return cultMeshOperationInvocation(operation, options);
+  }
+
+  public static operationInvocationRecord(
+    invocation?: CultMeshOperationInvocationDescriptor,
+    options: {
+      fallbackOperationId?: string;
+      fallbackSchemaId?: string;
+      fallbackRouteHint?: CultMeshRouteHint;
+      fallbackIdempotencyKey?: string;
+    } = {},
+  ): CultMeshOperationInvocationRecord {
+    return cultMeshOperationInvocationRecord(invocation, options);
+  }
+
+  public static operationInvocationFromRecord(
+    record: Partial<CultMeshOperationInvocationRecord>,
+    options: {
+      fallbackOperationId?: string;
+      fallbackSchemaId?: string;
+      fallbackRouteHint?: CultMeshRouteHint;
+      fallbackIdempotencyKey?: string;
+    } = {},
+  ): CultMeshOperationInvocationDescriptor {
+    return cultMeshOperationInvocationFromRecord(record, options);
+  }
+
+  public static operationPayload(
+    fields: Readonly<Record<string, string | number | boolean | undefined>> = {},
+  ): CultMeshOperationPayload {
+    return cultMeshOperationPayload(fields);
+  }
+
+  public static projectionRecipe<TParameters, TResult>(
+    projectionId: string,
+    sources: readonly CultMeshProjectionSource[],
+    projectProjection: (
+      parameters: TParameters,
+      context: CultMeshQueryContext,
+    ) => Promise<TResult>,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      watchProjection?: (
+        parameters: TParameters,
+        context: CultMeshQueryContext,
+        callback: (value: TResult) => void,
+      ) => CultMeshUnsubscribe;
+    } = {},
+  ): CultMeshProjectionRecipe<TParameters, TResult> {
+    return cultMeshProjectionRecipe(
+      projectionId,
+      sources,
+      projectProjection,
+      options,
+    );
+  }
+
+  public static describeProjectionRecipe(
+    recipe: {
+      readonly projectionId: string;
+      readonly routeHint: CultMeshRouteHint;
+      readonly sources: readonly CultMeshProjectionSource[];
+    },
+  ): CultMeshProjectionRecipeDiagnostic {
+    return cultMeshDescribeProjectionRecipe(recipe);
+  }
+
+  public static describeSurface(
+    surface:
+      | {
+          readonly queryId: string;
+          readonly routeHint: CultMeshRouteHint;
+          readonly sources: readonly CultMeshProjectionSource[];
+        }
+      | {
+          readonly operationId: string;
+        }
+      | {
+          readonly projectionId: string;
+          readonly routeHint: CultMeshRouteHint;
+          readonly sources: readonly CultMeshProjectionSource[];
+        }
+    | {
+        readonly feedId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly pointerId: string;
+      }
+    | CultMeshNativeSliceViewDescriptor,
+  ): CultMeshSurfaceDiagnostic {
+    return cultMeshDescribeSurface(surface);
+  }
+
+  public static surfaceDiagnostic(
+    kind: CultMeshSurfaceKind,
+    surfaceId: string,
+    options: {
+      routeHint?: CultMeshRouteHint;
+      sources?: readonly CultMeshProjectionSource[];
+    } = {},
+  ): CultMeshSurfaceDiagnostic {
+    return cultMeshSurfaceDiagnostic(kind, surfaceId, options);
+  }
+
+  public static describeSurfaceCatalog(
+    catalogId: string,
+    surfaces: readonly CultMeshSurfaceDiagnostic[],
+  ): CultMeshSurfaceCatalogDiagnostic {
+    return cultMeshDescribeSurfaceCatalog(catalogId, surfaces);
+  }
+
+  public static findSurface(
+    catalog: CultMeshSurfaceCatalogDiagnostic,
+    surfaceId: string,
+  ): CultMeshSurfaceDiagnostic | undefined {
+    return cultMeshFindSurface(catalog, surfaceId);
+  }
+
+  public static surfacesByKind(
+    catalog: CultMeshSurfaceCatalogDiagnostic,
+    kind: CultMeshSurfaceKind,
+  ): CultMeshSurfaceDiagnostic[] {
+    return cultMeshSurfacesByKind(catalog, kind);
+  }
+
+  public static surfaceCatalogIndex(
+    catalog: CultMeshSurfaceCatalogDiagnostic,
+  ): CultMeshSurfaceCatalogIndexDiagnostic {
+    return cultMeshSurfaceCatalogIndex(catalog);
+  }
+
+  public static nativeSliceColumn(
+    name: string,
+    valueType: string,
+    elementSizeBytes: number,
+  ): CultMeshNativeSliceColumn {
+    return cultMeshNativeSliceColumn(name, valueType, elementSizeBytes);
+  }
+
+  public static nativeSliceView(
+    viewId: string,
+    schemaId: string,
+    rowCount: number,
+    columns: readonly CultMeshNativeSliceColumn[],
+    options: { route?: CultMeshRouteHint; nativeHandle?: string } = {},
+  ): CultMeshNativeSliceViewDescriptor {
+    return cultMeshNativeSliceView(viewId, schemaId, rowCount, columns, options);
+  }
+
+  public static denseRowStrideBytes(view: CultMeshNativeSliceViewDescriptor): number {
+    return cultMeshDenseRowStrideBytes(view);
+  }
+
+  public static findNativeSliceColumn(
+    view: CultMeshNativeSliceViewDescriptor,
+    name: string,
+  ): CultMeshNativeSliceColumn | undefined {
+    return cultMeshFindNativeSliceColumn(view, name);
+  }
+
+  public static describeNativeSliceView(
+    view: CultMeshNativeSliceViewDescriptor,
+  ): CultMeshNativeSliceViewDiagnostic {
+    return cultMeshDescribeNativeSliceView(view);
+  }
+
   public static async createNode(
     cachePath: string,
     options: CultMeshNodeOptions = {},
@@ -1105,5 +3771,33 @@ function copyBudgetFor(
       return "one-copy-fallback";
     case "inline-bytes":
       return "opaque-runtime";
+  }
+}
+
+function nonBlankOr(value?: string, fallback = ""): string {
+  return value && value.trim() ? value : fallback;
+}
+
+function parseCultMeshLocalityKind(
+  value: string | undefined,
+  fallback: CultMeshLocalityKind,
+): CultMeshLocalityKind {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "automatic":
+      return "automatic";
+    case "inprocess":
+    case "in-process":
+      return "in-process";
+    case "sharedmemory":
+    case "shared-memory":
+      return "shared-memory";
+    case "ipc":
+      return "ipc";
+    case "network":
+      return "network";
+    case "wasm":
+      return "wasm";
+    default:
+      return fallback;
   }
 }

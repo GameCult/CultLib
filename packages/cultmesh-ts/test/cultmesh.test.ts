@@ -145,6 +145,1129 @@ test("CultMesh TS local Verse catalog exposes sorted views and watch ergonomics"
   );
 });
 
+test("CultMesh TS exposes shared geometry query primitives", () => {
+  const viewport = CultMesh.rect(CultMesh.vec2(10, -5), CultMesh.vec2(-2, 7));
+  assert.deepEqual(viewport, {
+    min: { x: -2, y: -5 },
+    max: { x: 10, y: 7 },
+  });
+
+  assert.deepEqual(CultMesh.viewportRequest(viewport, [3, 1]), {
+    minX: -2,
+    minY: -5,
+    maxX: 10,
+    maxY: 7,
+    controlledEntityIndices: [3, 1],
+  });
+
+  assert.deepEqual(CultMesh.rectFromBounds(4, 3, 2, 1), {
+    min: { x: 2, y: 1 },
+    max: { x: 4, y: 3 },
+  });
+});
+
+test("CultMesh TS exposes typed operation primitives", async () => {
+  const operation = CultMesh.operation<
+    { actor: string; direction: { x: number; y: number } },
+    { receipt: ReturnType<typeof CultMesh.operationReceipt>; actor: string }
+  >("game.test.move", async (request, context) => {
+    assert.equal(context.runtimeId, "rts-client");
+    assert.deepEqual(context.claims, [
+      { role: "simulation-authority", shardId: "zone:0", leaseId: "lease:zone:0" },
+    ]);
+    assert.deepEqual(context.routeHint, {
+      kind: "network",
+      description: "remote Verse node",
+    });
+    assert.equal(context.idempotencyKey, "move-1");
+    return {
+      receipt: CultMesh.operationReceipt("game.test.move", true, {
+        route: context.routeHint,
+      }),
+      actor: request.actor,
+    };
+  });
+
+  const response = await operation.invoke(
+    { actor: "pawn:1", direction: CultMesh.vec2(1, 0) },
+    CultMesh.operationContext("rts-client", {
+      claims: [
+        CultMesh.authorityClaim("simulation-authority", {
+          shardId: "zone:0",
+          leaseId: "lease:zone:0",
+        }),
+      ],
+      routeHint: CultMesh.routeHint("network", "remote Verse node"),
+      idempotencyKey: "move-1",
+    }),
+  );
+
+  assert.equal(operation.operationId, "game.test.move");
+  assert.equal(response.actor, "pawn:1");
+  assert.deepEqual(CultMesh.describeOperationHandle(operation), {
+    operationId: "game.test.move",
+  });
+  assert.deepEqual(response.receipt, {
+    operationId: "game.test.move",
+    accepted: true,
+    route: {
+      kind: "network",
+      description: "remote Verse node",
+    },
+    diagnostic: undefined,
+  });
+});
+
+test("CultMesh TS flattens and parses cross-runtime route records", () => {
+  const record = CultMesh.routeRecord(
+    CultMesh.routeHint("shared-memory", "co-located slab"),
+  );
+  const restored = CultMesh.routeFromRecord(record);
+  const fromCsharp = CultMesh.routeFromRecord(
+    {
+      kind: "InProcess",
+      description: "",
+    },
+    CultMesh.routeHint("network", "fallback route"),
+  );
+  const fallback = CultMesh.routeFromRecord(
+    {
+      kind: "not-real",
+      description: "",
+    },
+    CultMesh.routeHint("ipc", "fallback route"),
+  );
+
+  assert.deepEqual(record, {
+    kind: "shared-memory",
+    description: "co-located slab",
+  });
+  assert.deepEqual(restored, {
+    kind: "shared-memory",
+    description: "co-located slab",
+  });
+  assert.deepEqual(fromCsharp, {
+    kind: "in-process",
+    description: "fallback route",
+  });
+  assert.deepEqual(fallback, {
+    kind: "ipc",
+    description: "fallback route",
+  });
+});
+
+test("CultMesh TS exposes typed query primitives", async () => {
+  const watchedCounts: number[] = [];
+  const visibleObjects = CultMesh.query<
+    { viewport: ReturnType<typeof CultMesh.viewportRequest> },
+    { queryId: string; count: number }
+  >("game.test.visible_objects", async (parameters, context) => {
+    assert.equal(context.runtimeId, "browser-client");
+    assert.deepEqual(context.routeHint, {
+      kind: "shared-memory",
+      description: "co-located daemon slab",
+    });
+    assert.equal(parameters.viewport.minX, -10);
+    return {
+      queryId: "game.test.visible_objects",
+      count: 2,
+    };
+  }, {
+    watchQuery: (parameters, context, callback) => {
+      assert.equal(context.runtimeId, "browser-client");
+      assert.equal(parameters.viewport.maxX, 10);
+      callback({ queryId: "game.test.visible_objects", count: 3 });
+      return () => watchedCounts.push(-1);
+    },
+  });
+
+  const result = await visibleObjects.execute(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-10, -5, 10, 5)) },
+    CultMesh.queryContext("browser-client", {
+      routeHint: CultMesh.routeHint("shared-memory", "co-located daemon slab"),
+    }),
+  );
+
+  assert.deepEqual(result, {
+    queryId: "game.test.visible_objects",
+    count: 2,
+  });
+
+  const diagnostic = CultMesh.describeQuerySurface(visibleObjects);
+  assert.equal(diagnostic.queryId, "game.test.visible_objects");
+  assert.equal(diagnostic.routeHint.kind, "automatic");
+  assert.deepEqual(diagnostic.sources, []);
+  assert.notEqual(diagnostic.sources, visibleObjects.sources);
+
+  const unsubscribe = visibleObjects.watch(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-10, -5, 10, 5)) },
+    "browser-client",
+    (value) => watchedCounts.push(value.count),
+  );
+  unsubscribe();
+
+  assert.deepEqual(watchedCounts, [3, -1]);
+});
+
+test("CultMesh TS polling watcher turns snapshots into a query watch", async () => {
+  let value = 0;
+  const observed: number[] = [];
+  const query = CultMesh.query<void, number>(
+    "game.test.counter",
+    async () => value,
+    {
+      watchQuery: CultMesh.pollingQueryWatcher(async () => value, {
+        intervalMs: 5,
+        equals: (left, right) => left === right,
+      }),
+    },
+  );
+
+  const unsubscribe = query.watch(undefined, "browser-client", next => observed.push(next));
+  await delay(15);
+  value = 1;
+  await delay(20);
+  value = 1;
+  await delay(12);
+  value = 2;
+  await delay(20);
+  unsubscribe();
+  value = 3;
+  await delay(12);
+
+  assert.deepEqual(observed, [0, 1, 2]);
+});
+
+test("CultMesh TS polling watcher can suppress the initial baseline", async () => {
+  let value = "baseline";
+  const observed: string[] = [];
+  const watch = CultMesh.pollingQueryWatcher<void, string>(async () => value, {
+    intervalMs: 5,
+    emitInitial: false,
+  });
+
+  const unsubscribe = watch(undefined, CultMesh.queryContext("browser-client"), next => observed.push(next));
+  await delay(15);
+  value = "changed";
+  await delay(15);
+  unsubscribe();
+
+  assert.deepEqual(observed, ["changed"]);
+});
+
+test("CultMesh TS exposes live feed primitives for reactive client views", async () => {
+  let frameId = 10;
+  const observed: number[] = [];
+  const feed = CultMesh.liveFeed<
+    { viewport: ReturnType<typeof CultMesh.viewportRequest> },
+    { frameId: number; route: string }
+  >(
+    "aetheria.rts.viewport.feed",
+    async (_parameters, context) => ({
+      frameId,
+      route: context.routeHint.kind,
+    }),
+    {
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.frame.latest.v1"),
+        CultMesh.projectionSource("daemon:aetheria.health.latest.v1"),
+      ],
+      routeHint: CultMesh.routeHint("shared-memory", "co-located RTS cache"),
+      watchFeed: CultMesh.pollingQueryWatcher(async (_parameters, context) => ({
+        frameId,
+        route: context.routeHint.kind,
+      }), {
+        intervalMs: 5,
+        equals: (left, right) => left.frameId === right.frameId && left.route === right.route,
+      }),
+    },
+  );
+
+  assert.equal(feed.feedId, "aetheria.rts.viewport.feed");
+  assert.equal(feed.routeHint.kind, "shared-memory");
+  assert.deepEqual(feed.sources.map(source => source.sourceId), [
+    "daemon:aetheria.frame.latest.v1",
+    "daemon:aetheria.health.latest.v1",
+  ]);
+
+  const diagnostic = CultMesh.describeLiveFeed(feed);
+  assert.equal(diagnostic.feedId, "aetheria.rts.viewport.feed");
+  assert.equal(diagnostic.routeHint.description, "co-located RTS cache");
+  assert.deepEqual(diagnostic.sources.map(source => source.sourceId), [
+    "daemon:aetheria.frame.latest.v1",
+    "daemon:aetheria.health.latest.v1",
+  ]);
+  assert.notEqual(diagnostic.sources, feed.sources);
+
+  const snapshot = await feed.snapshot(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-1, -1, 1, 1)) },
+    "browser-client",
+  );
+
+  assert.deepEqual(snapshot, {
+    frameId: 10,
+    route: "shared-memory",
+  });
+
+  const unsubscribe = feed.watch(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-1, -1, 1, 1)) },
+    "browser-client",
+    value => observed.push(value.frameId),
+  );
+  await delay(15);
+  frameId = 11;
+  await delay(15);
+  unsubscribe();
+
+  assert.deepEqual(observed, [10, 11]);
+});
+
+test("CultMesh TS exposes projection recipes as shared query affordances", async () => {
+  const watchedRoutes: string[] = [];
+  const recipe = CultMesh.projectionRecipe<
+    { viewport: ReturnType<typeof CultMesh.viewportRequest> },
+    { projectionId: string; sourceCount: number; route: string }
+  >(
+    "aetheria.zone.objects.visible",
+    [
+      CultMesh.projectionSource("daemon:aetheria.frame.latest.v1", {
+        schemaId: "gamecult.aetheria.daemon_frame.v1",
+        description: "latest daemon frame",
+      }),
+      CultMesh.projectionSource("daemon:aetheria.authority.policy.v1", {
+        schemaId: "gamecult.aetheria.authority_policy.v1",
+      }),
+    ],
+    async (_parameters, context) => ({
+      projectionId: "aetheria.zone.objects.visible",
+      sourceCount: 2,
+      route: context.routeHint.kind,
+    }),
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "co-located frame slab"),
+      watchProjection: (_parameters, context, callback) => {
+        callback({
+          projectionId: "aetheria.zone.objects.visible",
+          sourceCount: 2,
+          route: context.routeHint.kind,
+        });
+        return () => watchedRoutes.push("unsubscribed");
+      },
+    },
+  );
+
+  assert.equal(recipe.projectionId, "aetheria.zone.objects.visible");
+  assert.equal(recipe.routeHint.kind, "shared-memory");
+  assert.deepEqual(recipe.sources.map((source) => source.sourceId), [
+    "daemon:aetheria.frame.latest.v1",
+    "daemon:aetheria.authority.policy.v1",
+  ]);
+
+  const recipeDiagnostic = CultMesh.describeProjectionRecipe(recipe);
+  assert.equal(recipeDiagnostic.projectionId, "aetheria.zone.objects.visible");
+  assert.equal(recipeDiagnostic.routeHint.description, "co-located frame slab");
+  assert.deepEqual(recipeDiagnostic.sources.map((source) => source.schemaId), [
+    "gamecult.aetheria.daemon_frame.v1",
+    "gamecult.aetheria.authority_policy.v1",
+  ]);
+  assert.notEqual(recipeDiagnostic.sources, recipe.sources);
+
+  const projected = await recipe.project(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-10, -5, 10, 5)) },
+    CultMesh.queryContextFor("browser-starfire")
+      .route("wasm", "browser-local projection")
+      .build(),
+  );
+
+  assert.deepEqual(projected, {
+    projectionId: "aetheria.zone.objects.visible",
+    sourceCount: 2,
+    route: "wasm",
+  });
+
+  const query = recipe.asQuerySurface();
+  assert.equal(query.routeHint.kind, "shared-memory");
+  assert.deepEqual(query.sources.map((source) => source.schemaId), [
+    "gamecult.aetheria.daemon_frame.v1",
+    "gamecult.aetheria.authority_policy.v1",
+  ]);
+
+  const queried = await query.execute(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-1, -1, 1, 1)) },
+    "unity-raven",
+  );
+
+  assert.equal(query.queryId, recipe.projectionId);
+  assert.equal(queried.route, "shared-memory");
+
+  const queryDiagnostic = CultMesh.describeQuerySurface(query);
+  assert.equal(queryDiagnostic.queryId, "aetheria.zone.objects.visible");
+  assert.equal(queryDiagnostic.routeHint.kind, "shared-memory");
+  assert.deepEqual(queryDiagnostic.sources.map((source) => source.sourceId), [
+    "daemon:aetheria.frame.latest.v1",
+    "daemon:aetheria.authority.policy.v1",
+  ]);
+  assert.notEqual(queryDiagnostic.sources, query.sources);
+
+  const unsubscribe = query.watch(
+    { viewport: CultMesh.viewportRequest(CultMesh.rectFromBounds(-1, -1, 1, 1)) },
+    "unity-raven",
+    (value) => watchedRoutes.push(value.route),
+  );
+  unsubscribe();
+
+  assert.deepEqual(watchedRoutes, ["shared-memory", "unsubscribed"]);
+});
+
+test("CultMesh TS describes typed surface catalogs for tools and generated bindings", () => {
+  const source = CultMesh.projectionSource("daemon:aetheria.frame.latest.v1", {
+    schemaId: "gamecult.aetheria.daemon_frame.v1",
+  });
+  const routeHint = CultMesh.routeHint("shared-memory", "co-located frame slab");
+  const query = CultMesh.query<void, string>(
+    "aetheria.zone.objects.visible",
+    async () => "objects",
+    {
+      sources: [source],
+      routeHint,
+    },
+  );
+  const feed = CultMesh.liveFeed<void, string>(
+    "aetheria.rts.viewport.feed",
+    async () => "frame",
+    {
+      sources: [source],
+      routeHint,
+    },
+  );
+  const operation = CultMesh.operation<void, string>(
+    "aetheria.pilot.set_move_vector",
+    async () => "accepted",
+  );
+  const pointer = CultMesh.statePointer(
+    "aetheria.selection.current",
+    async () => "entity:ship:1",
+    undefined,
+    {
+      sources: [source],
+      routeHint,
+    },
+  );
+  const nativeView = CultMesh.nativeSliceView(
+    "aetheria.zone.render",
+    "gamecult.aetheria.render_body.v1",
+    128,
+    [CultMesh.nativeSliceColumn("position", "CultVec2", 8)],
+    { route: routeHint },
+  );
+
+  const querySurface = CultMesh.describeSurface(query);
+  const feedSurface = CultMesh.describeSurface(feed);
+  const operationSurface = CultMesh.describeSurface(operation);
+  const pointerSurface = CultMesh.describeSurface(pointer);
+  const nativeViewSurface = CultMesh.describeSurface(nativeView);
+  const catalog = CultMesh.describeSurfaceCatalog("gamecult.aetheria.rts.surfaces.v1", [
+    querySurface,
+    feedSurface,
+    operationSurface,
+    pointerSurface,
+    nativeViewSurface,
+  ]);
+
+  assert.equal(querySurface.kind, "query");
+  assert.equal(feedSurface.kind, "live-feed");
+  assert.equal(pointerSurface.kind, "state-pointer");
+  assert.equal(pointerSurface.routeHint.kind, "shared-memory");
+  assert.deepEqual(pointerSurface.sources.map(next => next.schemaId), [
+    "gamecult.aetheria.daemon_frame.v1",
+  ]);
+  assert.equal(nativeViewSurface.kind, "native-slice-view");
+  assert.equal(catalog.catalogId, "gamecult.aetheria.rts.surfaces.v1");
+  assert.deepEqual(catalog.surfaces.map(surface => surface.surfaceId), [
+    "aetheria.zone.objects.visible",
+    "aetheria.rts.viewport.feed",
+    "aetheria.pilot.set_move_vector",
+    "aetheria.selection.current",
+    "aetheria.zone.render",
+  ]);
+  assert.equal(catalog.surfaces[0].routeHint.kind, "shared-memory");
+  assert.deepEqual(catalog.surfaces[0].sources.map(next => next.schemaId), [
+    "gamecult.aetheria.daemon_frame.v1",
+  ]);
+  assert.notEqual(catalog.surfaces[0], querySurface);
+  assert.notEqual(catalog.surfaces[0].sources, querySurface.sources);
+  assert.equal(catalog.surfaces[4].routeHint.kind, "shared-memory");
+
+  assert.equal(
+    CultMesh.findSurface(catalog, "aetheria.selection.current")?.kind,
+    "state-pointer",
+  );
+  assert.equal(CultMesh.findSurface(catalog, "missing"), undefined);
+
+  const operations = CultMesh.surfacesByKind(catalog, "operation");
+  assert.deepEqual(operations.map(surface => surface.surfaceId), [
+    "aetheria.pilot.set_move_vector",
+  ]);
+  assert.notEqual(operations, catalog.surfaces);
+  assert.notEqual(operations[0], operationSurface);
+
+  const index = CultMesh.surfaceCatalogIndex(catalog);
+  assert.equal(index.catalogId, "gamecult.aetheria.rts.surfaces.v1");
+  assert.deepEqual(index.queries.map(surface => surface.surfaceId), [
+    "aetheria.zone.objects.visible",
+  ]);
+  assert.deepEqual(index.liveFeeds.map(surface => surface.surfaceId), [
+    "aetheria.rts.viewport.feed",
+  ]);
+  assert.deepEqual(index.operations.map(surface => surface.surfaceId), [
+    "aetheria.pilot.set_move_vector",
+  ]);
+  assert.deepEqual(index.statePointers.map(surface => surface.surfaceId), [
+    "aetheria.selection.current",
+  ]);
+  assert.deepEqual(index.nativeSliceViews.map(surface => surface.surfaceId), [
+    "aetheria.zone.render",
+  ]);
+  assert.deepEqual(index.projectionRecipes, []);
+  assert.notEqual(index.operations, operations);
+  assert.notEqual(index.operations[0], operations[0]);
+});
+
+test("CultMesh TS exposes fluent context builders for typed handles", async () => {
+  const operationContext = CultMesh.operationContextFor("unity-client")
+    .claim("pilot-authority", { shardId: "zone:raven" })
+    .route("shared-memory", "co-located Verse")
+    .idempotency("move:raven:1")
+    .build();
+
+  assert.deepEqual(operationContext, {
+    runtimeId: "unity-client",
+    claims: [{ role: "pilot-authority", shardId: "zone:raven", leaseId: undefined }],
+    routeHint: { kind: "shared-memory", description: "co-located Verse" },
+    idempotencyKey: "move:raven:1",
+  });
+
+  const queryContext = CultMesh.queryContextFor("browser-client")
+    .route("wasm", "browser-local projection")
+    .build();
+
+  assert.deepEqual(queryContext, {
+    runtimeId: "browser-client",
+    routeHint: { kind: "wasm", description: "browser-local projection" },
+  });
+});
+
+test("CultMesh TS Verse context lets generated domain sugar use shared typed contexts", async () => {
+  const verse = await CultMesh.connectVerse("starbridge", "browser-starfire", {
+    routeHint: CultMesh.routeHint("network", "remote Verse peer"),
+    claims: [
+      CultMesh.authorityClaim("commander-control", {
+        shardId: "zone:frontier",
+        leaseId: "lease:starfire",
+      }),
+    ],
+  });
+  const queryVerse = verse.withRoute("shared-memory", "local projection slab");
+  const commandVerse = verse.withRoute("network", "remote command route");
+
+  const aetheria = queryVerse.use((queryContext) => {
+    const moveOperation = commandVerse.bindOperation(CultMesh.operation<
+      { entityId: number; direction: { x: number; y: number } },
+      ReturnType<typeof CultMesh.operationReceipt>
+    >("aetheria.entity.pilot.move", async (request, operationContext) => {
+      assert.equal(operationContext.runtimeId, "browser-starfire");
+      assert.equal(operationContext.claims[0]?.role, "commander-control");
+      assert.equal(operationContext.idempotencyKey, "move:starfire:1");
+      return CultMesh.operationReceipt("aetheria.entity.pilot.move", request.entityId === 7, {
+        route: operationContext.routeHint,
+      });
+    }));
+    const objectsVisible = CultMesh.bindQuery(queryContext, CultMesh.query<
+      { viewport: ReturnType<typeof CultMesh.viewportRequest> },
+      { runtimeId: string; zoneId: string; route: string; minX: number }
+    >("aetheria.zone.objects.visible", async (parameters, context) => ({
+      runtimeId: context.runtimeId,
+      zoneId: "zone:frontier",
+      route: context.routeHint.kind,
+      minX: parameters.viewport.minX,
+    })));
+
+    return {
+    entity: (entityId: number) => ({
+      pilot: {
+        move: (direction: { x: number; y: number }, idempotencyKey: string) =>
+          moveOperation.invoke({ entityId, direction }, { idempotencyKey }),
+      },
+    }),
+    zone: (zoneId: string) => ({
+      objects: {
+        visibleWithin: async (viewport: ReturnType<typeof CultMesh.viewportRequest>) => ({
+          ...await objectsVisible.execute({ viewport }),
+          zoneId,
+        }),
+      },
+    }),
+  };
+  });
+
+  const receipt = await aetheria
+    .entity(7)
+    .pilot
+    .move(CultMesh.vec2(1, 0), "move:starfire:1");
+  const viewport = await aetheria
+    .zone("zone:frontier")
+    .objects
+    .visibleWithin(CultMesh.viewportRequest(CultMesh.rectFromBounds(-16, -8, 16, 8)));
+
+  assert.equal(verse.verseId, "starbridge");
+  assert.equal(verse.runtimeId, "browser-starfire");
+  assert.deepEqual(verse.operationContext({ idempotencyKey: "move:starfire:2" }), {
+    runtimeId: "browser-starfire",
+    claims: [{ role: "commander-control", shardId: "zone:frontier", leaseId: "lease:starfire" }],
+    routeHint: { kind: "network", description: "remote Verse peer" },
+    idempotencyKey: "move:starfire:2",
+  });
+  assert.deepEqual(queryVerse.queryContext(), {
+    runtimeId: "browser-starfire",
+    routeHint: { kind: "shared-memory", description: "local projection slab" },
+  });
+  assert.equal(commandVerse.bindOperation(CultMesh.operation("noop", async (_request, context) =>
+    CultMesh.operationReceipt("noop", true, { route: context.routeHint }))).operationId, "noop");
+  assert.deepEqual(receipt, {
+    operationId: "aetheria.entity.pilot.move",
+    accepted: true,
+    route: {
+      kind: "network",
+      description: "remote command route",
+    },
+    diagnostic: undefined,
+  });
+  assert.deepEqual(viewport, {
+    runtimeId: "browser-starfire",
+    zoneId: "zone:frontier",
+    route: "shared-memory",
+    minX: -16,
+  });
+});
+
+test("CultMesh TS exposes typed state pointers for UI and tools", async () => {
+  const updates: string[] = [];
+  let value = "initial";
+  const pointer = CultMesh.statePointer(
+    "aetheria.selection.current",
+    async () => value,
+    (callback: (value: string) => void) => {
+      callback(value);
+      return () => updates.push("unsubscribed");
+    },
+    {
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.selection.current.v1", {
+          schemaId: "gamecult.aetheria.selection.v1",
+        }),
+      ],
+      routeHint: CultMesh.routeHint("shared-memory", "co-located selection cache"),
+    },
+  );
+
+  assert.equal(pointer.pointerId, "aetheria.selection.current");
+  assert.equal(await pointer.resolve(), "initial");
+  assert.deepEqual(CultMesh.describeStatePointer(pointer), {
+    pointerId: "aetheria.selection.current",
+    routeHint: {
+      kind: "shared-memory",
+      description: "co-located selection cache",
+    },
+    sources: [
+      {
+        sourceId: "daemon:aetheria.selection.current.v1",
+        schemaId: "gamecult.aetheria.selection.v1",
+        description: undefined,
+      },
+    ],
+  });
+
+  value = "selected:ship:1";
+  const unsubscribe = pointer.watch((next) => updates.push(next));
+  unsubscribe();
+
+  assert.deepEqual(updates, ["selected:ship:1", "unsubscribed"]);
+
+  const contextualUpdates: string[] = [];
+  const contextualPointer = CultMesh.statePointer(
+    "aetheria.daemon.frame.latest",
+    async (context) => `${context.runtimeId}:${context.routeHint.kind}`,
+    (context, callback) => {
+      callback(`${context.runtimeId}:frame:12:${context.routeHint.kind}`);
+      return () => contextualUpdates.push("contextual-unsubscribed");
+    },
+    {
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.frame.latest.v1", {
+          schemaId: "gamecult.aetheria.daemon_frame.v1",
+        }),
+      ],
+      routeHint: CultMesh.routeHint("shared-memory", "co-located daemon frame"),
+    },
+  );
+  const verse = CultMesh.verse("aetheria.local", "bifrost-tool")
+    .withRoute("ipc", "tool bridge");
+  const bound = CultMesh.bindStatePointer(verse, contextualPointer);
+
+  assert.equal(await bound.resolve(), "bifrost-tool:ipc");
+  const contextualUnsubscribe = bound.watch((next) => contextualUpdates.push(next));
+  contextualUnsubscribe();
+
+  assert.equal(bound.pointerId, "aetheria.daemon.frame.latest");
+  assert.deepEqual(bound.sources.map(source => source.schemaId), [
+    "gamecult.aetheria.daemon_frame.v1",
+  ]);
+  assert.deepEqual(contextualUpdates, [
+    "bifrost-tool:frame:12:ipc",
+    "contextual-unsubscribed",
+  ]);
+});
+
+test("CultMesh TS mutable state pointers read watch and replace through a Verse", async () => {
+  let stored = "frame:0";
+  let watcher: ((value: string) => void) | undefined;
+  const contexts: string[] = [];
+  const pointer = CultMesh.mutableStatePointer(
+    "aetheria.daemon.frame.latest",
+    async (context) => {
+      contexts.push(`read:${context.runtimeId}:${context.routeHint.kind}`);
+      return stored;
+    },
+    (context, callback) => {
+      contexts.push(`watch:${context.runtimeId}:${context.routeHint.kind}`);
+      watcher = (value) => callback(`${context.runtimeId}:${value}:${context.routeHint.kind}`);
+      return () => {
+        watcher = undefined;
+      };
+    },
+    async (context, value) => {
+      contexts.push(`replace:${context.runtimeId}:${context.routeHint.kind}`);
+      stored = value;
+      watcher?.(value);
+    },
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "co-located daemon frame"),
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.frame.latest.v1", {
+          schemaId: "gamecult.aetheria.daemon_frame.v1",
+        }),
+      ],
+    },
+  );
+
+  const verse = CultMesh.verse("aetheria.local", "unity-raven", {
+    routeHint: CultMesh.routeHint("ipc", "tool bridge"),
+  });
+  const bound = verse.bindMutableStatePointer(pointer);
+
+  let observed = "";
+  const unsubscribe = bound.watch((value) => {
+    observed = value;
+  });
+  assert.equal(await bound.read(), "frame:0");
+  await bound.replace("frame:1");
+  unsubscribe();
+
+  assert.equal(stored, "frame:1");
+  assert.equal(observed, "unity-raven:frame:1:ipc");
+  assert.deepEqual(contexts, [
+    "watch:unity-raven:ipc",
+    "read:unity-raven:ipc",
+    "replace:unity-raven:ipc",
+  ]);
+  assert.deepEqual(CultMesh.describeStatePointer(pointer), {
+    pointerId: "aetheria.daemon.frame.latest",
+    routeHint: {
+      kind: "shared-memory",
+      description: "co-located daemon frame",
+    },
+    sources: [
+      {
+        sourceId: "daemon:aetheria.frame.latest.v1",
+        schemaId: "gamecult.aetheria.daemon_frame.v1",
+        description: undefined,
+      },
+    ],
+  });
+  assert.deepEqual(CultMesh.stateBinding("frame", pointer), {
+    targetProp: "frame",
+    pointerId: "aetheria.daemon.frame.latest",
+    sourceId: "daemon:aetheria.frame.latest.v1",
+    schemaId: "gamecult.aetheria.daemon_frame.v1",
+    routeHint: {
+      kind: "shared-memory",
+      description: "co-located daemon frame",
+    },
+  });
+});
+
+test("CultMesh TS describes UI state bindings from typed state pointers", async () => {
+  const pointer = CultMesh.statePointer(
+    "aetheria.selection.current",
+    async () => "entity:station:0",
+    undefined,
+    {
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.selection.current.v1", {
+          schemaId: "gamecult.aetheria.selection.v1",
+        }),
+      ],
+      routeHint: CultMesh.routeHint("shared-memory", "co-located selection cache"),
+    },
+  );
+
+  const binding = CultMesh.stateBinding("value", pointer);
+  const explicitBinding = CultMesh.stateBinding(
+    "label",
+    "aetheria.selection.label",
+    {
+      sourceId: "daemon:aetheria.selection.label.v1",
+      schemaId: "gamecult.aetheria.selection_label.v1",
+      routeHint: CultMesh.routeHint("ipc", "tool bridge"),
+    },
+  );
+
+  assert.deepEqual(binding, {
+    targetProp: "value",
+    pointerId: "aetheria.selection.current",
+    sourceId: "daemon:aetheria.selection.current.v1",
+    schemaId: "gamecult.aetheria.selection.v1",
+    routeHint: {
+      kind: "shared-memory",
+      description: "co-located selection cache",
+    },
+  });
+  assert.deepEqual(explicitBinding, {
+    targetProp: "label",
+    pointerId: "aetheria.selection.label",
+    sourceId: "daemon:aetheria.selection.label.v1",
+    schemaId: "gamecult.aetheria.selection_label.v1",
+    routeHint: {
+      kind: "ipc",
+      description: "tool bridge",
+    },
+  });
+});
+
+test("CultMesh TS flattens and rehydrates UI state binding records", () => {
+  const binding = CultMesh.stateBinding(
+    "status",
+    "aetheria.current.status",
+    {
+      sourceId: "daemon:aetheria.frame.latest.v1",
+      schemaId: "gamecult.aetheria.daemon_frame.v1",
+      routeHint: CultMesh.routeHint("shared-memory", "co-located frame slab"),
+    },
+  );
+
+  assert.deepEqual(CultMesh.stateBindingRecord(binding), {
+    targetProp: "status",
+    pointerId: "aetheria.current.status",
+    sourceId: "daemon:aetheria.frame.latest.v1",
+    schemaId: "gamecult.aetheria.daemon_frame.v1",
+    routeKind: "shared-memory",
+    routeDescription: "co-located frame slab",
+  });
+
+  assert.deepEqual(CultMesh.stateBindingFromRecord({
+    targetProp: "value",
+    pointerId: "aetheria.selection.current",
+    sourceId: "daemon:aetheria.selection.current.v1",
+    schemaId: "gamecult.aetheria.selection.v1",
+    routeKind: "InProcess",
+    routeDescription: "embedded tool host",
+  }), {
+    targetProp: "value",
+    pointerId: "aetheria.selection.current",
+    sourceId: "daemon:aetheria.selection.current.v1",
+    schemaId: "gamecult.aetheria.selection.v1",
+    routeHint: {
+      kind: "in-process",
+      description: "embedded tool host",
+    },
+  });
+});
+
+test("CultMesh TS describes UI command bindings from typed operations", async () => {
+  const operation = CultMesh.operation<
+    { actor: string },
+    ReturnType<typeof CultMesh.operationReceipt>
+  >("aetheria.entity.pilot.move", async (_request, context) =>
+    CultMesh.operationReceipt("aetheria.entity.pilot.move", true, {
+      route: context.routeHint,
+    }));
+
+  const binding = CultMesh.operationBinding(operation, {
+    label: "Move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: CultMesh.routeHint("network", "remote Verse peer"),
+  });
+  const explicitBinding = CultMesh.operationBinding("aetheria.surface.refresh", {
+    label: "Refresh",
+  });
+
+  assert.deepEqual(binding, {
+    operationId: "aetheria.entity.pilot.move",
+    label: "Move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: {
+      kind: "network",
+      description: "remote Verse peer",
+    },
+  });
+  assert.deepEqual(explicitBinding, {
+    operationId: "aetheria.surface.refresh",
+    label: "Refresh",
+    schemaId: "",
+    routeHint: {
+      kind: "automatic",
+    },
+  });
+});
+
+test("CultMesh TS flattens and rehydrates UI operation binding records", () => {
+  const binding = CultMesh.operationBinding("aetheria.entity.pilot.move", {
+    label: "Move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: CultMesh.routeHint("network", "remote Verse peer"),
+  });
+
+  assert.deepEqual(CultMesh.operationBindingRecord(binding), {
+    operationId: "aetheria.entity.pilot.move",
+    label: "Move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeKind: "network",
+    routeDescription: "remote Verse peer",
+  });
+
+  assert.deepEqual(CultMesh.operationBindingFromRecord({
+    operationId: "aetheria.surface.refresh",
+    label: "Refresh",
+    schemaId: "gamecult.aetheria.refresh.v1",
+    routeKind: "SharedMemory",
+    routeDescription: "co-located command boundary",
+  }), {
+    operationId: "aetheria.surface.refresh",
+    label: "Refresh",
+    schemaId: "gamecult.aetheria.refresh.v1",
+    routeHint: {
+      kind: "shared-memory",
+      description: "co-located command boundary",
+    },
+  });
+});
+
+test("CultMesh TS carries UI command invocations as typed operation descriptors", () => {
+  const binding = CultMesh.operationBinding("aetheria.entity.pilot.move", {
+    label: "Move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: CultMesh.routeHint("ipc", "local Verse node"),
+  });
+
+  const invocation = CultMesh.operationInvocation(binding, {
+    idempotencyKey: "move:42",
+  });
+  const explicitInvocation = CultMesh.operationInvocation(
+    "aetheria.surface.refresh",
+    {
+      routeHint: CultMesh.routeHint("network", "remote Verse peer"),
+    },
+  );
+
+  assert.deepEqual(invocation, {
+    operationId: "aetheria.entity.pilot.move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: {
+      kind: "ipc",
+      description: "local Verse node",
+    },
+    idempotencyKey: "move:42",
+  });
+  assert.deepEqual(explicitInvocation, {
+    operationId: "aetheria.surface.refresh",
+    schemaId: "",
+    routeHint: {
+      kind: "network",
+      description: "remote Verse peer",
+    },
+    idempotencyKey: undefined,
+  });
+});
+
+test("CultMesh TS reads common operation payload scalar fields", () => {
+  const payload = CultMesh.operationPayload({
+    value: "42.5",
+    tierIndex: 3,
+    enabled: "on",
+    name: "Starfire",
+  });
+  const updated = payload.with("enabled", false);
+
+  assert.equal(payload.getString("name"), "Starfire");
+  assert.equal(payload.getString("missing", "fallback"), "fallback");
+  assert.equal(payload.getInt("tierIndex", -1), 3);
+  assert.equal(payload.getInt("missing", -1), -1);
+  assert.equal(payload.getDouble("value", -1), 42.5);
+  assert.equal(payload.getBoolean("enabled"), true);
+  assert.equal(payload.getBoolean("missing", true), true);
+  assert.equal(updated.getBoolean("enabled", true), false);
+  assert.equal(updated.getString("name"), "Starfire");
+  assert.deepEqual(payload.fields, {
+    value: "42.5",
+    tierIndex: "3",
+    enabled: "on",
+    name: "Starfire",
+  });
+  assert.deepEqual(payload.toRecord(), payload.fields);
+});
+
+test("CultMesh TS flattens and rehydrates operation invocation records", () => {
+  const invocation = CultMesh.operationInvocation("aetheria.entity.pilot.move", {
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeHint: CultMesh.routeHint("ipc", "local Verse node"),
+    idempotencyKey: "move:42",
+  });
+
+  const record = CultMesh.operationInvocationRecord(invocation);
+  const restored = CultMesh.operationInvocationFromRecord(record, {
+    fallbackOperationId: "fallback.operation",
+    fallbackSchemaId: "fallback.schema",
+    fallbackRouteHint: CultMesh.routeHint("network", "fallback route"),
+  });
+  const csharpRecord = CultMesh.operationInvocationFromRecord(
+    {
+      operationId: "",
+      schemaId: "",
+      routeKind: "InProcess",
+      routeDescription: "",
+      idempotencyKey: "",
+    },
+    {
+      fallbackOperationId: "fallback.operation",
+      fallbackSchemaId: "fallback.schema",
+      fallbackRouteHint: CultMesh.routeHint("network", "fallback route"),
+      fallbackIdempotencyKey: "fallback-key",
+    },
+  );
+
+  assert.deepEqual(record, {
+    operationId: "aetheria.entity.pilot.move",
+    schemaId: "gamecult.aetheria.pilot_move.v1",
+    routeKind: "ipc",
+    routeDescription: "local Verse node",
+    idempotencyKey: "move:42",
+  });
+  assert.deepEqual(restored, invocation);
+  assert.deepEqual(csharpRecord, {
+    operationId: "fallback.operation",
+    schemaId: "fallback.schema",
+    routeHint: {
+      kind: "in-process",
+      description: "fallback route",
+    },
+    idempotencyKey: "fallback-key",
+  });
+});
+
+test("CultMesh TS composes named state ref resolvers for surfaces", () => {
+  const daemon = CultMesh.stateRefResolver(
+    "aetheria.daemon.refs",
+    (stateRef: string, context) =>
+      stateRef === "aetheria.daemon/frame/id"
+        ? `${context.runtimeId}:${context.routeHint.kind}:42`
+        : "",
+    {
+      sources: [
+        CultMesh.projectionSource("daemon:aetheria.frame.latest.v1", {
+          schemaId: "gamecult.aetheria.daemon_frame.v1",
+        }),
+      ],
+      routeHint: CultMesh.routeHint("in-process", "embedded renderer"),
+    },
+  );
+  const itemStats = CultMesh.stateRefResolver(
+    "aetheria.item_stats.refs",
+    (stateRef: string) =>
+      stateRef === "aetheria.item_stats/laser/damage" ? "12.5" : "",
+  );
+  const resolver = daemon.or(itemStats);
+
+  assert.equal(
+    resolver.resolve(
+      "aetheria.daemon/frame/id",
+      CultMesh.queryContext("unity-raven", {
+        routeHint: CultMesh.routeHint("network", "remote peer"),
+      }),
+    ),
+    "unity-raven:network:42",
+  );
+  assert.equal(resolver.resolve("aetheria.item_stats/laser/damage"), "12.5");
+  assert.deepEqual(resolver.tryResolve("missing"), {
+    resolved: false,
+    value: "",
+  });
+  assert.equal(resolver.asFunction()("aetheria.item_stats/laser/damage"), "12.5");
+
+  assert.deepEqual(CultMesh.describeStateRefResolver(resolver), {
+    resolverId: "aetheria.daemon.refs|aetheria.item_stats.refs",
+    routeHint: {
+      kind: "in-process",
+      description: "embedded renderer",
+    },
+    sources: [
+      {
+        sourceId: "daemon:aetheria.frame.latest.v1",
+        schemaId: "gamecult.aetheria.daemon_frame.v1",
+        description: undefined,
+      },
+    ],
+  });
+});
+
+test("CultMesh TS exposes native slice descriptors", () => {
+  const view = CultMesh.nativeSliceView(
+    "aetheria.zone.render",
+    "gamecult.aetheria.zone_render.v1",
+    12,
+    [
+      CultMesh.nativeSliceColumn("position", "CultVec3", 12),
+      CultMesh.nativeSliceColumn("rotationRadians", "float32", 4),
+      CultMesh.nativeSliceColumn("renderGroupId", "uint32", 4),
+    ],
+    {
+      route: CultMesh.routeHint("shared-memory", "CultCache slab"),
+      nativeHandle: "aetheria-zone-render-001",
+    },
+  );
+
+  assert.equal(CultMesh.denseRowStrideBytes(view), 20);
+  assert.deepEqual(CultMesh.findNativeSliceColumn(view, "position"), {
+    name: "position",
+    valueType: "CultVec3",
+    elementSizeBytes: 12,
+  });
+  assert.equal(CultMesh.findNativeSliceColumn(view, "missing"), undefined);
+
+  const diagnostic = CultMesh.describeNativeSliceView(view);
+  assert.equal(diagnostic.viewId, "aetheria.zone.render");
+  assert.equal(diagnostic.schemaId, "gamecult.aetheria.zone_render.v1");
+  assert.equal(diagnostic.rowCount, 12);
+  assert.equal(diagnostic.route.kind, "shared-memory");
+  assert.equal(diagnostic.nativeHandle, "aetheria-zone-render-001");
+  assert.equal(diagnostic.denseRowStrideBytes, 20);
+  assert.deepEqual(diagnostic.columns.map(column => column.name), [
+    "position",
+    "rotationRadians",
+    "renderGroupId",
+  ]);
+  assert.notEqual(diagnostic.columns, view.columns);
+});
+
 test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
   const schemaCatalog = CultMesh.createSchemaCatalog();
   const schemaUpdates: string[] = [];
@@ -615,3 +1738,7 @@ test("CultMesh TS negotiates streaming frame body transports explicitly", () => 
   assert.deepEqual(streamUpdates, ["mimir:kiyo-pro"]);
   assert.deepEqual(frameUpdates, [42n]);
 });
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
