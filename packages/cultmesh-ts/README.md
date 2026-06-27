@@ -288,7 +288,7 @@ await client.syncSchemaCatalog(schemas, { kinds: ["document_payload"] });
 
 const health = CultMesh.documentFromPeerSnapshot(
   () => client,
-  "gamecult.aetheria.daemon_health.v1",
+  daemonHealthDocument,
   "daemon:aetheria.health.v1",
   {
     routeHint: CultMesh.routeHint("network", endpoint.uri),
@@ -313,7 +313,9 @@ payload binary normalization, and MessagePack decode behind the same
 `CultMeshDocumentHandle` shape as local documents. The helper prefers an exact
 schema id match and falls back to the requested record key, so runtimes that
 alias the same logical document through different generated schema names can
-still read the publication with one CultMesh call.
+still read the publication with one CultMesh call. Pass a CultCache document
+definition instead of a raw schema id when you want a typed handle whose
+`latest()` result is parsed through that definition.
 
 ## Streaming Mode
 

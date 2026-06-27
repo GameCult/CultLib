@@ -2003,6 +2003,32 @@ export function cultMeshDocumentFromPeerSnapshot(
   peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
   schemaId: string,
   recordKey: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  },
+): CultMeshDocumentHandle<unknown>;
+export function cultMeshDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
+  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+  definition: TDefinition,
+  recordKey: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  },
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+export function cultMeshDocumentFromPeerSnapshot(
+  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+  recordKey: string,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
@@ -2012,29 +2038,41 @@ export function cultMeshDocumentFromPeerSnapshot(
     messageIdPrefix?: string;
   } = {},
 ): CultMeshDocumentHandle<unknown> {
-  requireNonEmpty(schemaId, "schemaId");
+  const schema = typeof schemaOrDefinition === "string"
+    ? { schemaId: schemaOrDefinition }
+    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+  const resolvedSchemaId = schema.schemaId ?? schema.type;
+  if (!resolvedSchemaId) {
+    throw new Error("CultMesh peer snapshot document requires a schema id or document type.");
+  }
+  if (typeof schemaOrDefinition === "string") {
+    requireNonEmpty(schemaOrDefinition, "schemaId");
+  }
   requireNonEmpty(recordKey, "recordKey");
   const documentId = options.documentId ?? recordKey;
   const read = async () =>
-    decodeCultNetRawDocumentPayload(
-      await requestCultNetRawSnapshotDocument(
-        peer,
-        schemaId,
-        recordKey,
-        {
-          timeoutMs: options.timeoutMs,
-          messageIdPrefix: options.messageIdPrefix ?? documentId,
-        },
+    parseCultMeshPeerSnapshotDocument(
+      schemaOrDefinition,
+      decodeCultNetRawDocumentPayload(
+        await requestCultNetRawSnapshotDocument(
+          peer,
+          resolvedSchemaId,
+          recordKey,
+          {
+            timeoutMs: options.timeoutMs,
+            messageIdPrefix: options.messageIdPrefix ?? documentId,
+          },
+        ),
       ),
     );
 
   return cultMeshDocument(
     documentId,
-    { schemaId },
+    schema,
     async () => read(),
     {
       routeHint: options.routeHint ?? cultMeshRouteHint("network", "CultNet snapshot"),
-      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId })],
+      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId: resolvedSchemaId })],
       watchDocument: cultMeshPollingDocumentWatcher(read, {
         intervalMs: options.pollMs ?? 250,
       }),
@@ -3754,6 +3792,32 @@ export class CultMesh {
     peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
     schemaId: string,
     recordKey: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    },
+  ): CultMeshDocumentHandle<unknown>;
+  public static documentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
+    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+    definition: TDefinition,
+    recordKey: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    },
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+  public static documentFromPeerSnapshot(
+    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+    recordKey: string,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -3763,7 +3827,9 @@ export class CultMesh {
       messageIdPrefix?: string;
     } = {},
   ): CultMeshDocumentHandle<unknown> {
-    return cultMeshDocumentFromPeerSnapshot(peer, schemaId, recordKey, options);
+    return typeof schemaOrDefinition === "string"
+      ? cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options)
+      : cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options);
   }
 
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -4860,6 +4926,15 @@ function decodeCultNetRawDocumentPayload(document: CultNetRawDocumentRecord): un
     throw new Error(`Unsupported CultNet raw document payload encoding ${document.payloadEncoding}.`);
   }
   return decode(toUint8Array(document.payload));
+}
+
+function parseCultMeshPeerSnapshotDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+  schemaOrDefinition: string | TDefinition,
+  value: unknown,
+): unknown | CultCacheDocumentValue<TDefinition> {
+  return typeof schemaOrDefinition === "string"
+    ? value
+    : schemaOrDefinition.schema.parse(value);
 }
 
 function isCultNetErrorMessage(message: CultNetMessage): message is CultNetErrorMessage {

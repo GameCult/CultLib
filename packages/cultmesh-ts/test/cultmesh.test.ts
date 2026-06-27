@@ -1950,7 +1950,7 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
 
     const document = CultMesh.documentFromPeerSnapshot(
       peer,
-      "cultmesh.note.v0",
+      noteDocument,
       "note:remote",
       {
         documentId: "note:remote",
@@ -1958,10 +1958,13 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
       },
     );
 
-    assert.deepEqual(await document.latest(), {
+    const latest = await document.latest();
+    assert.equal(latest.body, "remote handles feel local");
+    assert.deepEqual(latest, {
       noteId: "note:remote",
       body: "remote handles feel local",
     });
+    assert.equal(document.schema.type, "cultmesh.note");
 
     const alias = CultMesh.documentFromPeerSnapshot(
       peer,
