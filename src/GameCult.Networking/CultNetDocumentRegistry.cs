@@ -94,6 +94,42 @@ namespace GameCult.Networking
                     ? payloadDeserializer(payload)
                     : CultDocumentMessagePackSerialization.Deserialize<T>(payload));
         }
+
+        /// <summary>
+        /// Creates a document binding for a CultCache document type discovered at runtime.
+        /// </summary>
+        public static CultNetDocumentBinding ForDocument(
+            Type documentType,
+            CultDocumentRegistry? registry = null,
+            string? schemaId = null,
+            Func<object, byte[]>? payloadSerializer = null,
+            Func<byte[], object>? payloadDeserializer = null)
+        {
+            if (documentType == null)
+            {
+                throw new ArgumentNullException(nameof(documentType));
+            }
+
+            var descriptor = (registry ?? CultDocumentRegistry.Shared).GetRequired(documentType);
+            return new CultNetDocumentBinding(
+                documentType,
+                string.IsNullOrWhiteSpace(schemaId) ? descriptor.SchemaId : schemaId!,
+                document =>
+                {
+                    if (!documentType.IsInstanceOfType(document))
+                    {
+                        throw new InvalidOperationException(
+                            $"Document payload type {document.GetType().FullName} is not assignable to {documentType.FullName}.");
+                    }
+
+                    return payloadSerializer != null
+                        ? payloadSerializer(document)
+                        : CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType);
+                },
+                payload => payloadDeserializer != null
+                    ? payloadDeserializer(payload)
+                    : CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload));
+        }
     }
 
     /// <summary>

@@ -1102,6 +1102,43 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentRegistryHelpers_CreateTypedNetworkRegistriesForAliases()
+    {
+        var sourceCache = new CultCache();
+        var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(
+            typeof(MeshNoteDocument),
+            typeof(MeshNoteAliasDocument));
+        var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(
+            new[] { typeof(MeshNoteDocument), typeof(MeshNoteAliasDocument) },
+            cacheRegistry);
+        var key = new CultRecordKey("mesh-note:registry-helper");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "registry-helper",
+            Revision = 23
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var endpoint = "cultnet://registry-helper.test:3077";
+
+        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteAliasDocument>(
+            endpoint,
+            new CultMeshSnapshotRequestOptions
+            {
+                RecordKeys = new[] { key.Value },
+                CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                    networkRegistry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
+            },
+            networkRegistry);
+
+        var schemaId = cacheRegistry.GetRequired<MeshNoteDocument>().SchemaId;
+        cacheRegistry.GetRequired<MeshNoteAliasDocument>().SchemaId.Should().Be(schemaId);
+        networkRegistry.GetByDocumentType(typeof(MeshNoteDocument)).Should().NotBeNull();
+        networkRegistry.GetByDocumentType(typeof(MeshNoteAliasDocument)).Should().NotBeNull();
+        networkRegistry.GetBySchemaId(schemaId)!.DocumentType.Should().Be(typeof(MeshNoteDocument));
+        documents.Should().ContainSingle().Which.Text.Should().Be("registry-helper");
+    }
+
+    [Test]
     public async Task SnapshotEndpoint_ProvidesTypedHandlesAndSchemaAliases()
     {
         var sourceCache = new CultCache();
