@@ -2260,6 +2260,49 @@ public sealed class CultMeshStreamingTests
             CultMesh.Verse("starbridge", "unity-pilot"));
 
         (await aliasSchemaHandle.LatestAsync()).Text.Should().Be("record-key-fallback");
+
+        var mixedAliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
+            _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "alias-schema-with-neighbor",
+                Documents = new[]
+                {
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId,
+                        RecordKey = "mesh-note:other",
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "wrong-schema-neighbor",
+                                Revision = 11
+                            },
+                            typeof(MeshNoteDocument))
+                    },
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = "remote.generated.mesh_note_alias.v100",
+                        RecordKey = key.Value,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "compatible-record-key",
+                                Revision = 12
+                            },
+                            typeof(MeshNoteDocument))
+                    }
+                }
+            }),
+            key.Value,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+
+        (await mixedAliasSchemaHandle.LatestAsync()).Text.Should().Be("compatible-record-key");
     }
 
     [Test]

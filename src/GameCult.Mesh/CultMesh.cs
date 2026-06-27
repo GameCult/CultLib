@@ -2317,6 +2317,9 @@ namespace GameCult.Mesh
                     string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) &&
                     string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal))
                 ?? response.Documents.FirstOrDefault(candidate =>
+                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal) &&
+                    TryDecodeSnapshotDocument(candidate, out TDocument? _))
+                ?? response.Documents.FirstOrDefault(candidate =>
                     string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal))
                 ?? response.Documents.FirstOrDefault(candidate =>
                     string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal));
@@ -2332,6 +2335,32 @@ namespace GameCult.Mesh
                     $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{record.PayloadEncoding}\".");
             }
 
+            return DecodeSnapshotDocument<TDocument>(record);
+        }
+
+        private static bool TryDecodeSnapshotDocument<TDocument>(
+            CultNetRawDocumentRecord record,
+            out TDocument? document)
+            where TDocument : class
+        {
+            document = null;
+            if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))
+                return false;
+
+            try
+            {
+                document = DecodeSnapshotDocument<TDocument>(record);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static TDocument DecodeSnapshotDocument<TDocument>(CultNetRawDocumentRecord record)
+            where TDocument : class
+        {
             return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(
                 typeof(TDocument),
                 record.Payload);
