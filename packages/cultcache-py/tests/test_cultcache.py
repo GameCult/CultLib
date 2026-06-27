@@ -4476,6 +4476,71 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(target.database.get_required(document, "note:alias").body, "from-source")
         self.assertIsInstance(target.database.get_required(alias, "note:alias"), UiNote)
 
+    def test_cultmesh_document_subscription_syncs_alias_snapshot_and_changes(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.subscription_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.subscription_alias_note.v1",
+            schema_name="mesh.subscription_alias_note",
+            schema_version="mesh.subscription_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.subscription_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.subscription_alias_note.v1",
+            schema_name="mesh.subscription_alias_note",
+            schema_version="mesh.subscription_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="subscription-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:live", CanonicalNote("initial"))
+        target = CultMesh.create_node(runtime_id="subscription-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with CultMesh.subscribe_document(target, raw_client, alias, "note:live") as subscription:
+                initial = subscription.sync_initial()
+                subscription.send(document_put_raw(
+                    message_id="subscription-alias-put",
+                    key="note:live",
+                    schema_id="mesh.subscription_alias_note.v1",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=document.encode_payload(CanonicalNote("updated")),
+                ))
+                updated = subscription.read_next_change()
+                subscription.send(document_delete(
+                    message_id="subscription-alias-delete",
+                    schema_id="mesh.subscription_alias_note.v1",
+                    record_key="note:live",
+                ))
+                removed = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        self.assertIsInstance(initial, UiNote)
+        self.assertEqual(initial.body, "initial")
+        self.assertEqual(updated.change_kind, "updated")
+        self.assertIsInstance(updated.value, UiNote)
+        self.assertEqual(updated.value.body, "updated")
+        self.assertIsInstance(updated.previous_value, UiNote)
+        self.assertEqual(updated.previous_value.body, "initial")
+        self.assertEqual(removed.change_kind, "removed")
+        self.assertIsNone(removed.value)
+        self.assertIsInstance(removed.previous_value, UiNote)
+        self.assertEqual(removed.previous_value.body, "updated")
+        self.assertIsNone(target.database.get(alias, "note:live"))
+
     def test_cultmesh_snapshot_fanout_syncs_once_and_reports_applied_records(self) -> None:
         document = define_database_entry_type(
             "mesh.snapshot_loop_note",

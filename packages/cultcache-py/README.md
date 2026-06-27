@@ -408,6 +408,14 @@ synced_stock = CultMesh.sync_document(
     station_stock_ui_doc,
     "station:starbridge:stock",
 )
+with CultMesh.subscribe_document(
+    node,
+    raw_client,
+    station_stock_ui_doc,
+    "station:starbridge:stock",
+) as stock_subscription:
+    stock = stock_subscription.sync_initial()
+    next_change = stock_subscription.read_next_change()
 node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
 replicator = CultNetShardReplicator(
     node.database,

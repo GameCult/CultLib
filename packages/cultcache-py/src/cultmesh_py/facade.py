@@ -21,7 +21,7 @@ from cultnet_py import (
     wire_message_schema_catalog,
 )
 
-from .client import CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
+from .client import CultMeshDocumentSubscription, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import CultMeshNode, CultMeshNodeOptions, create_node
 from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
@@ -290,6 +290,27 @@ class CultMesh:
             key,
             shard_id=shard_id,
             shard_epoch=shard_epoch,
+        )
+
+    @staticmethod
+    def subscribe_document(
+        node: CultMeshNode,
+        client: CultNetRawClient,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        subscription_id: str | None = None,
+        message_id: str = "cultmesh-python-document-subscribe",
+        include_snapshot: bool = True,
+    ) -> CultMeshDocumentSubscription:
+        return CultMeshDocumentSubscription(
+            client=client,
+            database=node.database,
+            document=document,
+            key=key,
+            subscription_id=subscription_id,
+            message_id=message_id,
+            include_snapshot=include_snapshot,
         )
 
     @staticmethod

@@ -7,7 +7,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from cultcache_py.documents import DocumentDefinition
-from cultnet_py import CultNetRawClient, CultNetRawSnapshotResponse, hello
+from cultnet_py import CultNetDatabaseSubscription, CultNetRawClient, CultNetRawSnapshotResponse, hello
 
 from .wire import (
     PEER_EXCHANGE_RESPONSE,
@@ -315,6 +315,26 @@ class CultMeshDiscoveryClient:
             for document, key in documents
         ]
 
+    def subscribe_document(
+        self,
+        database: Any,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        subscription_id: str | None = None,
+        message_id: str = "cultmesh-python-document-subscribe",
+        include_snapshot: bool = True,
+    ) -> "CultMeshDocumentSubscription":
+        return CultMeshDocumentSubscription(
+            client=CultNetRawClient(self.host, self.port, self.timeout_seconds),
+            database=database,
+            document=document,
+            key=key,
+            subscription_id=subscription_id,
+            message_id=message_id,
+            include_snapshot=include_snapshot,
+        )
+
     def _fanout_endpoints(
         self,
         catalog: CultMeshPeerCatalog,
@@ -387,6 +407,88 @@ class CultMeshPeerExchangeClient(CultMeshDiscoveryClient):
         limit: int | None = None,
     ) -> int:
         return self.fanout_peer_catalog(catalog, verse_id=verse_id, roles=roles, limit=limit)
+
+
+@dataclass
+class CultMeshDocumentSubscription:
+    client: CultNetRawClient
+    database: Any
+    document: DocumentDefinition[Any]
+    key: str
+    subscription_id: str | None = None
+    message_id: str = "cultmesh-python-document-subscribe"
+    include_snapshot: bool = True
+    _subscription: CultNetDatabaseSubscription | None = field(default=None, init=False, repr=False)
+
+    def __enter__(self) -> "CultMeshDocumentSubscription":
+        if not self.key:
+            raise ValueError("key must be non-empty")
+        registered = self.database._resolve_document_alias(self.document)
+        self._subscription = self.client.subscribe_database(
+            subscription_id=self.subscription_id or f"{registered.type}:{self.key}",
+            message_id=self.message_id,
+            schema_ids=[registered.catalog_entry().schema_id],
+            record_keys=[self.key],
+            include_snapshot=self.include_snapshot,
+        )
+        self._subscription.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self._subscription is not None:
+            self._subscription.__exit__(exc_type, exc, traceback)
+            self._subscription = None
+
+    def sync_initial(self) -> Any:
+        self._require_subscription()
+        changes = self._capture_changes(lambda: self.database.apply_snapshot_response(
+            self._subscription.read_next_snapshot_response()  # type: ignore[union-attr]
+        ))
+        if changes:
+            return changes[-1].value
+        return self.database.get_required(self.document, self.key)
+
+    def send(self, message: Any) -> None:
+        self._require_subscription()
+        self._subscription.send(message)  # type: ignore[union-attr]
+
+    def read_next_change(self) -> Any:
+        self._require_subscription()
+        remote_change = self._subscription.read_next_change()  # type: ignore[union-attr]
+
+        def apply_remote_change() -> None:
+            if remote_change.raw_document is not None:
+                self.database.apply_raw_put_message({
+                    "schemaVersion": "cultnet.document_put_raw.v0",
+                    "messageId": remote_change.message_id,
+                    "document": remote_change.raw_document.to_wire(),
+                })
+                return
+            if remote_change.change_kind == "removed":
+                self.database.apply_raw_delete_message({
+                    "schemaVersion": "cultnet.document_delete.v0",
+                    "messageId": remote_change.message_id,
+                    "schemaId": remote_change.schema_id,
+                    "recordKey": remote_change.record_key,
+                })
+
+        changes = self._capture_changes(apply_remote_change)
+        if not changes:
+            raise RuntimeError("CultMesh document subscription change did not apply to the local database")
+        return changes[-1]
+
+    def _capture_changes(self, action: Callable[[], Any]) -> list[Any]:
+        changes: list[Any] = []
+        unsubscribe = self.database.watch_record(self.document, self.key, changes.append)
+        try:
+            action()
+        finally:
+            unsubscribe()
+        return changes
+
+    def _require_subscription(self) -> None:
+        if self._subscription is None:
+            raise RuntimeError("CultMesh document subscription is not open")
 
 
 @dataclass
