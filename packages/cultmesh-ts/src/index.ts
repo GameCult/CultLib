@@ -6,6 +6,7 @@ import {
   SingleFileMessagePackBackingStore,
   type AnyCultCacheDocumentDefinition,
   type CacheBackingStore,
+  type CultCacheEnvelope,
   type CultCacheDocumentValue,
 } from "cultcache-ts";
 import {
@@ -2425,7 +2426,7 @@ export function cultMeshDocumentFromStore(
   const documentId = options.documentId ?? resolvedSchemaId;
   const read = async () => {
     const records = await store.pullAll();
-    const record = records.find(candidate => candidate.schemaId === resolvedSchemaId);
+    const record = resolveCultMeshStoreDocumentRecord(records, schema, schemaOrDefinition);
     if (!record) {
       throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
@@ -5679,6 +5680,59 @@ function cultMeshSchemasAreCompatible(
   }
 
   return Boolean(left.type && right.type && left.type === right.type);
+}
+
+function resolveCultMeshStoreDocumentRecord(
+  records: readonly CultCacheEnvelope[],
+  schema: CultMeshDocumentSchemaDescriptor,
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+): CultCacheEnvelope | undefined {
+  const schemaId = schema.schemaId ?? schema.type;
+  return (
+    records.find(candidate => schemaId !== undefined && candidate.schemaId === schemaId) ??
+    records.find(candidate =>
+      cultMeshEnvelopeMatchesSchema(candidate, schema) &&
+      (typeof schemaOrDefinition === "string" ||
+        cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition))) ??
+    (typeof schemaOrDefinition === "string"
+      ? undefined
+      : records.find(candidate => cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition)))
+  );
+}
+
+function cultMeshEnvelopeMatchesSchema(
+  envelope: CultCacheEnvelope,
+  schema: CultMeshDocumentSchemaDescriptor,
+): boolean {
+  const entry = envelope.catalogEntry;
+  if (!entry) {
+    return false;
+  }
+  if (
+    schema.schemaId &&
+    (entry.schemaId === schema.schemaId ||
+      envelope.schemaId === schema.schemaId ||
+      entry.compatibleSchemaIds?.includes(schema.schemaId))
+  ) {
+    return true;
+  }
+  return Boolean(
+    schema.schemaName &&
+    entry.schemaName === schema.schemaName &&
+    (schema.schemaVersion ?? "") === (entry.schemaVersion ?? ""),
+  );
+}
+
+function cultMeshEnvelopeParsesAsDefinition(
+  envelope: CultCacheEnvelope,
+  definition: AnyCultCacheDocumentDefinition,
+): boolean {
+  try {
+    definition.schema.parse(decode(envelope.payload));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function cultMeshSchemaLabel(schema: CultMeshDocumentSchemaDescriptor): string {

@@ -220,6 +220,59 @@ test("CultMesh TS document handles submit predictions through configured authori
   );
 });
 
+test("CultMesh TS store document handles choose compatible foreign schema payloads", async () => {
+  const store = {
+    async pullAll() {
+      return [
+        {
+          key: "note:foreign",
+          type: "runtime.generated.incompatible-note",
+          schemaId: "runtime.generated.incompatible-note.v1",
+          storedAt: "2026-06-27T00:00:00Z",
+          payload: encode({ nope: "not the requested shape" }),
+          catalogEntry: {
+            schemaId: "runtime.generated.incompatible-note.v1",
+            schemaName: "runtime.generated.incompatible-note",
+            schemaVersion: "runtime.generated.incompatible-note.v1",
+            contentHash: "runtime.generated.incompatible-note.v1",
+            canonicalSchemaJson: "{}",
+            compatibleSchemaIds: ["runtime.generated.incompatible-note.v1"],
+          },
+        },
+        {
+          key: "note:foreign",
+          type: "runtime.generated.cultmesh.note",
+          schemaId: "runtime.generated.cultmesh.note.ui.42",
+          storedAt: "2026-06-27T00:00:01Z",
+          payload: encode({
+            noteId: "note:foreign",
+            body: "foreign schema id, local store shape",
+          }),
+          catalogEntry: {
+            schemaId: "runtime.generated.cultmesh.note.ui.42",
+            schemaName: "cultmesh.note",
+            schemaVersion: "cultmesh.note.v1",
+            contentHash: "runtime.generated.cultmesh.note.ui.42",
+            canonicalSchemaJson: "{}",
+            compatibleSchemaIds: ["runtime.generated.cultmesh.note.ui.42"],
+          },
+        },
+      ];
+    },
+    async push() {},
+    async delete() {},
+  };
+
+  const document = CultMesh.documentFromStore(store, noteAliasDocument, {
+    documentId: "note:foreign.store",
+  });
+
+  assert.deepEqual(await document.latest(), {
+    noteId: "note:foreign",
+    body: "foreign schema id, local store shape",
+  });
+});
+
 test("CultMesh TS reactive documents submit predictions from member writes", async () => {
   let current = {
     noteId: "note:reactive",
