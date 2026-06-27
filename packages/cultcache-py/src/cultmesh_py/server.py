@@ -591,12 +591,21 @@ class CultMeshLocalServer:
     def _shard_catalog_response(self, request: dict[str, Any]) -> dict[str, Any]:
         requested_schema_ids = {str(value) for value in request.get("schemaIds") or []}
         document_schema_ids = [document.catalog_entry().schema_id for document in self.node.documents]
+        documents_by_schema_id = _schema_document_map(self.node.documents)
         shard_ids = self.node.database.shard_ids() or ["primary"]
         shards = []
         for shard_id in shard_ids:
             schema_ids = self.node.database.shard_schema_ids(shard_id) or document_schema_ids
             if requested_schema_ids:
-                schema_ids = [schema_id for schema_id in schema_ids if schema_id in requested_schema_ids]
+                schema_ids = [
+                    schema_id
+                    for schema_id in schema_ids
+                    if _schema_matches_request(
+                        schema_id,
+                        documents_by_schema_id.get(schema_id),
+                        requested_schema_ids,
+                    )
+                ]
             if not schema_ids:
                 continue
             shards.append({
@@ -620,3 +629,39 @@ class CultMeshLocalServer:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _schema_document_map(documents: list[Any]) -> dict[str, Any]:
+    mapped: dict[str, Any] = {}
+    for document in documents:
+        entry = document.catalog_entry()
+        mapped[entry.schema_id] = document
+        mapped[entry.schema_name] = document
+        for compatible_schema_id in entry.compatible_schema_ids:
+            mapped[compatible_schema_id] = document
+    return mapped
+
+
+def _schema_matches_request(
+    schema_id: str,
+    document: Any | None,
+    requested_schema_ids: set[str],
+) -> bool:
+    if not requested_schema_ids or schema_id in requested_schema_ids:
+        return True
+    if document is None:
+        return False
+    entry = document.catalog_entry()
+    if entry.schema_id in requested_schema_ids or entry.schema_name in requested_schema_ids:
+        return True
+    if any(compatible_schema_id in requested_schema_ids for compatible_schema_id in entry.compatible_schema_ids):
+        return True
+    return any(_infer_schema_name(requested_schema_id) == entry.schema_name for requested_schema_id in requested_schema_ids)
+
+
+def _infer_schema_name(schema_id: str) -> str | None:
+    marker = schema_id.rfind(".v")
+    if marker <= 0 or marker + 2 >= len(schema_id):
+        return None
+    version = schema_id[marker + 2:]
+    return schema_id[:marker] if version.isdigit() else None

@@ -535,6 +535,8 @@ class CultMeshDatabase:
     ) -> CultNetRawSnapshotResponse:
         requested_schema_ids = set(schema_ids or [])
         requested_record_keys = set(record_keys or [])
+        documents_by_type = {document.type: document for document in self.documents}
+        documents_by_schema_id = schema_document_map(self.documents)
         shard_record_keys = (
             self._live_shard_record_keys(shard_id)
             if shard_id is not None and shard_id in self._shard_logs
@@ -543,7 +545,8 @@ class CultMeshDatabase:
         documents: list[CultNetRawDocumentRecord] = []
         for envelope in self.cache.snapshot_envelopes():
             schema_id = envelope.schema_id or envelope.type
-            if requested_schema_ids and schema_id not in requested_schema_ids:
+            document = documents_by_type.get(envelope.type) or documents_by_schema_id.get(schema_id)
+            if requested_schema_ids and not self._schema_matches_request(schema_id, document, requested_schema_ids):
                 continue
             if requested_record_keys and envelope.key not in requested_record_keys:
                 continue
@@ -949,6 +952,31 @@ class CultMeshDatabase:
             record_key = str(record.get("recordKey"))
             previous[(resolved_schema_id, record_key)] = self.cache.get(document, record_key)
         return previous
+
+    @staticmethod
+    def _schema_matches_request(
+        schema_id: str,
+        document: DocumentDefinition[Any] | None,
+        requested_schema_ids: set[str],
+    ) -> bool:
+        if not requested_schema_ids or schema_id in requested_schema_ids:
+            return True
+        if document is None:
+            return False
+        entry = document.catalog_entry()
+        if entry.schema_id in requested_schema_ids or entry.schema_name in requested_schema_ids:
+            return True
+        if any(schema_id in requested_schema_ids for schema_id in entry.compatible_schema_ids):
+            return True
+        return any(_infer_schema_name(schema_id) == entry.schema_name for schema_id in requested_schema_ids)
+
+
+def _infer_schema_name(schema_id: str) -> str | None:
+    marker = schema_id.rfind(".v")
+    if marker <= 0 or marker + 2 >= len(schema_id):
+        return None
+    version = schema_id[marker + 2:]
+    return schema_id[:marker] if version.isdigit() else None
 
 
 def create_node(

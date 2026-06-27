@@ -5233,6 +5233,40 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(subscription_delete.raw_document)
         self.assertIsNone(node.database.get(document, "note:2"))
 
+    def test_cultmesh_local_server_resolves_snapshot_and_shard_catalog_schema_aliases(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_server_note",
+            [("body", 0)],
+            schema_id="sha256:mesh-alias-server-note",
+            schema_name="mesh.alias_server_note",
+            schema_version="mesh.alias_server_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(
+            document,
+            "note:alias",
+            {"body": "served through alias"},
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            snapshot = raw_client.fetch_snapshot(schema_ids=["mesh.alias_server_note.v1"])
+            typed_snapshot = raw_client.fetch_snapshot_response(schema_ids=["mesh.alias_server_note.v1"])
+            shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.alias_server_note.v1"])
+        finally:
+            server.stop()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(snapshot["documents"][0]["schemaId"], local_schema_id)
+        self.assertEqual(snapshot["documents"][0]["recordKey"], "note:alias")
+        self.assertEqual(typed_snapshot.documents[0].schema_id, local_schema_id)
+        self.assertEqual(shard_catalog["shards"][0]["schemaIds"], [local_schema_id])
+        self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
+
     def test_cultmesh_local_server_rejects_oversized_snapshot_responses(self) -> None:
         document = define_database_entry_type(
             "mesh.snapshot_limit_note",
