@@ -892,6 +892,9 @@ namespace GameCult.Mesh
         /// <summary>Gets the stable CultCache schema version.</summary>
         string SchemaVersion { get; }
 
+        /// <summary>Gets the content-derived schema identifier.</summary>
+        string SchemaId { get; }
+
         /// <summary>Gets the preferred or observed route for document access.</summary>
         CultMeshRouteHint RouteHint { get; }
 
@@ -1577,6 +1580,8 @@ namespace GameCult.Mesh
             foreach (var document in documentList)
             {
                 byType[document.DocumentType] = document;
+                if (!string.IsNullOrWhiteSpace(document.SchemaId))
+                    bySchema[document.SchemaId] = document;
                 if (!string.IsNullOrWhiteSpace(document.SchemaVersion))
                     bySchema[document.SchemaVersion] = document;
                 if (!string.IsNullOrWhiteSpace(document.SchemaName))
@@ -1591,7 +1596,7 @@ namespace GameCult.Mesh
         /// <summary>Gets the handles in this catalog.</summary>
         public IReadOnlyList<ICultMeshDocumentHandle> Documents => _documents;
 
-        /// <summary>Looks up a document handle by shared schema name or schema version.</summary>
+        /// <summary>Looks up a document handle by schema id, shared schema name, or schema version.</summary>
         public bool TryGetDocumentBySchema(
             string schema,
             out ICultMeshDocumentHandle document)
@@ -1606,7 +1611,7 @@ namespace GameCult.Mesh
             return false;
         }
 
-        /// <summary>Looks up a document handle by shared schema name or schema version.</summary>
+        /// <summary>Looks up a document handle by schema id, shared schema name, or schema version.</summary>
         public ICultMeshDocumentHandle DocumentBySchema(string schema)
         {
             if (TryGetDocumentBySchema(schema, out var document))

@@ -724,6 +724,9 @@ public sealed class CultMeshStreamingTests
         catalog.TryGetDocumentBySchema("tests.mesh_note.v1", out var byVersion).Should().BeTrue();
         byVersion.Should().BeSameAs(handle);
         catalog.DocumentBySchema("tests.mesh_note").Should().BeSameAs(handle);
+        catalog.DocumentBySchema(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId)
+            .Should()
+            .BeSameAs(handle);
 
         catalog.TryGetDocument<MeshNoteAliasDocument>(out var alias).Should().BeTrue();
         alias.DocumentId.Should().Be(handle.DocumentId);
