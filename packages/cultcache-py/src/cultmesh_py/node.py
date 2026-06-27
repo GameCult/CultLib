@@ -264,7 +264,16 @@ class CultMeshDatabase:
         document: DocumentDefinition[Any] | None = None,
         key: str | None = None,
     ) -> Callable[[], None]:
-        subscriber = (document, key, callback)
+        requested = document
+        registered = None if document is None else self._resolve_document_alias(document)
+
+        def converted(change: CultMeshDatabaseChange) -> None:
+            if requested is None:
+                callback(change)
+            else:
+                callback(self._change_as_document(change, requested))
+
+        subscriber = (registered, key, converted)
         self._subscribers.append(subscriber)
 
         def unsubscribe() -> None:
@@ -279,8 +288,13 @@ class CultMeshDatabase:
         key: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
-        document = self._resolve_document_alias(document)
-        return self.watch(callback, document=document, key=key)
+        requested = document
+        registered = self._resolve_document_alias(document)
+
+        def converted(change: CultMeshDatabaseChange) -> None:
+            callback(self._change_as_document(change, requested))
+
+        return self.watch(converted, document=registered, key=key)
 
     def watch_global(
         self,
@@ -295,6 +309,7 @@ class CultMeshDatabase:
         name: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
+        requested = document
         document = self._resolve_document_alias(document)
         if not name:
             raise ValueError("Name watch values must be non-empty")
@@ -303,7 +318,7 @@ class CultMeshDatabase:
 
         def filtered(change: CultMeshDatabaseChange) -> None:
             if self._change_matches_extractor(change, document.name, name):
-                callback(change)
+                callback(self._change_as_document(change, requested))
 
         return self.watch(filtered, document=document)
 
@@ -314,6 +329,7 @@ class CultMeshDatabase:
         value: str,
         callback: Callable[[CultMeshDatabaseChange], None],
     ) -> Callable[[], None]:
+        requested = document
         document = self._resolve_document_alias(document)
         if not index:
             raise ValueError("Index watch aliases must be non-empty")
@@ -325,7 +341,7 @@ class CultMeshDatabase:
 
         def filtered(change: CultMeshDatabaseChange) -> None:
             if self._change_matches_extractor(change, extractor, value):
-                callback(change)
+                callback(self._change_as_document(change, requested))
 
         return self.watch(filtered, document=document)
 
@@ -913,6 +929,32 @@ class CultMeshDatabase:
         target: DocumentDefinition[Any],
     ) -> Any:
         return target.decode_payload(source.encode_payload(value))
+
+    def _change_as_document(
+        self,
+        change: CultMeshDatabaseChange,
+        target: DocumentDefinition[Any],
+    ) -> CultMeshDatabaseChange:
+        if change.document.type == target.type:
+            return change
+        if not self._documents_alias(change.document, target):
+            return change
+        return CultMeshDatabaseChange(
+            document=target,
+            schema_id=target.catalog_entry().schema_id,
+            record_key=change.record_key,
+            change_kind=change.change_kind,
+            value=None if change.value is None else self._convert_document_value(
+                change.value,
+                change.document,
+                target,
+            ),
+            previous_value=None if change.previous_value is None else self._convert_document_value(
+                change.previous_value,
+                change.document,
+                target,
+            ),
+        )
 
     def _documents_alias(
         self,

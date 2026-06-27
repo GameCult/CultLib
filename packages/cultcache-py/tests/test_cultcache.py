@@ -2127,6 +2127,8 @@ class CultCacheTests(unittest.TestCase):
         node = create_node(runtime_id="python-node")
         node.register_document(document)
         seen: list[CultMeshDatabaseChange] = []
+        all_seen: list[CultMeshDatabaseChange] = []
+        node.database.watch(all_seen.append, document=alias)
         node.database.watch_record(alias, "note:alias", seen.append)
 
         node.put(alias, "note:alias", UiNote("from-alias-put"))
@@ -2138,9 +2140,20 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(len(alias_collection), 1)
         self.assertIsInstance(alias_collection[0], UiNote)
         self.assertEqual(alias_collection[0].body, "from-alias-put")
-        self.assertEqual(seen[0].document.type, document.type)
-        self.assertIsInstance(seen[0].value, CanonicalNote)
+        self.assertEqual(seen[0].document.type, alias.type)
+        self.assertEqual(seen[0].schema_id, "mesh.alias_note.v1")
+        self.assertIsInstance(seen[0].value, UiNote)
         self.assertEqual(seen[0].value.body, "from-alias-put")
+        self.assertEqual(all_seen[0].document.type, alias.type)
+        self.assertIsInstance(all_seen[0].value, UiNote)
+        self.assertEqual(all_seen[0].value.body, "from-alias-put")
+
+        node.put(document, "note:alias", CanonicalNote("from-canonical-put"))
+        self.assertEqual(seen[1].document.type, alias.type)
+        self.assertIsInstance(seen[1].value, UiNote)
+        self.assertIsInstance(seen[1].previous_value, UiNote)
+        self.assertEqual(seen[1].value.body, "from-canonical-put")
+        self.assertEqual(seen[1].previous_value.body, "from-alias-put")
 
         put = node.put_raw_message(
             alias,
@@ -3146,6 +3159,60 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsInstance(sword, UiItem)
         self.assertEqual(sword.name, "Sword")
         self.assertIsNone(node.database.get_by_name(alias, "Missing"))
+
+    def test_cultmesh_database_alias_collection_watches_emit_alias_values(self) -> None:
+        @dataclass
+        class CanonicalItem:
+            name: str
+            kind: str
+
+        @dataclass
+        class UiItem:
+            name: str
+            kind: str
+
+        document = define_database_entry_type(
+            "mesh.alias_collection_watch_item",
+            [("name", 0), ("kind", 1)],
+            cls=CanonicalItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_watch_item.v1",
+            schema_name="mesh.alias_collection_watch_item",
+            schema_version="mesh.alias_collection_watch_item.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.alias_collection_watch_item.ui",
+            [("name", 0), ("kind", 1)],
+            cls=UiItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_watch_item.v1",
+            schema_name="mesh.alias_collection_watch_item",
+            schema_version="mesh.alias_collection_watch_item.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-collection-watch")
+        node.database.register_document(document)
+        name_changes: list[CultMeshDatabaseChange] = []
+        index_changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_by_name(alias, "Potion", name_changes.append)
+        node.database.watch_by_index(alias, "kind", "consumable", index_changes.append)
+
+        node.database.put(document, "item:potion", CanonicalItem("Potion", "consumable"))
+        node.database.put(document, "item:potion", CanonicalItem("Elixir", "rare"))
+
+        self.assertEqual([change.change_kind for change in name_changes], ["added", "updated"])
+        self.assertTrue(all(change.document.type == alias.type for change in name_changes))
+        self.assertIsInstance(name_changes[0].value, UiItem)
+        self.assertIsInstance(name_changes[1].value, UiItem)
+        self.assertIsInstance(name_changes[1].previous_value, UiItem)
+        self.assertEqual(name_changes[1].previous_value.name, "Potion")
+        self.assertEqual(name_changes[1].value.name, "Elixir")
+        self.assertEqual([change.change_kind for change in index_changes], ["added", "updated"])
+        self.assertTrue(all(change.document.type == alias.type for change in index_changes))
+        self.assertIsInstance(index_changes[0].value, UiItem)
+        self.assertIsInstance(index_changes[1].previous_value, UiItem)
 
     def test_cultmesh_database_watch_by_name_and_index_validate_lookup_shape(self) -> None:
         document = define_database_entry_type("mesh.unnamed_watch", [("body", 0)])
