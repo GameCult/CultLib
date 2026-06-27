@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using GameCult.Networking;
+using MessagePack;
 
 namespace GameCult.Mesh
 {
@@ -679,7 +680,9 @@ namespace GameCult.Mesh
                     binding != null &&
                     typeof(TDocument).IsAssignableFrom(binding.DocumentType);
                 var canDeserializeAsSchemaAlias =
-                    string.Equals(record.SchemaId, descriptor.SchemaId, StringComparison.Ordinal);
+                    string.Equals(record.SchemaId, descriptor.SchemaId, StringComparison.Ordinal) ||
+                    (binding != null && IsSameCultDocumentSchema(binding.DocumentType, descriptor)) ||
+                    RawSnapshotPayloadMatchesSchema(record.Payload, descriptor);
                 if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
 
@@ -689,12 +692,77 @@ namespace GameCult.Mesh
                         $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{record.PayloadEncoding}\".");
                 }
 
-                documents.Add(canDeserializeWithBinding
-                    ? (TDocument)binding!.PayloadDeserializer(record.Payload)
-                    : CultDocumentMessagePackSerialization.Deserialize<TDocument>(record.Payload));
+                if (binding != null)
+                {
+                    var decoded = binding.PayloadDeserializer(record.Payload);
+                    documents.Add(decoded is TDocument typed
+                        ? typed
+                        : ConvertUntypedDocument<TDocument>(decoded));
+                }
+                else
+                {
+                    documents.Add(CultDocumentMessagePackSerialization.Deserialize<TDocument>(record.Payload));
+                }
             }
 
             return documents;
+        }
+
+        private static bool RawSnapshotPayloadMatchesSchema(
+            byte[] payload,
+            CultDocumentDescriptor descriptor)
+        {
+            var schemaVersion = TryReadSchemaVersion(payload);
+            if (string.IsNullOrWhiteSpace(schemaVersion))
+                return false;
+
+            if (string.Equals(schemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal))
+                return true;
+
+            var schemaName = InferSchemaName(schemaVersion!);
+            return !string.IsNullOrWhiteSpace(schemaName) &&
+                   string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal);
+        }
+
+        private static string? TryReadSchemaVersion(byte[] payload)
+        {
+            try
+            {
+                var array = MessagePackSerializer.Deserialize<object[]>(payload, CultNetSchemaMessageSerialization.Options);
+                if (array.Length > 0 && array[0] is string schemaVersion)
+                    return schemaVersion;
+            }
+            catch (Exception)
+            {
+                // Fall through to map decoding; different runtimes may encode object-like payloads.
+            }
+
+            try
+            {
+                var map = MessagePackSerializer.Deserialize<IReadOnlyDictionary<string, object?>>(payload, CultNetSchemaMessageSerialization.Options);
+                if (map.TryGetValue("schemaVersion", out var schemaVersion) && schemaVersion is string schemaVersionText)
+                    return schemaVersionText;
+                if (map.TryGetValue("schema_version", out var snakeSchemaVersion) && snakeSchemaVersion is string snakeSchemaVersionText)
+                    return snakeSchemaVersionText;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            return null;
+        }
+
+        private static string? InferSchemaName(string schemaVersion)
+        {
+            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
+            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
+                return null;
+
+            var version = schemaVersion.Substring(marker + 2);
+            return version.All(char.IsDigit)
+                ? schemaVersion.Substring(0, marker)
+                : null;
         }
     }
 }

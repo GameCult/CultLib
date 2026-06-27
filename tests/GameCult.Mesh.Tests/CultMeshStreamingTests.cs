@@ -2323,6 +2323,49 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotHelpers_DecodeSameSchemaAliasFromForeignSchemaId()
+    {
+        var key = new CultRecordKey("mesh-note:snapshot-alias-foreign-schema");
+        var snapshot = new CultNetSnapshotResponseRawMessage
+        {
+            MessageId = "foreign-schema",
+            Documents = new[]
+            {
+                new CultNetRawDocumentRecord
+                {
+                    SchemaId = "runtime.generated.mesh-note.ui.42",
+                    RecordKey = key.Value,
+                    StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                    PayloadEncoding = "messagepack",
+                    Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                        new MeshNoteDocument
+                        {
+                            Schema = "tests.mesh_note.v1",
+                            Text = "foreign-schema-alias",
+                            Revision = 44
+                        },
+                        typeof(MeshNoteDocument))
+                }
+            }
+        };
+
+        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteAliasDocument>(
+            "cultnet://foreign-schema.test:3075",
+            new CultMeshSnapshotRequestOptions
+            {
+                RecordKeys = new[] { key.Value },
+                CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                {
+                    snapshot.MessageId = request.MessageId;
+                    return snapshot;
+                })
+            },
+            new CultNetDocumentRegistry());
+
+        documents.Should().ContainSingle().Which.Text.Should().Be("foreign-schema-alias");
+    }
+
+    [Test]
     public async Task DocumentRegistryHelpers_CreateTypedNetworkRegistriesForAliases()
     {
         var sourceCache = new CultCache();
