@@ -722,6 +722,89 @@ test("CultMesh TS syncs configured publications into local node aliases", async 
   assert.equal((await target.reactiveDocument(noteAliasDocument, "note:published", { watch: false }).ready).body, "publication source hydrates local alias");
 });
 
+test("CultMesh TS syncs configured publication catalogs into local node aliases", async () => {
+  const firstPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-first-")), "first.ccmp");
+  const secondPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-second-")), "second.ccmp");
+  const targetPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-catalog-target-")), "target.ccmp");
+  const first = await CultMesh.startNode(firstPath, {
+    documents: [noteDocument],
+  });
+  const second = await CultMesh.startNode(secondPath, {
+    documents: [noteDocument],
+  });
+  await first.put(noteDocument, "note:first-sync", {
+    noteId: "note:first-sync",
+    body: "first synced publication",
+  });
+  await second.put(noteDocument, "note:second-sync", {
+    noteId: "note:second-sync",
+    body: "second synced publication",
+  });
+  await first.flush();
+  await second.flush();
+  const target = await CultMesh.startNode(targetPath, {
+    documents: [noteDocument],
+  });
+  const bindings = [
+    CultMesh.publicationDocument(noteDocument, "note:first-sync", {
+      documentId: "local:first",
+    }),
+    CultMesh.publicationDocument(noteAliasDocument, "note:second-sync", {
+      documentId: "local:second",
+      source: {
+        kind: "single-file",
+        path: secondPath,
+      },
+    }),
+  ];
+
+  const catalog = await target.syncDocumentsFromPublication(
+    {
+      kind: "single-file",
+      path: firstPath,
+    },
+    bindings,
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "publication sync catalog"),
+      pollMs: 5,
+    },
+  );
+  const facadeCatalog = await CultMesh.syncDocumentsFromPublication(
+    target,
+    {
+      kind: "single-file",
+      path: firstPath,
+    },
+    bindings,
+  );
+
+  assert.deepEqual(
+    catalog.documents.map(document => document.documentId),
+    ["local:first", "local:second"],
+  );
+  assert.equal(
+    await catalog.document(noteDocument, {
+      parse: value => noteDocument.schema.parse(value),
+    }).latest().then(value => value.body),
+    "first synced publication",
+  );
+  assert.equal(
+    await catalog.document(noteAliasDocument, {
+      parse: value => noteAliasDocument.schema.parse(value),
+    }).latest().then(value => value.body),
+    "second synced publication",
+  );
+  assert.equal(catalog.document(noteAliasDocument).routeHint.description, "publication sync catalog");
+  assert.equal(target.getRequired(noteDocument, "note:second-sync").body, "second synced publication");
+  assert.equal(target.getRequired(noteAliasDocument, "note:second-sync").body, "second synced publication");
+  assert.equal(
+    await facadeCatalog.document(noteAliasDocument, {
+      parse: value => noteAliasDocument.schema.parse(value),
+    }).latest().then(value => value.body),
+    "second synced publication",
+  );
+});
+
 test("CultMesh TS document catalogs resolve semantic schema versions passed as schema ids", async () => {
   const current = {
     noteId: "note:semantic",

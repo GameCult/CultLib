@@ -2787,6 +2787,57 @@ export async function cultMeshSyncDocumentFromPublication<TDefinition extends An
   return node.put(definition, recordKey, value);
 }
 
+export async function cultMeshSyncDocumentsFromPublication(
+  node: CultMeshNode,
+  source: CultMeshDocumentPublicationSourceResolver,
+  bindings: readonly CultMeshPublicationDocumentBinding[],
+  options: {
+    routeHint?: CultMeshRouteHint;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): Promise<CultMeshDocumentCatalog> {
+  if (!node) {
+    throw new Error("CultMesh node is required.");
+  }
+  if (!source) {
+    throw new Error("CultMesh publication source is required.");
+  }
+  if (!bindings) {
+    throw new Error("CultMesh publication bindings are required.");
+  }
+
+  const documents = await Promise.all(bindings.map(async binding => {
+    if (!binding) {
+      throw new Error("CultMesh publication binding is required.");
+    }
+    if (typeof binding.schema === "string") {
+      throw new Error(
+        `CultMesh synced publication binding '${binding.recordKey}' requires a document definition, not only a schema id.`,
+      );
+    }
+    const resolvedSource = binding.source ??
+      (typeof source === "function" ? source(binding) : source);
+    await node.syncDocumentFromPublication(
+      resolvedSource,
+      binding.schema,
+      binding.recordKey,
+      {
+        timeoutMs: options.timeoutMs,
+        messageIdPrefix: options.messageIdPrefix,
+      },
+    );
+    return node.document(binding.schema, binding.recordKey, {
+      documentId: binding.documentId ?? binding.recordKey,
+      routeHint: options.routeHint,
+      pollMs: options.pollMs,
+    });
+  }));
+
+  return cultMeshDocuments(...documents);
+}
+
 export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
   cache: CultCache,
   definition: TDefinition,
@@ -3898,6 +3949,19 @@ export class CultMeshNode {
     return cultMeshSyncDocumentFromPublication(this, source, definition, key, options);
   }
 
+  public syncDocumentsFromPublication(
+    source: CultMeshDocumentPublicationSourceResolver,
+    bindings: readonly CultMeshPublicationDocumentBinding[],
+    options: {
+      routeHint?: CultMeshRouteHint;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultMeshDocumentCatalog> {
+    return cultMeshSyncDocumentsFromPublication(this, source, bindings, options);
+  }
+
   public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     options: {
@@ -4899,6 +4963,20 @@ export class CultMesh {
     } = {},
   ): Promise<CultCacheDocumentValue<TDefinition>> {
     return node.syncDocumentFromPublication(source, definition, key, options);
+  }
+
+  public static syncDocumentsFromPublication(
+    node: CultMeshNode,
+    source: CultMeshDocumentPublicationSourceResolver,
+    bindings: readonly CultMeshPublicationDocumentBinding[],
+    options: {
+      routeHint?: CultMeshRouteHint;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultMeshDocumentCatalog> {
+    return node.syncDocumentsFromPublication(source, bindings, options);
   }
 
   public static documents(
