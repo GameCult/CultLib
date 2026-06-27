@@ -529,7 +529,7 @@ namespace GameCult.Networking
                 var key = GetTrackedKey(document, documentType);
                 if (string.IsNullOrWhiteSpace(key.Value) ||
                     !shard.Matches(descriptor.SchemaId, key) ||
-                    (requestedSchemaIds != null && !requestedSchemaIds.Contains(descriptor.SchemaId)) ||
+                    (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, requestedSchemaIds)) ||
                     (requestedRecordKeys != null && !requestedRecordKeys.Contains(key.Value)))
                 {
                     continue;
@@ -1523,6 +1523,37 @@ namespace GameCult.Networking
                              recordKeys.Any(key => string.IsNullOrEmpty(shard.KeyPrefix) ||
                                                    key.Value.StartsWith(shard.KeyPrefix!, StringComparison.Ordinal));
             return schemaMatches && keyMatches;
+        }
+
+        private static bool MatchesRequestedSchema(
+            CultDocumentDescriptor descriptor,
+            ISet<string> requestedSchemaIds)
+        {
+            if (requestedSchemaIds.Count == 0)
+                return true;
+
+            if (requestedSchemaIds.Contains(descriptor.SchemaId))
+                return true;
+
+            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requestedSchemaIds.Contains))
+                return true;
+
+            return requestedSchemaIds
+                .Select(InferSchemaName)
+                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
+                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
+        }
+
+        private static string? InferSchemaName(string schemaVersion)
+        {
+            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
+            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
+                return null;
+
+            var version = schemaVersion.Substring(marker + 2);
+            return version.All(char.IsDigit)
+                ? schemaVersion.Substring(0, marker)
+                : null;
         }
 
         internal static CultNetShardDescriptorMessage ToMessage(CultNetShardDescriptor shard)

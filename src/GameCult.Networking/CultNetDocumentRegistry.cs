@@ -280,12 +280,9 @@ namespace GameCult.Networking
                                   value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
                                   payload => CultDocumentMessagePackSerialization.DeserializeUntyped(document.GetType(), payload));
 
-                if (requestedSchemaIds != null && !requestedSchemaIds.Contains(descriptor.SchemaId))
+                if (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, binding, requestedSchemaIds))
                 {
-                    if (!requestedSchemaIds.Contains(binding.SchemaId))
-                    {
-                        continue;
-                    }
+                    continue;
                 }
 
                 var handleMethod = typeof(CultCache)
@@ -436,6 +433,27 @@ namespace GameCult.Networking
                 .Select(binding => _documents.GetRequired(binding.DocumentType))
                 .GroupBy(descriptor => descriptor.DocumentType)
                 .Select(group => group.First());
+        }
+
+        private static bool MatchesRequestedSchema(
+            CultDocumentDescriptor descriptor,
+            CultNetDocumentBinding binding,
+            ISet<string> requestedSchemaIds)
+        {
+            if (requestedSchemaIds.Count == 0)
+                return true;
+
+            if (requestedSchemaIds.Contains(descriptor.SchemaId) ||
+                requestedSchemaIds.Contains(binding.SchemaId))
+                return true;
+
+            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requestedSchemaIds.Contains))
+                return true;
+
+            return requestedSchemaIds
+                .Select(InferSchemaName)
+                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
+                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
         }
 
         private static string? TryReadSchemaVersion(byte[] payload)

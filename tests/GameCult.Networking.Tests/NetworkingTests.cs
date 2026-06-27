@@ -1838,6 +1838,79 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabaseServer_Creates_SnapshotResponse_ForCompatibleSchemaAlias()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var key = new CultRecordKey("network-note:alias-snapshot");
+            var note = new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "alias snapshot",
+                Revision = 7
+            };
+            await database.PutAsync(key, note);
+
+            var response = databaseServer.CreateSnapshotResponse(registry.CreateSnapshotRequest(
+                "snapshot-alias-request",
+                schemaIds: ["tests.networking_note.v1"],
+                recordKeys: [key.Value]));
+
+            Assert.That(response.Documents, Has.Length.EqualTo(1));
+            Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_Creates_ShardSnapshotResponse_ForCompatibleSchemaAlias()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "network-notes",
+                "runtime-a",
+                epoch: 4,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "network-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3075"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("network-note:alias-shard-snapshot");
+            var note = new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "alias shard snapshot",
+                Revision = 8
+            };
+            await database.PutAsync(key, note);
+
+            var response = database.CreateShardSnapshotResponse(
+                shard,
+                "snapshot-shard-alias-request",
+                registry.CreateSnapshotRequest(
+                    "snapshot-shard-alias-request",
+                    schemaIds: ["tests.networking_note.v1"],
+                    recordKeys: [key.Value]));
+
+            Assert.That(response.Documents, Has.Length.EqualTo(1));
+            Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_ShardCatalogResponse()
         {
             var cache = new CultCache();
