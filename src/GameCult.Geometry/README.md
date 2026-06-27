@@ -1,7 +1,8 @@
 # GameCult.Geometry
 
-`GameCult.Geometry` defines CultCache-native documents for procedural geometry
-domains, LOD build requests, selected-cut manifests, and mesh chunk artifacts.
+`GameCult.Geometry` defines shared geometry values plus CultCache-native
+documents for procedural geometry domains, LOD build requests, selected-cut
+manifests, and mesh chunk artifacts.
 
 The package is deliberately substrate-shaped:
 
@@ -13,6 +14,22 @@ The package is deliberately substrate-shaped:
 - JSON is not a runtime transport here. It may publish schema descriptions at
   the xeno boundary, but the live machine eats and emits typed CultCache
   documents.
+
+## Value Primitives
+
+The small value layer is for cross-runtime query contracts, physics probes,
+native slices, and UI surfaces:
+
+- `CultVec2` and `CultVec3`: whole-vector values for positions, velocities,
+  accelerations, and query inputs. SoA layouts may store them efficiently, but
+  the semantic API does not force callers to split x/y/z into unrelated fields.
+- `CultRect`: canonical XY viewport/query rectangle stored as min/max corners.
+- `CultCircle`: 2D influence/query brush with rect intersection helpers.
+- `CultSphere`: 3D query primitive with whole-vector center and XY projection.
+
+Aetheria object viewports, gravity influence brushes, Ymir overlap/cast query
+fixtures, and Unity native render views should use these shapes or generated
+runtime equivalents instead of bespoke `{ minX, minY, maxX, maxY }` payloads.
 
 ## Runtime Path
 
@@ -55,6 +72,8 @@ cache miss; that is split-brain geometry.
 
 ## Documents
 
+- `CultVec2`, `CultVec3`, `CultRect`, `CultCircle`, `CultSphere`: shared value
+  primitives for query and view contracts.
 - `CultGeometryDomainDocument`: one hierarchical domain tree, suitable for
   Ragnarok/Fensalir-style feature DSL output.
 - `CultGeometryBuildRequest`: one LOD/frustum/budget request for workers.
