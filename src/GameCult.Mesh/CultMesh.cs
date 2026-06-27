@@ -299,6 +299,14 @@ namespace GameCult.Mesh
             CultMeshVerseContext context,
             CultMeshStoreDocumentOptions? storeOptions,
             CultMeshPeerSnapshotDocumentOptions? peerOptions);
+
+        /// <summary>Reads this publication document and hydrates it into a local node.</summary>
+        Task<ICultMeshDocumentHandle> SyncAsync(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions);
     }
 
     /// <summary>
@@ -344,6 +352,32 @@ namespace GameCult.Mesh
                 context,
                 CultMesh.WithPublicationBindingOptions(storeOptions, Key, DocumentId, SourceId),
                 CultMesh.WithPublicationBindingOptions(peerOptions, Key, DocumentId, SourceId));
+        }
+
+        /// <inheritdoc />
+        public async Task<ICultMeshDocumentHandle> SyncAsync(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var publication = CultMesh.DocumentFromPublication<TDocument>(
+                Source ?? source,
+                Key,
+                context,
+                CultMesh.WithPublicationBindingOptions(storeOptions, Key, DocumentId, SourceId),
+                CultMesh.WithPublicationBindingOptions(peerOptions, Key, DocumentId, SourceId));
+            var local = CultMesh.Document<TDocument>(
+                node,
+                Key,
+                context,
+                string.IsNullOrWhiteSpace(DocumentId) ? Key.Value : DocumentId);
+            await local.ReplaceAsync(await publication.LatestAsync().ConfigureAwait(false)).ConfigureAwait(false);
+            return local;
         }
     }
     /// <summary>
@@ -1665,6 +1699,57 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return DocumentsFromPublication(source, bindings, verse.Context, storeOptions, peerOptions);
+        }
+        /// <summary>
+        /// Reads configured publication documents, hydrates them into a local node, and returns local handles as a catalog.
+        /// </summary>
+        public static async Task<CultMeshDocumentCatalog> SyncDocumentsFromPublicationAsync(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            IEnumerable<ICultMeshPublicationDocumentBinding> bindings,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null,
+            bool flush = false)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (bindings == null) throw new ArgumentNullException(nameof(bindings));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var handles = await Task.WhenAll(bindings.Select(binding =>
+            {
+                if (binding == null) throw new ArgumentException("CultMesh publication bindings cannot contain null.", nameof(bindings));
+                return binding.SyncAsync(node, source, context, storeOptions, peerOptions);
+            })).ConfigureAwait(false);
+
+            if (flush)
+                await node.FlushAsync().ConfigureAwait(false);
+
+            return Documents(handles);
+        }
+
+        /// <summary>
+        /// Reads configured publication documents, hydrates them into a local node, and returns local handles as a catalog.
+        /// </summary>
+        public static Task<CultMeshDocumentCatalog> SyncDocumentsFromPublicationAsync(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            IEnumerable<ICultMeshPublicationDocumentBinding> bindings,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null,
+            bool flush = false)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return SyncDocumentsFromPublicationAsync(
+                node,
+                source,
+                bindings,
+                verse.Context,
+                storeOptions,
+                peerOptions,
+                flush);
         }
         /// <summary>
         /// Reads one typed document from a configured publication source and hydrates it into a local node.
