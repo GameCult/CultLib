@@ -872,8 +872,8 @@ public sealed class CultMeshStreamingTests
         await directReadCache.PullAllBackingStoresAsync();
         directReadCache.Get<MeshPublicationNoteDocument>(key)!.Text.Should().Be("published");
 
-        var handle = CultMesh.DocumentFromSingleFile<MeshPublicationNoteDocument>(
-            filePath,
+        var handle = CultMesh.DocumentFromPublication<MeshPublicationNoteDocument>(
+            CultMeshDocumentPublicationSource.SingleFile(filePath),
             key,
             CultMesh.Verse("starbridge", "unity-pilot"),
             new CultMeshStoreDocumentOptions
@@ -921,16 +921,17 @@ public sealed class CultMeshStreamingTests
             .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
         var requests = new List<CultNetSnapshotRequestMessage>();
 
-        var handle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
-            () => new MeshSnapshotSchemaClient(request =>
-            {
-                requests.Add(request);
-                return registry.CreateRawSnapshotResponse(cache, request.MessageId, request);
-            }),
-            "cultnet://snapshot.test:3075",
-            key.Value,
+        var handle = CultMesh.DocumentFromPublication<MeshNoteDocument>(
+            CultMeshDocumentPublicationSource.PeerSnapshot(
+                () => new MeshSnapshotSchemaClient(request =>
+                {
+                    requests.Add(request);
+                    return registry.CreateRawSnapshotResponse(cache, request.MessageId, request);
+                }),
+                "cultnet://snapshot.test:3075"),
+            key,
             CultMesh.Verse("starbridge", "unity-pilot"),
-            new CultMeshPeerSnapshotDocumentOptions
+            peerOptions: new CultMeshPeerSnapshotDocumentOptions
             {
                 PollInterval = TimeSpan.FromMilliseconds(10),
                 MessageIdPrefix = "mesh-test-snapshot"

@@ -162,6 +162,105 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Describes where a typed document publication should be read from.
+    /// </summary>
+    public abstract class CultMeshDocumentPublicationSource
+    {
+        private CultMeshDocumentPublicationSource()
+        {
+        }
+
+        /// <summary>Creates a publication source from a CultCache backing store.</summary>
+        public static CultMeshDocumentPublicationSource Store(CacheBackingStore store)
+        {
+            return new StoreSource(store);
+        }
+
+        /// <summary>Creates a publication source from a single-file MessagePack CultCache publication.</summary>
+        public static CultMeshDocumentPublicationSource SingleFile(string path)
+        {
+            return new SingleFileSource(path);
+        }
+
+        /// <summary>Creates a publication source from a remote CultNet snapshot response provider.</summary>
+        public static CultMeshDocumentPublicationSource PeerSnapshot(Func<CultMeshQueryContext, Task<CultNetSnapshotResponseRawMessage>> snapshot)
+        {
+            return new PeerSnapshotSource(snapshot);
+        }
+
+        /// <summary>Creates a publication source from a remote CultNet schema endpoint.</summary>
+        public static CultMeshDocumentPublicationSource PeerSnapshot(string endpoint)
+        {
+            return new PeerSnapshotEndpointSource(endpoint);
+        }
+
+        /// <summary>Creates a publication source from a remote CultNet schema client factory.</summary>
+        public static CultMeshDocumentPublicationSource PeerSnapshot(Func<ICultNetSchemaClient> createClient, string endpoint)
+        {
+            return new PeerSnapshotClientSource(createClient, endpoint);
+        }
+
+        internal sealed class StoreSource : CultMeshDocumentPublicationSource
+        {
+            public StoreSource(CacheBackingStore store)
+            {
+                BackingStore = store ?? throw new ArgumentNullException(nameof(store));
+            }
+
+            public CacheBackingStore BackingStore { get; }
+        }
+
+        internal sealed class SingleFileSource : CultMeshDocumentPublicationSource
+        {
+            public SingleFileSource(string path)
+            {
+                Path = string.IsNullOrWhiteSpace(path)
+                    ? throw new ArgumentException("Value must be non-empty.", nameof(path))
+                    : path;
+            }
+
+            public string Path { get; }
+        }
+
+        internal sealed class PeerSnapshotSource : CultMeshDocumentPublicationSource
+        {
+            public PeerSnapshotSource(Func<CultMeshQueryContext, Task<CultNetSnapshotResponseRawMessage>> snapshot)
+            {
+                Snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            public Func<CultMeshQueryContext, Task<CultNetSnapshotResponseRawMessage>> Snapshot { get; }
+        }
+
+        internal sealed class PeerSnapshotEndpointSource : CultMeshDocumentPublicationSource
+        {
+            public PeerSnapshotEndpointSource(string endpoint)
+            {
+                Endpoint = string.IsNullOrWhiteSpace(endpoint)
+                    ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
+                    : endpoint;
+            }
+
+            public string Endpoint { get; }
+        }
+
+        internal sealed class PeerSnapshotClientSource : CultMeshDocumentPublicationSource
+        {
+            public PeerSnapshotClientSource(Func<ICultNetSchemaClient> createClient, string endpoint)
+            {
+                CreateClient = createClient ?? throw new ArgumentNullException(nameof(createClient));
+                Endpoint = string.IsNullOrWhiteSpace(endpoint)
+                    ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
+                    : endpoint;
+            }
+
+            public Func<ICultNetSchemaClient> CreateClient { get; }
+
+            public string Endpoint { get; }
+        }
+    }
+
+    /// <summary>
     /// A locally hosted CultMesh node over CultCache, CultNet transport, and the mesh database facade.
     /// </summary>
     public sealed class CultMeshNode : IDisposable
@@ -1263,6 +1362,53 @@ namespace GameCult.Mesh
         {
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return DocumentFromSingleFile<TDocument>(path, key, verse.Context, options);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle from a configured publication source.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPublication<TDocument>(
+            CultMeshDocumentPublicationSource source,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null)
+            where TDocument : class
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            switch (source)
+            {
+                case CultMeshDocumentPublicationSource.StoreSource store:
+                    return DocumentFromStore<TDocument>(store.BackingStore, key, context, storeOptions);
+                case CultMeshDocumentPublicationSource.SingleFileSource file:
+                    return DocumentFromSingleFile<TDocument>(file.Path, key, context, storeOptions);
+                case CultMeshDocumentPublicationSource.PeerSnapshotSource snapshot:
+                    return DocumentFromPeerSnapshot<TDocument>(snapshot.Snapshot, key.Value, context, peerOptions);
+                case CultMeshDocumentPublicationSource.PeerSnapshotEndpointSource endpoint:
+                    return DocumentFromPeerSnapshot<TDocument>(endpoint.Endpoint, key.Value, context, peerOptions);
+                case CultMeshDocumentPublicationSource.PeerSnapshotClientSource client:
+                    return DocumentFromPeerSnapshot<TDocument>(client.CreateClient, client.Endpoint, key.Value, context, peerOptions);
+                default:
+                    throw new NotSupportedException(
+                        $"Unsupported CultMesh document publication source '{source.GetType().FullName}'.");
+            }
+        }
+
+        /// <summary>
+        /// Creates a typed document handle from a configured publication source.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPublication<TDocument>(
+            CultMeshDocumentPublicationSource source,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromPublication<TDocument>(source, key, verse.Context, storeOptions, peerOptions);
         }
 
         /// <summary>

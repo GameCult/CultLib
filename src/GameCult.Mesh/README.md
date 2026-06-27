@@ -182,6 +182,9 @@ var latestHealth = await health.LatestAsync();
 `DocumentFromStore<T>()` accepts any `CacheBackingStore`; both helpers pull,
 decode, resolve persisted schema metadata, and poll for updates behind the
 `CultMeshDocumentHandle<T>` surface.
+Use `DocumentFromPublication<T>()` when the caller should provide a configured
+source instead of branching between local files, backing stores, and remote
+CultNet snapshots itself.
 
 ## Game Session
 
