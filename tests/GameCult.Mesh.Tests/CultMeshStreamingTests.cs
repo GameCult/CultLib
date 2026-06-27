@@ -772,6 +772,71 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task CollectionHandle_ReadsAndWatchesDatabaseCollectionsByIndex()
+    {
+        var cache = new CultCache();
+        var database = new CultNetDatabase(cache);
+        var teamId = Guid.NewGuid().ToString("D");
+        var collection = CultMesh.CollectionByIndex<MeshIndexedPlayer>(
+            database,
+            "TeamId",
+            teamId);
+        var changes = new List<CultMeshCollectionChange<MeshIndexedPlayer>>();
+        using var subscription = collection.WatchChanges(change => changes.Add(change));
+
+        await database.PutAsync(
+            new CultRecordKey("player:one"),
+            new MeshIndexedPlayer
+            {
+                Name = "One",
+                TeamId = teamId,
+                Score = 10
+            });
+        await database.PutAsync(
+            new CultRecordKey("player:two"),
+            new MeshIndexedPlayer
+            {
+                Name = "Two",
+                TeamId = Guid.NewGuid().ToString("D"),
+                Score = 20
+            });
+
+        collection.CollectionId.Should().Contain(teamId);
+        collection.SchemaName.Should().Be("tests.mesh_indexed_player");
+        collection.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Automatic);
+        collection.Sources.Should().ContainSingle().Which.SchemaId.Should().Be(collection.SchemaId);
+
+        var snapshot = await collection.LatestAsync();
+        snapshot.Should().ContainSingle().Which.Name.Should().Be("One");
+        changes.Should().ContainSingle();
+        changes[0].Kind.Should().Be(CultMeshCollectionChangeKind.Added);
+        changes[0].Document!.Name.Should().Be("One");
+    }
+
+    [Test]
+    public async Task CollectionHandle_SupportsSameSchemaAliases()
+    {
+        var cache = new CultCache();
+        await cache.UpsertAsync(
+            new MeshNoteDocument
+            {
+                Schema = "tests.mesh_note.v1",
+                Text = "collection-alias",
+                Revision = 4
+            },
+            new CultRecordHandle<MeshNoteDocument>(new CultRecordKey("mesh-note:collection")));
+
+        var collection = CultMesh.Collection<MeshNoteDocument>(cache);
+        var alias = collection.AsSchemaAlias<MeshNoteAliasDocument>();
+
+        alias.CollectionId.Should().Be(collection.CollectionId);
+        alias.SchemaName.Should().Be(collection.SchemaName);
+
+        var snapshot = await alias.LatestAsync();
+        snapshot.Should().ContainSingle().Which.Text.Should().Be("collection-alias");
+    }
+
+    [Test]
     public async Task DocumentHandle_ReplacesThroughCultMeshNodeDatabase()
     {
         using var directory = new TemporaryDirectory();
@@ -1191,6 +1256,21 @@ public sealed class CultMeshStreamingTests
 
         [MessagePack.Key(2)]
         public int Health;
+    }
+
+    [CultDocument("tests.mesh_indexed_player", "tests.mesh_indexed_player.v1")]
+    [MessagePackObject(AllowPrivate = true)]
+    internal sealed class MeshIndexedPlayer
+    {
+        [Key(0)]
+        public string Name { get; set; } = string.Empty;
+
+        [Key(1)]
+        [CultIndex]
+        public string TeamId { get; set; } = string.Empty;
+
+        [Key(2)]
+        public int Score { get; set; }
     }
 
     [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]

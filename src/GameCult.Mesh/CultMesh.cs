@@ -1137,6 +1137,215 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a typed collection handle over all local CultCache records assignable to the document type.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> Collection<TDocument>(
+            CultCache cache,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+
+            var descriptor = cache.Registry.GetRequired<TDocument>();
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(CollectionId(collectionId, descriptor), descriptor.SchemaId, "CultCache collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                CollectionId(collectionId, descriptor),
+                () => Task.FromResult<IReadOnlyList<TDocument>>(cache.GetAll<TDocument>().ToArray()),
+                () => cache.Watch<TDocument>().Select(change => ToCollectionChange(change, descriptor.SchemaId)),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over the local CultCache record with the supplied CultName.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByName<TDocument>(
+            CultCache cache,
+            string name,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+            if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Value must be non-empty.", nameof(name));
+
+            var descriptor = cache.Registry.GetRequired<TDocument>();
+            var resolvedId = collectionId ?? $"{descriptor.SchemaId}:name:{name}";
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(resolvedId, descriptor.SchemaId, "CultCache named collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache named collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                resolvedId,
+                () => Task.FromResult<IReadOnlyList<TDocument>>(Optional(cache.GetByName<TDocument>(name))),
+                () => cache.Watch<TDocument>()
+                    .Where(change => MatchesName(cache, name, change))
+                    .Select(change => ToCollectionChange(change, descriptor.SchemaId)),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over local CultCache records matched by an indexed value.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByIndex<TDocument>(
+            CultCache cache,
+            string alias,
+            string value,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+            if (string.IsNullOrWhiteSpace(alias)) throw new ArgumentException("Value must be non-empty.", nameof(alias));
+            if (string.IsNullOrWhiteSpace(value)) throw new ArgumentException("Value must be non-empty.", nameof(value));
+
+            var descriptor = cache.Registry.GetRequired<TDocument>();
+            var resolvedId = collectionId ?? $"{descriptor.SchemaId}:index:{alias}:{value}";
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(resolvedId, descriptor.SchemaId, "CultCache indexed collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache indexed collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                resolvedId,
+                () => Task.FromResult<IReadOnlyList<TDocument>>(Optional(cache.GetByIndex<TDocument>(alias, value))),
+                () => cache.Watch<TDocument>()
+                    .Where(change => MatchesIndex(cache, alias, value, change))
+                    .Select(change => ToCollectionChange(change, descriptor.SchemaId)),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over all distributed CultNet database records assignable to the document type.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> Collection<TDocument>(
+            CultNetDatabase database,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (database == null) throw new ArgumentNullException(nameof(database));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(CollectionId(collectionId, descriptor), descriptor.SchemaId, "CultNet database collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Automatic, "CultNet database collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                CollectionId(collectionId, descriptor),
+                () => Task.FromResult<IReadOnlyList<TDocument>>(database.GetAll<TDocument>().ToArray()),
+                () => database.Watch<TDocument>().Select(ToCollectionChange),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over the distributed CultNet database record with the supplied CultName.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByName<TDocument>(
+            CultNetDatabase database,
+            string name,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (database == null) throw new ArgumentNullException(nameof(database));
+            if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Value must be non-empty.", nameof(name));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var resolvedId = collectionId ?? $"{descriptor.SchemaId}:name:{name}";
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(resolvedId, descriptor.SchemaId, "CultNet database named collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Automatic, "CultNet database named collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                resolvedId,
+                () => Task.FromResult<IReadOnlyList<TDocument>>(Optional(database.GetByName<TDocument>(name))),
+                () => database.WatchByName<TDocument>(name).Select(ToCollectionChange),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over distributed CultNet database records matched by an indexed value.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByIndex<TDocument>(
+            CultNetDatabase database,
+            string alias,
+            string value,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (database == null) throw new ArgumentNullException(nameof(database));
+            if (string.IsNullOrWhiteSpace(alias)) throw new ArgumentException("Value must be non-empty.", nameof(alias));
+            if (string.IsNullOrWhiteSpace(value)) throw new ArgumentException("Value must be non-empty.", nameof(value));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var resolvedId = collectionId ?? $"{descriptor.SchemaId}:index:{alias}:{value}";
+            var sourceList = sources?.ToArray()
+                ?? new[] { ProjectionSource(resolvedId, descriptor.SchemaId, "CultNet database indexed collection") };
+            var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Automatic, "CultNet database indexed collection");
+            return new CultMeshCollectionHandle<TDocument>(
+                resolvedId,
+                () => Task.FromResult<IReadOnlyList<TDocument>>(Optional(database.GetByIndex<TDocument>(alias, value))),
+                () => database.WatchByIndex<TDocument>(alias, value).Select(ToCollectionChange),
+                sourceList,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over all CultMesh node database records assignable to the document type.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> Collection<TDocument>(
+            CultMeshNode node,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return Collection<TDocument>(node.Database, collectionId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over the CultMesh node database record with the supplied CultName.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByName<TDocument>(
+            CultMeshNode node,
+            string name,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return CollectionByName<TDocument>(node.Database, name, collectionId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed collection handle over CultMesh node database records matched by an indexed value.
+        /// </summary>
+        public static CultMeshCollectionHandle<TDocument> CollectionByIndex<TDocument>(
+            CultMeshNode node,
+            string alias,
+            string value,
+            string? collectionId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            return CollectionByIndex<TDocument>(node.Database, alias, value, collectionId, sources, routeHint);
+        }
+
+        /// <summary>
         /// Describes a typed live feed surface for tooling, UI, and diagnostics.
         /// </summary>
         public static CultMeshLiveFeedDiagnostic DescribeLiveFeed<TParameters, TResult>(
@@ -1637,6 +1846,86 @@ namespace GameCult.Mesh
             return string.IsNullOrWhiteSpace(documentId)
                 ? key.Value
                 : documentId!;
+        }
+
+        private static string CollectionId(string? collectionId, CultDocumentDescriptor descriptor)
+        {
+            return string.IsNullOrWhiteSpace(collectionId)
+                ? descriptor.SchemaId
+                : collectionId!;
+        }
+
+        private static IReadOnlyList<TDocument> Optional<TDocument>(TDocument? document)
+            where TDocument : class
+        {
+            return document == null
+                ? Array.Empty<TDocument>()
+                : new[] { document };
+        }
+
+        private static bool MatchesName<TDocument>(
+            CultCache cache,
+            string name,
+            CultCacheDocumentChange<TDocument> change)
+            where TDocument : class
+        {
+            var current = cache.GetByName<TDocument>(name);
+            return (change.Document != null && ReferenceEquals(current, change.Document)) ||
+                   (change.PreviousDocument != null && ReferenceEquals(current, change.PreviousDocument));
+        }
+
+        private static bool MatchesIndex<TDocument>(
+            CultCache cache,
+            string alias,
+            string value,
+            CultCacheDocumentChange<TDocument> change)
+            where TDocument : class
+        {
+            var current = cache.GetByIndex<TDocument>(alias, value);
+            return (change.Document != null && ReferenceEquals(current, change.Document)) ||
+                   (change.PreviousDocument != null && ReferenceEquals(current, change.PreviousDocument));
+        }
+
+        private static CultMeshCollectionChange<TDocument> ToCollectionChange<TDocument>(
+            CultCacheDocumentChange<TDocument> change,
+            string schemaId)
+            where TDocument : class
+        {
+            return new CultMeshCollectionChange<TDocument>(
+                change.Kind switch
+                {
+                    CultCacheDocumentChangeKind.Added => CultMeshCollectionChangeKind.Added,
+                    CultCacheDocumentChangeKind.Updated => CultMeshCollectionChangeKind.Updated,
+                    CultCacheDocumentChangeKind.Removed => CultMeshCollectionChangeKind.Removed,
+                    _ => CultMeshCollectionChangeKind.Updated
+                },
+                change.Key,
+                schemaId,
+                change.Document,
+                change.PreviousDocument);
+        }
+
+        private static CultMeshCollectionChange<TDocument> ToCollectionChange<TDocument>(
+            CultNetDatabaseChange<TDocument> change)
+            where TDocument : class
+        {
+            return new CultMeshCollectionChange<TDocument>(
+                change.Kind switch
+                {
+                    CultNetDatabaseChangeKind.Added => CultMeshCollectionChangeKind.Added,
+                    CultNetDatabaseChangeKind.Updated => CultMeshCollectionChangeKind.Updated,
+                    CultNetDatabaseChangeKind.Removed => CultMeshCollectionChangeKind.Removed,
+                    CultNetDatabaseChangeKind.Predicted => CultMeshCollectionChangeKind.Predicted,
+                    CultNetDatabaseChangeKind.Reconciled => CultMeshCollectionChangeKind.Reconciled,
+                    CultNetDatabaseChangeKind.SchemaMigrated => CultMeshCollectionChangeKind.SchemaMigrated,
+                    CultNetDatabaseChangeKind.Rejected => CultMeshCollectionChangeKind.Rejected,
+                    _ => CultMeshCollectionChangeKind.Updated
+                },
+                change.Key,
+                change.SchemaId,
+                change.Document,
+                change.PreviousDocument,
+                change.Message);
         }
 
         private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)

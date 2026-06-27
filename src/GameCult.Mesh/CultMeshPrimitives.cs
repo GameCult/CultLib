@@ -1156,6 +1156,182 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Describes how a CultMesh collection document changed.
+    /// </summary>
+    public enum CultMeshCollectionChangeKind
+    {
+        /// <summary>A document was added.</summary>
+        Added,
+        /// <summary>A document was updated.</summary>
+        Updated,
+        /// <summary>A document was removed.</summary>
+        Removed,
+        /// <summary>A local prediction was published before authority accepted it.</summary>
+        Predicted,
+        /// <summary>A predicted document was reconciled with authority.</summary>
+        Reconciled,
+        /// <summary>A document was accepted through schema migration.</summary>
+        SchemaMigrated,
+        /// <summary>A document change was rejected.</summary>
+        Rejected
+    }
+
+    /// <summary>
+    /// One typed document change observed through a CultMesh collection handle.
+    /// </summary>
+    public sealed class CultMeshCollectionChange<TDocument>
+        where TDocument : class
+    {
+        /// <summary>Creates a collection change.</summary>
+        public CultMeshCollectionChange(
+            CultMeshCollectionChangeKind kind,
+            CultRecordKey key,
+            string schemaId,
+            TDocument? document,
+            TDocument? previousDocument,
+            string? message = null)
+        {
+            Kind = kind;
+            Key = key;
+            SchemaId = schemaId ?? "";
+            Document = document;
+            PreviousDocument = previousDocument;
+            Message = message;
+        }
+
+        /// <summary>Gets the change kind.</summary>
+        public CultMeshCollectionChangeKind Kind { get; }
+
+        /// <summary>Gets the changed record key.</summary>
+        public CultRecordKey Key { get; }
+
+        /// <summary>Gets the schema id of the changed document.</summary>
+        public string SchemaId { get; }
+
+        /// <summary>Gets the current document, when present.</summary>
+        public TDocument? Document { get; }
+
+        /// <summary>Gets the previous document, when present.</summary>
+        public TDocument? PreviousDocument { get; }
+
+        /// <summary>Gets an optional rejection or diagnostic message.</summary>
+        public string? Message { get; }
+    }
+
+    /// <summary>
+    /// Typed reactive collection handle with schema-aware alias conversion.
+    /// </summary>
+    public sealed class CultMeshCollectionHandle<TDocument>
+        where TDocument : class
+    {
+        private static readonly CultDocumentDescriptor Descriptor =
+            CultDocumentRegistry.Shared.GetRequired<TDocument>();
+
+        private readonly Func<Task<IReadOnlyList<TDocument>>> _latest;
+        private readonly Func<Observable<CultMeshCollectionChange<TDocument>>> _watchChanges;
+
+        /// <summary>Creates a collection handle.</summary>
+        public CultMeshCollectionHandle(
+            string collectionId,
+            Func<Task<IReadOnlyList<TDocument>>> latest,
+            Func<Observable<CultMeshCollectionChange<TDocument>>> watchChanges,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            CollectionId = string.IsNullOrWhiteSpace(collectionId)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(collectionId))
+                : collectionId;
+            _latest = latest ?? throw new ArgumentNullException(nameof(latest));
+            _watchChanges = watchChanges ?? throw new ArgumentNullException(nameof(watchChanges));
+            Sources = sources?.ToArray() ?? Array.Empty<CultMeshProjectionSource>();
+            RouteHint = routeHint ?? CultMeshRouteHint.Automatic;
+        }
+
+        /// <summary>Gets the semantic collection id.</summary>
+        public string CollectionId { get; }
+
+        /// <summary>Gets the CLR document type presented by this collection.</summary>
+        public Type DocumentType => typeof(TDocument);
+
+        /// <summary>Gets the stable CultCache schema name.</summary>
+        public string SchemaName => Descriptor.SchemaName;
+
+        /// <summary>Gets the stable CultCache schema version.</summary>
+        public string SchemaVersion => Descriptor.SchemaVersion;
+
+        /// <summary>Gets the content-derived schema identifier.</summary>
+        public string SchemaId => Descriptor.SchemaId;
+
+        /// <summary>Gets the preferred or observed route for collection access.</summary>
+        public CultMeshRouteHint RouteHint { get; }
+
+        /// <summary>Gets typed state sources this collection handle depends on, when known.</summary>
+        public IReadOnlyList<CultMeshProjectionSource> Sources { get; }
+
+        /// <summary>Reads one coherent collection snapshot.</summary>
+        public Task<IReadOnlyList<TDocument>> LatestAsync()
+        {
+            return _latest();
+        }
+
+        /// <summary>Watches typed collection changes.</summary>
+        public Observable<CultMeshCollectionChange<TDocument>> WatchChanges()
+        {
+            return _watchChanges();
+        }
+
+        /// <summary>Subscribes to typed collection changes.</summary>
+        public IDisposable WatchChanges(Action<CultMeshCollectionChange<TDocument>> onNext)
+        {
+            if (onNext == null) throw new ArgumentNullException(nameof(onNext));
+            return WatchChanges().Subscribe(onNext);
+        }
+
+        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
+        public CultMeshCollectionHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
+        {
+            var aliasDescriptor = CultDocumentRegistry.Shared.GetRequired<TAlias>();
+            if (!string.Equals(Descriptor.SchemaName, aliasDescriptor.SchemaName, StringComparison.Ordinal) ||
+                !string.Equals(Descriptor.SchemaVersion, aliasDescriptor.SchemaVersion, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Document type {typeof(TAlias).FullName} uses schema '{aliasDescriptor.SchemaName}' " +
+                    $"version '{aliasDescriptor.SchemaVersion}', but collection '{CollectionId}' exposes " +
+                    $"schema '{SchemaName}' version '{SchemaVersion}'.");
+            }
+
+            return new CultMeshCollectionHandle<TAlias>(
+                CollectionId,
+                async () => (await LatestAsync().ConfigureAwait(false))
+                    .Select(ConvertDocument<TDocument, TAlias>)
+                    .ToArray(),
+                () => WatchChanges().Select(change => new CultMeshCollectionChange<TAlias>(
+                    change.Kind,
+                    change.Key,
+                    change.SchemaId,
+                    change.Document == null ? null : ConvertDocument<TDocument, TAlias>(change.Document),
+                    change.PreviousDocument == null ? null : ConvertDocument<TDocument, TAlias>(change.PreviousDocument),
+                    change.Message)),
+                Sources,
+                RouteHint);
+        }
+
+        private static TTarget ConvertDocument<TSource, TTarget>(TSource document)
+            where TSource : class
+            where TTarget : class
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (document is TTarget alreadyTyped)
+            {
+                return alreadyTyped;
+            }
+
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TSource));
+            return (TTarget)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TTarget), payload);
+        }
+    }
+
+    /// <summary>
     /// Inspectable metadata for a typed live feed surface.
     /// </summary>
     public sealed class CultMeshLiveFeedDiagnostic

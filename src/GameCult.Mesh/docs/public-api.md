@@ -176,6 +176,13 @@ portable machinery that makes it feel native.
   `CultMeshDocumentHandle<TDocument>.AsSchemaAlias<TAlias>()`. Domain facades
   can expose `Document<T>()`, `DocumentBySchema(...)`, `LatestAsync<T>()`, and
   `Watch<T>()` without owning schema dictionaries or alias serializers.
+- `CultMeshCollectionHandle<TDocument>` is the typed reactive edge for
+  multi-record state. It exposes one `LatestAsync()` collection snapshot and a
+  `WatchChanges()` stream while hiding whether the backing source is an
+  in-process `CultCache`, a distributed `CultNetDatabase`, or a `CultMeshNode`.
+  Collection handles can represent all records of a document type, a named
+  document view, or an indexed value view, and they support the same
+  same-schema CLR alias conversion as document handles.
 - `CultMeshProjectionRecipe<TParameters, TResult>` names a reusable projection
   from typed source state into derived state. It records source handles,
   route hints, and projection execution, and can be exposed as a typed query
@@ -271,6 +278,20 @@ var documents = CultMesh.Documents(
 var refit = await documents.LatestAsync<StationRefitDocument>();
 var uiDocking = documents.Document<CurrentDockingUiDocument>();
 var bySchema = documents.DocumentBySchema("gamecult.aetheria.station_refit.v1");
+```
+
+Typed collections use the same one-call style:
+
+```csharp
+var allies = CultMesh.CollectionByIndex<PlayerShipDocument>(
+    node,
+    "Faction",
+    "au");
+
+var currentAllies = await allies.LatestAsync();
+using var changes = allies.WatchChanges(change => UpdateRoster(change));
+
+var uiAllies = allies.AsSchemaAlias<PlayerShipUiDocument>();
 ```
 
 ```ts

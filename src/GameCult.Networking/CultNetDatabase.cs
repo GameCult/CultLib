@@ -687,6 +687,33 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Gets all documents assignable to the requested type.
+        /// </summary>
+        public IEnumerable<T> GetAll<T>() where T : class
+        {
+            ThrowIfDisposed();
+            return _cache.GetAll<T>();
+        }
+
+        /// <summary>
+        /// Gets a typed document by its CultName value.
+        /// </summary>
+        public T? GetByName<T>(string name) where T : class
+        {
+            ThrowIfDisposed();
+            return _cache.GetByName<T>(name);
+        }
+
+        /// <summary>
+        /// Gets a typed document by an indexed value.
+        /// </summary>
+        public T? GetByIndex<T>(string alias, string value) where T : class
+        {
+            ThrowIfDisposed();
+            return _cache.GetByIndex<T>(alias, value);
+        }
+
+        /// <summary>
         /// Opens a reactive POCO presentation for one distributed CultCache document.
         /// </summary>
         public CultManagedDocument<T> Document<T>(CultRecordKey key) where T : class
