@@ -67,6 +67,26 @@ const stop = objects.watch(
 );
 ```
 
+Typed document handles use the same shape for local cache reads, network
+snapshots, replacement, and client prediction. Authority-specific code plugs in
+the submitter once; gameplay callers keep using the document:
+
+```ts
+const input = CultMesh.document(
+  "input:pilot-a:thermal",
+  pilotInputDocument,
+  async (context) => readInput(context),
+  {
+    routeHint: CultMesh.routeHint("network", "Starbridge Verse"),
+    watchDocument: watchInput,
+    submitPrediction: async (context, value) => submitPredictedInput(context, value),
+  },
+);
+
+await input.submitPrediction("pilot-a", predictedInput);
+const stop = input.watch("pilot-a", latest => reconcileInput(latest));
+```
+
 State pointers are the same kind of managed surface for UI and tools. They can
 advertise source documents, inherit a Verse route when bound, and resolve
 through that Verse without caller-side context plumbing:

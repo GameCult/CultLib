@@ -88,6 +88,7 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
 
   assert.equal(document.documentId, "cultmesh.note:note:1");
   assert.equal(document.canReplace, true);
+  assert.equal(document.canSubmitPrediction, false);
   assert.equal((await bound.latest()).body, "initial");
 
   await bound.replace({
@@ -112,6 +113,63 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   assert.throws(
     () => document.asSchemaAlias({ schemaId: "cultmesh.other.v0" }),
     /not compatible/,
+  );
+});
+
+test("CultMesh TS document handles submit predictions through configured authority hooks", async () => {
+  let current = {
+    noteId: "note:prediction",
+    body: "initial",
+  };
+  const predictions: string[] = [];
+  const contexts: string[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:prediction",
+    noteDocument,
+    async () => current,
+    {
+      routeHint: CultMesh.routeHint("network", "CultNet prediction"),
+      submitPrediction: async (context, value) => {
+        contexts.push(`${context.runtimeId}:${context.routeHint.kind}`);
+        predictions.push(value.body);
+        current = value;
+      },
+    },
+  );
+  const verse = CultMesh.verse("starbridge", "pilot-a");
+  const bound = document.bind(verse);
+
+  assert.equal(document.canReplace, false);
+  assert.equal(document.canSubmitPrediction, true);
+  assert.equal(bound.canSubmitPrediction, true);
+
+  await bound.submitPrediction({
+    noteId: "note:prediction",
+    body: "predicted",
+  });
+
+  assert.deepEqual(contexts, ["pilot-a:network"]);
+  assert.deepEqual(predictions, ["predicted"]);
+  assert.equal((await bound.latest()).body, "predicted");
+
+  const alias = bound.asSchemaAlias(noteAliasDocument, {
+    parse: value => noteAliasDocument.schema.parse(value),
+  });
+  assert.equal(alias.canSubmitPrediction, true);
+  await alias.submitPrediction({
+    noteId: "note:prediction",
+    body: "alias-predicted",
+  });
+
+  assert.deepEqual(predictions, ["predicted", "alias-predicted"]);
+  assert.equal((await document.latest("pilot-a")).body, "alias-predicted");
+
+  assert.throws(
+    () => document.replace({
+      noteId: "note:prediction",
+      body: "not-authoritative",
+    }),
+    /does not support replacement/,
   );
 });
 

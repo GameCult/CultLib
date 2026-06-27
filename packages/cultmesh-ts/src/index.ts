@@ -111,6 +111,11 @@ export type CultMeshDocumentReplacer<TDocument> = (
   value: TDocument,
 ) => Promise<void>;
 
+export type CultMeshDocumentPredictionSubmitter<TDocument> = (
+  context: CultMeshQueryContext,
+  value: TDocument,
+) => Promise<void>;
+
 export type CultMeshCollectionSnapshot<TDocument> = readonly TDocument[];
 
 export type CultMeshCollectionChangeKind = "added" | "updated" | "removed" | "reset";
@@ -724,6 +729,7 @@ export class CultMeshDocumentHandle<TDocument> {
       routeHint?: CultMeshRouteHint;
       watchDocument?: CultMeshDocumentWatcher<TDocument>;
       replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+      submitPrediction?: CultMeshDocumentPredictionSubmitter<TDocument>;
     } = {},
   ) {
     requireNonEmpty(documentId, "documentId");
@@ -732,13 +738,21 @@ export class CultMeshDocumentHandle<TDocument> {
     this.routeHint = options.routeHint ?? cultMeshRouteHint();
     this.watchDocument = options.watchDocument;
     this.replaceDocument = options.replaceDocument;
+    this.submitPredictionDocument = options.submitPrediction;
   }
 
   private readonly watchDocument: CultMeshDocumentWatcher<TDocument> | undefined;
   private readonly replaceDocument: CultMeshDocumentReplacer<TDocument> | undefined;
+  private readonly submitPredictionDocument:
+    | CultMeshDocumentPredictionSubmitter<TDocument>
+    | undefined;
 
   public get canReplace(): boolean {
     return this.replaceDocument !== undefined;
+  }
+
+  public get canSubmitPrediction(): boolean {
+    return this.submitPredictionDocument !== undefined;
   }
 
   public latest(context: CultMeshQueryContext | string = "local"): Promise<TDocument> {
@@ -802,6 +816,31 @@ export class CultMeshDocumentHandle<TDocument> {
     return this.replaceDocument(this.resolveContext(context), value);
   }
 
+  public submitPrediction(value: TDocument): Promise<void>;
+  public submitPrediction(context: CultMeshQueryContext | string, value: TDocument): Promise<void>;
+  public submitPrediction(
+    contextOrValue: CultMeshQueryContext | string | TDocument,
+    maybeValue?: TDocument,
+  ): Promise<void> {
+    if (!this.submitPredictionDocument) {
+      throw new Error(`Document '${this.documentId}' does not support prediction submission.`);
+    }
+
+    const hasContext =
+      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
+    const context = hasContext
+      ? typeof contextOrValue === "string"
+        ? cultMeshQueryContext(contextOrValue)
+        : contextOrValue as CultMeshQueryContext
+      : cultMeshQueryContext("local");
+    const value = hasContext ? maybeValue : contextOrValue as TDocument;
+    if (value === undefined) {
+      throw new Error(`Document '${this.documentId}' requires a prediction value.`);
+    }
+
+    return this.submitPredictionDocument(this.resolveContext(context), value);
+  }
+
   public asSchemaAlias<TAlias>(
     schema: CultMeshDocumentSchemaDescriptor,
     options: { parse?: (value: unknown) => TAlias } = {},
@@ -826,6 +865,9 @@ export class CultMeshDocumentHandle<TDocument> {
           : undefined,
         replaceDocument: this.replaceDocument
           ? (context, value) => this.replace(context, value as unknown as TDocument)
+          : undefined,
+        submitPrediction: this.submitPredictionDocument
+          ? (context, value) => this.submitPrediction(context, value as unknown as TDocument)
           : undefined,
       },
     );
@@ -864,6 +906,10 @@ export class CultMeshBoundDocumentHandle<TDocument> {
     return this.document.canReplace;
   }
 
+  public get canSubmitPrediction(): boolean {
+    return this.document.canSubmitPrediction;
+  }
+
   public latest(): Promise<TDocument> {
     return this.document.latest(cultMeshQueryContextFromVerse(this.verse));
   }
@@ -878,6 +924,10 @@ export class CultMeshBoundDocumentHandle<TDocument> {
 
   public replace(value: TDocument): Promise<void> {
     return this.document.replace(cultMeshQueryContextFromVerse(this.verse), value);
+  }
+
+  public submitPrediction(value: TDocument): Promise<void> {
+    return this.document.submitPrediction(cultMeshQueryContextFromVerse(this.verse), value);
   }
 
   public asSchemaAlias<TAlias>(
@@ -1794,6 +1844,7 @@ export function cultMeshDocument<TDocument>(
     routeHint?: CultMeshRouteHint;
     watchDocument?: CultMeshDocumentWatcher<TDocument>;
     replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+    submitPrediction?: CultMeshDocumentPredictionSubmitter<TDocument>;
   } = {},
 ): CultMeshDocumentHandle<TDocument> {
   return new CultMeshDocumentHandle(documentId, schema, snapshotDocument, options);
@@ -3592,6 +3643,7 @@ export class CultMesh {
       routeHint?: CultMeshRouteHint;
       watchDocument?: CultMeshDocumentWatcher<TDocument>;
       replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+      submitPrediction?: CultMeshDocumentPredictionSubmitter<TDocument>;
     } = {},
   ): CultMeshDocumentHandle<TDocument> {
     return cultMeshDocument(documentId, schema, snapshotDocument, options);
