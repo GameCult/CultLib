@@ -2306,6 +2306,60 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task PublicationHelpers_BindConfiguredDocumentsIntoCatalog()
+    {
+        using var directory = new TemporaryDirectory();
+        var firstPath = Path.Combine(directory.Path, "first.ccmp");
+        var secondPath = Path.Combine(directory.Path, "second.ccmp");
+        var firstKey = new CultRecordKey("mesh-note:publication-catalog-first");
+        var secondKey = new CultRecordKey("mesh-note:publication-catalog-second");
+        var firstWriter = new CultCache();
+        firstWriter.AddBackingStore(new SingleFileMessagePackBackingStore(firstPath));
+        await firstWriter.UpsertAsync(typeof(MeshPublicationNoteDocument), new MeshPublicationNoteDocument
+        {
+            Schema = "tests.mesh_publication_note.v1",
+            Text = "first source",
+            Revision = 21
+        }, firstKey);
+        firstWriter.FlushAllBackingStores();
+        var secondWriter = new CultCache();
+        secondWriter.AddBackingStore(new SingleFileMessagePackBackingStore(secondPath));
+        await secondWriter.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "second source",
+            Revision = 22
+        }, new CultRecordHandle<MeshNoteDocument>(secondKey));
+        secondWriter.FlushAllBackingStores();
+
+        var catalog = CultMesh.DocumentsFromPublication(
+            CultMeshDocumentPublicationSource.SingleFile(firstPath),
+            new ICultMeshPublicationDocumentBinding[]
+            {
+                CultMesh.PublicationDocument<MeshPublicationNoteDocument>(
+                    firstKey,
+                    documentId: "daemon:first"),
+                CultMesh.PublicationDocument<MeshNoteAliasDocument>(
+                    secondKey,
+                    documentId: "daemon:second",
+                    source: CultMeshDocumentPublicationSource.SingleFile(secondPath))
+            },
+            CultMesh.Verse("starbridge", "unity-catalog"),
+            new CultMeshStoreDocumentOptions
+            {
+                RouteHint = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "publication catalog"),
+                PollInterval = TimeSpan.FromMilliseconds(10)
+            });
+
+        catalog.Documents.Select(document => document.DocumentId).Should().Equal("daemon:first", "daemon:second");
+        (await catalog.LatestAsync<MeshPublicationNoteDocument>()).Text.Should().Be("first source");
+        (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("second source");
+        catalog.Document<MeshNoteDocument>().DocumentId.Should().Be("daemon:second");
+        catalog.Document<MeshPublicationNoteDocument>().RouteHint.Description.Should().Be("publication catalog");
+        catalog.Document<MeshNoteAliasDocument>().Sources.Should().ContainSingle().Which.SourceId.Should().Be("daemon:second");
+    }
+
+    [Test]
     public async Task PublicationHelpers_SyncConfiguredPeerSourceIntoLocalNodeAlias()
     {
         var sourceCache = new CultCache();

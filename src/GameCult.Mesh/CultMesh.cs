@@ -286,6 +286,67 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Describes one typed document to bind from a CultMesh publication source.
+    /// </summary>
+    public interface ICultMeshPublicationDocumentBinding
+    {
+        /// <summary>Gets the publication source override for this document, when it differs from the catalog source.</summary>
+        CultMeshDocumentPublicationSource? Source { get; }
+
+        /// <summary>Binds this document request to a publication-backed handle.</summary>
+        ICultMeshDocumentHandle Bind(
+            CultMeshDocumentPublicationSource source,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions);
+    }
+
+    /// <summary>
+    /// Describes one typed document to bind from a CultMesh publication source.
+    /// </summary>
+    public sealed class CultMeshPublicationDocumentBinding<TDocument> : ICultMeshPublicationDocumentBinding
+        where TDocument : class
+    {
+        internal CultMeshPublicationDocumentBinding(
+            CultRecordKey key,
+            string? documentId,
+            string? sourceId,
+            CultMeshDocumentPublicationSource? source)
+        {
+            Key = key;
+            DocumentId = documentId;
+            SourceId = sourceId;
+            Source = source;
+        }
+
+        /// <summary>Gets the record key to read.</summary>
+        public CultRecordKey Key { get; }
+
+        /// <summary>Gets the semantic document id. Defaults to the record key.</summary>
+        public string? DocumentId { get; }
+
+        /// <summary>Gets the source id advertised by diagnostics. Defaults to the document id or record key.</summary>
+        public string? SourceId { get; }
+
+        /// <inheritdoc />
+        public CultMeshDocumentPublicationSource? Source { get; }
+
+        /// <inheritdoc />
+        public ICultMeshDocumentHandle Bind(
+            CultMeshDocumentPublicationSource source,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions)
+        {
+            return CultMesh.DocumentFromPublication<TDocument>(
+                Source ?? source,
+                Key,
+                context,
+                CultMesh.WithPublicationBindingOptions(storeOptions, Key, DocumentId, SourceId),
+                CultMesh.WithPublicationBindingOptions(peerOptions, Key, DocumentId, SourceId));
+        }
+    }
+    /// <summary>
     /// A locally hosted CultMesh node over CultCache, CultNet transport, and the mesh database facade.
     /// </summary>
     public sealed class CultMeshNode : IDisposable
@@ -1545,6 +1606,67 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Describes one typed document to bind from a CultMesh publication source.
+        /// </summary>
+        public static CultMeshPublicationDocumentBinding<TDocument> PublicationDocument<TDocument>(
+            CultRecordKey key,
+            string? documentId = null,
+            string? sourceId = null,
+            CultMeshDocumentPublicationSource? source = null)
+            where TDocument : class
+        {
+            return new CultMeshPublicationDocumentBinding<TDocument>(key, documentId, sourceId, source);
+        }
+
+        /// <summary>
+        /// Describes one typed document to bind from a CultMesh publication source.
+        /// </summary>
+        public static CultMeshPublicationDocumentBinding<TDocument> PublicationDocument<TDocument>(
+            string recordKey,
+            string? documentId = null,
+            string? sourceId = null,
+            CultMeshDocumentPublicationSource? source = null)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            return PublicationDocument<TDocument>(new CultRecordKey(recordKey), documentId, sourceId, source);
+        }
+
+        /// <summary>
+        /// Creates a schema-aware document catalog from one or more configured publication bindings.
+        /// </summary>
+        public static CultMeshDocumentCatalog DocumentsFromPublication(
+            CultMeshDocumentPublicationSource source,
+            IEnumerable<ICultMeshPublicationDocumentBinding> bindings,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (bindings == null) throw new ArgumentNullException(nameof(bindings));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            return Documents(bindings.Select(binding =>
+            {
+                if (binding == null) throw new ArgumentException("CultMesh publication bindings cannot contain null.", nameof(bindings));
+                return binding.Bind(source, context, storeOptions, peerOptions);
+            }).ToArray());
+        }
+
+        /// <summary>
+        /// Creates a schema-aware document catalog from one or more configured publication bindings.
+        /// </summary>
+        public static CultMeshDocumentCatalog DocumentsFromPublication(
+            CultMeshDocumentPublicationSource source,
+            IEnumerable<ICultMeshPublicationDocumentBinding> bindings,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentsFromPublication(source, bindings, verse.Context, storeOptions, peerOptions);
+        }
+        /// <summary>
         /// Reads one typed document from a configured publication source and hydrates it into a local node.
         /// </summary>
         public static async Task<TDocument> SyncDocumentFromPublicationAsync<TDocument>(
@@ -1626,6 +1748,53 @@ namespace GameCult.Mesh
                 storeOptions,
                 peerOptions,
                 flush);
+        }
+        internal static CultMeshStoreDocumentOptions WithPublicationBindingOptions(
+            CultMeshStoreDocumentOptions? options,
+            CultRecordKey key,
+            string? documentId,
+            string? sourceId)
+        {
+            return new CultMeshStoreDocumentOptions
+            {
+                DocumentId = string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId,
+                SourceId = string.IsNullOrWhiteSpace(sourceId)
+                    ? (string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId)
+                    : sourceId,
+                RouteHint = options?.RouteHint,
+                PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250),
+                Registry = options?.Registry
+            };
+        }
+
+        internal static CultMeshPeerSnapshotDocumentOptions WithPublicationBindingOptions(
+            CultMeshPeerSnapshotDocumentOptions? options,
+            CultRecordKey key,
+            string? documentId,
+            string? sourceId)
+        {
+            return new CultMeshPeerSnapshotDocumentOptions
+            {
+                DocumentId = string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId,
+                SourceId = string.IsNullOrWhiteSpace(sourceId)
+                    ? (string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId)
+                    : sourceId,
+                RouteHint = options?.RouteHint,
+                ResponseTimeout = options?.ResponseTimeout ?? TimeSpan.FromSeconds(5),
+                ConnectTimeout = options?.ConnectTimeout ?? TimeSpan.FromSeconds(5),
+                PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250),
+                MessageIdPrefix = options?.MessageIdPrefix,
+                SchemaIds = options?.SchemaIds,
+                ShardId = options?.ShardId,
+                ShardEpoch = options?.ShardEpoch,
+                Security = options?.Security,
+                ConfigureClient = options?.ConfigureClient,
+                RudpRuntimeId = options?.RudpRuntimeId,
+                RudpConnectionId = options?.RudpConnectionId ?? 0x43554c54,
+                RudpConnectPayload = options?.RudpConnectPayload ?? "cultnet-schema-rudp",
+                RudpMaxFragmentBytes = options?.RudpMaxFragmentBytes ?? 1024,
+                RudpResendDelayMs = options?.RudpResendDelayMs ?? 25
+            };
         }
         /// <summary>
         /// Creates a typed document handle directly over one distributed CultNet database record.
