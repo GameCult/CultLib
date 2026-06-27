@@ -1946,6 +1946,26 @@ export function cultMeshDocumentFromCache<TDefinition extends AnyCultCacheDocume
 export function cultMeshDocumentFromStore(
   store: CacheBackingStore,
   schemaId: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  },
+): CultMeshDocumentHandle<unknown>;
+export function cultMeshDocumentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
+  store: CacheBackingStore,
+  definition: TDefinition,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  },
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+export function cultMeshDocumentFromStore(
+  store: CacheBackingStore,
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
@@ -1953,24 +1973,33 @@ export function cultMeshDocumentFromStore(
     pollMs?: number;
   } = {},
 ): CultMeshDocumentHandle<unknown> {
-  requireNonEmpty(schemaId, "schemaId");
-  const documentId = options.documentId ?? schemaId;
+  const schema = typeof schemaOrDefinition === "string"
+    ? { schemaId: schemaOrDefinition }
+    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+  const resolvedSchemaId = schema.schemaId ?? schema.type;
+  if (!resolvedSchemaId) {
+    throw new Error("CultMesh store document requires a schema id or document type.");
+  }
+  if (typeof schemaOrDefinition === "string") {
+    requireNonEmpty(schemaOrDefinition, "schemaId");
+  }
+  const documentId = options.documentId ?? resolvedSchemaId;
   const read = async () => {
     const records = await store.pullAll();
-    const record = records.find(candidate => candidate.schemaId === schemaId);
+    const record = records.find(candidate => candidate.schemaId === resolvedSchemaId);
     if (!record) {
-      throw new Error(`CultMesh store document '${documentId}' did not contain schema ${schemaId}.`);
+      throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
-    return decode(record.payload);
+    return parseCultMeshDocumentValue(schemaOrDefinition, decode(record.payload));
   };
 
   return cultMeshDocument(
     documentId,
-    { schemaId },
+    schema,
     async () => read(),
     {
       routeHint: options.routeHint ?? cultMeshRouteHint("in-process", "CultCache store"),
-      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId })],
+      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId: resolvedSchemaId })],
       watchDocument: cultMeshPollingDocumentWatcher(read, {
         intervalMs: options.pollMs ?? 50,
       }),
@@ -1981,6 +2010,26 @@ export function cultMeshDocumentFromStore(
 export function cultMeshDocumentFromSingleFile(
   path: string,
   schemaId: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  },
+): CultMeshDocumentHandle<unknown>;
+export function cultMeshDocumentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
+  path: string,
+  definition: TDefinition,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    pollMs?: number;
+  },
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+export function cultMeshDocumentFromSingleFile(
+  path: string,
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
@@ -1989,14 +2038,14 @@ export function cultMeshDocumentFromSingleFile(
   } = {},
 ): CultMeshDocumentHandle<unknown> {
   requireNonEmpty(path, "path");
-  return cultMeshDocumentFromStore(
-    new SingleFileMessagePackBackingStore(path),
-    schemaId,
-    {
-      ...options,
-      routeHint: options.routeHint ?? cultMeshRouteHint("shared-memory", path),
-    },
-  );
+  const store = new SingleFileMessagePackBackingStore(path);
+  const resolvedOptions = {
+    ...options,
+    routeHint: options.routeHint ?? cultMeshRouteHint("shared-memory", path),
+  };
+  return typeof schemaOrDefinition === "string"
+    ? cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions)
+    : cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions);
 }
 
 export function cultMeshDocumentFromPeerSnapshot(
@@ -2051,7 +2100,7 @@ export function cultMeshDocumentFromPeerSnapshot(
   requireNonEmpty(recordKey, "recordKey");
   const documentId = options.documentId ?? recordKey;
   const read = async () =>
-    parseCultMeshPeerSnapshotDocument(
+    parseCultMeshDocumentValue(
       schemaOrDefinition,
       decodeCultNetRawDocumentPayload(
         await requestCultNetRawSnapshotDocument(
@@ -3765,6 +3814,26 @@ export class CultMesh {
   public static documentFromStore(
     store: CacheBackingStore,
     schemaId: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    },
+  ): CultMeshDocumentHandle<unknown>;
+  public static documentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
+    store: CacheBackingStore,
+    definition: TDefinition,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    },
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+  public static documentFromStore(
+    store: CacheBackingStore,
+    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -3772,12 +3841,34 @@ export class CultMesh {
       pollMs?: number;
     } = {},
   ): CultMeshDocumentHandle<unknown> {
-    return cultMeshDocumentFromStore(store, schemaId, options);
+    return typeof schemaOrDefinition === "string"
+      ? cultMeshDocumentFromStore(store, schemaOrDefinition, options)
+      : cultMeshDocumentFromStore(store, schemaOrDefinition, options);
   }
 
   public static documentFromSingleFile(
     path: string,
     schemaId: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    },
+  ): CultMeshDocumentHandle<unknown>;
+  public static documentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
+    path: string,
+    definition: TDefinition,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      pollMs?: number;
+    },
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+  public static documentFromSingleFile(
+    path: string,
+    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -3785,7 +3876,9 @@ export class CultMesh {
       pollMs?: number;
     } = {},
   ): CultMeshDocumentHandle<unknown> {
-    return cultMeshDocumentFromSingleFile(path, schemaId, options);
+    return typeof schemaOrDefinition === "string"
+      ? cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options)
+      : cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options);
   }
 
   public static documentFromPeerSnapshot(
@@ -4928,7 +5021,7 @@ function decodeCultNetRawDocumentPayload(document: CultNetRawDocumentRecord): un
   return decode(toUint8Array(document.payload));
 }
 
-function parseCultMeshPeerSnapshotDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+function parseCultMeshDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(
   schemaOrDefinition: string | TDefinition,
   value: unknown,
 ): unknown | CultCacheDocumentValue<TDefinition> {

@@ -317,6 +317,11 @@ still read the publication with one CultMesh call. Pass a CultCache document
 definition instead of a raw schema id when you want a typed handle whose
 `latest()` result is parsed through that definition.
 
+The same typed-definition overload is available for
+`CultMesh.documentFromStore(...)` and `CultMesh.documentFromSingleFile(...)`, so
+local schema publications can be read as typed reactive documents without
+manually pulling records, decoding MessagePack, or parsing the payload.
+
 ## Streaming Mode
 
 CultMesh streaming mode is for audio, video, tensor, and opaque byte frames that

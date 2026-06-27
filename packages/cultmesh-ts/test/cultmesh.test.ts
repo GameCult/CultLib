@@ -196,18 +196,19 @@ test("CultMesh TS document handles read schema publications from single-file sto
   });
   await node.flush();
 
-  const document = CultMesh.documentFromSingleFile(filePath, "cultmesh.note.v0", {
+  const document = CultMesh.documentFromSingleFile(filePath, noteDocument, {
     documentId: "daemon:cultmesh.note.latest",
     sourceId: "daemon:cultmesh.note.latest.v0",
     pollMs: 50,
   });
   const observed: string[] = [];
   const unsubscribe = document.watch(value => {
-    observed.push(noteDocument.schema.parse(value).body);
+    observed.push(value.body);
   });
 
   try {
-    assert.equal(noteDocument.schema.parse(await document.latest()).body, "published");
+    assert.equal((await document.latest()).body, "published");
+    assert.equal(document.schema.type, "cultmesh.note");
 
     const republisher = await CultMesh.startNode(filePath, {
       documents: [noteDocument],
