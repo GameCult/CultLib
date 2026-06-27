@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
+using GameCult.Caching.MessagePack;
 using GameCult.Networking;
 using MessagePack;
 using NUnit.Framework;
@@ -887,9 +888,37 @@ public sealed class CultMeshStreamingTests
         handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
         handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be(key.Value);
         requests.Should().ContainSingle();
-        requests[0].SchemaIds.Should().ContainSingle().Which.Should().Be(handle.SchemaId);
+        requests[0].SchemaIds.Should().BeNull();
         requests[0].RecordKeys.Should().ContainSingle().Which.Should().Be(key.Value);
         (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("remote-snapshot");
+
+        var aliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
+            _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "alias-schema",
+                Documents = new[]
+                {
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = "remote.generated.mesh_note_alias.v99",
+                        RecordKey = key.Value,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "record-key-fallback",
+                                Revision = 10
+                            },
+                            typeof(MeshNoteDocument))
+                    }
+                }
+            }),
+            key.Value,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+
+        (await aliasSchemaHandle.LatestAsync()).Text.Should().Be("record-key-fallback");
     }
 
     [Test]

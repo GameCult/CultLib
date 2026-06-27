@@ -288,6 +288,11 @@ var health = await remoteHealth.LatestAsync();
 var uiHealth = remoteHealth.AsSchemaAlias<DaemonHealthUiDocument>();
 ```
 
+Snapshot requests are record-key-first so same logical documents can still be
+read when another runtime generated a different schema id for a compatible
+schema alias. The decode path prefers exact schema id matches when present and
+falls back to the requested record key.
+
 A domain facade can collect handles into one schema-aware catalog:
 
 ```csharp

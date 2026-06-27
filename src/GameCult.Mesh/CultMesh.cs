@@ -1839,7 +1839,6 @@ namespace GameCult.Mesh
             client.SendCultNet(new CultNetSnapshotRequestMessage
             {
                 MessageId = messageId,
-                SchemaIds = new[] { descriptor.SchemaId },
                 RecordKeys = new[] { recordKey }
             });
 
