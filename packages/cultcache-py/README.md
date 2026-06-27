@@ -383,7 +383,13 @@ client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"
 client.fanout_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
 
 raw_client = CultNetRawClient("127.0.0.1", 3075)
-node.database.sync_snapshot(raw_client, schema_ids=[note_doc.catalog_entry().schema_id])
+synced_note = node.database.sync_document(raw_client, note_doc, "note:remote")
+synced_stock = CultMesh.sync_document(
+    node,
+    raw_client,
+    station_stock_ui_doc,
+    "station:starbridge:stock",
+)
 node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
 replicator = CultNetShardReplicator(
     node.database,

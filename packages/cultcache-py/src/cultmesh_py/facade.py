@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from cultcache_py.documents import DocumentDefinition
 from cultnet_py import (
     CultNetRawClient,
     CultNetReconnectPolicy,
@@ -272,6 +273,24 @@ class CultMesh:
     @staticmethod
     def create_simulation_fact_committer(node: CultMeshNode) -> CultMeshSimulationFactCommitter:
         return CultMeshSimulationFactCommitter(node)
+
+    @staticmethod
+    def sync_document(
+        node: CultMeshNode,
+        client: CultNetRawClient,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> Any:
+        return node.sync_document(
+            client,
+            document,
+            key,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
 
     @staticmethod
     def create_game_session(

@@ -2113,17 +2113,28 @@ class CultCacheTests(unittest.TestCase):
                 }
 
         synced = node.sync_document(SnapshotClient(), alias, "note:remote")
+        facade_synced = CultMesh.sync_document(node, SnapshotClient(), alias, "note:remote")
 
         self.assertIsInstance(synced, UiNote)
         self.assertEqual(synced.body, "synced-alias")
+        self.assertIsInstance(facade_synced, UiNote)
+        self.assertEqual(facade_synced.body, "synced-alias")
         self.assertEqual(node.get_required(document, "note:remote").body, "synced-alias")
         self.assertIsInstance(node.get_required(alias, "note:remote"), UiNote)
-        self.assertEqual(requests, [{
-            "schema_ids": ["mesh.sync_alias_note.v1"],
-            "record_keys": ["note:remote"],
-            "shard_id": None,
-            "shard_epoch": None,
-        }])
+        self.assertEqual(requests, [
+            {
+                "schema_ids": ["mesh.sync_alias_note.v1"],
+                "record_keys": ["note:remote"],
+                "shard_id": None,
+                "shard_epoch": None,
+            },
+            {
+                "schema_ids": ["mesh.sync_alias_note.v1"],
+                "record_keys": ["note:remote"],
+                "shard_id": None,
+                "shard_epoch": None,
+            },
+        ])
 
     def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
         document = define_database_entry_type(
