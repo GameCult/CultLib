@@ -3742,6 +3742,62 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(session.pending_predictions(), ())
             self.assertEqual(session.resimulation_inputs(), ())
 
+    def test_cultmesh_game_session_partial_reconciliation_keeps_unmatched_predictions(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.partial_input",
+            [("body", 0)],
+            schema_id="mesh.partial_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-partial")
+        node.register_document(note_doc)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-partial",
+                        schema_ids=("mesh.partial_input.v1",),
+                        key_prefix="input:client-partial",
+                    ),
+                )
+            ),
+        )
+        pending = session.predict(note_doc, "input:client-partial:pending", {"body": "pending-local"})
+        accepted = session.predict(note_doc, "input:client-partial:accepted", {"body": "accepted-local"})
+        put = document_put_raw(
+            message_id="authoritative-partial",
+            key=accepted.key,
+            schema_id=accepted.schema_id,
+            stored_at="2026-06-13T00:00:00Z",
+            payload=note_doc.encode_payload({"body": "accepted-authority"}),
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+
+        changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-partial-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "updated",
+                    "put": put.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual([(change.change_kind, change.record_key) for change in changes], [
+            ("reconciled", accepted.key),
+        ])
+        self.assertEqual(node.get_required(note_doc, accepted.key)["body"], "accepted-authority")
+        self.assertEqual(node.get_required(note_doc, pending.key)["body"], "pending-local")
+        self.assertEqual([prediction.key for prediction in session.pending_predictions()], [pending.key])
+        self.assertEqual([prediction.key for prediction in session.resimulation_inputs()], [pending.key])
+
     def test_cultmesh_game_session_rolls_back_pending_predictions(self) -> None:
         note_doc = define_database_entry_type(
             "mesh.rollback_input",

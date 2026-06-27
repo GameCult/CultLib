@@ -1545,6 +1545,89 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Reads one typed document from a configured publication source and hydrates it into a local node.
+        /// </summary>
+        public static async Task<TDocument> SyncDocumentFromPublicationAsync<TDocument>(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var document = await DocumentFromPublication<TDocument>(
+                    source,
+                    key,
+                    context,
+                    storeOptions,
+                    peerOptions)
+                .LatestAsync()
+                .ConfigureAwait(false);
+
+            await Document<TDocument>(node, key, context)
+                .ReplaceAsync(document)
+                .ConfigureAwait(false);
+
+            if (flush)
+                await node.FlushAsync().ConfigureAwait(false);
+
+            return document;
+        }
+
+        /// <summary>
+        /// Reads one typed document from a configured publication source and hydrates it into a local node.
+        /// </summary>
+        public static Task<TDocument> SyncDocumentFromPublicationAsync<TDocument>(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return SyncDocumentFromPublicationAsync<TDocument>(
+                node,
+                source,
+                key,
+                verse.Context,
+                storeOptions,
+                peerOptions,
+                flush);
+        }
+
+        /// <summary>
+        /// Reads one typed document from a configured publication source and hydrates it into a local node.
+        /// </summary>
+        public static Task<TDocument> SyncDocumentFromPublicationAsync<TDocument>(
+            CultMeshNode node,
+            CultMeshDocumentPublicationSource source,
+            string recordKey,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? storeOptions = null,
+            CultMeshPeerSnapshotDocumentOptions? peerOptions = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            return SyncDocumentFromPublicationAsync<TDocument>(
+                node,
+                source,
+                new CultRecordKey(recordKey),
+                verse,
+                storeOptions,
+                peerOptions,
+                flush);
+        }
+        /// <summary>
         /// Creates a typed document handle directly over one distributed CultNet database record.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> Document<TDocument>(

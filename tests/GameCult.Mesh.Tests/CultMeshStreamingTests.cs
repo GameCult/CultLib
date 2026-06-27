@@ -2306,6 +2306,62 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task PublicationHelpers_SyncConfiguredPeerSourceIntoLocalNodeAlias()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:publication-sync-alias");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "publication-synced",
+            Revision = 51
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+        var verse = CultMesh.Verse("starbridge", "unity-support");
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(Path.GetTempPath(), $"cultmesh-publication-sync-alias-{Guid.NewGuid():N}.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+
+        var synced = await CultMesh.SyncDocumentFromPublicationAsync<MeshNoteAliasDocument>(
+            node,
+            CultMeshDocumentPublicationSource.PeerSnapshot(
+                () => new MeshSnapshotSchemaClient(request =>
+                {
+                    requests.Add(request);
+                    return registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request);
+                }),
+                "cultnet://publication-sync.test:3075"),
+            key,
+            verse,
+            peerOptions: new CultMeshPeerSnapshotDocumentOptions
+            {
+                MessageIdPrefix = "mesh-test-publication-sync",
+                PollInterval = TimeSpan.FromMilliseconds(10)
+            });
+        var localAlias = await node.Document<MeshNoteAliasDocument>(key, verse).LatestAsync();
+
+        synced.Text.Should().Be("publication-synced");
+        synced.Revision.Should().Be(51);
+        localAlias.Text.Should().Be("publication-synced");
+        localAlias.Revision.Should().Be(51);
+        requests.Should().ContainSingle().Which.RecordKeys.Should().Equal(key.Value);
+    }
+
+    [Test]
     public async Task SnapshotHelpers_FetchApplyAndDecodeScopedSnapshots()
     {
         var sourceCache = new CultCache();
