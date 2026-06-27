@@ -43,6 +43,7 @@ The initial tests prove:
 - shard catalog request/response filtering and response application
 - CultCache snapshot replication through registered typed documents
 - raw snapshot replication that preserves the original payload bytes
+- raw snapshot replication into a local same-schema Rust alias type
 - document mutation contract advertisement through hello frames and registries
 
 ## Schema Discovery
@@ -109,6 +110,24 @@ Those messages carry the exact persisted MessagePack payload bytes from
 CultCache along with the typed envelope metadata. Combined with
 `CultCache::put_envelope::<T>()`, that lets a bit-compatible neighbor ingest the
 document without re-encoding the payload first.
+
+The receiving Rust type does not have to be the sender's concrete Rust type. If
+the local registry binds a different `DatabaseEntry` to the same schema id,
+`apply_raw_snapshot_response::<LocalAlias>(...)` hydrates the local alias type
+directly:
+
+```rust
+let mut target_registry = CultNetDocumentRegistry::new();
+target_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<UiNote>(
+    "aetheria.note.v1".to_string(),
+    "aetheria.note.v1".to_string(),
+));
+
+let applied = target_registry.apply_raw_snapshot_response::<UiNote>(
+    &mut target_cache,
+    &snapshot_response,
+)?;
+```
 
 That still is not zero-copy in the religious sense. Frames allocate, bytes move,
 and the receiving cache still decodes once to keep typed reads and validation

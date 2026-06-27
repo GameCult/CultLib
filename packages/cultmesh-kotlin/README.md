@@ -66,6 +66,28 @@ target.applyRawSnapshotResponse(response)
 val note = target.require(notes, "note:1")
 ```
 
+When the caller wants one record as a local typed view, `syncDocument(...)`
+applies just that snapshot record and returns the requested document type. This
+is the comfortable alias path: the source can publish one Kotlin type, while
+the target registers a different Kotlin type with the same schema version.
+
+```kotlin
+val sourceNote = cultDocument(SourceNoteCodec)
+val uiNote = cultDocument(UiNoteCodec) // same schemaVersion as sourceNote
+
+source.remember(sourceNote, "note:bridge", SourceNote("kotlin.note.v1", "hello"))
+
+val response = source.createRawSnapshotResponse(
+    cultNetSnapshotRequest(
+        messageId = "sync-ui-note",
+        schemaIds = listOf(uiNote.schemaVersion),
+        recordKeys = listOf("note:bridge"),
+    ),
+)
+
+val note: UiNote = target.syncDocument(response, uiNote, "note:bridge")
+```
+
 `applyRawDocumentPut(...)`, `applyRawSnapshotResponse(...)`, and
 `applyDocumentDelete(...)` require matching codecs to be registered first, so
 raw bytes re-enter the typed cache through the same document definitions that
