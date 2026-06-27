@@ -82,6 +82,18 @@ export type CultMeshDocumentPublicationSource =
       readonly endpoint?: string;
     };
 
+export interface CultMeshPublicationDocumentBinding {
+  readonly schema: string | AnyCultCacheDocumentDefinition;
+  readonly recordKey: string;
+  readonly documentId?: string;
+  readonly sourceId?: string;
+  readonly source?: CultMeshDocumentPublicationSource;
+}
+
+export type CultMeshDocumentPublicationSourceResolver =
+  | CultMeshDocumentPublicationSource
+  | ((binding: CultMeshPublicationDocumentBinding) => CultMeshDocumentPublicationSource);
+
 export interface CultMeshAuthorityClaim {
   readonly role: string;
   readonly shardId?: string;
@@ -2275,6 +2287,80 @@ export function cultMeshDocuments(
   return new CultMeshDocumentCatalog(documents);
 }
 
+export function cultMeshPublicationDocument(
+  schema: string | AnyCultCacheDocumentDefinition,
+  recordKey: string,
+  options: {
+    documentId?: string;
+    sourceId?: string;
+    source?: CultMeshDocumentPublicationSource;
+  } = {},
+): CultMeshPublicationDocumentBinding {
+  requireNonEmpty(recordKey, "recordKey");
+  return {
+    schema,
+    recordKey,
+    documentId: options.documentId,
+    sourceId: options.sourceId,
+    source: options.source,
+  };
+}
+
+export function cultMeshDocumentsFromPublication(
+  source: CultMeshDocumentPublicationSourceResolver,
+  bindings: readonly CultMeshPublicationDocumentBinding[],
+  options: {
+    routeHint?: CultMeshRouteHint;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): CultMeshDocumentCatalog {
+  if (!source) {
+    throw new Error("CultMesh publication source is required.");
+  }
+  if (!bindings) {
+    throw new Error("CultMesh publication bindings are required.");
+  }
+
+  return cultMeshDocuments(
+    ...bindings.map(binding => {
+      if (!binding) {
+        throw new Error("CultMesh publication binding is required.");
+      }
+      const resolvedSource = binding.source ??
+        (typeof source === "function" ? source(binding) : source);
+      return typeof binding.schema === "string"
+        ? cultMeshDocumentFromPublication(
+            resolvedSource,
+            binding.schema,
+            binding.recordKey,
+            {
+              documentId: binding.documentId ?? binding.recordKey,
+              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
+              routeHint: options.routeHint,
+              timeoutMs: options.timeoutMs,
+              pollMs: options.pollMs,
+              messageIdPrefix: options.messageIdPrefix,
+            },
+          )
+        : cultMeshDocumentFromPublication(
+            resolvedSource,
+            binding.schema,
+            binding.recordKey,
+            {
+              documentId: binding.documentId ?? binding.recordKey,
+              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
+              routeHint: options.routeHint,
+              timeoutMs: options.timeoutMs,
+              pollMs: options.pollMs,
+              messageIdPrefix: options.messageIdPrefix,
+            },
+          );
+    }),
+  );
+}
+
 export function cultMeshCollection<TDocument>(
   collectionId: string,
   schema: CultMeshDocumentSchemaDescriptor,
@@ -4096,6 +4182,31 @@ export class CultMesh {
     ...documents: readonly CultMeshDocumentHandle<any>[]
   ): CultMeshDocumentCatalog {
     return cultMeshDocuments(...documents);
+  }
+
+  public static publicationDocument(
+    schema: string | AnyCultCacheDocumentDefinition,
+    recordKey: string,
+    options: {
+      documentId?: string;
+      sourceId?: string;
+      source?: CultMeshDocumentPublicationSource;
+    } = {},
+  ): CultMeshPublicationDocumentBinding {
+    return cultMeshPublicationDocument(schema, recordKey, options);
+  }
+
+  public static documentsFromPublication(
+    source: CultMeshDocumentPublicationSourceResolver,
+    bindings: readonly CultMeshPublicationDocumentBinding[],
+    options: {
+      routeHint?: CultMeshRouteHint;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): CultMeshDocumentCatalog {
+    return cultMeshDocumentsFromPublication(source, bindings, options);
   }
 
   public static bindDocument<TDocument>(

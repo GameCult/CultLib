@@ -232,6 +232,66 @@ test("CultMesh TS document handles read schema publications from single-file sto
   ]);
 });
 
+test("CultMesh TS binds publication document catalogs from source resolvers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-catalog-"));
+  const firstPath = join(root, "first.ccmp");
+  const secondPath = join(root, "second.ccmp");
+  const first = await CultMesh.startNode(firstPath, {
+    documents: [noteDocument],
+  });
+  const second = await CultMesh.startNode(secondPath, {
+    documents: [noteDocument],
+  });
+  await first.put(noteDocument, "note:first", {
+    noteId: "note:first",
+    body: "first source",
+  });
+  await second.put(noteDocument, "note:second", {
+    noteId: "note:second",
+    body: "second source",
+  });
+  await first.flush();
+  await second.flush();
+
+  const bindings = [
+    CultMesh.publicationDocument(noteDocument, "note:first", {
+      documentId: "daemon:first",
+      sourceId: "daemon:first.latest",
+    }),
+    CultMesh.publicationDocument(noteDocument, "note:second", {
+      documentId: "daemon:second",
+      sourceId: "daemon:second.latest",
+    }),
+  ];
+  const paths = new Map([
+    ["note:first", firstPath],
+    ["note:second", secondPath],
+  ]);
+  const catalog = CultMesh.documentsFromPublication(
+    binding => ({
+      kind: "single-file",
+      path: paths.get(binding.recordKey) ?? firstPath,
+    }),
+    bindings,
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "publication catalog"),
+      pollMs: 50,
+    },
+  );
+
+  assert.deepEqual(
+    catalog.documents.map(document => document.documentId),
+    ["daemon:first", "daemon:second"],
+  );
+  assert.equal(
+    (await catalog.document(noteAliasDocument, {
+      parse: value => noteAliasDocument.schema.parse(value),
+    }).latest()).body,
+    "second source",
+  );
+  assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
+});
+
 test("CultMesh TS collection handles expose typed snapshots and reset watches", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-coll-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {
