@@ -267,6 +267,7 @@ from cultmesh_py import (
     CultMeshGameSessionOptions,
     CultMeshHmacAuthorityLeaseVerifier,
     CultMeshNodeOptions,
+    CultMeshSnapshotFanout,
     peer_exchange_request,
 )
 
@@ -388,6 +389,16 @@ replica_notes = client.sync_documents(
     roles=["read-replica"],
     documents=[(note_doc, "note:remote")],
 )
+snapshot_fanout = CultMeshSnapshotFanout(
+    client,
+    node.database,
+    peers,
+    verse_id="python-interop",
+    roles=["read-replica"],
+    documents=[(note_doc, "note:remote")],
+    on_document=lambda note: print(note),
+)
+snapshot_fanout.sync_once()
 
 raw_client = CultNetRawClient("127.0.0.1", 3075)
 synced_note = node.database.sync_document(raw_client, note_doc, "note:remote")

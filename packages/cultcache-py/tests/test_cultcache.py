@@ -4515,6 +4515,67 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(seen, ["note:sync-once"])
         self.assertEqual(target.database.get_required(document, "note:sync-once")["body"], "from-source")
 
+    def test_cultmesh_snapshot_fanout_syncs_typed_documents_and_reports_alias_values(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.snapshot_loop_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.snapshot_loop_alias_note.v1",
+            schema_name="mesh.snapshot_loop_alias_note",
+            schema_version="mesh.snapshot_loop_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.snapshot_loop_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.snapshot_loop_alias_note.v1",
+            schema_name="mesh.snapshot_loop_alias_note",
+            schema_version="mesh.snapshot_loop_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-loop-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:typed-loop", CanonicalNote("from-source"))
+        target = CultMesh.create_node(runtime_id="snapshot-loop-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-loop-alias-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[UiNote] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                documents=[(alias, "note:typed-loop")],
+                on_document=seen.append,
+            )
+
+            values = fanout.sync_once()
+        finally:
+            server.stop()
+
+        self.assertEqual(len(values), 1)
+        self.assertIsInstance(values[0], UiNote)
+        self.assertEqual(values[0].body, "from-source")
+        self.assertEqual(seen, [values[0]])
+        self.assertEqual(target.database.get_required(document, "note:typed-loop").body, "from-source")
+        self.assertIsInstance(target.database.get_required(alias, "note:typed-loop"), UiNote)
+
     def test_cultmesh_snapshot_fanout_runs_background_loop(self) -> None:
         document = define_database_entry_type(
             "mesh.snapshot_background_note",

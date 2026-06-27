@@ -473,17 +473,34 @@ class CultMeshSnapshotFanout:
     peer_catalog: CultMeshPeerCatalog
     verse_id: str
     roles: list[str] | None = None
+    documents: list[tuple[DocumentDefinition[Any], str]] | None = None
     schema_ids: list[str] | None = None
     record_keys: list[str] | None = None
     shard_id: str | None = None
     shard_epoch: int | None = None
     interval_seconds: float = 1.0
     on_applied: Callable[[Any], None] | None = None
+    on_document: Callable[[Any], None] | None = None
     on_error: Callable[[str, Exception], None] | None = None
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
 
     def sync_once(self) -> list[Any]:
+        if self.documents is not None:
+            values = self.client.sync_documents(
+                self.database,
+                self.peer_catalog,
+                verse_id=self.verse_id,
+                roles=self.roles,
+                documents=self.documents,
+                shard_id=self.shard_id,
+                shard_epoch=self.shard_epoch,
+                on_error=self.on_error,
+            )
+            for value in values:
+                if self.on_document is not None:
+                    self.on_document(value)
+            return values
         applied = self.client.sync_snapshots(
             self.database,
             self.peer_catalog,
