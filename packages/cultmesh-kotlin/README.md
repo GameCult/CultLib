@@ -93,6 +93,27 @@ val note: UiNote = target.syncDocument(response, uiNote, "note:bridge")
 raw bytes re-enter the typed cache through the same document definitions that
 local Kotlin callers use.
 
+Reactive document handles let Kotlin callers keep a typed local view and have
+CultMesh flush changed state on the debounce cadence:
+
+```kotlin
+val note = CultMesh.reactiveDocument(
+    target,
+    uiNote,
+    "note:bridge",
+    CultReactiveDocumentOptions(flushDelayMs = 16),
+)
+
+note.current.body = "local prediction"
+```
+
+For immutable document types, use `update { it.copy(...) }` or
+`setCurrent(...)`. When an authoritative raw document put arrives while local
+state is dirty, `applyRawDocumentPut(...)` records a
+`CultReactiveDocumentReconciliation` with the canonical value, predicted value,
+and a delta. Tuple-backed MessagePack codecs report delta keys by field slot,
+such as `"0"` and `"1"`.
+
 ## WebSocket Transport
 
 For browser/mobile-friendly schema lanes, `CultNetWebSocketTransportConnection`

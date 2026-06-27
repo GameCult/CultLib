@@ -195,6 +195,202 @@ fun <T : Any> CultCache.document(document: CultDocumentDefinition<T>, key: Strin
 fun <T : Any> CultCache.global(document: CultDocumentDefinition<T>): CultCacheDocumentHandle<T> =
     CultCacheDocumentHandle(this, document, CultCache.GLOBAL_KEY)
 
+data class CultReactiveDocumentOptions(
+    val flushDelayMs: Long = 16,
+    val detectLocalChanges: Boolean = true,
+    val replaceDirtyCurrentOnCanonicalSnapshot: Boolean = false,
+)
+
+data class CultReactiveDocumentReconciliation<T : Any>(
+    val canonical: T,
+    val predicted: T,
+    val delta: Map<String, Any?>,
+    val version: Long,
+    val receivedAt: Instant,
+)
+
+class CultReactiveDocument<T : Any>(
+    private val cache: CultCache,
+    private val document: CultDocumentDefinition<T>,
+    private val key: String,
+    private val options: CultReactiveDocumentOptions = CultReactiveDocumentOptions(),
+) : AutoCloseable {
+    private val lock = Any()
+    private val disposed = AtomicBoolean(false)
+    private var lastCleanPayload = ByteArray(0)
+    private var flushing = false
+    private var flushQueued = false
+    private var reconciliationVersion = 0L
+    private val detectWorker: Thread?
+
+    @Volatile
+    var current: T = cache.getRequired(document, key)
+        private set
+
+    @Volatile
+    var isDirty: Boolean = false
+        private set
+
+    @Volatile
+    var reconciliation: CultReactiveDocumentReconciliation<T>? = null
+        private set
+
+    @Volatile
+    var lastError: Throwable? = null
+        private set
+
+    init {
+        require(key.isNotBlank()) { "key must be non-empty" }
+        lastCleanPayload = document.codec.encode(current)
+        detectWorker = if (options.detectLocalChanges) {
+            Thread {
+                val delay = options.flushDelayMs.coerceAtLeast(1)
+                while (!disposed.get()) {
+                    try {
+                        Thread.sleep(delay)
+                        if (disposed.get()) return@Thread
+                        if (detectLocalChanges()) flush()
+                    } catch (_: InterruptedException) {
+                        if (disposed.get()) return@Thread
+                    } catch (error: Throwable) {
+                        lastError = error
+                    }
+                }
+            }.apply {
+                isDaemon = true
+                name = "cultmesh-reactive-document-${document.documentType}-$key"
+                start()
+            }
+        } else {
+            null
+        }
+    }
+
+    fun update(update: (T) -> T): T {
+        val predicted = synchronized(lock) {
+            current = update(current)
+            isDirty = true
+            current
+        }
+        if (options.flushDelayMs <= 0) flush()
+        return predicted
+    }
+
+    fun setCurrent(value: T): T {
+        synchronized(lock) {
+            current = value
+            isDirty = true
+        }
+        if (options.flushDelayMs <= 0) flush()
+        return value
+    }
+
+    fun markDirty() {
+        synchronized(lock) {
+            isDirty = true
+        }
+    }
+
+    fun refresh(): T {
+        val canonical = cache.getRequired(document, key)
+        synchronized(lock) {
+            current = canonical
+            lastCleanPayload = document.codec.encode(canonical)
+            isDirty = false
+            flushQueued = false
+            reconciliation = null
+        }
+        return canonical
+    }
+
+    fun flush() {
+        val predicted = synchronized(lock) {
+            if (!isDirty && !detectLocalChangesLocked()) return
+            if (flushing) {
+                flushQueued = true
+                return
+            }
+            flushing = true
+            isDirty = false
+            current
+        }
+        val payload = document.codec.encode(predicted)
+        cache.put(document, key, predicted)
+        val shouldFlushAgain = synchronized(lock) {
+            flushing = false
+            lastCleanPayload = payload
+            reconciliation = null
+            lastError = null
+            if (!document.codec.encode(current).contentEquals(lastCleanPayload)) {
+                isDirty = true
+            }
+            val queued = flushQueued || isDirty
+            flushQueued = false
+            queued
+        }
+        if (shouldFlushAgain) flush()
+    }
+
+    fun applyRawDocumentPut(message: CultNetMessage): T {
+        cache.applyRawDocumentPut(message)
+        return applyCanonical(cache.getRequired(document, key))
+    }
+
+    fun clearReconciliation() {
+        synchronized(lock) {
+            reconciliation = null
+        }
+    }
+
+    override fun close() {
+        disposed.set(true)
+        detectWorker?.interrupt()
+    }
+
+    private fun detectLocalChanges(): Boolean = synchronized(lock) {
+        detectLocalChangesLocked() && !flushing
+    }
+
+    private fun detectLocalChangesLocked(): Boolean {
+        if (!isDirty && !flushing && !document.codec.encode(current).contentEquals(lastCleanPayload)) {
+            isDirty = true
+        }
+        return isDirty
+    }
+
+    private fun applyCanonical(canonical: T): T {
+        synchronized(lock) {
+            if (isDirty || flushing) {
+                val predicted = current
+                val delta = reconciliationDelta(document.codec.encode(predicted), document.codec.encode(canonical))
+                reconciliation = if (delta.isEmpty()) {
+                    null
+                } else {
+                    reconciliationVersion += 1
+                    CultReactiveDocumentReconciliation(
+                        canonical = canonical,
+                        predicted = predicted,
+                        delta = delta,
+                        version = reconciliationVersion,
+                        receivedAt = Instant.now(),
+                    )
+                }
+                if (!options.replaceDirtyCurrentOnCanonicalSnapshot) return canonical
+            }
+            current = canonical
+            lastCleanPayload = document.codec.encode(canonical)
+            reconciliation = null
+            return canonical
+        }
+    }
+}
+
+fun <T : Any> CultCache.reactiveDocument(
+    document: CultDocumentDefinition<T>,
+    key: String,
+    options: CultReactiveDocumentOptions = CultReactiveDocumentOptions(),
+): CultReactiveDocument<T> = CultReactiveDocument(this, document, key, options)
+
 class StringDocumentCodec(
     override val documentType: String,
     override val schemaVersion: String,
@@ -235,6 +431,11 @@ private data class KotlinUiNote(
     val body: String,
 )
 
+private data class KotlinReactiveNote(
+    var body: String,
+    var revision: Long,
+)
+
 private class KotlinAliasNoteCodec<T : Any>(
     override val documentType: String,
     override val schemaVersion: String,
@@ -250,6 +451,21 @@ private class KotlinAliasNoteCodec<T : Any>(
     override fun decode(payload: ByteArray): T {
         val slots = anyList(MessagePackReader(payload).readAny())
         return create(slots[0] as String, slots[1] as String)
+    }
+}
+
+private class KotlinReactiveNoteCodec(
+    override val documentType: String,
+    override val schemaVersion: String,
+) : CultDocumentCodec<KotlinReactiveNote> {
+    override fun encode(value: KotlinReactiveNote): ByteArray =
+        MessagePackWriter()
+            .value(listOf(value.body, value.revision))
+            .toByteArray()
+
+    override fun decode(payload: ByteArray): KotlinReactiveNote {
+        val slots = anyList(MessagePackReader(payload).readAny())
+        return KotlinReactiveNote(slots[0] as String, (slots[1] as Number).toLong())
     }
 }
 
@@ -301,6 +517,12 @@ class CultMeshNode(
     fun <T : Any> syncDocument(response: CultNetMessage, document: CultDocumentDefinition<T>, key: String): T =
         cache.syncDocument(response, document, key)
 
+    fun <T : Any> reactiveDocument(
+        document: CultDocumentDefinition<T>,
+        key: String,
+        options: CultReactiveDocumentOptions = CultReactiveDocumentOptions(),
+    ): CultReactiveDocument<T> = cache.reactiveDocument(document, key, options)
+
     fun applyDocumentDelete(message: CultNetMessage): Boolean = cache.applyDocumentDelete(message)
 
     fun applyShardLogResponse(response: CultNetMessage): List<Any?> = cache.applyShardLogResponse(response)
@@ -310,6 +532,13 @@ object CultMesh {
     fun createNode(cache: CultCache = CultCache()): CultMeshNode = CultMeshNode(cache)
 
     fun startNode(cache: CultCache = CultCache()): CultMeshNode = createNode(cache)
+
+    fun <T : Any> reactiveDocument(
+        node: CultMeshNode,
+        document: CultDocumentDefinition<T>,
+        key: String,
+        options: CultReactiveDocumentOptions = CultReactiveDocumentOptions(),
+    ): CultReactiveDocument<T> = node.reactiveDocument(document, key, options)
 
     fun createVerseCatalog(): CultMeshVerseCatalog = CultMeshVerseCatalog()
 
@@ -2255,6 +2484,39 @@ private fun mapValue(value: Any?): Map<String, Any?> {
     return map
 }
 
+private fun reconciliationDelta(predictedPayload: ByteArray, canonicalPayload: ByteArray): Map<String, Any?> {
+    val predicted = MessagePackReader(predictedPayload).readAny()
+    val canonical = MessagePackReader(canonicalPayload).readAny()
+    val delta = linkedMapOf<String, Any?>()
+    when {
+        predicted is Map<*, *> && canonical is Map<*, *> -> {
+            val canonicalMap = mapValue(canonical)
+            for ((key, predictedValue) in mapValue(predicted)) {
+                val canonicalValue = canonicalMap[key]
+                if (predictedValue == canonicalValue) continue
+                delta[key] = numericDelta(predictedValue, canonicalValue) ?: predictedValue
+            }
+        }
+        predicted is List<*> && canonical is List<*> -> {
+            predicted.forEachIndexed { index, predictedValue ->
+                val canonicalValue = canonical.getOrNull(index)
+                if (predictedValue == canonicalValue) return@forEachIndexed
+                delta[index.toString()] = numericDelta(predictedValue, canonicalValue) ?: predictedValue
+            }
+        }
+        predicted != canonical -> {
+            delta["value"] = numericDelta(predicted, canonical) ?: predicted
+        }
+    }
+    return delta
+}
+
+private fun numericDelta(predicted: Any?, canonical: Any?): Double? {
+    val predictedNumber = predicted as? Number ?: return null
+    val canonicalNumber = canonical as? Number ?: return null
+    return predictedNumber.toDouble() - canonicalNumber.toDouble()
+}
+
 private fun sha256Hex(value: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(StandardCharsets.UTF_8))
     return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
@@ -3161,6 +3423,68 @@ private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
     val syncedAlias = target.syncDocument(aliasSnapshotResponse, uiNote, "note:alias")
     check(syncedAlias == KotlinUiNote("kotlin.alias_note.v1", "canonical-to-ui"))
     check(target.require(uiNote, "note:alias") == syncedAlias)
+
+    val reactiveUiNote = cultDocument(KotlinReactiveNoteCodec(
+        documentType = "kotlin.reactive_note.ui",
+        schemaVersion = "kotlin.reactive_note.v1",
+    ))
+    target.cache.register(reactiveUiNote)
+    target.remember(reactiveUiNote, "note:reactive", KotlinReactiveNote("initial", 1))
+    CultMesh.reactiveDocument(
+        target,
+        reactiveUiNote,
+        "note:reactive",
+        CultReactiveDocumentOptions(flushDelayMs = 5),
+    ).use { reactive ->
+        reactive.current.body = "first-local-edit"
+        reactive.current.body = "second-local-edit"
+        reactive.current.revision = 2
+        val deadline = System.nanoTime() + 500_000_000L
+        while (System.nanoTime() < deadline && target.require(reactiveUiNote, "note:reactive").body != "second-local-edit") {
+            Thread.sleep(5)
+        }
+        check(target.require(reactiveUiNote, "note:reactive") == KotlinReactiveNote("second-local-edit", 2))
+        check(!reactive.isDirty)
+        check(reactive.lastError == null)
+    }
+
+    val reactiveCanonicalNote = cultDocument(KotlinReactiveNoteCodec(
+        documentType = "kotlin.reactive_note",
+        schemaVersion = "kotlin.reactive_note.v1",
+    ))
+    target.cache.register(reactiveCanonicalNote)
+    target.remember(reactiveCanonicalNote, "note:reconcile", KotlinReactiveNote("initial", 1))
+    target.reactiveDocument(
+        reactiveCanonicalNote,
+        "note:reconcile",
+        CultReactiveDocumentOptions(flushDelayMs = 60_000, detectLocalChanges = false),
+    ).use { reactive ->
+        reactive.update {
+            it.body = "local-prediction"
+            it.revision = 2
+            it
+        }
+        val authoritative = cultNetDocumentPutRaw(
+            messageId = "put-authoritative-note",
+            document = CultNetRawDocumentRecord(
+                schemaId = reactiveCanonicalNote.schemaVersion,
+                recordKey = "note:reconcile",
+                storedAt = "2026-06-15T00:00:03Z",
+                payload = reactiveCanonicalNote.codec.encode(KotlinReactiveNote("authoritative", 7)),
+                sourceRuntimeId = "kotlin-authority",
+            ),
+        )
+        reactive.applyRawDocumentPut(authoritative)
+        check(reactive.current == KotlinReactiveNote("local-prediction", 2))
+        val reconciliation = reactive.reconciliation ?: error("Expected Kotlin reactive reconciliation")
+        check(reconciliation.canonical == KotlinReactiveNote("authoritative", 7))
+        check(reconciliation.predicted == KotlinReactiveNote("local-prediction", 2))
+        check(reconciliation.delta["0"] == "local-prediction")
+        check(reconciliation.delta["1"] == -5.0)
+        reactive.flush()
+        check(target.require(reactiveCanonicalNote, "note:reconcile") == KotlinReactiveNote("local-prediction", 2))
+        check(reactive.reconciliation == null)
+    }
 
     val rawPut = parseCultNetMessage(
         cultNetDocumentPutRaw(
