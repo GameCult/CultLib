@@ -302,6 +302,141 @@ test("CultMesh TS reactive documents store reconciliation deltas after mispredic
   reactive.dispose();
 });
 
+test("CultMesh TS reactive documents coalesce same-frame member writes", async () => {
+  let current = {
+    noteId: "note:reactive-frame",
+    body: "initial",
+  };
+  const predictions: string[] = [];
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const frameCallbacks: FrameRequestCallback[] = [];
+  globalThis.requestAnimationFrame = callback => {
+    frameCallbacks.push(callback);
+    return frameCallbacks.length;
+  };
+  const document = CultMesh.document(
+    "cultmesh.note:reactive-frame",
+    noteDocument,
+    async () => current,
+    {
+      submitPrediction: async (_context, value) => {
+        predictions.push(value.body);
+        current = value;
+      },
+    },
+  );
+
+  const reactive = document.reactive<typeof current>({
+    watch: false,
+  });
+  try {
+    await reactive.ready;
+    reactive.current.body = "frame-1";
+    reactive.current.body = "frame-2";
+    reactive.current.body = "frame-3";
+
+    assert.equal(frameCallbacks.length, 1);
+    frameCallbacks[0](performance.now());
+    await waitFor(() => predictions.length === 1, "same-frame prediction");
+
+    assert.deepEqual(predictions, ["frame-3"]);
+    assert.equal(current.body, "frame-3");
+  } finally {
+    reactive.dispose();
+    if (previousRequestAnimationFrame) {
+      globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+    } else {
+      delete (globalThis as unknown as {
+        requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+      }).requestAnimationFrame;
+    }
+  }
+});
+
+test("CultMesh TS reactive documents queue edits made while a prediction is in flight", async () => {
+  let current = {
+    noteId: "note:reactive-in-flight",
+    body: "initial",
+  };
+  let releaseFirstPrediction!: () => void;
+  let resolveFirstPredictionStarted!: () => void;
+  const firstPredictionStarted = new Promise<void>(resolve => {
+    resolveFirstPredictionStarted = resolve;
+  });
+  const predictions: typeof current[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:reactive-in-flight",
+    noteDocument,
+    async () => current,
+    {
+      submitPrediction: async (_context, value) => {
+        predictions.push(value);
+        if (predictions.length === 1) {
+          resolveFirstPredictionStarted();
+          await new Promise<void>(release => {
+            releaseFirstPrediction = release;
+          });
+        }
+        current = value;
+      },
+    },
+  );
+
+  const reactive = document.reactive<typeof current>({
+    watch: false,
+    debounceMs: 0,
+  });
+  await reactive.ready;
+  reactive.current.body = "first";
+  await firstPredictionStarted;
+  reactive.current.body = "second";
+  releaseFirstPrediction();
+  await waitFor(() => predictions.length === 2, "in-flight queued prediction");
+
+  assert.deepEqual(predictions.map(value => value.body), ["first", "second"]);
+  assert.equal(current.body, "second");
+  reactive.dispose();
+});
+
+test("CultMesh TS reactive read-only documents surface mutation failures and keep watching", async () => {
+  let current = {
+    noteId: "note:reactive-readonly",
+    body: "initial",
+  };
+  let watcher: ((value: typeof current) => void) | undefined;
+  const errors: string[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:reactive-readonly",
+    noteDocument,
+    async () => current,
+    {
+      watchDocument: (_context, callback) => {
+        watcher = callback;
+        return () => {
+          watcher = undefined;
+        };
+      },
+    },
+  );
+
+  const reactive = document.reactive<typeof current>({
+    onError: error => errors.push(String((error as Error).message ?? error)),
+  });
+  await reactive.ready;
+  reactive.current.body = "local-readonly-edit";
+  await waitFor(() => errors.length === 1, "read-only mutation error");
+
+  current = {
+    noteId: "note:reactive-readonly",
+    body: "canonical-after-error",
+  };
+  watcher?.(current);
+
+  assert.match(errors[0], /does not support mutation/);
+  assert.equal(reactive.current.body, "canonical-after-error");
+  reactive.dispose();
+});
+
 test("CultMesh TS document handles read schema publications from single-file stores", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-")), "publication.ccmp");
   const node = await CultMesh.startNode(filePath, {

@@ -1849,6 +1849,162 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_DebouncesBurstUpdatesIntoOnePrediction()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.burst",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMilliseconds(35)
+            });
+
+        for (var i = 0; i < 5; i++)
+        {
+            reactive.Update(document =>
+            {
+                document.Text = $"burst-{i}";
+                document.Revision++;
+            });
+        }
+
+        await WaitForAsync(() => predictions.Count == 1);
+
+        predictions[0].Text.Should().Be("burst-4");
+        predictions[0].Revision.Should().Be(6);
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_DirectEditsDuringInFlightFlushQueueLatestPrediction()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var allowFirstWrite = new TaskCompletionSource<bool>();
+        var firstWriteStarted = new TaskCompletionSource<bool>();
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.direct-in-flight",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            async value =>
+            {
+                predictions.Add(value);
+                if (predictions.Count == 1)
+                {
+                    firstWriteStarted.SetResult(true);
+                    await allowFirstWrite.Task.ConfigureAwait(false);
+                }
+
+                current = value;
+                subject.OnNext(value);
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Current.Text = "first-direct";
+        reactive.Current.Revision = 2;
+        var flush = reactive.FlushAsync();
+        await firstWriteStarted.Task;
+
+        reactive.Current.Text = "second-direct";
+        reactive.Current.Revision = 3;
+        allowFirstWrite.SetResult(true);
+        await flush;
+
+        predictions.Should().HaveCount(2);
+        predictions[0].Text.Should().Be("first-direct");
+        predictions[1].Text.Should().Be("second-direct");
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_CanonicalEchoClearsOutstandingPredictionWithoutDelta()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.canonical-echo",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Update(document =>
+        {
+            document.Text = "accepted";
+            document.Revision = 2;
+        });
+
+        await reactive.FlushAsync();
+
+        reactive.Current.Text.Should().Be("accepted");
+        reactive.Reconciliation.Should().BeNull();
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsSchemaPublicationsFromSingleFileStores()
     {
         using var directory = new TemporaryDirectory();

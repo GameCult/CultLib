@@ -1338,6 +1338,8 @@ namespace GameCult.Mesh
                 lock (_gate)
                 {
                     _flushing = false;
+                    if (_document.CanSet)
+                        DetectLocalChangesLocked();
                     shouldFlushAgain = _flushQueued || _dirty;
                     _flushQueued = false;
                 }
