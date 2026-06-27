@@ -1318,6 +1318,299 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_TwoRuntimeManagedDocumentsSyncThroughDatabase()
+    {
+        var cache = new CultCache();
+        var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
+        var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+        {
+            RuntimeId = "pilot-a",
+            Shards = new[]
+            {
+                new CultNetShardDescriptor(
+                    "pilot-inputs",
+                    "server",
+                    epoch: 1,
+                    isPrimary: false,
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:")
+            },
+            ClientAuthorityScopes = new[]
+            {
+                new CultNetClientAuthorityScope(
+                    "pilot-a",
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:pilot-a")
+            }
+        });
+        var key = new CultRecordKey("input:pilot-a:co-op");
+        await cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+
+        var pilotHandle = CultMesh.Document<MeshNoteDocument>(
+            database,
+            key,
+            CultMesh.Verse("starbridge", "pilot-a"));
+        var commanderHandle = CultMesh.Document<MeshNoteDocument>(
+            database,
+            key,
+            CultMesh.Verse("starbridge", "commander-rts"));
+        using var commanderReactive = await commanderHandle
+            .AsSchemaAlias<MeshNoteAliasDocument>()
+            .ReactiveAsync(new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        using var pilotReactive = await pilotHandle
+            .AsSchemaAlias<MeshNoteAliasDocument>()
+            .ReactiveAsync(new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        pilotReactive.Update(document =>
+        {
+            document.Text = "pilot-first-touch";
+            document.Revision++;
+        });
+        pilotReactive.Update(document =>
+        {
+            document.Text = "pilot-coalesced-order";
+            document.Revision++;
+        });
+        await pilotReactive.FlushAsync();
+
+        await WaitForAsync(() => commanderReactive.Current.Text == "pilot-coalesced-order");
+
+        pilotReactive.IsDirty.Should().BeFalse();
+        commanderReactive.Document.Context.RuntimeId.Should().Be("commander-rts");
+        commanderReactive.Current.Revision.Should().Be(3);
+        cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("pilot-coalesced-order");
+    }
+
+    [Test]
+    public async Task ReactiveDocument_SyncedSnapshotEndpointCapturesCanonicalCorrectionAcrossRuntimeBoundary()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:remote-correction");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var endpoint = "cultnet://remote-correction.test:3080";
+        var surface = CultMesh.SnapshotEndpoint(
+            endpoint,
+            new CultMeshSnapshotEndpointOptions
+            {
+                Context = CultMesh.Verse("starbridge", "unity-pilot").Context,
+                DocumentRegistry = registry,
+                PollInterval = TimeSpan.FromMilliseconds(10),
+                Request = new CultMeshSnapshotRequestOptions
+                {
+                    CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                        registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
+                }
+            });
+
+        using var temp = new TemporaryDirectory();
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(temp.Path, "pilot-runtime.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+        var handle = surface.SyncTo(node).Document<MeshNoteAliasDocument>(key.Value);
+        using var reactive = await handle.ReactiveAsync(new CultMeshReactiveDocumentOptions
+        {
+            FlushDelay = TimeSpan.FromMinutes(1)
+        });
+
+        reactive.Update(document =>
+        {
+            document.Text = "local-prediction";
+            document.Revision = 2;
+        });
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "remote-authority-correction",
+            Revision = 7
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+
+        await WaitForAsync(() => reactive.Reconciliation?.Canonical.Text == "remote-authority-correction");
+
+        reactive.Current.Text.Should().Be("local-prediction");
+        reactive.Reconciliation!.Predicted.Text.Should().Be("local-prediction");
+        reactive.Reconciliation.Canonical.Revision.Should().Be(7);
+        node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("remote-authority-correction");
+    }
+
+    [Test]
+    public async Task ReactiveDocument_FreshRuntimeReconstructsFromSyncedSnapshotEndpoint()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:runtime-reconnect");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "before-crash",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var endpoint = "cultnet://runtime-reconnect.test:3081";
+        var surface = CultMesh.SnapshotEndpoint(
+            endpoint,
+            new CultMeshSnapshotEndpointOptions
+            {
+                Context = CultMesh.Verse("starbridge", "unity-reconnected").Context,
+                DocumentRegistry = registry,
+                Request = new CultMeshSnapshotRequestOptions
+                {
+                    CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                        registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
+                }
+            });
+
+        using var temp = new TemporaryDirectory();
+        using (var crashedRuntime = await CultMesh.CreateNodeAsync(
+                   Path.Combine(temp.Path, "crashed-runtime.ccmp"),
+                   new CultMeshNodeOptions
+                   {
+                       StartServer = false,
+                       CacheOptions = new CultCacheOpenOptions
+                       {
+                           Registry = sourceCache.Registry,
+                           PullOnOpen = false
+                       },
+                       DatabaseOptions = new CultNetDatabaseOptions
+                       {
+                           DocumentRegistry = registry
+                       }
+                   }))
+        {
+            var stale = await surface.SyncTo(crashedRuntime).Document<MeshNoteAliasDocument>(key.Value).LatestAsync();
+            stale.Text.Should().Be("before-crash");
+        }
+
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "after-reboot-authority",
+            Revision = 4
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        using var freshRuntime = await CultMesh.CreateNodeAsync(
+            Path.Combine(temp.Path, "fresh-runtime.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+        using var reactive = await surface
+            .SyncTo(freshRuntime)
+            .Documents(CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value))
+            .ReactiveAsync<MeshNoteAliasDocument>();
+
+        reactive.Current.Text.Should().Be("after-reboot-authority");
+        reactive.Current.Revision.Should().Be(4);
+        freshRuntime.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("after-reboot-authority");
+    }
+
+    [Test]
+    public async Task ReactiveDocument_ReadOnlySnapshotEndpointRefreshRecoversAfterRejectedLocalEdit()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:readonly-refresh");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var endpoint = "cultnet://readonly-refresh.test:3082";
+        var surface = CultMesh.SnapshotEndpoint(
+            endpoint,
+            new CultMeshSnapshotEndpointOptions
+            {
+                Context = CultMesh.Verse("starbridge", "observer").Context,
+                DocumentRegistry = registry,
+                Request = new CultMeshSnapshotRequestOptions
+                {
+                    CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                        registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
+                }
+            });
+
+        using var temp = new TemporaryDirectory();
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(temp.Path, "observer-runtime.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+        using var reactive = await surface
+            .SyncTo(node)
+            .Document<MeshNoteAliasDocument>(key.Value)
+            .ReactiveAsync(new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Update(document => document.Text = "observer-should-not-write");
+
+        Func<Task> flush = () => reactive.FlushAsync();
+        await flush.Should().ThrowAsync<NotSupportedException>();
+
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "fresh-authority",
+            Revision = 5
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        await reactive.RefreshAsync();
+        await reactive.FlushAsync();
+
+        reactive.Current.Text.Should().Be("fresh-authority");
+        reactive.IsDirty.Should().BeFalse();
+        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(5);
+    }
+
+    [Test]
     public async Task ReactiveDocument_MarkDirtyFlushesDirectMemberEdits()
     {
         var subject = new Subject<MeshNoteDocument>();
