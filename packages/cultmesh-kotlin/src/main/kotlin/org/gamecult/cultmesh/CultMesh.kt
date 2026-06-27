@@ -225,6 +225,34 @@ fun bytesDocument(
     global: Boolean = false,
 ): CultDocumentDefinition<ByteArray> = cultDocument(ByteArrayDocumentCodec(documentType, schemaVersion), global)
 
+private data class KotlinCanonicalNote(
+    val schemaVersion: String,
+    val body: String,
+)
+
+private data class KotlinUiNote(
+    val schemaVersion: String,
+    val body: String,
+)
+
+private class KotlinAliasNoteCodec<T : Any>(
+    override val documentType: String,
+    override val schemaVersion: String,
+    private val create: (String, String) -> T,
+    private val readSchemaVersion: (T) -> String,
+    private val readBody: (T) -> String,
+) : CultDocumentCodec<T> {
+    override fun encode(value: T): ByteArray =
+        MessagePackWriter()
+            .value(listOf(readSchemaVersion(value), readBody(value)))
+            .toByteArray()
+
+    override fun decode(payload: ByteArray): T {
+        val slots = anyList(MessagePackReader(payload).readAny())
+        return create(slots[0] as String, slots[1] as String)
+    }
+}
+
 class CultMeshNode(
     val cache: CultCache = CultCache(),
     private val random: SecureRandom = SecureRandom(),
@@ -269,6 +297,9 @@ class CultMeshNode(
     fun applyRawDocumentPut(message: CultNetMessage): Any = cache.applyRawDocumentPut(message)
 
     fun applyRawSnapshotResponse(response: CultNetMessage): List<Any> = cache.applyRawSnapshotResponse(response)
+
+    fun <T : Any> syncDocument(response: CultNetMessage, document: CultDocumentDefinition<T>, key: String): T =
+        cache.syncDocument(response, document, key)
 
     fun applyDocumentDelete(message: CultNetMessage): Boolean = cache.applyDocumentDelete(message)
 
@@ -1973,6 +2004,22 @@ fun CultCache.applyRawSnapshotResponse(response: CultNetMessage): List<Any> {
         .map { applyRawDocumentRecord(it) }
 }
 
+fun <T : Any> CultCache.syncDocument(
+    response: CultNetMessage,
+    document: CultDocumentDefinition<T>,
+    key: String,
+): T {
+    require(response.schemaVersion == "cultnet.snapshot_response_raw.v0") {
+        "Expected cultnet.snapshot_response_raw.v0, received ${response.schemaVersion}"
+    }
+    val rawDocument = mapList(response.body["documents"])
+        .map { rawDocumentRecordFromWire(it) }
+        .firstOrNull { it.schemaId == document.schemaVersion && it.recordKey == key }
+        ?: throw NoSuchElementException("No ${document.schemaVersion} document for key $key")
+    applyRawDocumentRecord(rawDocument)
+    return getRequired(document, key)
+}
+
 fun CultCache.applyDocumentDelete(message: CultNetMessage): Boolean {
     require(message.schemaVersion == "cultnet.document_delete.v0") {
         "Expected cultnet.document_delete.v0, received ${message.schemaVersion}"
@@ -3084,6 +3131,36 @@ private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
     check(target.recall(notes, "note:1") == null)
     check(target.require(notes, "note:2") == "second")
     check(target.recallGlobal(settings) == null)
+
+    val canonicalNote = cultDocument(KotlinAliasNoteCodec(
+        documentType = "kotlin.alias_note",
+        schemaVersion = "kotlin.alias_note.v1",
+        create = ::KotlinCanonicalNote,
+        readSchemaVersion = KotlinCanonicalNote::schemaVersion,
+        readBody = KotlinCanonicalNote::body,
+    ))
+    val uiNote = cultDocument(KotlinAliasNoteCodec(
+        documentType = "kotlin.alias_note.ui",
+        schemaVersion = "kotlin.alias_note.v1",
+        create = ::KotlinUiNote,
+        readSchemaVersion = KotlinUiNote::schemaVersion,
+        readBody = KotlinUiNote::body,
+    ))
+    source.cache.register(canonicalNote)
+    target.cache.register(uiNote)
+    source.remember(canonicalNote, "note:alias", KotlinCanonicalNote("kotlin.alias_note.v1", "canonical-to-ui"))
+    val aliasSnapshotResponse = source.createRawSnapshotResponse(
+        cultNetSnapshotRequest(
+            messageId = "snapshot-alias-note",
+            schemaIds = listOf(uiNote.schemaVersion),
+            recordKeys = listOf("note:alias"),
+        ),
+        storedAt = "2026-06-15T00:00:02Z",
+        sourceRuntimeId = "kotlin-source",
+    )
+    val syncedAlias = target.syncDocument(aliasSnapshotResponse, uiNote, "note:alias")
+    check(syncedAlias == KotlinUiNote("kotlin.alias_note.v1", "canonical-to-ui"))
+    check(target.require(uiNote, "note:alias") == syncedAlias)
 
     val rawPut = parseCultNetMessage(
         cultNetDocumentPutRaw(

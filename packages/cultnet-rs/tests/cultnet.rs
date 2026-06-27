@@ -149,6 +149,20 @@ struct GhostlightAgentStateFixture {
     display_name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "ghostlight.agent-state.ui",
+    schema = "GhostlightAgentStateUiFixture"
+)]
+struct GhostlightAgentStateUiFixture {
+    #[cultcache(key = 0)]
+    schema_version: String,
+    #[cultcache(key = 1)]
+    agent_id: String,
+    #[cultcache(key = 2)]
+    display_name: String,
+}
+
 #[test]
 fn security_helpers_round_trip_encrypted_strings_and_validate_sessions() -> Result<()> {
     let server_security = CultNetServerSecurityOptions::development();
@@ -1678,6 +1692,66 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     assert_eq!(
         target.get_required::<GhostlightAgentStateFixture>("epiphany.persona")?,
         payload
+    );
+    Ok(())
+}
+
+#[test]
+fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let origin_store = temp.path().join("origin-alias.msgpack");
+    let target_store = temp.path().join("target-alias.msgpack");
+    let canonical = GhostlightAgentStateFixture {
+        schema_version: "ghostlight.agent_state.v0".to_string(),
+        agent_id: "epiphany.persona".to_string(),
+        display_name: "Persona".to_string(),
+    };
+
+    let mut origin_registry = CultNetDocumentRegistry::new();
+    origin_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightAgentStateFixture,
+    >(
+        "ghostlight.agent_state.v0".to_string(),
+        "ghostlight.agent_state.v0".to_string(),
+    ));
+    let mut origin = CultCache::new();
+    origin.register_entry_type::<GhostlightAgentStateFixture>()?;
+    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+    origin.pull_all_backing_stores()?;
+    origin.put("epiphany.persona", &canonical)?;
+    let raw_snapshot = origin_registry.create_raw_snapshot_response(
+        &origin,
+        "raw-snapshot-alias",
+        Some(&["ghostlight.agent_state.v0".to_string()]),
+        Some(&["epiphany.persona".to_string()]),
+    )?;
+
+    let mut alias_registry = CultNetDocumentRegistry::new();
+    alias_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightAgentStateUiFixture,
+    >(
+        "ghostlight.agent_state.v0".to_string(),
+        "ghostlight.agent_state.v0".to_string(),
+    ));
+    let mut target = CultCache::new();
+    target.register_entry_type::<GhostlightAgentStateUiFixture>()?;
+    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+    target.pull_all_backing_stores()?;
+
+    let applied = alias_registry
+        .apply_raw_snapshot_response::<GhostlightAgentStateUiFixture>(&mut target, &raw_snapshot)?;
+
+    assert_eq!(
+        applied,
+        vec![GhostlightAgentStateUiFixture {
+            schema_version: "ghostlight.agent_state.v0".to_string(),
+            agent_id: "epiphany.persona".to_string(),
+            display_name: "Persona".to_string(),
+        }]
+    );
+    assert_eq!(
+        target.get_required::<GhostlightAgentStateUiFixture>("epiphany.persona")?,
+        applied[0]
     );
     Ok(())
 }
