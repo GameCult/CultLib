@@ -1032,6 +1032,130 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Schema-aware lookup table for typed CultMesh document handles.
+    /// </summary>
+    public sealed class CultMeshDocumentCatalog
+    {
+        private readonly IReadOnlyList<ICultMeshDocumentHandle> _documents;
+        private readonly IReadOnlyDictionary<Type, ICultMeshDocumentHandle> _documentsByType;
+        private readonly IReadOnlyDictionary<string, ICultMeshDocumentHandle> _documentsBySchema;
+
+        /// <summary>Creates a document catalog from known handles.</summary>
+        public CultMeshDocumentCatalog(IEnumerable<ICultMeshDocumentHandle> documents)
+        {
+            if (documents == null) throw new ArgumentNullException(nameof(documents));
+
+            var documentList = documents
+                .Where(document => document != null)
+                .ToArray();
+            var byType = new Dictionary<Type, ICultMeshDocumentHandle>();
+            var bySchema = new Dictionary<string, ICultMeshDocumentHandle>(StringComparer.Ordinal);
+            foreach (var document in documentList)
+            {
+                byType[document.DocumentType] = document;
+                if (!string.IsNullOrWhiteSpace(document.SchemaVersion))
+                    bySchema[document.SchemaVersion] = document;
+                if (!string.IsNullOrWhiteSpace(document.SchemaName))
+                    bySchema[document.SchemaName] = document;
+            }
+
+            _documents = documentList;
+            _documentsByType = byType;
+            _documentsBySchema = bySchema;
+        }
+
+        /// <summary>Gets the handles in this catalog.</summary>
+        public IReadOnlyList<ICultMeshDocumentHandle> Documents => _documents;
+
+        /// <summary>Looks up a document handle by shared schema name or schema version.</summary>
+        public bool TryGetDocumentBySchema(
+            string schema,
+            out ICultMeshDocumentHandle document)
+        {
+            if (!string.IsNullOrWhiteSpace(schema) &&
+                _documentsBySchema.TryGetValue(schema, out document!))
+            {
+                return true;
+            }
+
+            document = null!;
+            return false;
+        }
+
+        /// <summary>Looks up a document handle by shared schema name or schema version.</summary>
+        public ICultMeshDocumentHandle DocumentBySchema(string schema)
+        {
+            if (TryGetDocumentBySchema(schema, out var document))
+                return document;
+
+            throw new NotSupportedException(
+                $"CultMesh document catalog does not expose a document for schema '{schema}'.");
+        }
+
+        /// <summary>Looks up a typed document handle by CLR type or same-schema alias.</summary>
+        public bool TryGetDocument<TDocument>(
+            out CultMeshDocumentHandle<TDocument> document)
+            where TDocument : class
+        {
+            if (_documentsByType.TryGetValue(typeof(TDocument), out var untypedDocument) &&
+                untypedDocument is CultMeshDocumentHandle<TDocument> typedDocument)
+            {
+                document = typedDocument;
+                return true;
+            }
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            if (_documentsBySchema.TryGetValue(descriptor.SchemaVersion, out var schemaDocument) ||
+                _documentsBySchema.TryGetValue(descriptor.SchemaName, out schemaDocument!))
+            {
+                if (schemaDocument is CultMeshDocumentHandle<TDocument> schemaTypedDocument)
+                {
+                    document = schemaTypedDocument;
+                    return true;
+                }
+
+                document = schemaDocument.AsSchemaAlias<TDocument>();
+                return true;
+            }
+
+            document = null!;
+            return false;
+        }
+
+        /// <summary>Looks up a typed document handle by CLR type or same-schema alias.</summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>()
+            where TDocument : class
+        {
+            if (TryGetDocument<TDocument>(out var document))
+                return document;
+
+            throw new NotSupportedException(
+                $"CultMesh document catalog does not expose a document for {typeof(TDocument).FullName}.");
+        }
+
+        /// <summary>Reads one typed document snapshot by CLR type or same-schema alias.</summary>
+        public Task<TDocument> LatestAsync<TDocument>()
+            where TDocument : class
+        {
+            return Document<TDocument>().LatestAsync();
+        }
+
+        /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>
+        public Observable<TDocument> Watch<TDocument>()
+            where TDocument : class
+        {
+            return Document<TDocument>().Watch();
+        }
+
+        /// <summary>Subscribes to one typed document by CLR type or same-schema alias.</summary>
+        public IDisposable Watch<TDocument>(Action<TDocument> onNext)
+            where TDocument : class
+        {
+            return Document<TDocument>().Watch(onNext);
+        }
+    }
+
+    /// <summary>
     /// Inspectable metadata for a typed live feed surface.
     /// </summary>
     public sealed class CultMeshLiveFeedDiagnostic

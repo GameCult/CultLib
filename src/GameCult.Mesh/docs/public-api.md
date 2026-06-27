@@ -170,6 +170,12 @@ portable machinery that makes it feel native.
   with `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
   `[CultDocument(schemaName, schemaVersion)]` identity and uses the shared
   CultCache MessagePack codec for read/watch/replace conversion.
+- `CultMeshDocumentCatalog` is the schema-aware lookup edge for a set of
+  document handles. It indexes handles by CLR document type, schema name, and
+  schema version, and resolves same-schema CLR aliases by delegating to
+  `CultMeshDocumentHandle<TDocument>.AsSchemaAlias<TAlias>()`. Domain facades
+  can expose `Document<T>()`, `DocumentBySchema(...)`, `LatestAsync<T>()`, and
+  `Watch<T>()` without owning schema dictionaries or alias serializers.
 - `CultMeshProjectionRecipe<TParameters, TResult>` names a reusable projection
   from typed source state into derived state. It records source handles,
   route hints, and projection execution, and can be exposed as a typed query
@@ -252,6 +258,19 @@ var current = await cockpit.LatestAsync();
 using var subscription = cockpit.Watch(next => RenderCockpit(next));
 
 var daemonAlias = cockpit.AsSchemaAlias<DaemonCockpitState>();
+```
+
+A domain facade can collect handles into one schema-aware catalog:
+
+```csharp
+var documents = CultMesh.Documents(
+    currentDocking,
+    stationRefit,
+    zoneContacts);
+
+var refit = await documents.LatestAsync<StationRefitDocument>();
+var uiDocking = documents.Document<CurrentDockingUiDocument>();
+var bySchema = documents.DocumentBySchema("gamecult.aetheria.station_refit.v1");
 ```
 
 ```ts

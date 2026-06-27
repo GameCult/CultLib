@@ -1121,6 +1121,22 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a schema-aware catalog over typed document handles.
+        /// </summary>
+        public static CultMeshDocumentCatalog Documents(IEnumerable<ICultMeshDocumentHandle> documents)
+        {
+            return new CultMeshDocumentCatalog(documents);
+        }
+
+        /// <summary>
+        /// Creates a schema-aware catalog over typed document handles.
+        /// </summary>
+        public static CultMeshDocumentCatalog Documents(params ICultMeshDocumentHandle[] documents)
+        {
+            return new CultMeshDocumentCatalog(documents);
+        }
+
+        /// <summary>
         /// Describes a typed live feed surface for tooling, UI, and diagnostics.
         /// </summary>
         public static CultMeshLiveFeedDiagnostic DescribeLiveFeed<TParameters, TResult>(

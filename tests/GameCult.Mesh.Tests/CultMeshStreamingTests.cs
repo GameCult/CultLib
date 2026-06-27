@@ -699,6 +699,39 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentCatalog_IndexesHandlesByTypeAndSchemaAlias()
+    {
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "catalog-primary",
+            Revision = 3
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.current",
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            _ => Task.FromResult(current),
+            _ => new Subject<MeshNoteDocument>());
+        var catalog = CultMesh.Documents(handle);
+
+        catalog.Documents.Should().ContainSingle().Which.Should().BeSameAs(handle);
+        catalog.TryGetDocument<MeshNoteDocument>(out var exact).Should().BeTrue();
+        exact.Should().BeSameAs(handle);
+        catalog.TryGetDocumentBySchema("tests.mesh_note.v1", out var byVersion).Should().BeTrue();
+        byVersion.Should().BeSameAs(handle);
+        catalog.DocumentBySchema("tests.mesh_note").Should().BeSameAs(handle);
+
+        catalog.TryGetDocument<MeshNoteAliasDocument>(out var alias).Should().BeTrue();
+        alias.DocumentId.Should().Be(handle.DocumentId);
+        alias.SchemaName.Should().Be(handle.SchemaName);
+        alias.SchemaVersion.Should().Be(handle.SchemaVersion);
+
+        var aliasSnapshot = await catalog.LatestAsync<MeshNoteAliasDocument>();
+        aliasSnapshot.Text.Should().Be("catalog-primary");
+        aliasSnapshot.Revision.Should().Be(3);
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsWatchesAndReplacesCultCacheRecords()
     {
         var cache = new CultCache();
