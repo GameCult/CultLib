@@ -999,6 +999,465 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_AutoFlushesOnceAfterDebounceWindow()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.debounce",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMilliseconds(25)
+            });
+
+        reactive.Update(document =>
+        {
+            document.Text = "coalesced-one";
+            document.Revision++;
+        });
+        reactive.Update(document =>
+        {
+            document.Text = "coalesced-two";
+            document.Revision++;
+        });
+
+        await WaitForAsync(() => predictions.Count == 1);
+
+        predictions[0].Text.Should().Be("coalesced-two");
+        predictions[0].Revision.Should().Be(3);
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_UsesReplacementWhenPredictionIsUnavailable()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var replacements = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.replace",
+            CultMesh.Verse("starbridge", "daemon"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                replacements.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Update(document =>
+        {
+            document.Text = "authoritative-replace";
+            document.Revision = 10;
+        });
+        await reactive.FlushAsync();
+
+        replacements.Should().ContainSingle();
+        replacements[0].Text.Should().Be("authoritative-replace");
+        current.Revision.Should().Be(10);
+    }
+
+    [Test]
+    public async Task ReactiveDocument_ReadOnlyHandleRejectsFlush()
+    {
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.readonly",
+            CultMesh.Verse("starbridge", "observer"),
+            _ => Task.FromResult(current),
+            _ => new Subject<MeshNoteDocument>());
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Update(document => document.Text = "not-allowed");
+
+        Func<Task> act = () => reactive.FlushAsync();
+
+        await act.Should().ThrowAsync<NotSupportedException>();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_DisposeSuppressesScheduledFlush()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.dispose",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMilliseconds(25)
+            });
+        reactive.Update(document => document.Text = "disposed-before-flush");
+        reactive.Dispose();
+
+        await Task.Delay(100);
+
+        predictions.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_CanAdoptCanonicalSnapshotWhileDirty()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.adopt-canonical",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1),
+                ReplaceDirtyCurrentOnCanonicalSnapshot = true
+            });
+        reactive.Update(document => document.Text = "local-prediction");
+
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "canonical-wins",
+            Revision = 9
+        });
+
+        reactive.Current.Text.Should().Be("canonical-wins");
+        reactive.Current.Revision.Should().Be(9);
+        reactive.Reconciliation.Should().BeNull();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_RefreshClearsDirtyLocalState()
+    {
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var replacements = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.refresh",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => new Subject<MeshNoteDocument>(),
+            value =>
+            {
+                replacements.Add(value);
+                current = value;
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Update(document => document.Text = "local-dirty");
+        current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "fresh-canonical",
+            Revision = 5
+        };
+
+        await reactive.RefreshAsync();
+        await reactive.FlushAsync();
+
+        reactive.Current.Text.Should().Be("fresh-canonical");
+        reactive.IsDirty.Should().BeFalse();
+        replacements.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_SyncsSameSchemaAliasesAcrossRuntimeHandles()
+    {
+        var cache = new CultCache();
+        var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
+        var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+        {
+            RuntimeId = "pilot-a",
+            Shards = new[]
+            {
+                new CultNetShardDescriptor(
+                    "pilot-inputs",
+                    "server",
+                    epoch: 1,
+                    isPrimary: false,
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:")
+            },
+            ClientAuthorityScopes = new[]
+            {
+                new CultNetClientAuthorityScope(
+                    "pilot-a",
+                    schemaIds: new[] { schemaId },
+                    keyPrefix: "input:pilot-a")
+            }
+        });
+        var key = new CultRecordKey("input:pilot-a:reactive");
+        await cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+
+        var pilotHandle = CultMesh.Document<MeshNoteDocument>(
+            database,
+            key,
+            CultMesh.Verse("starbridge", "pilot-a"));
+        var commanderHandle = CultMesh.Document<MeshNoteDocument>(
+            database,
+            key,
+            CultMesh.Verse("starbridge", "commander-rts"));
+        var observedByCommander = new List<MeshNoteAliasDocument>();
+        using var commanderSubscription = commanderHandle
+            .AsSchemaAlias<MeshNoteAliasDocument>()
+            .Watch(observedByCommander.Add);
+        using var pilotReactive = await CultMesh
+            .Documents(pilotHandle)
+            .ReactiveAsync<MeshNoteAliasDocument>(
+                new CultMeshReactiveDocumentOptions
+                {
+                    FlushDelay = TimeSpan.FromMinutes(1)
+                });
+
+        pilotReactive.Update(document =>
+        {
+            document.Text = "pilot-predicted";
+            document.Revision = 2;
+        });
+        await pilotReactive.FlushAsync();
+
+        await WaitForAsync(() => observedByCommander.Any(document => document.Text == "pilot-predicted"));
+
+        commanderHandle.Context.RuntimeId.Should().Be("commander-rts");
+        observedByCommander.Last().Revision.Should().Be(2);
+        (await commanderHandle.AsSchemaAlias<MeshNoteAliasDocument>().LatestAsync()).Text.Should().Be("pilot-predicted");
+    }
+
+    [Test]
+    public async Task ReactiveDocument_MarkDirtyFlushesDirectMemberEdits()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.mark-dirty",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Current.Text = "direct-member-edit";
+        reactive.Current.Revision = 12;
+        reactive.MarkDirty();
+        await reactive.FlushAsync();
+
+        predictions.Should().ContainSingle();
+        predictions[0].Text.Should().Be("direct-member-edit");
+        predictions[0].Revision.Should().Be(12);
+    }
+
+    [Test]
+    public async Task ReactiveDocument_CleanFlushDoesNotWrite()
+    {
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var writes = 0;
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.clean-flush",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => new Subject<MeshNoteDocument>(),
+            value =>
+            {
+                writes++;
+                current = value;
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync();
+
+        await reactive.FlushAsync();
+
+        writes.Should().Be(0);
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_FlushesAgainWhenEditedDuringInFlightFlush()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var allowFirstWrite = new TaskCompletionSource<bool>();
+        var firstWriteStarted = new TaskCompletionSource<bool>();
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.in-flight",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            async value =>
+            {
+                predictions.Add(value);
+                if (predictions.Count == 1)
+                {
+                    firstWriteStarted.SetResult(true);
+                    await allowFirstWrite.Task.ConfigureAwait(false);
+                }
+
+                current = value;
+                subject.OnNext(value);
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        reactive.Update(document =>
+        {
+            document.Text = "first";
+            document.Revision = 2;
+        });
+        var flush = reactive.FlushAsync();
+        await firstWriteStarted.Task;
+
+        reactive.Update(document =>
+        {
+            document.Text = "second";
+            document.Revision = 3;
+        });
+        allowFirstWrite.SetResult(true);
+        await flush;
+
+        predictions.Should().HaveCount(2);
+        predictions[0].Text.Should().Be("first");
+        predictions[1].Text.Should().Be("second");
+        current.Revision.Should().Be(3);
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsSchemaPublicationsFromSingleFileStores()
     {
         using var directory = new TemporaryDirectory();
