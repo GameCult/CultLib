@@ -265,6 +265,18 @@ const client = await CultMesh.createRudpPeerForAuthorizedPeer(
 );
 const schemas = CultMesh.createSchemaCatalog();
 await client.syncSchemaCatalog(schemas, { kinds: ["document_payload"] });
+
+const health = CultMesh.documentFromPeerSnapshot(
+  () => client,
+  "gamecult.aetheria.daemon_health.v1",
+  "daemon:aetheria.health.v1",
+  {
+    routeHint: CultMesh.routeHint("network", endpoint.uri),
+    timeoutMs: 5_000,
+  },
+);
+
+const latestHealth = await health.latest();
 ```
 
 `CultMesh.createRudpPeerForPeer(...)` remains available for already trusted
@@ -274,6 +286,14 @@ Discovery-first schema/catalog paths should prefer
 `createRudpPeerForAuthorizedPeer(...)`, which composes
 `CultMeshPeerCatalog.firstAuthorized(...)` with the authority lease catalog
 before using the peer-card endpoint as a dial target.
+
+`CultMesh.documentFromPeerSnapshot(...)` is the document-level path for RUDP
+snapshots. It hides the snapshot request message id, response listener, raw
+payload binary normalization, and MessagePack decode behind the same
+`CultMeshDocumentHandle` shape as local documents. The helper prefers an exact
+schema id match and falls back to the requested record key, so runtimes that
+alias the same logical document through different generated schema names can
+still read the publication with one CultMesh call.
 
 ## Streaming Mode
 

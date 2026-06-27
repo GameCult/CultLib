@@ -21,11 +21,13 @@ import {
   encodeCultNetMessageForWire,
   encodeRudpPacket,
   parseCultNetMessage,
+  type CultNetErrorMessage,
   type CultNetDocumentBinding,
   type CultNetMessage,
   type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
+  type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
 } from "cultnet-ts";
 
@@ -1884,6 +1886,49 @@ export function cultMeshDocumentFromSingleFile(
   );
 }
 
+export function cultMeshDocumentFromPeerSnapshot(
+  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+  schemaId: string,
+  recordKey: string,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): CultMeshDocumentHandle<unknown> {
+  requireNonEmpty(schemaId, "schemaId");
+  requireNonEmpty(recordKey, "recordKey");
+  const documentId = options.documentId ?? recordKey;
+  const read = async () =>
+    decodeCultNetRawDocumentPayload(
+      await requestCultNetRawSnapshotDocument(
+        peer,
+        schemaId,
+        recordKey,
+        {
+          timeoutMs: options.timeoutMs,
+          messageIdPrefix: options.messageIdPrefix ?? documentId,
+        },
+      ),
+    );
+
+  return cultMeshDocument(
+    documentId,
+    { schemaId },
+    async () => read(),
+    {
+      routeHint: options.routeHint ?? cultMeshRouteHint("network", "CultNet snapshot"),
+      sources: [cultMeshProjectionSource(options.sourceId ?? documentId, { schemaId })],
+      watchDocument: cultMeshPollingDocumentWatcher(read, {
+        intervalMs: options.pollMs ?? 250,
+      }),
+    },
+  );
+}
+
 export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
   cache: CultCache,
   definition: TDefinition,
@@ -3591,6 +3636,22 @@ export class CultMesh {
     return cultMeshDocumentFromSingleFile(path, schemaId, options);
   }
 
+  public static documentFromPeerSnapshot(
+    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+    schemaId: string,
+    recordKey: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): CultMeshDocumentHandle<unknown> {
+    return cultMeshDocumentFromPeerSnapshot(peer, schemaId, recordKey, options);
+  }
+
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
     cache: CultCache,
     definition: TDefinition,
@@ -4593,6 +4654,112 @@ function normalizeRudpDocumentPut(
     tags: Array.isArray(document.tags) ? document.tags : [],
     remote,
   };
+}
+
+async function requestCultNetRawSnapshotDocument(
+  peerOrProvider: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+  schemaId: string,
+  recordKey: string,
+  options: {
+    timeoutMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): Promise<CultNetRawDocumentRecord> {
+  const peer = await resolveCultNetPeer(peerOrProvider);
+  const messageId = `${options.messageIdPrefix ?? "cultmesh-snapshot"}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const response = await requestCultNetRawSnapshot(peer, [recordKey], {
+    messageId,
+    timeoutMs: options.timeoutMs,
+  });
+  const candidates = response.documents.filter(candidate => candidate.recordKey === recordKey);
+  const document = candidates.find(candidate => candidate.schemaId === schemaId) ?? candidates[0];
+  if (!document) {
+    throw new Error(`CultMesh peer snapshot did not return ${schemaId} at ${recordKey}.`);
+  }
+  return document;
+}
+
+async function requestCultNetRawSnapshot(
+  peer: CultNetPeer,
+  recordKeys: readonly string[],
+  options: {
+    messageId: string;
+    timeoutMs?: number;
+  },
+): Promise<CultNetSnapshotResponseRawMessage> {
+  return new Promise<CultNetSnapshotResponseRawMessage>((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      peer.off("message", onMessage);
+      peer.off("invalidMessage", onInvalidMessage);
+      peer.off("error", onError);
+      peer.off("close", onClose);
+    };
+    const rejectWith = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onMessage = (message: CultNetMessage): void => {
+      if (isCultNetErrorMessage(message)) {
+        cleanup();
+        reject(new Error(message.error));
+        return;
+      }
+      if (message.schemaVersion !== "cultnet.snapshot_response_raw.v0" ||
+          message.messageId !== options.messageId) {
+        return;
+      }
+
+      cleanup();
+      resolve(message);
+    };
+    const onInvalidMessage = (error: Error): void => rejectWith(error);
+    const onError = (error: Error): void => rejectWith(error);
+    const onClose = (): void => rejectWith(new Error("CultNet peer closed before snapshot response."));
+    const timer = setTimeout(
+      () => rejectWith(new Error(`Timed out waiting for CultNet snapshot ${options.messageId}.`)),
+      options.timeoutMs ?? 4_000,
+    );
+
+    peer.on("message", onMessage);
+    peer.on("invalidMessage", onInvalidMessage);
+    peer.on("error", onError);
+    peer.on("close", onClose);
+    peer.sendSnapshotRequest({
+      schemaVersion: "cultnet.snapshot_request.v0",
+      messageId: options.messageId,
+      recordKeys: [...recordKeys],
+    });
+  });
+}
+
+async function resolveCultNetPeer(
+  peerOrProvider: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+): Promise<CultNetPeer> {
+  return typeof peerOrProvider === "function"
+    ? await peerOrProvider()
+    : peerOrProvider;
+}
+
+function decodeCultNetRawDocumentPayload(document: CultNetRawDocumentRecord): unknown {
+  if (document.payloadEncoding !== "messagepack") {
+    throw new Error(`Unsupported CultNet raw document payload encoding ${document.payloadEncoding}.`);
+  }
+  return decode(toUint8Array(document.payload));
+}
+
+function isCultNetErrorMessage(message: CultNetMessage): message is CultNetErrorMessage {
+  return message.schemaVersion === "cultnet.error.v0";
+}
+
+function toUint8Array(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value);
+  }
+  throw new Error("CultNet raw document payload was not binary.");
 }
 
 async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socket> {

@@ -1832,6 +1832,87 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
   }
 });
 
+test("CultMesh TS reads remote RUDP snapshots through document handles", async () => {
+  const connectionId = 0x10203048;
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-snapshot-")), "node.ccmp"),
+    {
+      documents: [noteDocument],
+    },
+  );
+  await node.put(noteDocument, "note:remote", {
+    noteId: "note:remote",
+    body: "remote handles feel local",
+  });
+
+  const server = CultMesh.createRudpDocumentServer(
+    "cultmesh-ts-rudp-snapshot-server",
+    connectionId,
+    {
+      documents: new CultNetDocumentRegistry([
+        defineCultNetDocumentBinding({ definition: noteDocument }),
+      ]),
+      getCache: () => node.cache,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+
+  let peer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    peer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-rudp-snapshot-client",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+
+    const document = CultMesh.documentFromPeerSnapshot(
+      peer,
+      "cultmesh.note.v0",
+      "note:remote",
+      {
+        documentId: "note:remote",
+        timeoutMs: 1_000,
+      },
+    );
+
+    assert.deepEqual(await document.latest(), {
+      noteId: "note:remote",
+      body: "remote handles feel local",
+    });
+
+    const alias = CultMesh.documentFromPeerSnapshot(
+      peer,
+      "cultmesh.note.alias.v1",
+      "note:remote",
+      {
+        documentId: "note:remote.alias",
+        timeoutMs: 1_000,
+      },
+    );
+
+    assert.deepEqual(await alias.latest(), {
+      noteId: "note:remote",
+      body: "remote handles feel local",
+    });
+  } finally {
+    peer?.close();
+    server.close();
+  }
+});
+
 test("CultMesh TS negotiates streaming frame body transports explicitly", () => {
   const streams = CultMesh.createStreamCatalog();
   const streamUpdates: string[] = [];
