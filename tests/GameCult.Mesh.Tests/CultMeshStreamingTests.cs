@@ -994,8 +994,13 @@ public sealed class CultMeshStreamingTests
 
         reactive.Current.Text.Should().Be("local-prediction");
         reactive.Reconciliation.Should().NotBeNull();
+        reactive.Reconciliation!.Version.Should().Be(1);
         reactive.Reconciliation!.Canonical.Text.Should().Be("canonical-correction");
         reactive.Reconciliation.Predicted.Text.Should().Be("local-prediction");
+        reactive.Reconciliation.Delta.Should().ContainKey(nameof(MeshNoteDocument.Text));
+        reactive.Reconciliation.Delta[nameof(MeshNoteDocument.Text)].Should().Be("local-prediction");
+        reactive.Reconciliation.Delta.Should().ContainKey(nameof(MeshNoteDocument.Revision));
+        reactive.Reconciliation.Delta[nameof(MeshNoteDocument.Revision)].Should().Be(-5.0);
     }
 
     [Test]

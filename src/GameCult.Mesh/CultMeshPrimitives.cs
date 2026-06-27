@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -1156,18 +1157,31 @@ namespace GameCult.Mesh
         internal CultMeshReactiveDocumentReconciliation(
             TDocument canonical,
             TDocument predicted,
+            IReadOnlyDictionary<string, object?> delta,
+            int version,
             DateTimeOffset receivedAt)
         {
             Canonical = canonical;
             Predicted = predicted;
+            Delta = delta ?? throw new ArgumentNullException(nameof(delta));
+            Version = version;
             ReceivedAt = receivedAt;
         }
+
+        /// <summary>Gets the monotonically increasing reconciliation version for this reactive document.</summary>
+        public int Version { get; }
 
         /// <summary>Gets the authoritative canonical document snapshot.</summary>
         public TDocument Canonical { get; }
 
         /// <summary>Gets the locally predicted document snapshot that was active when the canonical value arrived.</summary>
         public TDocument Predicted { get; }
+
+        /// <summary>
+        /// Gets the predicted-vs-canonical member delta. Numeric members store predicted minus canonical;
+        /// non-numeric members store the predicted value.
+        /// </summary>
+        public IReadOnlyDictionary<string, object?> Delta { get; }
 
         /// <summary>Gets when the canonical snapshot was received.</summary>
         public DateTimeOffset ReceivedAt { get; }
@@ -1190,6 +1204,7 @@ namespace GameCult.Mesh
         private bool _flushQueued;
         private bool _flushing;
         private bool _disposed;
+        private int _reconciliationVersion;
 
         internal CultMeshReactiveDocument(
             CultMeshDocumentHandle<TDocument> document,
@@ -1367,10 +1382,22 @@ namespace GameCult.Mesh
                 var nextCanonical = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
                 if (_dirty || _flushing)
                 {
-                    Reconciliation = new CultMeshReactiveDocumentReconciliation<TDocument>(
-                        nextCanonical,
-                        CultMeshDocumentHandle<TDocument>.CloneDocument(Current),
-                        DateTimeOffset.UtcNow);
+                    var predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(Current);
+                    var delta = CreateReconciliationDelta(predicted, nextCanonical);
+                    if (delta.Count == 0)
+                    {
+                        Reconciliation = null;
+                    }
+                    else
+                    {
+                        Reconciliation = new CultMeshReactiveDocumentReconciliation<TDocument>(
+                            nextCanonical,
+                            predicted,
+                            delta,
+                            ++_reconciliationVersion,
+                            DateTimeOffset.UtcNow);
+                    }
+
                     if (!_options.ReplaceDirtyCurrentOnCanonicalSnapshot)
                         return;
                 }
@@ -1420,10 +1447,109 @@ namespace GameCult.Mesh
             return CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument));
         }
 
+        private static IReadOnlyDictionary<string, object?> CreateReconciliationDelta(
+            TDocument predicted,
+            TDocument canonical)
+        {
+            var delta = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var member in GetComparableMembers(typeof(TDocument)))
+            {
+                var predictedValue = member.GetValue(predicted);
+                var canonicalValue = member.GetValue(canonical);
+                if (CultMeshValuesEqual(predictedValue, canonicalValue))
+                    continue;
+
+                delta[member.Name] = TryCreateNumericDelta(predictedValue, canonicalValue, out var numericDelta)
+                    ? numericDelta
+                    : predictedValue;
+            }
+
+            return delta;
+        }
+
+        private static IEnumerable<CultMeshComparableMember> GetComparableMembers(Type documentType)
+        {
+            foreach (var property in documentType.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (property.GetMethod == null || property.GetIndexParameters().Length != 0)
+                    continue;
+                yield return new CultMeshComparableMember(property.Name, property.GetValue);
+            }
+
+            foreach (var field in documentType.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                yield return new CultMeshComparableMember(field.Name, field.GetValue);
+            }
+        }
+
+        private static bool TryCreateNumericDelta(object? predicted, object? canonical, out object? delta)
+        {
+            delta = null;
+            if (predicted == null || canonical == null)
+                return false;
+            var predictedType = Nullable.GetUnderlyingType(predicted.GetType()) ?? predicted.GetType();
+            var canonicalType = Nullable.GetUnderlyingType(canonical.GetType()) ?? canonical.GetType();
+            if (!IsNumericType(predictedType) || !IsNumericType(canonicalType))
+                return false;
+
+            delta = Convert.ToDouble(predicted, CultureInfo.InvariantCulture) -
+                Convert.ToDouble(canonical, CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private static bool IsNumericType(Type type)
+        {
+            if (type.IsEnum)
+                return false;
+            return Type.GetTypeCode(type) switch
+            {
+                TypeCode.Byte or
+                TypeCode.SByte or
+                TypeCode.UInt16 or
+                TypeCode.UInt32 or
+                TypeCode.UInt64 or
+                TypeCode.Int16 or
+                TypeCode.Int32 or
+                TypeCode.Int64 or
+                TypeCode.Decimal or
+                TypeCode.Double or
+                TypeCode.Single => true,
+                _ => false
+            };
+        }
+
+        private static bool CultMeshValuesEqual(object? left, object? right)
+        {
+            if (ReferenceEquals(left, right))
+                return true;
+            if (left == null || right == null)
+                return false;
+            if (left.Equals(right))
+                return true;
+            if (left is string || right is string)
+                return false;
+            if (left is IEnumerable leftEnumerable && right is IEnumerable rightEnumerable)
+                return leftEnumerable.Cast<object?>().SequenceEqual(rightEnumerable.Cast<object?>());
+            return false;
+        }
+
         private void ThrowIfDisposed()
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(CultMeshReactiveDocument<TDocument>));
+        }
+
+        private readonly struct CultMeshComparableMember
+        {
+            public CultMeshComparableMember(string name, Func<object, object?> getValue)
+            {
+                Name = name;
+                GetValue = getValue;
+            }
+
+            public string Name { get; }
+
+            public Func<object, object?> GetValue { get; }
         }
     }
 
