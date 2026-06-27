@@ -2266,6 +2266,71 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(node.get_required(document, "note:published-file").body, "file-publication-alias")
         self.assertIsInstance(node.get_required(alias, "note:published-file"), UiNote)
 
+    def test_cultmesh_node_sync_documents_from_publication_uses_binding_sources_and_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.catalog_publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.catalog_publication_alias_note.v1",
+            schema_name="mesh.catalog_publication_alias_note",
+            schema_version="mesh.catalog_publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.catalog_publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.catalog_publication_alias_note.v1",
+            schema_name="mesh.catalog_publication_alias_note",
+            schema_version="mesh.catalog_publication_alias_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.ccmp"
+            second_path = Path(tmp) / "second.ccmp"
+            first = CultCache()
+            first.register_document_type(document)
+            first.add_generic_store(SingleFileMessagePackBackingStore(first_path))
+            first.put(document, "note:first", CanonicalNote("first catalog publication"))
+            second = CultCache()
+            second.register_document_type(document)
+            second.add_generic_store(SingleFileMessagePackBackingStore(second_path))
+            second.put(document, "note:second", CanonicalNote("second catalog publication"))
+
+            node = create_node(runtime_id="python-catalog-publication-node")
+            node.register_document(document)
+            source = CultMesh.publication_source_from_single_file(first_path)
+            bindings = [
+                CultMesh.publication_document(alias, "note:first"),
+                CultMesh.publication_document(
+                    alias,
+                    "note:second",
+                    source=CultMesh.publication_source_from_single_file(second_path),
+                ),
+            ]
+
+            synced = node.sync_documents_from_publication(source, bindings)
+            facade_synced = CultMesh.sync_documents_from_publication(node, source, bindings)
+
+        self.assertEqual([value.body for value in synced], [
+            "first catalog publication",
+            "second catalog publication",
+        ])
+        self.assertTrue(all(isinstance(value, UiNote) for value in synced))
+        self.assertEqual([value.body for value in facade_synced], [
+            "first catalog publication",
+            "second catalog publication",
+        ])
+        self.assertEqual(node.get_required(document, "note:first").body, "first catalog publication")
+        self.assertEqual(node.get_required(document, "note:second").body, "second catalog publication")
+        self.assertIsInstance(node.get_required(alias, "note:second"), UiNote)
+
     def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
         document = define_database_entry_type(
             "mesh.emit_item",

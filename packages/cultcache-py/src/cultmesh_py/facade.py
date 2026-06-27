@@ -22,7 +22,13 @@ from cultnet_py import (
 )
 
 from .client import CultMeshDocumentSubscription, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
-from .node import CultMeshDocumentPublicationSource, CultMeshNode, CultMeshNodeOptions, create_node
+from .node import (
+    CultMeshDocumentPublicationSource,
+    CultMeshNode,
+    CultMeshNodeOptions,
+    CultMeshPublicationDocumentBinding,
+    create_node,
+)
 from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
@@ -310,6 +316,17 @@ class CultMesh:
         return CultMeshDocumentPublicationSource.single_file(path)
 
     @staticmethod
+    def publication_document(
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        source: CultMeshDocumentPublicationSource | None = None,
+    ) -> CultMeshPublicationDocumentBinding:
+        if not key:
+            raise ValueError("key must be non-empty")
+        return CultMeshPublicationDocumentBinding(document=document, key=key, source=source)
+
+    @staticmethod
     def sync_document_from_publication(
         node: CultMeshNode,
         source: CultMeshDocumentPublicationSource,
@@ -317,6 +334,14 @@ class CultMesh:
         key: str,
     ) -> Any:
         return node.sync_document_from_publication(source, document, key)
+
+    @staticmethod
+    def sync_documents_from_publication(
+        node: CultMeshNode,
+        source: CultMeshDocumentPublicationSource,
+        bindings: list[CultMeshPublicationDocumentBinding] | tuple[CultMeshPublicationDocumentBinding, ...],
+    ) -> list[Any]:
+        return node.sync_documents_from_publication(source, bindings)
 
     @staticmethod
     def subscribe_document(

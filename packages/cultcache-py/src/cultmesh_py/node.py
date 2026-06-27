@@ -64,6 +64,13 @@ class CultMeshDocumentPublicationSource:
         return CultMeshDocumentPublicationSource(kind="single_file", path=Path(path))
 
 
+@dataclass(frozen=True)
+class CultMeshPublicationDocumentBinding:
+    document: DocumentDefinition[Any]
+    key: str
+    source: CultMeshDocumentPublicationSource | None = None
+
+
 @dataclass
 class CultMeshNode:
     cache: CultCache = field(default_factory=CultCache)
@@ -231,6 +238,13 @@ class CultMeshNode:
         key: str,
     ) -> Any:
         return self.database.sync_document_from_publication(source, document, key)
+
+    def sync_documents_from_publication(
+        self,
+        source: CultMeshDocumentPublicationSource,
+        bindings: list[CultMeshPublicationDocumentBinding] | tuple[CultMeshPublicationDocumentBinding, ...],
+    ) -> list[Any]:
+        return self.database.sync_documents_from_publication(source, bindings)
 
     def sync_shard_log(
         self,
@@ -736,6 +750,24 @@ class CultMeshDatabase:
             self.put(document, key, requested)
             return self.get_required(document, key)
         raise ValueError(f"Unsupported CultMesh document publication source: {source.kind!r}")
+
+    def sync_documents_from_publication(
+        self,
+        source: CultMeshDocumentPublicationSource,
+        bindings: list[CultMeshPublicationDocumentBinding] | tuple[CultMeshPublicationDocumentBinding, ...],
+    ) -> list[Any]:
+        if source is None:
+            raise ValueError("publication source is required")
+        if bindings is None:
+            raise ValueError("publication bindings are required")
+        return [
+            self.sync_document_from_publication(
+                binding.source or source,
+                binding.document,
+                binding.key,
+            )
+            for binding in bindings
+        ]
 
     def sync_shard_log(
         self,

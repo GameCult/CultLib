@@ -16,6 +16,7 @@ from .node import (
     CultMeshDocumentPublicationSource,
     CultMeshNode,
     CultMeshNodeOptions,
+    CultMeshPublicationDocumentBinding,
     create_node,
 )
 from .server import CultMeshLocalServer
@@ -65,6 +66,7 @@ __all__ = [
     "CultMeshDatabaseChange",
     "CultMeshDocumentPublicationSource",
     "CultMesh",
+    "CultMeshPublicationDocumentBinding",
     "CultMeshGameSession",
     "CultMeshGameSessionOptions",
     "CultMeshLocalServer",
