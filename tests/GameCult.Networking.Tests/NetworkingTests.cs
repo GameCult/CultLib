@@ -1911,6 +1911,94 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Routes_TypedWrite_ToShardSchemaAlias()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "wrong-network-notes",
+                        "runtime-b",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: ["other.note.v1"],
+                        keyPrefix: "network-note:"),
+                    new CultNetShardDescriptor(
+                        "network-notes",
+                        "runtime-a",
+                        epoch: 2,
+                        isPrimary: true,
+                        schemaIds: ["tests.networking_note.v1"],
+                        keyPrefix: "network-note:")
+                ]
+            });
+            var key = new CultRecordKey("network-note:alias-routed-write");
+
+            await database.PutAsync(key, new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "typed write routed by alias",
+                Revision = 12
+            });
+
+            Assert.That(cache.Get<NetworkSchemaNote>(key)!.Text, Is.EqualTo("typed write routed by alias"));
+            Assert.That(database.GetMutationLog("network-notes"), Has.Count.EqualTo(1));
+            Assert.That(database.GetMutationLog("wrong-network-notes"), Is.Empty);
+        }
+
+        [Test]
+        public async Task CultNetDatabase_Predicts_ClientOwnedInput_ThroughSchemaAliasScope()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                RuntimeId = "pilot-a",
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "wrong-network-inputs",
+                        "server",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: ["other.note.v1"],
+                        keyPrefix: "network-input:"),
+                    new CultNetShardDescriptor(
+                        "network-inputs",
+                        "server",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: ["tests.networking_note.v1"],
+                        keyPrefix: "network-input:")
+                ],
+                ClientAuthorityScopes =
+                [
+                    new CultNetClientAuthorityScope(
+                        "pilot-a",
+                        schemaIds: ["tests.networking_note.v1"],
+                        keyPrefix: "network-input:pilot-a")
+                ]
+            });
+            var key = new CultRecordKey("network-input:pilot-a:alias-prediction");
+
+            await database.PutPredictedAsync(key, new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "predicted through alias scope",
+                Revision = 1
+            });
+
+            Assert.That(cache.Get<NetworkSchemaNote>(key)!.Text, Is.EqualTo("predicted through alias scope"));
+        }
+
+        [Test]
         public void CultNetDatabaseServer_Creates_Filtered_ShardCatalogResponse()
         {
             var cache = new CultCache();

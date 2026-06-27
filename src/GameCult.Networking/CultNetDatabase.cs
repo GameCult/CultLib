@@ -43,6 +43,58 @@ namespace GameCult.Networking
         Reconciled
     }
 
+    internal static class CultNetSchemaAliasMatching
+    {
+        public static bool MatchesAny(IReadOnlyList<string> candidates, string schemaId)
+        {
+            return candidates.Count == 0 ||
+                   candidates.Any(candidate => Matches(candidate, schemaId));
+        }
+
+        public static bool MatchesAny(IReadOnlyList<string> candidates, CultDocumentDescriptor descriptor)
+        {
+            return candidates.Count == 0 ||
+                   candidates.Any(candidate => Matches(candidate, descriptor));
+        }
+
+        public static bool Matches(string candidate, string schemaId)
+        {
+            if (string.Equals(candidate, schemaId, StringComparison.Ordinal))
+                return true;
+
+            var candidateName = InferSchemaName(candidate) ?? candidate;
+            var schemaName = InferSchemaName(schemaId) ?? schemaId;
+            return string.Equals(candidateName, schemaName, StringComparison.Ordinal);
+        }
+
+        public static bool Matches(string candidate, CultDocumentDescriptor descriptor)
+        {
+            if (string.Equals(candidate, descriptor.SchemaId, StringComparison.Ordinal) ||
+                string.Equals(candidate, descriptor.SchemaName, StringComparison.Ordinal) ||
+                string.Equals(candidate, descriptor.SchemaVersion, StringComparison.Ordinal))
+                return true;
+
+            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(compatible =>
+                    string.Equals(candidate, compatible, StringComparison.Ordinal)))
+                return true;
+
+            var candidateName = InferSchemaName(candidate) ?? candidate;
+            return string.Equals(candidateName, descriptor.SchemaName, StringComparison.Ordinal);
+        }
+
+        private static string? InferSchemaName(string schemaId)
+        {
+            var marker = schemaId.LastIndexOf(".v", StringComparison.Ordinal);
+            if (marker <= 0 || marker + 2 >= schemaId.Length)
+                return null;
+
+            var version = schemaId.Substring(marker + 2);
+            return version.All(char.IsDigit)
+                ? schemaId.Substring(0, marker)
+                : null;
+        }
+    }
+
     /// <summary>
     /// Declares which documents this runtime may predict locally before authoritative commit.
     /// </summary>
@@ -80,7 +132,14 @@ namespace GameCult.Networking
         internal bool Matches(string runtimeId, string schemaId, CultRecordKey key)
         {
             return string.Equals(OwnerRuntimeId, runtimeId, StringComparison.Ordinal) &&
-                   (SchemaIds.Count == 0 || SchemaIds.Contains(schemaId, StringComparer.Ordinal)) &&
+                   CultNetSchemaAliasMatching.MatchesAny(SchemaIds, schemaId) &&
+                   (string.IsNullOrEmpty(KeyPrefix) || key.Value.StartsWith(KeyPrefix!, StringComparison.Ordinal));
+        }
+
+        internal bool Matches(string runtimeId, CultDocumentDescriptor descriptor, CultRecordKey key)
+        {
+            return string.Equals(OwnerRuntimeId, runtimeId, StringComparison.Ordinal) &&
+                   CultNetSchemaAliasMatching.MatchesAny(SchemaIds, descriptor) &&
                    (string.IsNullOrEmpty(KeyPrefix) || key.Value.StartsWith(KeyPrefix!, StringComparison.Ordinal));
         }
     }
@@ -182,7 +241,15 @@ namespace GameCult.Networking
 
         internal bool Matches(string schemaId, CultRecordKey key)
         {
-            var schemaMatches = SchemaIds.Count == 0 || SchemaIds.Contains(schemaId, StringComparer.Ordinal);
+            var schemaMatches = CultNetSchemaAliasMatching.MatchesAny(SchemaIds, schemaId);
+            var keyMatches = string.IsNullOrEmpty(KeyPrefix) ||
+                             key.Value.StartsWith(KeyPrefix!, StringComparison.Ordinal);
+            return schemaMatches && keyMatches;
+        }
+
+        internal bool Matches(CultDocumentDescriptor descriptor, CultRecordKey key)
+        {
+            var schemaMatches = CultNetSchemaAliasMatching.MatchesAny(SchemaIds, descriptor);
             var keyMatches = string.IsNullOrEmpty(KeyPrefix) ||
                              key.Value.StartsWith(KeyPrefix!, StringComparison.Ordinal);
             return schemaMatches && keyMatches;
@@ -737,7 +804,7 @@ namespace GameCult.Networking
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
             var previous = _cache.Get<T>(key);
@@ -768,8 +835,8 @@ namespace GameCult.Networking
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShardInternal(descriptor.SchemaId, key);
-            EnsureClientAuthority(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor, key);
+            EnsureClientAuthority(descriptor, key);
 
             var previous = _cache.Get<T>(key);
             var handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
@@ -791,7 +858,7 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
             var previous = _cache.Get<T>(key);
@@ -831,7 +898,7 @@ namespace GameCult.Networking
 
             var key = new CultRecordKey(message.Document.RecordKey);
             var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
-            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
@@ -1046,7 +1113,7 @@ namespace GameCult.Networking
             var key = current != null
                 ? GetTrackedKey(current, documentType)
                 : new CultRecordKey(string.Empty);
-            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            var shard = ResolveShardInternal(descriptor, key);
             var changeType = typeof(CultNetDatabaseChange<>).MakeGenericType(documentType);
             var change = Activator.CreateInstance(
                 changeType,
@@ -1088,7 +1155,7 @@ namespace GameCult.Networking
                 var documentType = document.GetType();
                 var descriptor = _cache.Registry.GetRequired(documentType);
                 var key = GetTrackedKey(document, documentType);
-                if (!string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key))
+                if (!string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor, key))
                 {
                     yield return new TrackedShardDocument(documentType, descriptor.SchemaId, key, document);
                 }
@@ -1107,7 +1174,7 @@ namespace GameCult.Networking
             try
             {
                 var descriptor = _documents.ResolveDescriptorForRawDocument(document);
-                return shard.Matches(descriptor.SchemaId, new CultRecordKey(document.RecordKey));
+                return shard.Matches(descriptor, new CultRecordKey(document.RecordKey));
             }
             catch (InvalidOperationException)
             {
@@ -1453,6 +1520,20 @@ namespace GameCult.Networking
                 "not_client_authority");
         }
 
+        private void EnsureClientAuthority(CultDocumentDescriptor descriptor, CultRecordKey key)
+        {
+            if (_clientAuthorityScopes.Any(scope => scope.Matches(_runtimeId, descriptor, key)))
+            {
+                return;
+            }
+
+            var shard = ResolveShardInternal(descriptor, key);
+            throw new CultNetShardAuthorityException(
+                shard,
+                $"Runtime '{_runtimeId}' does not have client prediction authority for schema '{descriptor.SchemaId}' key '{key.Value}'.",
+                "not_client_authority");
+        }
+
         private static string PredictionKey(string schemaId, CultRecordKey key)
         {
             return $"{schemaId}:{key.Value}";
@@ -1486,6 +1567,11 @@ namespace GameCult.Networking
         private CultNetShardDescriptor ResolveShardInternal(string schemaId, CultRecordKey key)
         {
             return _shards.FirstOrDefault(shard => shard.Matches(schemaId, key)) ?? _shards[0];
+        }
+
+        private CultNetShardDescriptor ResolveShardInternal(CultDocumentDescriptor descriptor, CultRecordKey key)
+        {
+            return _shards.FirstOrDefault(shard => shard.Matches(descriptor, key)) ?? _shards[0];
         }
 
         private static void EnsurePrimary(CultNetShardDescriptor shard, string schemaId, CultRecordKey key, long? expectedEpoch = null)
