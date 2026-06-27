@@ -74,6 +74,7 @@ export class CultCache {
 
   readonly #definitions = new Map<string, RegisteredDefinition>();
   readonly #schemaIdDefinitions = new Map<string, RegisteredDefinition>();
+  readonly #schemaNameDefinitions = new Map<string, RegisteredDefinition>();
   readonly #entries = new Map<string, HydratedEntry>();
   readonly #typeEntryIds = new Map<string, Set<string>>();
   readonly #nameToKeyMaps = new Map<string, Map<string, string>>();
@@ -121,6 +122,13 @@ export class CultCache {
       }
       this.#schemaIdDefinitions.set(schemaId, registered);
     }
+    const existingBySchemaName = this.#schemaNameDefinitions.get(registered.catalogEntry.schemaName);
+    if (existingBySchemaName && existingBySchemaName !== registered) {
+      throw new Error(
+        `CultCache schema name "${registered.catalogEntry.schemaName}" is already registered for type "${existingBySchemaName.definition.type}".`,
+      );
+    }
+    this.#schemaNameDefinitions.set(registered.catalogEntry.schemaName, registered);
     this.#rebuildDefinitionLookups(registered);
     return definition;
   }
@@ -203,6 +211,7 @@ export class CultCache {
         const value = registered.formatter.decode(payload);
         this.#applyHydratedEntry(registered, {
           ...entry,
+          type: registered.definition.type,
           payload,
         }, value, "pull");
       }
@@ -643,10 +652,12 @@ export class CultCache {
 
   #resolveDefinitionForEnvelope(entry: CultCacheEnvelope): RegisteredDefinition | undefined {
     if (entry.schemaId) {
-      return this.#schemaIdDefinitions.get(entry.schemaId) ?? this.#definitions.get(entry.type);
+      return this.#schemaIdDefinitions.get(entry.schemaId)
+        ?? this.#schemaNameDefinitions.get(entry.type)
+        ?? this.#definitions.get(entry.type);
     }
 
-    return this.#definitions.get(entry.type);
+    return this.#schemaNameDefinitions.get(entry.type) ?? this.#definitions.get(entry.type);
   }
 
   #resolveRoute(type: string): StoreRoute {

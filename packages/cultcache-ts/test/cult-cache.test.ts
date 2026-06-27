@@ -437,6 +437,58 @@ test("SingleFileMessagePackBackingStore reads CultCache v1 snapshots by schema i
   assert.equal(cache.getRequiredEnvelope(noteDocument, "record-1").schemaId, "schema-1");
 });
 
+test("SingleFileMessagePackBackingStore recovers schema-stamped records missing catalog entries", async () => {
+  const stampedDocument = defineDocumentType({
+    type: "runtime-policy",
+    schema: z.tuple([
+      z.literal("tests.schema_stamped_entry.v1"),
+      z.string(),
+      z.string(),
+    ]),
+    schemaId: "schema-current",
+    schemaName: "tests.schema_stamped_entry",
+    schemaVersion: "tests.schema_stamped_entry.v1",
+    compatibleSchemaIds: ["schema-current"],
+  });
+
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "missing-catalog.msgpack");
+  await writeFile(
+    storePath,
+    encode([
+      "cultcache.store.v1",
+      [],
+      [
+        [
+          "record-1",
+          "sha256:stale-schema-id-from-cold-record",
+          "2026-06-25T12:00:00Z",
+          encode([
+            "tests.schema_stamped_entry.v1",
+            "schema-stamped",
+            "still readable",
+          ]),
+        ],
+      ],
+    ]),
+  );
+
+  const cache = CultCache.builder()
+    .withDocumentType(stampedDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.getRequired(stampedDocument, "record-1"), [
+    "tests.schema_stamped_entry.v1",
+    "schema-stamped",
+    "still readable",
+  ]);
+  assert.equal(
+    cache.getRequiredEnvelope(stampedDocument, "record-1").schemaId,
+    "sha256:stale-schema-id-from-cold-record",
+  );
+});
+
 test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
   const noteDocument = defineDocumentType({
     type: "note",
@@ -601,6 +653,42 @@ test("CultCache inspector decodes v1 store catalog and record payloads from byte
     written.title,
     written.body,
     written.tags,
+  ]);
+});
+
+test("CultCache inspector recovers schema-stamped records missing catalog entries", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-inspector-"));
+  const file = join(tempDir, "missing-catalog.cc");
+
+  await writeFile(
+    file,
+    encode([
+      "cultcache.store.v1",
+      [],
+      [
+        [
+          "record-1",
+          "sha256:stale-schema-id-from-cold-record",
+          "2026-06-25T12:00:00Z",
+          encode([
+            "tests.schema_stamped_entry.v1",
+            "schema-stamped",
+            "still readable",
+          ]),
+        ],
+      ],
+    ]),
+  );
+
+  const inspection = inspectCultCacheBytes(file, await readFile(file));
+  assert.equal(inspection.catalog.length, 1);
+  assert.equal(inspection.catalog[0]?.schemaId, "sha256:stale-schema-id-from-cold-record");
+  assert.equal(inspection.catalog[0]?.schemaName, "tests.schema_stamped_entry");
+  assert.equal(inspection.records[0]?.schemaName, "tests.schema_stamped_entry");
+  assert.deepEqual(inspection.records[0]?.payloadPreview, [
+    "tests.schema_stamped_entry.v1",
+    "schema-stamped",
+    "still readable",
   ]);
 });
 

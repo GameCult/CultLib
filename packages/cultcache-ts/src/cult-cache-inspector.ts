@@ -74,13 +74,31 @@ function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: unk
       catalogBySchemaId.set(compatibleSchemaId, entry);
     }
   }
+  const records = recordsRaw.map((record) => decodeV1Record(record, catalogBySchemaId));
+  for (const record of records) {
+    if (!catalog.some((entry) => entry.schemaId === record.schemaId)) {
+      const schemaVersion = inferSchemaVersionFromPayloadPreview(record.payloadPreview);
+      const schemaName = schemaVersion ? inferSchemaName(schemaVersion) : undefined;
+      if (schemaName) {
+        catalog.push({
+          schemaId: record.schemaId,
+          schemaName,
+          schemaVersion: schemaVersion!,
+          contentHash: record.schemaId,
+          canonicalSchemaJson: "",
+          compatibleSchemaIds: [],
+          members: [],
+        });
+      }
+    }
+  }
 
   return {
     filePath,
     fileSizeBytes,
     format: STORE_FORMAT_VERSION,
     catalog,
-    records: recordsRaw.map((record) => decodeV1Record(record, catalogBySchemaId)),
+    records,
   };
 }
 
@@ -184,8 +202,8 @@ function decodeV1Record(value: unknown, catalogBySchemaId: Map<string, Inspected
     throw new Error("CultCache persisted records must declare key, schemaId, and storedAt.");
   }
 
-  const catalogEntry = catalogBySchemaId.get(schemaId);
   const payloadBytes = normalizePayloadBytes(payload);
+  const catalogEntry = catalogBySchemaId.get(schemaId) ?? recoverCatalogEntry(schemaId, payloadBytes);
   return {
     key,
     schemaId,
@@ -194,6 +212,53 @@ function decodeV1Record(value: unknown, catalogBySchemaId: Map<string, Inspected
     payloadBytes: payloadBytes.length,
     ...previewPayload(payloadBytes),
   };
+}
+
+function recoverCatalogEntry(schemaId: string, payload: Uint8Array): InspectedCatalogEntry | undefined {
+  let payloadPreview: unknown;
+  try {
+    payloadPreview = decode(payload);
+  } catch {
+    return undefined;
+  }
+
+  const schemaVersion = inferSchemaVersionFromPayloadPreview(payloadPreview);
+  if (!schemaVersion) {
+    return undefined;
+  }
+
+  const schemaName = inferSchemaName(schemaVersion);
+  if (!schemaName) {
+    return undefined;
+  }
+
+  return {
+    schemaId,
+    schemaName,
+    schemaVersion,
+    contentHash: schemaId,
+    canonicalSchemaJson: "",
+    compatibleSchemaIds: [],
+    members: [],
+  };
+}
+
+function inferSchemaVersionFromPayloadPreview(payloadPreview: unknown): string | undefined {
+  if (Array.isArray(payloadPreview) && typeof payloadPreview[0] === "string") {
+    return payloadPreview[0];
+  }
+
+  if (isRecord(payloadPreview)) {
+    const schemaVersion = payloadPreview.schemaVersion ?? payloadPreview.schema_version;
+    return typeof schemaVersion === "string" ? schemaVersion : undefined;
+  }
+
+  return undefined;
+}
+
+function inferSchemaName(schemaVersion: string): string | undefined {
+  const match = /^(.*)\.v\d+$/.exec(schemaVersion);
+  return match?.[1];
 }
 
 function decodeLegacyEnvelope(value: unknown): InspectedRecord {

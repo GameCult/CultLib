@@ -23,6 +23,7 @@ def schema_document_map(documents: Iterable[DocumentDefinition[Any]]) -> dict[st
     for document in documents:
         catalog_entry = document.catalog_entry()
         mapped[catalog_entry.schema_id] = document
+        mapped[catalog_entry.schema_name] = document
         for compatible_schema_id in catalog_entry.compatible_schema_ids:
             mapped[compatible_schema_id] = document
     return mapped
@@ -35,7 +36,7 @@ def apply_raw_document_record(
 ) -> CultNetAppliedRecord:
     wire = record.to_wire() if isinstance(record, CultNetRawDocumentRecord) else record
     schema_id = str(wire["schemaId"])
-    document = documents_by_schema_id[schema_id]
+    document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, wire)
     envelope = raw_record_to_envelope(document, schema_id, wire)
     value = cache.put_envelope(document, envelope)
     return CultNetAppliedRecord(
@@ -76,7 +77,7 @@ def apply_raw_snapshot(
         if not isinstance(record, dict):
             continue
         schema_id = str(record["schemaId"])
-        document = documents_by_schema_id[schema_id]
+        document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, record)
         envelope = raw_record_to_envelope(document, schema_id, record)
         batch = batches.setdefault(document.type, (document, []))
         batch[1].append((schema_id, envelope))
@@ -120,7 +121,7 @@ def apply_shard_log_response(
         if change_kind in ("added", "updated") and isinstance(entry.get("put"), dict):
             put = entry["put"]
             schema_id = str(put["document"]["schemaId"])
-            if schema_id not in documents_by_schema_id:
+            if not can_resolve_document_for_raw_record(documents_by_schema_id, schema_id, put["document"]):
                 continue
             result = apply_raw_document_record(cache, documents_by_schema_id, put["document"])
             applied.append(CultNetAppliedRecord(result.schema_id, result.record_key, str(change_kind), result.value))
@@ -134,3 +135,54 @@ def apply_shard_log_response(
             cache.delete(document, record_key)
             applied.append(CultNetAppliedRecord(schema_id, record_key, "removed", None))
     return applied
+
+
+def can_resolve_document_for_raw_record(
+    documents_by_schema_id: dict[str, DocumentDefinition[Any]],
+    schema_id: str,
+    record: dict[str, Any],
+) -> bool:
+    try:
+        resolve_document_for_raw_record(documents_by_schema_id, schema_id, record)
+        return True
+    except KeyError:
+        return False
+
+
+def resolve_document_for_raw_record(
+    documents_by_schema_id: dict[str, DocumentDefinition[Any]],
+    schema_id: str,
+    record: dict[str, Any],
+) -> DocumentDefinition[Any]:
+    document = documents_by_schema_id.get(schema_id)
+    if document is not None:
+        return document
+    schema_version = _infer_schema_version_from_payload(bytes(record["payload"]))
+    schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
+    if schema_name is not None and schema_name in documents_by_schema_id:
+        return documents_by_schema_id[schema_name]
+    raise KeyError(schema_id)
+
+
+def _infer_schema_version_from_payload(payload: bytes) -> str | None:
+    try:
+        import msgpack  # type: ignore
+        decoded = msgpack.unpackb(payload, raw=False)
+    except Exception:
+        return None
+    if isinstance(decoded, list) and decoded and isinstance(decoded[0], str):
+        return decoded[0]
+    if isinstance(decoded, dict):
+        value = decoded.get("schemaVersion", decoded.get("schema_version"))
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _infer_schema_name(schema_version: str) -> str | None:
+    marker = schema_version.rfind(".v")
+    if marker <= 0:
+        return None
+    version = schema_version[marker + 2:]
+    if not version or not version.isdigit():
+        return None
+    return schema_version[:marker]

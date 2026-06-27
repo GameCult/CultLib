@@ -252,6 +252,7 @@ struct CultCacheStoreRegistration {
 
 pub struct CultCache {
     definitions: BTreeMap<String, &'static str>,
+    schema_name_definitions: BTreeMap<String, String>,
     entries: BTreeMap<String, CultCacheEnvelope>,
     stores: Vec<CultCacheStoreRegistration>,
 }
@@ -260,6 +261,7 @@ impl CultCache {
     pub fn new() -> Self {
         Self {
             definitions: BTreeMap::new(),
+            schema_name_definitions: BTreeMap::new(),
             entries: BTreeMap::new(),
             stores: Vec::new(),
         }
@@ -279,7 +281,18 @@ impl CultCache {
                 T::TYPE
             ));
         }
+        if let Some(existing_type) = self.schema_name_definitions.get(T::SCHEMA_NAME)
+            && existing_type != T::TYPE
+        {
+            return Err(anyhow!(
+                "CultCache schema name {:?} is already registered for type {:?}",
+                T::SCHEMA_NAME,
+                existing_type
+            ));
+        }
         self.definitions.insert(T::TYPE.to_string(), T::SCHEMA_NAME);
+        self.schema_name_definitions
+            .insert(T::SCHEMA_NAME.to_string(), T::TYPE.to_string());
         Ok(())
     }
 
@@ -310,14 +323,20 @@ impl CultCache {
     pub fn pull_all_backing_stores(&mut self) -> Result<()> {
         self.entries.clear();
         let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
+        let schema_name_definitions = self.schema_name_definitions.clone();
         for registration in &mut self.stores {
-            for entry in registration.store.pull_all()? {
-                if !known_types.contains(&entry.r#type) {
+            for mut entry in registration.store.pull_all()? {
+                let Some(canonical_type) = resolve_registered_type(
+                    &known_types,
+                    &schema_name_definitions,
+                    &entry.r#type,
+                ) else {
                     return Err(anyhow!(
                         "No schema is registered for persisted entry type {:?}",
                         entry.r#type
                     ));
-                }
+                };
+                entry.r#type = canonical_type;
                 self.entries.insert(entry_id(&entry), entry);
             }
         }
@@ -522,6 +541,7 @@ impl CultCache {
             .filter_map(|(index, registration)| registration.types.is_empty().then_some(index))
             .collect()
     }
+
 }
 
 impl Default for CultCache {
@@ -536,6 +556,18 @@ fn entry_id(entry: &CultCacheEnvelope) -> String {
 
 fn entry_id_parts(r#type: &str, key: &str) -> String {
     format!("{type}::{key}", type = r#type)
+}
+
+fn resolve_registered_type(
+    known_types: &BTreeSet<String>,
+    schema_name_definitions: &BTreeMap<String, String>,
+    persisted_type: &str,
+) -> Option<String> {
+    if known_types.contains(persisted_type) {
+        return Some(persisted_type.to_string());
+    }
+
+    schema_name_definitions.get(persisted_type).cloned()
 }
 
 fn now_utc_second() -> String {
@@ -605,13 +637,25 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
         .2
         .into_iter()
         .map(|record| {
-            let r#type = catalog.get(&record.1).cloned().ok_or_else(|| {
-                anyhow!(
-                    "CultCache record {:?} references missing schema {:?}",
-                    record.0,
-                    record.1
-                )
-            })?;
+            let r#type = match catalog.get(&record.1) {
+                Some(schema_name) => schema_name.clone(),
+                None => {
+                    let schema_version = infer_schema_version_from_payload(&record.3).ok_or_else(|| {
+                        anyhow!(
+                            "CultCache record {:?} references missing schema {:?}",
+                            record.0,
+                            record.1
+                        )
+                    })?;
+                    infer_schema_name(&schema_version).ok_or_else(|| {
+                        anyhow!(
+                            "CultCache record {:?} references missing schema {:?}",
+                            record.0,
+                            record.1
+                        )
+                    })?
+                }
+            };
             Ok(CultCacheEnvelope {
                 key: record.0,
                 r#type,
@@ -621,6 +665,68 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
             })
         })
         .collect()
+}
+
+fn infer_schema_version_from_payload(payload: &[u8]) -> Option<String> {
+    let mut offset = 0usize;
+    read_array_header(payload, &mut offset)?;
+    read_string(payload, &mut offset)
+}
+
+fn read_array_header(payload: &[u8], offset: &mut usize) -> Option<u32> {
+    let marker = *payload.get(*offset)?;
+    *offset += 1;
+    match marker {
+        0x90..=0x9f => Some((marker & 0x0f) as u32),
+        0xdc => {
+            let bytes = payload.get(*offset..(*offset + 2))?;
+            *offset += 2;
+            Some(u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
+        }
+        0xdd => {
+            let bytes = payload.get(*offset..(*offset + 4))?;
+            *offset += 4;
+            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+        _ => None,
+    }
+}
+
+fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
+    let marker = *payload.get(*offset)?;
+    *offset += 1;
+    let length = match marker {
+        0xa0..=0xbf => (marker & 0x1f) as usize,
+        0xd9 => {
+            let length = *payload.get(*offset)? as usize;
+            *offset += 1;
+            length
+        }
+        0xda => {
+            let bytes = payload.get(*offset..(*offset + 2))?;
+            *offset += 2;
+            u16::from_be_bytes([bytes[0], bytes[1]]) as usize
+        }
+        0xdb => {
+            let bytes = payload.get(*offset..(*offset + 4))?;
+            *offset += 4;
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+        }
+        _ => return None,
+    };
+
+    let bytes = payload.get(*offset..(*offset + length))?;
+    std::str::from_utf8(bytes).ok().map(str::to_string)
+}
+
+fn infer_schema_name(schema_version: &str) -> Option<String> {
+    let marker = schema_version.rfind(".v")?;
+    let version = schema_version.get((marker + 2)..)?;
+    if marker == 0 || version.is_empty() || !version.bytes().all(|value| value.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(schema_version[..marker].to_string())
 }
 
 fn escape_json_string(value: &str) -> String {
@@ -657,6 +763,17 @@ mod tests {
         title: String,
         #[cultcache(key = 1)]
         body: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "runtime-policy", schema = "tests.schema_stamped_entry")]
+    struct SchemaStamped {
+        #[cultcache(key = 0)]
+        schema_version: String,
+        #[cultcache(key = 1)]
+        name: String,
+        #[cultcache(key = 2)]
+        value: String,
     }
 
     cultcache_registry!(TestEntries { Settings, Note });
@@ -879,6 +996,42 @@ mod tests {
         assert_eq!(
             target.get_required_envelope::<Settings>("app")?.payload,
             envelope.payload
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn messagepack_store_recovers_schema_stamped_records_missing_catalog_entries() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("missing-catalog.msgpack");
+        let expected = SchemaStamped {
+            schema_version: "tests.schema_stamped_entry.v1".to_string(),
+            name: "schema-stamped".to_string(),
+            value: "still readable".to_string(),
+        };
+        let snapshot = PersistedStoreSnapshot(
+            "cultcache.store.v1".to_string(),
+            Vec::new(),
+            vec![PersistedRecord(
+                "record-1".to_string(),
+                "sha256:stale-schema-id-from-cold-record".to_string(),
+                "2026-06-25T12:00:00Z".to_string(),
+                rmp_serde::to_vec(&expected)?,
+            )],
+        );
+        fs::write(&store_path, rmp_serde::to_vec(&snapshot)?)?;
+
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<SchemaStamped>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.pull_all_backing_stores()?;
+
+        assert_eq!(cache.get_required::<SchemaStamped>("record-1")?, expected);
+        assert_eq!(
+            cache
+                .get_required_envelope::<SchemaStamped>("record-1")?
+                .schema_id,
+            Some("sha256:stale-schema-id-from-cold-record".to_string())
         );
         Ok(())
     }

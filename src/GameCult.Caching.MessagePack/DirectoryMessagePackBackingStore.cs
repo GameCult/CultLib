@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using MessagePack;
 
 namespace GameCult.Caching.MessagePack;
 
@@ -51,8 +52,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         foreach (var record in manifest.Records)
         {
-            reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, manifest.SchemaCatalog));
-            var stored = ToStoredDocument(record, manifest.SchemaCatalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
+            var catalog = ResolveCatalogForRecord(record, manifest.SchemaCatalog);
+            reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
+            var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
             Entries[stored.Key.Value] = stored;
             _dirtyKeys[stored.Key.Value] = true;
             EntryAdded.OnNext(stored);
@@ -63,8 +65,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             foreach (var recordFile in _recordDirectory.EnumerateFiles("*.msgpack").OrderBy(file => file.Name, StringComparer.Ordinal))
             {
                 var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordFile.FullName));
-                reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, manifest.SchemaCatalog));
-                var stored = ToStoredDocument(record, manifest.SchemaCatalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
+                var catalog = ResolveCatalogForRecord(record, manifest.SchemaCatalog);
+                reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
+                var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
                 Entries[stored.Key.Value] = stored;
                 EntryAdded.OnNext(stored);
             }
@@ -165,6 +168,79 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
             Records = Array.Empty<CultPersistedRecord>()
         };
+    }
+
+    private IReadOnlyCollection<CultSchemaCatalogEntry> ResolveCatalogForRecord(
+        CultPersistedRecord record,
+        IReadOnlyCollection<CultSchemaCatalogEntry> manifestCatalog)
+    {
+        if (manifestCatalog.Any(entry => string.Equals(entry.SchemaId, record.SchemaId, StringComparison.Ordinal)))
+        {
+            return manifestCatalog;
+        }
+
+        var schemaVersion = TryReadPayloadSchemaVersion(record.Payload);
+        if (string.IsNullOrWhiteSpace(schemaVersion))
+        {
+            return manifestCatalog;
+        }
+
+        var schemaName = InferSchemaName(schemaVersion);
+        if (string.IsNullOrWhiteSpace(schemaName))
+        {
+            return manifestCatalog;
+        }
+
+        return manifestCatalog
+            .Append(new CultSchemaCatalogEntry
+            {
+                SchemaId = record.SchemaId,
+                SchemaName = schemaName,
+                SchemaVersion = schemaVersion,
+                ContentHash = record.SchemaId,
+                CanonicalSchemaJson = "",
+                CompatibleSchemaIds = Array.Empty<string>(),
+                Members = Array.Empty<CultSchemaMemberCatalogEntry>()
+            })
+            .ToArray();
+    }
+
+    private static string TryReadPayloadSchemaVersion(byte[] payload)
+    {
+        if (payload == null || payload.Length == 0)
+        {
+            return "";
+        }
+
+        try
+        {
+            var reader = new MessagePackReader(payload);
+            if (reader.NextMessagePackType != MessagePackType.Array)
+            {
+                return "";
+            }
+
+            if (reader.ReadArrayHeader() <= 0)
+            {
+                return "";
+            }
+
+            return reader.NextMessagePackType == MessagePackType.String
+                ? reader.ReadString() ?? ""
+                : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static string InferSchemaName(string schemaVersion)
+    {
+        var versionMarker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
+        return versionMarker > 0 && versionMarker + 2 < schemaVersion.Length && char.IsDigit(schemaVersion[versionMarker + 2])
+            ? schemaVersion.Substring(0, versionMarker)
+            : "";
     }
 
     private string RecordPath(string key) => Path.Combine(_recordDirectory.FullName, $"{HashKey(key)}.msgpack");

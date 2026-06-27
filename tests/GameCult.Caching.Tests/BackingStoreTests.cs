@@ -222,6 +222,67 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_Loads_Record_When_Manifest_Misses_Catalog_Entry()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            var recordPath = Path.Combine(recordsPath, "stale-schema-record.msgpack");
+
+            try
+            {
+                Directory.CreateDirectory(recordsPath);
+
+                var entry = new SchemaStampedTestEntry
+                {
+                    SchemaVersion = "tests.schema_stamped_entry.v1",
+                    Name = "schema-stamped",
+                    Value = "still readable"
+                };
+                var record = new CultPersistedRecord
+                {
+                    Key = "record:stale",
+                    SchemaId = "sha256:stale-schema-id-from-cold-record",
+                    StoredAt = "2026-06-25T12:00:00Z",
+                    Payload = CultDocumentMessagePackSerialization.SerializeUntyped(entry, typeof(SchemaStampedTestEntry))
+                };
+                var manifest = new CultPersistedStoreSnapshot
+                {
+                    FormatVersion = "cultcache.store.v1.directory",
+                    SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
+                    Records = Array.Empty<CultPersistedRecord>()
+                };
+
+                File.WriteAllBytes(filePath, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+                File.WriteAllBytes(recordPath, CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
+
+                var readStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var readCache = new CultCache();
+                readCache.AddBackingStore(readStore);
+                await readCache.PullAllBackingStoresAsync();
+
+                var loaded = readCache.Get<SchemaStampedTestEntry>(new CultRecordKey("record:stale"));
+
+                Assert.That(loaded, Is.Not.Null);
+                Assert.That(loaded!.Value, Is.EqualTo("still readable"));
+                Assert.That(readStore.LastSchemaMigrationReports, Has.Count.EqualTo(1));
+                Assert.That(readStore.LastSchemaMigrationReports[0].PersistedSchemaName, Is.EqualTo("tests.schema_stamped_entry"));
+                Assert.That(readStore.LastSchemaMigrationReports[0].Kind, Is.EqualTo(CultSchemaMigrationKind.CompatibleDrift));
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+
+                if (Directory.Exists(recordsPath))
+                {
+                    Directory.Delete(recordsPath, recursive: true);
+                }
+            }
+        }
+
+        [Test]
         public async Task CultCache_RuntimeType_Upsert_Snapshot_And_Remove_Work_For_Editor_Tooling()
         {
             var cache = new CultCache();
@@ -505,6 +566,20 @@ namespace GameCult.Caching.Tests
 
             [Key(3)]
             public int Health;
+        }
+
+        [CultDocument("tests.schema_stamped_entry", "tests.schema_stamped_entry.v1")]
+        internal sealed class SchemaStampedTestEntry
+        {
+            [Key(0)]
+            public string SchemaVersion = string.Empty;
+
+            [Key(1)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(2)]
+            public string Value = string.Empty;
         }
 
         [CultDocument("tests.named_entry", "tests.named_entry.v2")]

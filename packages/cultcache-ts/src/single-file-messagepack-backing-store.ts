@@ -52,7 +52,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const snapshot = decodeSnapshot(decoded);
       if (snapshot) {
         return snapshot.records.map((record) => {
-          const catalogEntry = snapshot.catalogBySchemaId.get(record.schemaId);
+          const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
           if (!catalogEntry) {
             throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
           }
@@ -280,6 +280,59 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
 
   const records = recordsRaw.map(decodeRecord);
   return { catalogBySchemaId, records };
+}
+
+function resolveCatalogEntryForRecord(
+  record: PersistedRecord,
+  catalogBySchemaId: Map<string, CultCacheSchemaCatalogEntry>,
+): CultCacheSchemaCatalogEntry | undefined {
+  const existing = catalogBySchemaId.get(record.schemaId);
+  if (existing) {
+    return existing;
+  }
+
+  const schemaVersion = inferSchemaVersionFromPayload(record.payload);
+  if (!schemaVersion) {
+    return undefined;
+  }
+
+  const schemaName = inferSchemaName(schemaVersion);
+  if (!schemaName) {
+    return undefined;
+  }
+
+  return {
+    schemaId: record.schemaId,
+    schemaName,
+    schemaVersion,
+    contentHash: record.schemaId,
+    canonicalSchemaJson: "",
+    compatibleSchemaIds: [],
+    members: [],
+  };
+}
+
+function inferSchemaVersionFromPayload(payload: Uint8Array): string | undefined {
+  try {
+    const decoded = decode(payload);
+    if (Array.isArray(decoded) && typeof decoded[0] === "string") {
+      return decoded[0];
+    }
+
+    if (isObject(decoded)) {
+      const schemaVersion = decoded.schemaVersion ?? decoded.schema_version;
+      return typeof schemaVersion === "string" ? schemaVersion : undefined;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferSchemaName(schemaVersion: string): string | undefined {
+  const match = /^(.*)\.v\d+$/.exec(schemaVersion);
+  return match?.[1];
 }
 
 function decodeCatalogEntry(value: unknown): CultCacheSchemaCatalogEntry {

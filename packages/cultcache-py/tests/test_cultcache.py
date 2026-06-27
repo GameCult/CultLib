@@ -351,6 +351,53 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(raw[2][0][0], "app")
             self.assertEqual(raw[2][0][1], "settings")
 
+    def test_messagepack_store_recovers_schema_stamped_record_missing_catalog_entry(self) -> None:
+        try:
+            import msgpack  # type: ignore
+        except ModuleNotFoundError:
+            self.skipTest("msgpack optional dependency is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            document = define_database_entry_type(
+                "runtime-policy",
+                [
+                    ("schema_version", 0),
+                    ("name", 1),
+                    ("value", 2),
+                ],
+                schema_id="schema-current",
+                schema_name="tests.schema_stamped_entry",
+                schema_version="tests.schema_stamped_entry.v1",
+            )
+            store_path = Path(tmp) / "missing-catalog.msgpack"
+            store_path.write_bytes(msgpack.packb([
+                "cultcache.store.v1",
+                [],
+                [[
+                    "record-1",
+                    "sha256:stale-schema-id-from-cold-record",
+                    "2026-06-25T12:00:00Z",
+                    msgpack.packb([
+                        "tests.schema_stamped_entry.v1",
+                        "schema-stamped",
+                        "still readable",
+                    ], use_bin_type=True),
+                ]],
+            ], use_bin_type=True))
+
+            cache = (
+                CultCache.builder()
+                .register_document_type(document)
+                .add_generic_store(SingleFileMessagePackBackingStore(store_path))
+                .build()
+            )
+
+            cache.pull_all_backing_stores()
+            self.assertEqual(cache.get_required(document, "record-1")["value"], "still readable")
+            envelope = cache.get_required_envelope(document, "record-1")
+            self.assertEqual(envelope.type, "runtime-policy")
+            self.assertEqual(envelope.schema_id, "sha256:stale-schema-id-from-cold-record")
+
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store_path = str(Path(tmp) / "cache.msgpack")
@@ -1758,6 +1805,77 @@ class CultCacheTests(unittest.TestCase):
         typed_applied_log = apply_shard_log_response(cache, [document], typed_shard_log)
         self.assertEqual([change.change_kind for change in typed_applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
+
+    def test_cultnet_replication_helpers_recover_schema_stamped_raw_records(self) -> None:
+        document = define_database_entry_type(
+            "replica.runtime-policy",
+            [
+                ("schema_version", 0),
+                ("name", 1),
+                ("value", 2),
+            ],
+            schema_id="replica.runtime-policy.current",
+            schema_name="replica.runtime_policy",
+            schema_version="replica.runtime_policy.v1",
+        )
+        cache = CultCache()
+        cache.register_document_type(document)
+        stale_schema_id = "sha256:stale-replica-runtime-policy"
+        payload = document.encode_payload({
+            "schema_version": "replica.runtime_policy.v1",
+            "name": "policy",
+            "value": "still synced",
+        })
+        record = {
+            "schemaId": stale_schema_id,
+            "recordKey": "policy:1",
+            "storedAt": "2026-06-25T00:00:00Z",
+            "payloadEncoding": "messagepack",
+            "payload": payload,
+        }
+        snapshot = {
+            "schemaVersion": "cultnet.snapshot_response_raw.v0",
+            "messageId": "snapshot-stale",
+            "documents": [record],
+        }
+
+        applied_snapshot = apply_raw_snapshot(cache, [document], snapshot)
+        self.assertEqual(applied_snapshot[0].schema_id, stale_schema_id)
+        self.assertEqual(cache.get_required(document, "policy:1")["value"], "still synced")
+        direct_applied = apply_raw_document_record(cache, schema_document_map([document]), record)
+        self.assertEqual(direct_applied.schema_id, stale_schema_id)
+
+        shard_log = {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "log-stale",
+            "shardId": "interop",
+            "shardEpoch": 1,
+            "resyncRequired": False,
+            "entries": [
+                {
+                    "sequence": 0,
+                    "changeKind": "updated",
+                    "put": {
+                        "schemaVersion": "cultnet.document_put_raw.v0",
+                        "messageId": "put-stale",
+                        "document": {
+                            **record,
+                            "payload": document.encode_payload({
+                                "schema_version": "replica.runtime_policy.v1",
+                                "name": "policy",
+                                "value": "updated through log",
+                            }),
+                        },
+                        "shardId": "interop",
+                        "shardEpoch": 1,
+                    },
+                }
+            ],
+        }
+
+        applied_log = apply_shard_log_response(cache, [document], shard_log)
+        self.assertEqual(applied_log[0].schema_id, stale_schema_id)
+        self.assertEqual(cache.get_required(document, "policy:1")["value"], "updated through log")
 
     def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:
         import msgpack  # type: ignore

@@ -178,12 +178,25 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
             raise ValueError("CultCache persisted records must declare storedAt")
         catalog_entry = catalog_by_schema_id.get(schema_id)
         if catalog_entry is None:
-            raise ValueError(f'CultCache persisted record "{key}" references missing schema id "{schema_id}"')
+            schema_version = _infer_schema_version_from_payload(_normalize_payload(payload))
+            schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
+            if schema_name is None:
+                raise ValueError(f'CultCache persisted record "{key}" references missing schema id "{schema_id}"')
+            catalog_entry = CultCacheSchemaCatalogEntry(
+                schema_id=schema_id,
+                schema_name=schema_name,
+                schema_version=schema_version,
+                content_hash=schema_id,
+                canonical_schema_json="",
+                compatible_schema_ids=(),
+                members=(),
+            )
+        normalized_payload = _normalize_payload(payload)
         envelopes.append(
             CultCacheEnvelope(
                 key=key,
                 type=catalog_entry.schema_name,
-                payload=_normalize_payload(payload),
+                payload=normalized_payload,
                 stored_at=stored_at,
                 schema_id=schema_id,
                 catalog_entry=catalog_entry,
@@ -316,3 +329,27 @@ def _normalize_payload(payload: Any) -> bytes:
     if isinstance(payload, list) and all(isinstance(item, int) and 0 <= item <= 255 for item in payload):
         return bytes(payload)
     raise ValueError("CultCache record payload must be binary MessagePack bytes")
+
+
+def _infer_schema_version_from_payload(payload: bytes) -> str | None:
+    try:
+        msgpack = SingleFileMessagePackBackingStore._msgpack()
+        decoded = msgpack.unpackb(payload, raw=False)
+    except Exception:
+        return None
+    if isinstance(decoded, list) and decoded and isinstance(decoded[0], str):
+        return decoded[0]
+    if isinstance(decoded, dict):
+        value = decoded.get("schemaVersion", decoded.get("schema_version"))
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _infer_schema_name(schema_version: str) -> str | None:
+    marker = schema_version.rfind(".v")
+    if marker <= 0:
+        return None
+    version = schema_version[marker + 2:]
+    if not version or not version.isdigit():
+        return None
+    return schema_version[:marker]

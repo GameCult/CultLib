@@ -17,6 +17,7 @@ class CultCacheError(RuntimeError):
 @dataclass
 class _State:
     documents: dict[str, DocumentDefinition[Any]] = field(default_factory=dict)
+    documents_by_schema_name: dict[str, DocumentDefinition[Any]] = field(default_factory=dict)
     values: dict[str, dict[str, Any]] = field(default_factory=dict)
     envelopes: dict[str, dict[str, CultCacheEnvelope]] = field(default_factory=dict)
     stores_by_type: dict[str, list[BackingStore]] = field(default_factory=dict)
@@ -72,7 +73,11 @@ class CultCache:
     def register_document_type(self, document: DocumentDefinition[Any]) -> None:
         if document.type in self._state.documents:
             raise CultCacheError(f"Document type already registered: {document.type}")
+        schema_name = document.catalog_entry().schema_name
+        if schema_name in self._state.documents_by_schema_name:
+            raise CultCacheError(f"Document schema name already registered: {schema_name}")
         self._state.documents[document.type] = document
+        self._state.documents_by_schema_name[schema_name] = document
         if document.name is not None:
             self.register_name_lookup(document, document.name)
         for index, extractor in document.indexes.items():
@@ -105,9 +110,18 @@ class CultCache:
         seen_globals: set[str] = set()
         for store in [*self._all_specific_stores(), *self._state.generic_stores]:
             for envelope in store.pull_all():
-                document = self._state.documents.get(envelope.type)
+                document = self._resolve_document_for_envelope(envelope)
                 if document is None:
                     raise CultCacheError(f"Unknown persisted document type: {envelope.type}")
+                if envelope.type != document.type:
+                    envelope = CultCacheEnvelope(
+                        key=envelope.key,
+                        type=document.type,
+                        payload=envelope.payload,
+                        stored_at=envelope.stored_at,
+                        schema_id=envelope.schema_id,
+                        catalog_entry=envelope.catalog_entry,
+                    )
                 if document.global_document:
                     if envelope.type in seen_globals and envelope.key == GLOBAL_KEY:
                         raise CultCacheError(f"Duplicate global document for type: {envelope.type}")
@@ -361,3 +375,9 @@ class CultCache:
         self._assert_registered(document)
         if not document.global_document:
             raise CultCacheError(f"Document type is not global: {document.type}")
+
+    def _resolve_document_for_envelope(self, envelope: CultCacheEnvelope) -> DocumentDefinition[Any] | None:
+        document = self._state.documents.get(envelope.type)
+        if document is not None:
+            return document
+        return self._state.documents_by_schema_name.get(envelope.type)
