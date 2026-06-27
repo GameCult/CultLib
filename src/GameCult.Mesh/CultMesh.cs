@@ -1676,6 +1676,55 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Reads two typed document handles and projects them into one caller-defined view.
+        /// </summary>
+        public static async Task<TResult> LatestAsync<TFirst, TSecond, TResult>(
+            CultMeshDocumentHandle<TFirst> first,
+            CultMeshDocumentHandle<TSecond> second,
+            Func<TFirst, TSecond, TResult> project)
+            where TFirst : class
+            where TSecond : class
+        {
+            if (first == null) throw new ArgumentNullException(nameof(first));
+            if (second == null) throw new ArgumentNullException(nameof(second));
+            if (project == null) throw new ArgumentNullException(nameof(project));
+
+            var firstTask = first.LatestAsync();
+            var secondTask = second.LatestAsync();
+            await Task.WhenAll(firstTask, secondTask).ConfigureAwait(false);
+            return project(
+                await firstTask.ConfigureAwait(false),
+                await secondTask.ConfigureAwait(false));
+        }
+
+        /// <summary>
+        /// Reads three typed document handles and projects them into one caller-defined view.
+        /// </summary>
+        public static async Task<TResult> LatestAsync<TFirst, TSecond, TThird, TResult>(
+            CultMeshDocumentHandle<TFirst> first,
+            CultMeshDocumentHandle<TSecond> second,
+            CultMeshDocumentHandle<TThird> third,
+            Func<TFirst, TSecond, TThird, TResult> project)
+            where TFirst : class
+            where TSecond : class
+            where TThird : class
+        {
+            if (first == null) throw new ArgumentNullException(nameof(first));
+            if (second == null) throw new ArgumentNullException(nameof(second));
+            if (third == null) throw new ArgumentNullException(nameof(third));
+            if (project == null) throw new ArgumentNullException(nameof(project));
+
+            var firstTask = first.LatestAsync();
+            var secondTask = second.LatestAsync();
+            var thirdTask = third.LatestAsync();
+            await Task.WhenAll(firstTask, secondTask, thirdTask).ConfigureAwait(false);
+            return project(
+                await firstTask.ConfigureAwait(false),
+                await secondTask.ConfigureAwait(false),
+                await thirdTask.ConfigureAwait(false));
+        }
+
+        /// <summary>
         /// Creates a typed collection handle over all local CultCache records assignable to the document type.
         /// </summary>
         public static CultMeshCollectionHandle<TDocument> Collection<TDocument>(

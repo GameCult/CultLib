@@ -737,6 +737,37 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentHelpers_ProjectLatestSnapshotsFromMultipleHandles()
+    {
+        var primary = CultMesh.Document(
+            "mesh.note.primary",
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            _ => Task.FromResult(new MeshNoteDocument
+            {
+                Schema = "tests.mesh_note.v1",
+                Text = "alpha",
+                Revision = 3
+            }),
+            _ => new Subject<MeshNoteDocument>());
+        var secondary = CultMesh.Document(
+            "mesh.note.secondary",
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            _ => Task.FromResult(new MeshOtherDocument
+            {
+                Schema = "tests.mesh_other.v1",
+                Text = "beta"
+            }),
+            _ => new Subject<MeshOtherDocument>());
+
+        var projected = await CultMesh.LatestAsync(
+            primary,
+            secondary,
+            (first, second) => $"{first.Text}:{first.Revision}:{second.Text}");
+
+        projected.Should().Be("alpha:3:beta");
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsWatchesAndReplacesCultCacheRecords()
     {
         var cache = new CultCache();
