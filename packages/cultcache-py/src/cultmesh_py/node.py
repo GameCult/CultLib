@@ -334,7 +334,7 @@ class CultMeshDatabase:
 
     def put(self, document: DocumentDefinition[Any], key: str, value: Any) -> None:
         registered = self._resolve_document_alias(document)
-        parsed = document.decode_payload(document.encode_payload(value))
+        parsed = self._convert_document_value(value, document, registered)
         previous = self.cache.get(registered, key)
         self.cache.put(registered, key, parsed)
         self._publish_local_change(registered, key, "added" if previous is None else "updated", parsed, previous)
@@ -353,7 +353,7 @@ class CultMeshDatabase:
         shard_epoch: int | None = None,
     ) -> CultNetMessage:
         registered = self._resolve_document_alias(document)
-        parsed = document.decode_payload(document.encode_payload(value))
+        parsed = self._convert_document_value(value, document, registered)
         catalog_entry = registered.catalog_entry()
         previous = self.cache.get(registered, key)
         envelope = CultCacheEnvelope.create(
@@ -379,8 +379,9 @@ class CultMeshDatabase:
         return message
 
     def get(self, document: DocumentDefinition[Any], key: str) -> Any:
-        value = self.cache.get(self._resolve_document_alias(document), key)
-        return None if value is None else document.decode_payload(document.encode_payload(value))
+        registered = self._resolve_document_alias(document)
+        value = self.cache.get(registered, key)
+        return None if value is None else self._convert_document_value(value, registered, document)
 
     def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
         value = self.get(document, key)
@@ -847,6 +848,14 @@ class CultMeshDatabase:
             if self._documents_alias(document, registered):
                 return registered
         return document
+
+    def _convert_document_value(
+        self,
+        value: Any,
+        source: DocumentDefinition[Any],
+        target: DocumentDefinition[Any],
+    ) -> Any:
+        return target.decode_payload(source.encode_payload(value))
 
     def _documents_alias(
         self,

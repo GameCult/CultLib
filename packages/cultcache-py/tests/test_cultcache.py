@@ -2020,9 +2020,18 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(delete["shardEpoch"], 1)
 
     def test_cultmesh_node_resolves_same_schema_aliases_for_local_state(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
         document = define_database_entry_type(
             "mesh.alias_note",
             [("body", 0)],
+            cls=CanonicalNote,
             schema_id="mesh.alias_note.v1",
             schema_name="mesh.alias_note",
             schema_version="mesh.alias_note.v1",
@@ -2030,6 +2039,7 @@ class CultCacheTests(unittest.TestCase):
         alias = define_database_entry_type(
             "mesh.alias_note.ui",
             [("body", 0)],
+            cls=UiNote,
             schema_id="mesh.alias_note.v1",
             schema_name="mesh.alias_note",
             schema_version="mesh.alias_note.v1",
@@ -2039,21 +2049,24 @@ class CultCacheTests(unittest.TestCase):
         seen: list[CultMeshDatabaseChange] = []
         node.database.watch_record(alias, "note:alias", seen.append)
 
-        node.put(alias, "note:alias", {"body": "from-alias-put"})
-        self.assertEqual(node.get_required(document, "note:alias")["body"], "from-alias-put")
-        self.assertEqual(node.get_required(alias, "note:alias")["body"], "from-alias-put")
+        node.put(alias, "note:alias", UiNote("from-alias-put"))
+        self.assertEqual(node.get_required(document, "note:alias").body, "from-alias-put")
+        alias_value = node.get_required(alias, "note:alias")
+        self.assertIsInstance(alias_value, UiNote)
+        self.assertEqual(alias_value.body, "from-alias-put")
         self.assertEqual(seen[0].document.type, document.type)
-        self.assertEqual(seen[0].value["body"], "from-alias-put")
+        self.assertIsInstance(seen[0].value, CanonicalNote)
+        self.assertEqual(seen[0].value.body, "from-alias-put")
 
         put = node.put_raw_message(
             alias,
             "note:alias",
-            {"body": "from-alias-raw-put"},
+            UiNote("from-alias-raw-put"),
             message_id="alias-put",
         ).to_wire()
         self.assertEqual(put["document"]["schemaId"], "mesh.alias_note.v1")
         self.assertEqual(put["document"]["recordKey"], "note:alias")
-        self.assertEqual(node.get_required(alias, "note:alias")["body"], "from-alias-raw-put")
+        self.assertEqual(node.get_required(alias, "note:alias").body, "from-alias-raw-put")
 
         delete = node.delete_raw_message(alias, "note:alias", message_id="alias-delete").to_wire()
         self.assertEqual(delete["schemaId"], "mesh.alias_note.v1")
