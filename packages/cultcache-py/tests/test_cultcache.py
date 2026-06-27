@@ -5267,6 +5267,51 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], [local_schema_id])
         self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
 
+    def test_cultmesh_local_server_notifies_schema_alias_subscription_for_raw_put(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_sub_note",
+            [
+                ("schema_version", 0),
+                ("body", 1),
+            ],
+            schema_id="sha256:mesh-alias-sub-note",
+            schema_name="mesh.alias_sub_note",
+            schema_version="mesh.alias_sub_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-sub-server")
+        node.database.register_document(document)
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with raw_client.subscribe_database(
+                subscription_id="sub-alias",
+                schema_ids=["mesh.alias_sub_note.v1"],
+                include_snapshot=False,
+            ) as subscription:
+                subscription.send(document_put_raw(
+                    message_id="put-foreign-alias",
+                    key="note:alias-sub",
+                    schema_id="runtime.generated.mesh.alias_sub_note.ui.99",
+                    stored_at="2026-06-27T00:00:00Z",
+                    payload=document.encode_payload({
+                        "schema_version": "mesh.alias_sub_note.v1",
+                        "body": "notified",
+                    }),
+                ))
+                change = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(change.subscription_id, "sub-alias")
+        self.assertEqual(change.change_kind, "added")
+        self.assertEqual(change.record_key, "note:alias-sub")
+        self.assertIsInstance(change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(change.raw_document.schema_id, "runtime.generated.mesh.alias_sub_note.ui.99")
+        self.assertEqual(node.database.get_required(document, "note:alias-sub")["body"], "notified")
+        self.assertEqual(node.cache.get_required_envelope(document, "note:alias-sub").schema_id, local_schema_id)
+
     def test_cultmesh_local_server_rejects_oversized_snapshot_responses(self) -> None:
         document = define_database_entry_type(
             "mesh.snapshot_limit_note",

@@ -354,7 +354,13 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="unregistered_document_put",
             )]
-        return self._database_change_notifications(message, document_record, change.change_kind, subscriptions)
+        return self._database_change_notifications(
+            message,
+            document_record,
+            change.change_kind,
+            subscriptions,
+            resolved_schema_id=change.schema_id,
+        )
 
     def _handle_raw_delete(
         self,
@@ -384,10 +390,16 @@ class CultMeshLocalServer:
         document: dict[str, Any],
         change_kind: str,
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        resolved_schema_id: str | None = None,
     ) -> list[dict[str, Any]]:
         notifications = []
         for subscription in subscriptions.values():
-            if not subscription.matches(document):
+            if not self._subscription_matches_document(
+                subscription,
+                document,
+                resolved_schema_id=resolved_schema_id,
+            ):
                 continue
             message_id = message.get("messageId") or document.get("recordKey") or "change"
             notifications.append({
@@ -409,7 +421,7 @@ class CultMeshLocalServer:
         notifications = []
         document = {"schemaId": schema_id, "recordKey": record_key}
         for subscription in subscriptions.values():
-            if not subscription.matches(document):
+            if not self._subscription_matches_document(subscription, document):
                 continue
             message_id = message.get("messageId") or record_key or "change"
             notifications.append({
@@ -421,6 +433,35 @@ class CultMeshLocalServer:
                 "recordKey": record_key,
             })
         return notifications
+
+    def _subscription_matches_document(
+        self,
+        subscription: _DatabaseSubscription,
+        document: dict[str, Any],
+        *,
+        resolved_schema_id: str | None = None,
+    ) -> bool:
+        record_key = str(document.get("recordKey") or "")
+        if subscription.record_keys and record_key not in subscription.record_keys:
+            return False
+        if not subscription.schema_ids:
+            return True
+
+        document_schema_id = str(document.get("schemaId") or "")
+        documents_by_schema_id = _schema_document_map(self.node.documents)
+        if _schema_matches_request(
+            document_schema_id,
+            documents_by_schema_id.get(document_schema_id),
+            subscription.schema_ids,
+        ):
+            return True
+        if resolved_schema_id is None:
+            return False
+        return _schema_matches_request(
+            resolved_schema_id,
+            documents_by_schema_id.get(resolved_schema_id),
+            subscription.schema_ids,
+        )
 
     def _hello_response(self) -> dict[str, Any]:
         return {
