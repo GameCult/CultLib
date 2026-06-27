@@ -1135,15 +1135,33 @@ public sealed class CultMeshStreamingTests
             });
 
         var fetchedAlias = await surface.FetchDocumentAsync<MeshNoteAliasDocument>(key.Value);
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(Path.GetTempPath(), $"cultmesh-snapshot-endpoint-{Guid.NewGuid():N}.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+        var syncedAlias = await surface.SyncDocumentAsync<MeshNoteAliasDocument>(node, key.Value);
         var aliasHandle = surface.Document<MeshNoteAliasDocument>(key.Value);
         var aliasLatest = await aliasHandle.LatestAsync();
         var catalog = surface.Documents(surface.Document<MeshNoteDocument>(key.Value));
         var catalogAlias = await catalog.LatestAsync<MeshNoteAliasDocument>();
 
         fetchedAlias.Text.Should().Be("snapshot-endpoint");
+        syncedAlias.Text.Should().Be("snapshot-endpoint");
+        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(19);
         aliasLatest.Revision.Should().Be(19);
         catalogAlias.Text.Should().Be("snapshot-endpoint");
-        requests.Should().HaveCount(3);
+        requests.Should().HaveCount(4);
         requests.Should().OnlyContain(request =>
             request.SchemaIds!.SequenceEqual(new[]
             {

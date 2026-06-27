@@ -84,6 +84,32 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Result from syncing a remote snapshot into a local CultMesh node.
+    /// </summary>
+    public sealed class CultMeshSnapshotSyncResult
+    {
+        internal CultMeshSnapshotSyncResult(
+            CultNetSnapshotResponseRawMessage snapshot,
+            IReadOnlyList<object> appliedDocuments)
+        {
+            Snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+            AppliedDocuments = appliedDocuments ?? throw new ArgumentNullException(nameof(appliedDocuments));
+        }
+
+        /// <summary>Gets the raw snapshot that was fetched from the endpoint.</summary>
+        public CultNetSnapshotResponseRawMessage Snapshot { get; }
+
+        /// <summary>Gets the documents applied into the local node cache.</summary>
+        public IReadOnlyList<object> AppliedDocuments { get; }
+
+        /// <summary>Gets the number of documents applied into the local node cache.</summary>
+        public int AppliedCount => AppliedDocuments.Count;
+
+        /// <summary>Gets the source shard log sequence reported by the snapshot, when present.</summary>
+        public long ShardLogSequence => Snapshot.ShardLogSequence ?? 0L;
+    }
+
+    /// <summary>
     /// Typed snapshot surface for one remote CultNet endpoint.
     /// </summary>
     public sealed class CultMeshSnapshotEndpoint
@@ -132,6 +158,24 @@ namespace GameCult.Mesh
             return CultMesh.FetchSnapshotAsync(Endpoint, CreateRequest(schemaIds, recordKeys));
         }
 
+        /// <summary>Fetches one snapshot and applies it into the node's cache.</summary>
+        public async Task<CultMeshSnapshotSyncResult> SyncSnapshotAsync(
+            CultMeshNode node,
+            IReadOnlyList<string>? schemaIds = null,
+            IReadOnlyList<string>? recordKeys = null,
+            bool flush = false)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+
+            var snapshot = await FetchSnapshotAsync(schemaIds, recordKeys).ConfigureAwait(false);
+            var applied = await node.Database.Documents.ApplyRawSnapshotResponseAsync(node.Cache, snapshot)
+                .ConfigureAwait(false);
+            if (flush)
+                await node.FlushAsync().ConfigureAwait(false);
+
+            return new CultMeshSnapshotSyncResult(snapshot, applied);
+        }
+
         /// <summary>Fetches and decodes documents assignable to the requested type or matching its schema.</summary>
         public Task<IReadOnlyList<TDocument>> FetchDocumentsAsync<TDocument>(
             IReadOnlyList<string>? recordKeys = null,
@@ -145,12 +189,47 @@ namespace GameCult.Mesh
                 DocumentRegistry);
         }
 
+        /// <summary>Fetches typed documents and syncs their raw snapshot into the node's cache.</summary>
+        public async Task<IReadOnlyList<TDocument>> SyncDocumentsAsync<TDocument>(
+            CultMeshNode node,
+            IReadOnlyList<string>? recordKeys = null,
+            IReadOnlyList<string>? schemaIds = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var result = await SyncSnapshotAsync(
+                    node,
+                    schemaIds ?? new[] { descriptor.SchemaId },
+                    recordKeys,
+                    flush)
+                .ConfigureAwait(false);
+            return CultMesh.DecodeSnapshotDocuments<TDocument>(result.Snapshot, DocumentRegistry);
+        }
+
         /// <summary>Fetches one typed document by record key.</summary>
         public async Task<TDocument> FetchDocumentAsync<TDocument>(string recordKey)
             where TDocument : class
         {
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
             var documents = await FetchDocumentsAsync<TDocument>(new[] { recordKey }).ConfigureAwait(false);
+            return documents.FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    $"CultNet snapshot endpoint '{Endpoint}' did not return {typeof(TDocument).FullName} record '{recordKey}'.");
+        }
+
+        /// <summary>Fetches one typed document by record key and syncs it into the node's cache.</summary>
+        public async Task<TDocument> SyncDocumentAsync<TDocument>(
+            CultMeshNode node,
+            string recordKey,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            var documents = await SyncDocumentsAsync<TDocument>(node, new[] { recordKey }, flush: flush)
+                .ConfigureAwait(false);
             return documents.FirstOrDefault()
                 ?? throw new InvalidOperationException(
                     $"CultNet snapshot endpoint '{Endpoint}' did not return {typeof(TDocument).FullName} record '{recordKey}'.");
@@ -402,7 +481,7 @@ namespace GameCult.Mesh
             return filtered.Length == 0 ? null : filtered;
         }
 
-        private static IReadOnlyList<TDocument> DecodeSnapshotDocuments<TDocument>(
+        internal static IReadOnlyList<TDocument> DecodeSnapshotDocuments<TDocument>(
             CultNetSnapshotResponseRawMessage snapshot,
             CultNetDocumentRegistry registry)
             where TDocument : class
