@@ -196,7 +196,10 @@ test("CultMesh TS document handles read schema publications from single-file sto
   });
   await node.flush();
 
-  const document = CultMesh.documentFromSingleFile(filePath, noteDocument, {
+  const document = CultMesh.documentFromPublication({
+    kind: "single-file",
+    path: filePath,
+  }, noteDocument, "note:publication", {
     documentId: "daemon:cultmesh.note.latest",
     sourceId: "daemon:cultmesh.note.latest.v0",
     pollMs: 50,
@@ -1949,8 +1952,12 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
       },
     );
 
-    const document = CultMesh.documentFromPeerSnapshot(
-      peer,
+    const document = CultMesh.documentFromPublication(
+      {
+        kind: "peer-snapshot",
+        peer,
+        endpoint: `rudp://127.0.0.1:${server.bind.port}`,
+      },
       noteDocument,
       "note:remote",
       {

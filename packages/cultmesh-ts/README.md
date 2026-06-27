@@ -321,6 +321,10 @@ The same typed-definition overload is available for
 `CultMesh.documentFromStore(...)` and `CultMesh.documentFromSingleFile(...)`, so
 local schema publications can be read as typed reactive documents without
 manually pulling records, decoding MessagePack, or parsing the payload.
+When the caller wants source selection to be configuration, use
+`CultMesh.documentFromPublication(...)` with a `single-file`, `store`, or
+`peer-snapshot` source; it returns the same typed handle while hiding whether
+sync came from local persistence or a remote CultNet snapshot.
 
 ## Streaming Mode
 

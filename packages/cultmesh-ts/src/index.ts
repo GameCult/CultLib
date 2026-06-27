@@ -67,6 +67,21 @@ export interface CultMeshRouteRecord {
   readonly description: string;
 }
 
+export type CultMeshDocumentPublicationSource =
+  | {
+      readonly kind: "single-file";
+      readonly path: string;
+    }
+  | {
+      readonly kind: "store";
+      readonly store: CacheBackingStore;
+    }
+  | {
+      readonly kind: "peer-snapshot";
+      readonly peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>);
+      readonly endpoint?: string;
+    };
+
 export interface CultMeshAuthorityClaim {
   readonly role: string;
   readonly shardId?: string;
@@ -2129,6 +2144,102 @@ export function cultMeshDocumentFromPeerSnapshot(
   );
 }
 
+export function cultMeshDocumentFromPublication(
+  source: CultMeshDocumentPublicationSource,
+  schemaId: string,
+  recordKey: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  },
+): CultMeshDocumentHandle<unknown>;
+export function cultMeshDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
+  source: CultMeshDocumentPublicationSource,
+  definition: TDefinition,
+  recordKey: string,
+  options?: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  },
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+export function cultMeshDocumentFromPublication(
+  source: CultMeshDocumentPublicationSource,
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+  recordKey: string,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    sourceId?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): CultMeshDocumentHandle<unknown> {
+  if (!source) {
+    throw new Error("CultMesh publication source is required.");
+  }
+  requireNonEmpty(recordKey, "recordKey");
+
+  switch (source.kind) {
+    case "single-file":
+      return typeof schemaOrDefinition === "string"
+        ? cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint,
+            sourceId: options.sourceId ?? recordKey,
+            pollMs: options.pollMs,
+          })
+        : cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint,
+            sourceId: options.sourceId ?? recordKey,
+            pollMs: options.pollMs,
+          });
+    case "store":
+      return typeof schemaOrDefinition === "string"
+        ? cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint,
+            sourceId: options.sourceId ?? recordKey,
+            pollMs: options.pollMs,
+          })
+        : cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint,
+            sourceId: options.sourceId ?? recordKey,
+            pollMs: options.pollMs,
+          });
+    case "peer-snapshot":
+      return typeof schemaOrDefinition === "string"
+        ? cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
+            sourceId: options.sourceId ?? recordKey,
+            timeoutMs: options.timeoutMs,
+            pollMs: options.pollMs,
+            messageIdPrefix: options.messageIdPrefix,
+          })
+        : cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
+            documentId: options.documentId ?? recordKey,
+            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
+            sourceId: options.sourceId ?? recordKey,
+            timeoutMs: options.timeoutMs,
+            pollMs: options.pollMs,
+            messageIdPrefix: options.messageIdPrefix,
+          });
+    default:
+      throw new Error(`Unsupported CultMesh publication source kind '${(source as { kind?: string }).kind}'.`);
+  }
+}
+
 export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
   cache: CultCache,
   definition: TDefinition,
@@ -3923,6 +4034,50 @@ export class CultMesh {
     return typeof schemaOrDefinition === "string"
       ? cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options)
       : cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options);
+  }
+
+  public static documentFromPublication(
+    source: CultMeshDocumentPublicationSource,
+    schemaId: string,
+    recordKey: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    },
+  ): CultMeshDocumentHandle<unknown>;
+  public static documentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
+    source: CultMeshDocumentPublicationSource,
+    definition: TDefinition,
+    recordKey: string,
+    options?: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    },
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
+  public static documentFromPublication(
+    source: CultMeshDocumentPublicationSource,
+    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+    recordKey: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      sourceId?: string;
+      timeoutMs?: number;
+      pollMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): CultMeshDocumentHandle<unknown> {
+    return typeof schemaOrDefinition === "string"
+      ? cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options)
+      : cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options);
   }
 
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
