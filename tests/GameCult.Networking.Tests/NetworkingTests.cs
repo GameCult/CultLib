@@ -1955,6 +1955,16 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Shards[0].Epoch, Is.EqualTo(3));
             Assert.That(response.Shards[0].PrimaryEndpoints, Is.EqualTo(["cultnet://runtime-a:3075"]));
             Assert.That(response.Shards[0].ReadReplicaEndpoints, Is.EqualTo(["cultnet://edge-a:3075"]));
+
+            var aliasResponse = databaseServer.CreateShardCatalogResponse(new CultNetShardCatalogRequestMessage
+            {
+                MessageId = "catalog-players-alias",
+                SchemaIds = ["gamecult.player_data.v2"],
+                RecordKeys = ["player:one"]
+            });
+
+            Assert.That(aliasResponse.Shards, Has.Length.EqualTo(1));
+            Assert.That(aliasResponse.Shards[0].ShardId, Is.EqualTo("players"));
         }
 
         [Test]

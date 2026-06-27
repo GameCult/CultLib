@@ -1509,20 +1509,44 @@ namespace GameCult.Networking
                 "not_primary");
         }
 
-        private static bool MatchesCatalogFilter(
+        private bool MatchesCatalogFilter(
             CultNetShardDescriptor shard,
             IReadOnlyList<string>? schemaIds,
             IReadOnlyList<CultRecordKey>? recordKeys)
         {
-            var schemaMatches = schemaIds == null ||
-                                schemaIds.Count == 0 ||
-                                shard.SchemaIds.Count == 0 ||
-                                schemaIds.Any(schemaId => shard.SchemaIds.Contains(schemaId, StringComparer.Ordinal));
+            var schemaMatches = SchemaMatchesCatalogFilter(shard, schemaIds);
             var keyMatches = recordKeys == null ||
                              recordKeys.Count == 0 ||
                              recordKeys.Any(key => string.IsNullOrEmpty(shard.KeyPrefix) ||
                                                    key.Value.StartsWith(shard.KeyPrefix!, StringComparison.Ordinal));
             return schemaMatches && keyMatches;
+        }
+
+        private bool SchemaMatchesCatalogFilter(
+            CultNetShardDescriptor shard,
+            IReadOnlyList<string>? schemaIds)
+        {
+            if (schemaIds == null || schemaIds.Count == 0 || shard.SchemaIds.Count == 0)
+                return true;
+
+            var requestedSchemaIds = schemaIds.ToHashSet(StringComparer.Ordinal);
+            if (shard.SchemaIds.Any(requestedSchemaIds.Contains))
+                return true;
+
+            foreach (var shardSchemaId in shard.SchemaIds)
+            {
+                try
+                {
+                    if (MatchesRequestedSchema(_cache.Registry.GetRequiredBySchemaId(shardSchemaId), requestedSchemaIds))
+                        return true;
+                }
+                catch (InvalidOperationException)
+                {
+                    // Shards can advertise schemas that are not loaded in this process.
+                }
+            }
+
+            return false;
         }
 
         private static bool MatchesRequestedSchema(
