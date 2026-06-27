@@ -1952,6 +1952,55 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_Applies_Delete_BySchemaAlias()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor(
+                        "wrong-network-notes",
+                        "runtime-b",
+                        epoch: 1,
+                        isPrimary: false,
+                        schemaIds: ["other.note.v1"],
+                        keyPrefix: "network-note:"),
+                    new CultNetShardDescriptor(
+                        "network-notes",
+                        "runtime-a",
+                        epoch: 2,
+                        isPrimary: true,
+                        schemaIds: ["tests.networking_note.v1"],
+                        keyPrefix: "network-note:")
+                ]
+            });
+            var key = new CultRecordKey("network-note:alias-delete");
+            await database.PutAsync(key, new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "delete through alias",
+                Revision = 13
+            });
+
+            await database.ApplyDeleteAsync(new CultNetDocumentDeleteMessage
+            {
+                MessageId = "delete-alias",
+                SchemaId = "tests.networking_note.v1",
+                RecordKey = key.Value,
+                ShardId = "network-notes",
+                ShardEpoch = 2
+            });
+
+            Assert.That(cache.Get<NetworkSchemaNote>(key), Is.Null);
+            Assert.That(database.GetMutationLog("network-notes").Last().Kind, Is.EqualTo(CultNetDatabaseChangeKind.Removed));
+            Assert.That(database.GetMutationLog("wrong-network-notes"), Is.Empty);
+        }
+
+        [Test]
         public async Task CultNetDatabase_Predicts_ClientOwnedInput_ThroughSchemaAliasScope()
         {
             var cache = new CultCache();

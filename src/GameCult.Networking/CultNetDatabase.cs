@@ -941,9 +941,9 @@ namespace GameCult.Networking
             if (message == null) throw new ArgumentNullException(nameof(message));
 
             var key = new CultRecordKey(message.RecordKey);
-            var shard = ResolveShardInternal(message.SchemaId, key);
-            EnsurePrimary(shard, message.SchemaId, key, message.ShardEpoch);
-            var descriptor = _cache.Registry.GetRequiredBySchemaId(message.SchemaId);
+            var descriptor = _documents.ResolveDescriptorForSchemaId(message.SchemaId);
+            var shard = ResolveShardInternal(descriptor, key);
+            EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var previous = _cache.Get(key);
             if (previous == null)
             {

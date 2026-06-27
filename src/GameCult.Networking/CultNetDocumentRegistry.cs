@@ -396,12 +396,46 @@ namespace GameCult.Networking
         {
             try
             {
-                return _documents.GetRequiredBySchemaId(document.SchemaId);
+                return ResolveDescriptorForSchemaId(document.SchemaId);
             }
             catch (InvalidOperationException) when (TryResolveDescriptorByPayloadSchema(document.Payload) is { } descriptor)
             {
                 return descriptor;
             }
+        }
+
+        internal CultDocumentDescriptor ResolveDescriptorForSchemaId(string schemaId)
+        {
+            try
+            {
+                return _documents.GetRequiredBySchemaId(schemaId);
+            }
+            catch (InvalidOperationException) when (TryResolveDescriptorBySchemaAlias(schemaId) is { } descriptor)
+            {
+                return descriptor;
+            }
+        }
+
+        private CultDocumentDescriptor? TryResolveDescriptorBySchemaAlias(string schemaId)
+        {
+            if (string.IsNullOrWhiteSpace(schemaId))
+                return null;
+
+            var candidates = ResolvePayloadSchemaCandidates().ToArray();
+            var descriptor = candidates.FirstOrDefault(candidate =>
+                string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) ||
+                string.Equals(candidate.SchemaName, schemaId, StringComparison.Ordinal) ||
+                string.Equals(candidate.SchemaVersion, schemaId, StringComparison.Ordinal) ||
+                candidate.ToCatalogEntry().CompatibleSchemaIds.Any(compatible =>
+                    string.Equals(compatible, schemaId, StringComparison.Ordinal)));
+            if (descriptor != null)
+                return descriptor;
+
+            var schemaName = InferSchemaName(schemaId);
+            return string.IsNullOrWhiteSpace(schemaName)
+                ? null
+                : candidates.FirstOrDefault(candidate =>
+                    string.Equals(candidate.SchemaName, schemaName, StringComparison.Ordinal));
         }
 
         private CultDocumentDescriptor? TryResolveDescriptorByPayloadSchema(byte[] payload)
