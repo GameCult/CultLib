@@ -679,6 +679,49 @@ test("CultMesh TS binds publication document catalogs from source resolvers", as
   assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
 });
 
+test("CultMesh TS syncs configured publications into local node aliases", async () => {
+  const sourcePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-source-")), "source.ccmp");
+  const targetPath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-sync-target-")), "target.ccmp");
+  const source = await CultMesh.startNode(sourcePath, {
+    documents: [noteDocument],
+  });
+  await source.put(noteDocument, "note:published", {
+    noteId: "note:published",
+    body: "publication source hydrates local alias",
+  });
+  await source.flush();
+  const target = await CultMesh.startNode(targetPath, {
+    documents: [noteDocument],
+  });
+
+  const synced = await target.syncDocumentFromPublication(
+    {
+      kind: "single-file",
+      path: sourcePath,
+    },
+    noteAliasDocument,
+    "note:published",
+  );
+  const facadeSynced = await CultMesh.syncDocumentFromPublication(
+    target,
+    {
+      kind: "single-file",
+      path: sourcePath,
+    },
+    noteAliasDocument,
+    "note:published",
+  );
+
+  assert.deepEqual(synced, {
+    noteId: "note:published",
+    body: "publication source hydrates local alias",
+  });
+  assert.deepEqual(facadeSynced, synced);
+  assert.equal(target.getRequired(noteDocument, "note:published").body, "publication source hydrates local alias");
+  assert.equal(target.getRequired(noteAliasDocument, "note:published").body, "publication source hydrates local alias");
+  assert.equal((await target.reactiveDocument(noteAliasDocument, "note:published", { watch: false }).ready).body, "publication source hydrates local alias");
+});
+
 test("CultMesh TS document catalogs resolve semantic schema versions passed as schema ids", async () => {
   const current = {
     noteId: "note:semantic",

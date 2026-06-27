@@ -2756,6 +2756,37 @@ export function cultMeshDocumentFromPublication(
   }
 }
 
+export async function cultMeshSyncDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
+  node: CultMeshNode,
+  source: CultMeshDocumentPublicationSource,
+  definition: TDefinition,
+  recordKey: string,
+  options: {
+    timeoutMs?: number;
+    messageIdPrefix?: string;
+  } = {},
+): Promise<CultCacheDocumentValue<TDefinition>> {
+  if (!source) {
+    throw new Error("CultMesh publication source is required.");
+  }
+  requireNonEmpty(recordKey, "recordKey");
+
+  if (source.kind === "peer-snapshot") {
+    return node.syncDocumentFromPeerSnapshot(source.peer, definition, recordKey, options);
+  }
+
+  const value = await cultMeshDocumentFromPublication(
+    source,
+    definition,
+    recordKey,
+    {
+      timeoutMs: options.timeoutMs,
+      messageIdPrefix: options.messageIdPrefix,
+    },
+  ).latest();
+  return node.put(definition, recordKey, value);
+}
+
 export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
   cache: CultCache,
   definition: TDefinition,
@@ -3855,6 +3886,18 @@ export class CultMeshNode {
     return this.parseDocumentValue(definition, this.cache.getRequired(registered, key));
   }
 
+  public syncDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
+    source: CultMeshDocumentPublicationSource,
+    definition: TDefinition,
+    key: string,
+    options: {
+      timeoutMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshSyncDocumentFromPublication(this, source, definition, key, options);
+  }
+
   public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     options: {
@@ -4843,6 +4886,19 @@ export class CultMesh {
     } = {},
   ): Promise<CultCacheDocumentValue<TDefinition>> {
     return node.syncDocumentFromPeerSnapshot(peer, definition, key, options);
+  }
+
+  public static syncDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
+    node: CultMeshNode,
+    source: CultMeshDocumentPublicationSource,
+    definition: TDefinition,
+    key: string,
+    options: {
+      timeoutMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return node.syncDocumentFromPublication(source, definition, key, options);
   }
 
   public static documents(

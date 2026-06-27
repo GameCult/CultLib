@@ -364,6 +364,10 @@ When the caller wants source selection to be configuration, use
 `CultMesh.documentFromPublication(...)` with a `single-file`, `store`, or
 `peer-snapshot` source; it returns the same typed handle while hiding whether
 sync came from local persistence or a remote CultNet snapshot.
+Use `node.syncDocumentFromPublication(...)` or
+`CultMesh.syncDocumentFromPublication(...)` for the same source-agnostic shape
+when the publication should hydrate a local node before the caller continues
+through `node.document(...)` or `node.reactiveDocument(...)`.
 
 ## Streaming Mode
 
