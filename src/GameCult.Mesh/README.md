@@ -221,6 +221,17 @@ player.Value!.Health = 90;
 await player.CommitAsync();
 ```
 
+Remote publications use the same document handle shape:
+
+```csharp
+var health = CultMesh.DocumentFromPeerSnapshot<DaemonHealthDocument>(
+    "cultnet://daemon.local:3075",
+    "daemon:aetheria.health.v1",
+    verse);
+
+var latest = await health.LatestAsync();
+```
+
 The physical cache table remains SoA for CPU-local scans:
 
 ```csharp

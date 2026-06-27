@@ -108,6 +108,39 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Options for opening one typed document from a remote CultNet snapshot endpoint.
+    /// </summary>
+    public sealed class CultMeshPeerSnapshotDocumentOptions
+    {
+        /// <summary>Gets or sets the semantic document id. Defaults to the record key.</summary>
+        public string? DocumentId { get; set; }
+
+        /// <summary>Gets or sets the source id advertised by diagnostics. Defaults to the record key.</summary>
+        public string? SourceId { get; set; }
+
+        /// <summary>Gets or sets the route hint for the resulting handle.</summary>
+        public CultMeshRouteHint? RouteHint { get; set; }
+
+        /// <summary>Gets or sets the response timeout for each snapshot request.</summary>
+        public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>Gets or sets the connection timeout for endpoint-created clients.</summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>Gets or sets the polling interval for watch fallback.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+        /// <summary>Gets or sets the message id prefix used for snapshot requests.</summary>
+        public string? MessageIdPrefix { get; set; }
+
+        /// <summary>Gets or sets client security options for endpoint-created clients.</summary>
+        public ClientSecurityOptions? Security { get; set; }
+
+        /// <summary>Gets or sets a callback used to configure endpoint-created LiteNetLib clients.</summary>
+        public Action<Client>? ConfigureClient { get; set; }
+    }
+
+    /// <summary>
     /// A locally hosted CultMesh node over CultCache, CultNet transport, and the mesh database facade.
     /// </summary>
     public sealed class CultMeshNode : IDisposable
@@ -1166,6 +1199,144 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a typed document handle over one remote CultNet snapshot response provider.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            Func<CultMeshQueryContext, Task<CultNetSnapshotResponseRawMessage>> snapshot,
+            string recordKey,
+            CultMeshVerseContext context,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var resolvedOptions = options ?? new CultMeshPeerSnapshotDocumentOptions();
+            var documentId = string.IsNullOrWhiteSpace(resolvedOptions.DocumentId)
+                ? recordKey
+                : resolvedOptions.DocumentId!;
+            var route = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Network, "CultNet snapshot");
+            var sources = new[]
+            {
+                ProjectionSource(
+                    string.IsNullOrWhiteSpace(resolvedOptions.SourceId) ? recordKey : resolvedOptions.SourceId!,
+                    descriptor.SchemaId,
+                    "CultNet snapshot")
+            };
+            Func<CultMeshQueryContext, Task<TDocument>> latest = async queryContext =>
+                ReadDocumentFromSnapshotResponse<TDocument>(
+                    await snapshot(queryContext).ConfigureAwait(false),
+                    descriptor.SchemaId,
+                    recordKey);
+            var watch = PollingQueryWatcher<CultMeshDocumentQueryParameters, TDocument>(
+                async (_parameters, queryContext) => await latest(queryContext).ConfigureAwait(false),
+                new CultMeshPollingWatchOptions<TDocument>(resolvedOptions.PollInterval));
+
+            return Document<TDocument>(
+                documentId,
+                context,
+                latest,
+                queryContext => watch(CultMeshDocumentQueryParameters.Empty, queryContext),
+                sources,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one remote CultNet snapshot response provider.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            Func<CultMeshQueryContext, Task<CultNetSnapshotResponseRawMessage>> snapshot,
+            string recordKey,
+            CultMeshVerse verse,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromPeerSnapshot<TDocument>(snapshot, recordKey, verse.Context, options);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one remote CultNet schema endpoint.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            string endpoint,
+            string recordKey,
+            CultMeshVerseContext context,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            var resolvedOptions = options ?? new CultMeshPeerSnapshotDocumentOptions();
+            return DocumentFromPeerSnapshot<TDocument>(
+                queryContext => RequestPeerSnapshotAsync<TDocument>(
+                    () => CultNetSchemaClients.CreateForEndpoint(endpoint, resolvedOptions.Security, resolvedOptions.ConfigureClient),
+                    endpoint,
+                    recordKey,
+                    queryContext,
+                    resolvedOptions),
+                recordKey,
+                context,
+                resolvedOptions);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one remote CultNet schema endpoint.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            string endpoint,
+            string recordKey,
+            CultMeshVerse verse,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromPeerSnapshot<TDocument>(endpoint, recordKey, verse.Context, options);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one remote CultNet schema client factory.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            Func<ICultNetSchemaClient> createClient,
+            string endpoint,
+            string recordKey,
+            CultMeshVerseContext context,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (createClient == null) throw new ArgumentNullException(nameof(createClient));
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            var resolvedOptions = options ?? new CultMeshPeerSnapshotDocumentOptions();
+            return DocumentFromPeerSnapshot<TDocument>(
+                queryContext => RequestPeerSnapshotAsync<TDocument>(
+                    createClient,
+                    endpoint,
+                    recordKey,
+                    queryContext,
+                    resolvedOptions),
+                recordKey,
+                context,
+                resolvedOptions);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one remote CultNet schema client factory.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromPeerSnapshot<TDocument>(
+            Func<ICultNetSchemaClient> createClient,
+            string endpoint,
+            string recordKey,
+            CultMeshVerse verse,
+            CultMeshPeerSnapshotDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromPeerSnapshot<TDocument>(createClient, endpoint, recordKey, verse.Context, options);
+        }
+
+        /// <summary>
         /// Creates a typed document handle directly over one CultMesh node database record.
         /// </summary>
         public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
@@ -1637,6 +1808,116 @@ namespace GameCult.Mesh
                 var subscription = watcher.Observable.Subscribe(observer);
                 return new CultMeshCompositeDisposable(subscription, watcher);
             });
+        }
+
+        private static async Task<CultNetSnapshotResponseRawMessage> RequestPeerSnapshotAsync<TDocument>(
+            Func<ICultNetSchemaClient> createClient,
+            string endpoint,
+            string recordKey,
+            CultMeshQueryContext context,
+            CultMeshPeerSnapshotDocumentOptions options)
+            where TDocument : class
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var messageId = CreateSnapshotMessageId(options, context);
+            var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var client = createClient();
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                {
+                    completion.TrySetResult(response);
+                }
+            });
+            client.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+
+            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+            client.Connect(host, port);
+            await WaitForSchemaClientConnectionAsync(client, endpoint, options.ConnectTimeout).ConfigureAwait(false);
+            client.SendCultNet(new CultNetSnapshotRequestMessage
+            {
+                MessageId = messageId,
+                SchemaIds = new[] { descriptor.SchemaId },
+                RecordKeys = new[] { recordKey }
+            });
+
+            return await WaitForPeerSnapshotResponseAsync(completion.Task, endpoint, options.ResponseTimeout)
+                .ConfigureAwait(false);
+        }
+
+        private static string CreateSnapshotMessageId(
+            CultMeshPeerSnapshotDocumentOptions options,
+            CultMeshQueryContext context)
+        {
+            var prefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
+                ? $"cultmesh:{context.RuntimeId}:snapshot"
+                : options.MessageIdPrefix!;
+            return $"{prefix}:{Guid.NewGuid():N}";
+        }
+
+        private static async Task WaitForSchemaClientConnectionAsync(
+            ICultNetSchemaClient client,
+            string endpoint,
+            TimeSpan timeout)
+        {
+            var deadline = DateTimeOffset.UtcNow + timeout;
+            while (!client.Connected)
+            {
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"Timed out connecting to CultNet snapshot endpoint {endpoint}.");
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+            }
+        }
+
+        private static async Task<CultNetSnapshotResponseRawMessage> WaitForPeerSnapshotResponseAsync(
+            Task<CultNetSnapshotResponseRawMessage> responseTask,
+            string endpoint,
+            TimeSpan timeout)
+        {
+            var timeoutTask = Task.Delay(timeout);
+            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                throw new TimeoutException($"Timed out waiting for CultNet snapshot response from {endpoint}.");
+            }
+
+            return await responseTask.ConfigureAwait(false);
+        }
+
+        private static TDocument ReadDocumentFromSnapshotResponse<TDocument>(
+            CultNetSnapshotResponseRawMessage response,
+            string schemaId,
+            string recordKey)
+            where TDocument : class
+        {
+            if (response == null) throw new ArgumentNullException(nameof(response));
+            var record = response.Documents.FirstOrDefault(candidate =>
+                    string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) &&
+                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal))
+                ?? response.Documents.FirstOrDefault(candidate =>
+                    string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal))
+                ?? response.Documents.FirstOrDefault(candidate =>
+                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal));
+            if (record == null)
+            {
+                throw new InvalidOperationException(
+                    $"CultNet snapshot response '{response.MessageId}' did not contain schema '{schemaId}' record '{recordKey}'.");
+            }
+
+            if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{record.PayloadEncoding}\".");
+            }
+
+            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(
+                typeof(TDocument),
+                record.Payload);
         }
 
         /// <summary>

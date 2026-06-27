@@ -273,6 +273,21 @@ using var subscription = cockpit.Watch(next => RenderCockpit(next));
 var daemonAlias = cockpit.AsSchemaAlias<DaemonCockpitState>();
 ```
 
+Remote CultNet snapshots use the same document handle surface. The caller names
+the endpoint, record key, and typed document; CultMesh owns the snapshot request
+id, response filtering, raw MessagePack payload decode, route metadata, and
+polling watch fallback:
+
+```csharp
+var remoteHealth = CultMesh.DocumentFromPeerSnapshot<DaemonHealthDocument>(
+    "cultnet://daemon.local:3075",
+    "daemon:aetheria.health.v1",
+    verse);
+
+var health = await remoteHealth.LatestAsync();
+var uiHealth = remoteHealth.AsSchemaAlias<DaemonHealthUiDocument>();
+```
+
 A domain facade can collect handles into one schema-aware catalog:
 
 ```csharp
@@ -346,11 +361,12 @@ const health = await remoteHealth.latest();
 ```
 
 Projected, remote, shared-memory, IPC, WASM, and local-cache documents all use
-the same TS handle contract. The caller names the typed document or collection
-it wants; the handle owns route defaults, snapshot reads, reactive watches,
-schema alias validation, and replacement when the backing source is mutable.
-Generated Aetheria and Ymir facades should bind those handles to a Verse once
-and keep transport, quorum, and cache mechanics behind CultMesh.
+the same C# and TS handle contract. The caller names the typed document or
+collection it wants; the handle owns route defaults, snapshot reads, reactive
+watches, schema alias validation, prediction submission, and replacement when
+the backing source supports those mutations. Generated Aetheria and Ymir
+facades should bind those handles to a Verse once and keep transport, quorum,
+and cache mechanics behind CultMesh.
 
 Native view descriptors can name unmanaged columns without hand-entered byte
 sizes:

@@ -849,6 +849,50 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments()
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:remote");
+        await cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "remote-snapshot",
+            Revision = 9
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
+            .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+
+        var handle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
+            () => new MeshSnapshotSchemaClient(request =>
+            {
+                requests.Add(request);
+                return registry.CreateRawSnapshotResponse(cache, request.MessageId, request);
+            }),
+            "cultnet://snapshot.test:3075",
+            key.Value,
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            new CultMeshPeerSnapshotDocumentOptions
+            {
+                PollInterval = TimeSpan.FromMilliseconds(10),
+                MessageIdPrefix = "mesh-test-snapshot"
+            });
+        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
+        var catalog = CultMesh.Documents(handle);
+
+        var snapshot = await alias.LatestAsync();
+
+        snapshot.Text.Should().Be("remote-snapshot");
+        snapshot.Revision.Should().Be(9);
+        handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
+        handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be(key.Value);
+        requests.Should().ContainSingle();
+        requests[0].SchemaIds.Should().ContainSingle().Which.Should().Be(handle.SchemaId);
+        requests[0].RecordKeys.Should().ContainSingle().Which.Should().Be(key.Value);
+        (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("remote-snapshot");
+    }
+
+    [Test]
     public async Task CollectionHandle_ReadsAndWatchesDatabaseCollectionsByIndex()
     {
         var cache = new CultCache();
@@ -1536,5 +1580,60 @@ public sealed class MeshObjectsFacade
     public Task<string[]> VisibleWithinAsync(MeshViewportRequest request)
     {
         return _visibleObjects.ExecuteAsync(request);
+    }
+}
+
+internal sealed class MeshSnapshotSchemaClient : ICultNetSchemaClient
+{
+    private readonly Func<CultNetSnapshotRequestMessage, CultNetSnapshotResponseRawMessage> _respond;
+    private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshotHandlers = new();
+    private readonly List<Action<CultNetErrorMessage>> _errorHandlers = new();
+
+    public MeshSnapshotSchemaClient(
+        Func<CultNetSnapshotRequestMessage, CultNetSnapshotResponseRawMessage> respond)
+    {
+        _respond = respond;
+    }
+
+    public bool Connected { get; private set; }
+
+    public void Connect(string host, int port)
+    {
+        Connected = true;
+    }
+
+    public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+    {
+        if (message is not CultNetSnapshotRequestMessage request)
+        {
+            foreach (var handler in _errorHandlers)
+            {
+                handler(new CultNetErrorMessage { Error = $"Unexpected message {typeof(T).Name}." });
+            }
+
+            return;
+        }
+
+        var response = _respond(request);
+        foreach (var handler in _snapshotHandlers)
+        {
+            handler(response);
+        }
+    }
+
+    public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+    {
+        if (typeof(T) == typeof(CultNetSnapshotResponseRawMessage))
+        {
+            _snapshotHandlers.Add(message => callback((T)(object)message));
+        }
+        else if (typeof(T) == typeof(CultNetErrorMessage))
+        {
+            _errorHandlers.Add(message => callback((T)(object)message));
+        }
+    }
+
+    public void Dispose()
+    {
     }
 }
