@@ -87,6 +87,273 @@ whether a peer card is authorized for a requested role and shard. This keeps
 peer exchange separate from authority instead of letting contact gossip mutate
 the world.
 
+### Cross-Runtime Primitives
+
+These are the first shared primitives for the cozy typed Verse surface that
+projects like Aetheria should build on instead of inventing daemon-specific
+adapters:
+
+In CultMesh, a primitive can be more than a data shape. Useful state-access
+patterns should graduate into shared managed affordances: typed handles,
+generated binding metadata, route selection, authority context, watches,
+diagnostics, and native-view descriptors that let each runtime use the same
+semantic API. The domain package names the thing; CultMesh supplies the fast,
+portable machinery that makes it feel native.
+
+- `CultMeshStatePointer<T>` is a typed pointer to Verse state that UI surfaces,
+  tools, and clients can resolve or watch without string state-ref plumbing.
+  `CultMesh.StatePointer(...)` creates simple or context-aware pointers.
+  Pointers carry source descriptors and route hints, and
+  `CultMesh.DescribeStatePointer(...)` exposes that metadata for catalogs and
+  inspectors. Context-aware pointers can bind with `Bind(...)`,
+  `CultMesh.BindStatePointer(...)`, or `CultMeshVerse.BindStatePointer(...)`,
+  producing a Verse-bound handle that resolves and watches through the shared
+  Verse query context instead of forcing UI/tool code to rebuild route plumbing.
+- `CultMeshMutableStatePointer<T>` extends the same state pointer shape with a
+  typed `ReplaceAsync(...)` operation for authoritative document handles,
+  editor tools, and UI surfaces that intentionally write state. It keeps the
+  read/watch/replace trio in CultMesh instead of letting each domain package
+  invent private document wrappers. `CultMesh.MutableStatePointer(...)`,
+  `CultMesh.BindMutableStatePointer(...)`, and
+  `CultMeshVerse.BindMutableStatePointer(...)` preserve the same Verse context,
+  route hints, source diagnostics, and state-binding metadata as read-only
+  pointers.
+- `CultMeshStateRefResolver` is the shared bridge for UI/tool surfaces that
+  still receive state references from authored Eve/CultUI documents. Resolvers
+  are named, composable, carry source descriptors and route hints, and expose
+  diagnostics through `CultMesh.DescribeStateRefResolver(...)`. Legacy
+  `Func<string, string>` lowerers can use `AsFunc()` while generated surfaces
+  migrate to typed state pointers and binding descriptors.
+- `CultMeshStateBindingDescriptor` and `CultMeshStateBindingRecord` are the
+  UI/tool state edge. Live surfaces bind a component prop to a typed state
+  pointer; persistence and transport boundaries use
+  `CultMesh.StateBindingRecord(...)` instead of local pointer-field copies or
+  route parsers.
+- `CultMeshOperationHandle<TRequest, TResponse>` is a method-shaped operation
+  handle. `CultMeshOperationContext`, `CultMeshAuthorityClaim`, and
+  `CultMeshOperationReceipt` carry runtime identity, authority metadata,
+  route hints, idempotency, acceptance, and diagnostics.
+  `CultMesh.DescribeOperationHandle(...)` exposes the operation id for surface
+  catalogs and generated tooling. `Bind(...)`, `CultMesh.BindOperation(...)`,
+  and `CultMeshVerse.BindOperation(...)` produce Verse-bound handles so
+  generated domain facades can invoke without re-threading context plumbing at
+  every call site.
+- `CultMeshOperationBindingDescriptor`, `CultMeshOperationBindingRecord`,
+  `CultMeshOperationInvocationDescriptor`, `CultMeshOperationInvocationRecord`,
+  and `CultMeshOperationPayload` are the UI/tool operation edge. Live surfaces
+  carry typed operation identity and scalar payload reads; persistence and
+  transport boundaries use `CultMesh.OperationBindingRecord(...)`,
+  `CultMesh.OperationInvocationRecord(...)`, and
+  `CultMeshOperationPayload.ToDictionary()` instead of local route parsers or
+  ad-hoc payload maps.
+- `CultMeshQuerySurface<TParameters, TResult>` is a typed derived-state query
+  surface. Query execution can be local, remote, shared-memory, IPC, or
+  WASM-routed while preserving the same semantic API. Query surfaces can also
+  carry source descriptors, route hints, and reactive watches so tools and UI
+  runtimes can inspect what state a generated query depends on, which route it
+  prefers, and subscribe without inventing polling glue. Query surfaces can be
+  bound with `Bind(...)`, `CultMesh.BindQuery(...)`, or
+  `CultMeshVerse.BindQuery(...)`.
+- `CultMeshLiveFeed<TParameters, TResult>` is a typed live view surface for
+  composed client snapshots such as an RTS viewport plus selection, health, and
+  authority panels. It gives clients one `snapshot(...)` / `watch(...)` handle
+  while preserving source descriptors and route defaults. Live feeds can be
+  bound with `Bind(...)`, `CultMesh.BindLiveFeed(...)`, or
+  `CultMeshVerse.BindLiveFeed(...)`.
+- `CultMeshDocumentHandle<TDocument>` is the typed reactive document edge for
+  CultCache/CultNet state. It exposes document metadata, one coherent
+  `LatestAsync()` read, and a `Watch()` stream without forcing callers through
+  transport or projection layers. Same-schema CLR aliases can be requested with
+  `AsSchemaAlias<TAlias>()`; CultMesh verifies the shared
+  `[CultDocument(schemaName, schemaVersion)]` identity and uses the shared
+  CultCache MessagePack codec for conversion.
+- `CultMeshProjectionRecipe<TParameters, TResult>` names a reusable projection
+  from typed source state into derived state. It records source handles,
+  route hints, and projection execution, and can be exposed as a typed query
+  surface. Reactive projection recipes preserve their watcher when exposed as
+  query surfaces. When a caller supplies an automatic query context, the recipe
+  route becomes the default; explicit caller routes still win.
+- `CultMeshNativeSliceViewDescriptor` and `CultMeshNativeSliceColumn` describe
+  typed native views for co-located runtimes such as Unity Burst jobs, Rust
+  slices, or browser typed arrays. `CultMesh.DescribeNativeSliceView(...)`
+  exposes the full view id, schema id, row count, columns, route, native handle,
+  and dense stride for tools and adapters.
+- `CultMeshRouteHint`, `CultMeshRouteRecord`, and `CultMeshLocalityKind` name
+  locality choices without forcing application code to choose transport-specific
+  APIs. `CultMesh.RouteRecord(...)` is the shared way to flatten and rehydrate
+  route kind/description fields at persisted document, UI, tool, and transport
+  boundaries.
+
+These types are intentionally small handles and descriptors. Generated bindings
+and runtime adapters should compose them into domain sugar such as
+`verse.aetheria().entity(id).pilot().move(...)`,
+`zone.objects().visibleTo(units).within(rect)`, and
+`renderView.AsNativeArrays()`.
+
+The C# helpers already support the first layer of that shape:
+
+```csharp
+var context = CultMeshOperationContext
+    .ForRuntime("unity-raven")
+    .WithClaim(new CultMeshAuthorityClaim("pilot-control", shardId: "zone:local-rts"))
+    .WithRoute(new CultMeshRouteHint(CultMeshLocalityKind.InProcess));
+
+await moveOperation.InvokeAsync(moveRequest, context);
+```
+
+Generated facades should bind surfaces once to the correct Verse view:
+
+```csharp
+var queryVerse = verse.WithRoute(new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory));
+var commandVerse = verse.WithRoute(new CultMeshRouteHint(CultMeshLocalityKind.Network));
+
+var visibleObjects = queryVerse.BindQuery(objectsViewport);
+var movePilot = commandVerse.BindOperation(setMoveVector);
+
+var objects = await visibleObjects.ExecuteAsync(viewportRequest);
+await movePilot.InvokeAsync(moveRequest, idempotencyKey);
+```
+
+A single typed document can be surfaced the same way:
+
+```csharp
+var cockpit = CultMesh.Document(
+    "aetheria.ship.cockpit.current",
+    verse,
+    context => cockpitStore.LatestAsync(context),
+    context => cockpitStore.Watch(context),
+    sources: new[]
+    {
+        CultMesh.ProjectionSource(
+            "pilot:cockpit",
+            schemaId: "gamecult.aetheria.cockpit_state.v1")
+    });
+
+var current = await cockpit.LatestAsync();
+using var subscription = cockpit.Watch(next => RenderCockpit(next));
+
+var daemonAlias = cockpit.AsSchemaAlias<DaemonCockpitState>();
+```
+
+```ts
+const queryVerse = verse.withRoute("shared-memory", statePath);
+const commandVerse = verse
+  .withRoute("network", endpoint)
+  .withClaim("commander-control", { shardId: "aetheria.local" });
+
+const visibleObjects = CultMesh.bindQuery(queryVerse, queries.objectsViewport);
+const movePilot = CultMesh.bindOperation(commandVerse, operations.setMoveVector);
+
+const objects = await visibleObjects.execute(viewportRequest);
+await movePilot.invoke({ actorEntityKey, directionX: 1, directionY: 0 });
+```
+
+Native view descriptors can name unmanaged columns without hand-entered byte
+sizes:
+
+```csharp
+var view = new CultMeshNativeSliceViewDescriptor(
+    "aetheria.zone.render",
+    "gamecult.aetheria.render_body.v1",
+    rowCount,
+    new[]
+    {
+        CultMeshNativeSliceColumn.For<CultVec2>("position"),
+        CultMeshNativeSliceColumn.For<CultVec2>("velocity")
+    },
+    new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory));
+```
+
+Projection recipes give local projection code a shared shape before it becomes
+runtime-specific glue:
+
+```csharp
+var objectsViewport = CultMesh.ProjectionRecipe<ViewportRequest, ObjectsViewport>(
+    "aetheria.zone.objects.visible",
+    new[]
+    {
+        CultMesh.ProjectionSource("daemon:aetheria.frame.latest.v1", "gamecult.aetheria.daemon_frame.v1"),
+        CultMesh.ProjectionSource("daemon:aetheria.authority.policy.v1")
+    },
+    (request, context) => ProjectObjectsAsync(request, context),
+    new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory));
+
+var query = objectsViewport.AsQuerySurface();
+```
+
+Calling `query.ExecuteAsync(request, "unity-raven")` inherits the recipe's
+shared-memory route. Calling it with a `CultMeshQueryContext` that already names
+`Network`, `Ipc`, `Wasm`, or another route uses the caller's route instead.
+`query.Sources` and `query.RouteHint` preserve the recipe metadata for
+diagnostics, tooling, and UI/MCP surfaces. If the projection supports reactive
+execution, `query.Watch(...)` / `query.watch(...)` keeps the same projection
+route resolution, so a browser map tab, Unity renderer, Eve surface, or MCP
+tool can subscribe through the same typed query affordance it uses for one-shot
+reads.
+
+`CultMesh.DescribeQuerySurface(...)` and
+`CultMesh.DescribeProjectionRecipe(...)` expose the same metadata in a stable
+diagnostic shape for generated clients, Eve/CultUI inspectors, MCP tools, and
+surface catalogs. Tooling should ask CultMesh for these descriptors instead of
+copying source lists and route hints by convention.
+`CultMesh.DescribeSurface(...)` and `CultMesh.DescribeSurfaceCatalog(...)`
+collect query surfaces, projection recipes, live feeds, operations, state
+pointers, and native views into one inspectable catalog for a runtime or
+generated binding package. State pointers are advertised by pointer id; native
+slice views are advertised by view id and route while the full column layout
+stays in `CultMeshNativeSliceViewDescriptor`.
+Catalog diagnostics support exact id lookup and kind filtering so tools can
+discover, for example, every operation or native view without local scan
+conventions. `CultMesh.DescribeSurfaceCatalogIndex(...)` / TS
+`CultMesh.surfaceCatalogIndex(...)` promotes that grouping into a shared
+diagnostic shape with `queries`, `projectionRecipes`, `liveFeeds`,
+`operations`, `statePointers`, and `nativeSliceViews`, so generated bindings
+and tools can ask for the semantic bucket they need without copying catalog
+scan logic.
+
+Live feeds compose several query surfaces into one client-facing snapshot
+without making the UI own refresh loops:
+
+```csharp
+var viewportFeed = CultMesh.LiveFeed<ViewportRequest, RtsViewportSnapshot>(
+    "aetheria.rts.viewport.feed",
+    (request, context) => SnapshotViewportAsync(request, context),
+    (request, context) => WatchViewport(request, context),
+    new[]
+    {
+        CultMesh.ProjectionSource("daemon:aetheria.frame.latest.v1"),
+        CultMesh.ProjectionSource("daemon:aetheria.health.latest.v1")
+    },
+    new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory));
+
+var feedDiagnostics = CultMesh.DescribeLiveFeed(viewportFeed);
+```
+
+When a runtime has a snapshot path before it has native reactive transport,
+`CultMesh.PollingQueryWatcher(...)` provides a disposable watch adapter:
+
+```csharp
+var feed = CultMesh.LiveFeed<ViewportRequest, RtsViewportSnapshot>(
+    "aetheria.rts.viewport.feed",
+    SnapshotViewportAsync,
+    CultMesh.PollingQueryWatcher<ViewportRequest, RtsViewportSnapshot>(
+        SnapshotViewportAsync,
+        new CultMeshPollingWatchOptions<RtsViewportSnapshot>(
+            TimeSpan.FromMilliseconds(50))));
+```
+
+The polling adapter is intentionally a bridge primitive: application UI code
+still receives a typed `Watch(...)` handle, and the sampling loop can later be
+replaced by shared-memory, IPC, network, or WASM-native reactivity without
+changing renderer call sites.
+
+The staged roadmap for growing these handles into the cross-runtime developer
+experience lives in `docs/cross-runtime-primitives-roadmap.md`. When a project
+discovers a reusable state-ref, operation, query, projection, authority, watch,
+surface-binding, schema-generation, routing, diagnostic, or native-slab
+abstraction, it should graduate into that roadmap and then into the shared
+CultMesh/CultLib layer instead of remaining a private bridge.
+
 ### RUDP Helpers
 
 `CultMesh.ParseRudpEndpoint(...)`, `CreateRudpServer(...)`,

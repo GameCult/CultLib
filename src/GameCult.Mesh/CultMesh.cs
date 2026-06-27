@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -295,6 +296,796 @@ namespace GameCult.Mesh
         public static CultMeshStreamCatalog CreateStreamCatalog()
         {
             return new CultMeshStreamCatalog();
+        }
+
+        /// <summary>
+        /// Creates a managed Verse context for generated domain sugar.
+        /// </summary>
+        public static CultMeshVerse Verse(
+            string verseId,
+            string runtimeId,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshAuthorityClaim>? claims = null)
+        {
+            return new CultMeshVerse(new CultMeshVerseContext(verseId, runtimeId, routeHint, claims));
+        }
+
+        /// <summary>
+        /// Creates a managed Verse context for generated domain sugar.
+        /// </summary>
+        public static Task<CultMeshVerse> ConnectVerseAsync(
+            string verseId,
+            string runtimeId,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshAuthorityClaim>? claims = null)
+        {
+            return Task.FromResult(Verse(verseId, runtimeId, routeHint, claims));
+        }
+
+        /// <summary>
+        /// Starts a fluent typed operation context for one runtime.
+        /// </summary>
+        public static CultMeshOperationContextBuilder OperationContextFor(string runtimeId)
+        {
+            return new CultMeshOperationContextBuilder(runtimeId);
+        }
+
+        /// <summary>
+        /// Starts a fluent typed query context for one runtime.
+        /// </summary>
+        public static CultMeshQueryContextBuilder QueryContextFor(string runtimeId)
+        {
+            return new CultMeshQueryContextBuilder(runtimeId);
+        }
+
+        /// <summary>
+        /// Binds a typed operation handle to a Verse context.
+        /// </summary>
+        public static CultMeshBoundOperationHandle<TRequest, TResponse> BindOperation<TRequest, TResponse>(
+            CultMeshVerseContext context,
+            CultMeshOperationHandle<TRequest, TResponse> operation)
+        {
+            return new CultMeshBoundOperationHandle<TRequest, TResponse>(context, operation);
+        }
+
+        /// <summary>
+        /// Binds a typed operation handle to a Verse.
+        /// </summary>
+        public static CultMeshBoundOperationHandle<TRequest, TResponse> BindOperation<TRequest, TResponse>(
+            CultMeshVerse verse,
+            CultMeshOperationHandle<TRequest, TResponse> operation)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindOperation(verse.Context, operation);
+        }
+
+        /// <summary>
+        /// Binds a typed query surface to a Verse context.
+        /// </summary>
+        public static CultMeshBoundQuerySurface<TParameters, TResult> BindQuery<TParameters, TResult>(
+            CultMeshVerseContext context,
+            CultMeshQuerySurface<TParameters, TResult> query)
+        {
+            return new CultMeshBoundQuerySurface<TParameters, TResult>(context, query);
+        }
+
+        /// <summary>
+        /// Binds a typed query surface to a Verse.
+        /// </summary>
+        public static CultMeshBoundQuerySurface<TParameters, TResult> BindQuery<TParameters, TResult>(
+            CultMeshVerse verse,
+            CultMeshQuerySurface<TParameters, TResult> query)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindQuery(verse.Context, query);
+        }
+
+        /// <summary>
+        /// Binds a typed live feed to a Verse context.
+        /// </summary>
+        public static CultMeshBoundLiveFeed<TParameters, TResult> BindLiveFeed<TParameters, TResult>(
+            CultMeshVerseContext context,
+            CultMeshLiveFeed<TParameters, TResult> feed)
+        {
+            return new CultMeshBoundLiveFeed<TParameters, TResult>(context, feed);
+        }
+
+        /// <summary>
+        /// Binds a typed live feed to a Verse.
+        /// </summary>
+        public static CultMeshBoundLiveFeed<TParameters, TResult> BindLiveFeed<TParameters, TResult>(
+            CultMeshVerse verse,
+            CultMeshLiveFeed<TParameters, TResult> feed)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindLiveFeed(verse.Context, feed);
+        }
+
+        /// <summary>
+        /// Binds a typed document live feed to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerseContext context,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed)
+            where TDocument : class
+        {
+            return new CultMeshDocumentHandle<TDocument>(BindLiveFeed(context, feed));
+        }
+
+        /// <summary>
+        /// Binds a typed document live feed to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> BindDocument<TDocument>(
+            CultMeshVerse verse,
+            CultMeshLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindDocument(verse.Context, feed);
+        }
+
+        /// <summary>
+        /// Binds a typed state pointer to a Verse context.
+        /// </summary>
+        public static CultMeshBoundStatePointer<TValue> BindStatePointer<TValue>(
+            CultMeshVerseContext context,
+            CultMeshStatePointer<TValue> pointer)
+        {
+            return new CultMeshBoundStatePointer<TValue>(context, pointer);
+        }
+
+        /// <summary>
+        /// Binds a typed state pointer to a Verse.
+        /// </summary>
+        public static CultMeshBoundStatePointer<TValue> BindStatePointer<TValue>(
+            CultMeshVerse verse,
+            CultMeshStatePointer<TValue> pointer)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindStatePointer(verse.Context, pointer);
+        }
+
+        /// <summary>
+        /// Binds a mutable typed state pointer to a Verse context.
+        /// </summary>
+        public static CultMeshBoundMutableStatePointer<TValue> BindMutableStatePointer<TValue>(
+            CultMeshVerseContext context,
+            CultMeshMutableStatePointer<TValue> pointer)
+        {
+            return new CultMeshBoundMutableStatePointer<TValue>(context, pointer);
+        }
+
+        /// <summary>
+        /// Binds a mutable typed state pointer to a Verse.
+        /// </summary>
+        public static CultMeshBoundMutableStatePointer<TValue> BindMutableStatePointer<TValue>(
+            CultMeshVerse verse,
+            CultMeshMutableStatePointer<TValue> pointer)
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return BindMutableStatePointer(verse.Context, pointer);
+        }
+
+        /// <summary>
+        /// Creates a typed state pointer to Verse state.
+        /// </summary>
+        public static CultMeshStatePointer<TValue> StatePointer<TValue>(
+            string pointerId,
+            Func<Task<TValue?>> resolve,
+            Func<R3.Observable<TValue>> watch,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null)
+        {
+            return new CultMeshStatePointer<TValue>(
+                pointerId,
+                resolve,
+                watch,
+                routeHint,
+                sources);
+        }
+
+        /// <summary>
+        /// Creates a typed state pointer to Verse state that can resolve through a query context.
+        /// </summary>
+        public static CultMeshStatePointer<TValue> StatePointer<TValue>(
+            string pointerId,
+            Func<CultMeshQueryContext, Task<TValue?>> resolve,
+            Func<CultMeshQueryContext, R3.Observable<TValue>> watch,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null)
+        {
+            return new CultMeshStatePointer<TValue>(
+                pointerId,
+                resolve,
+                watch,
+                routeHint,
+                sources);
+        }
+
+        /// <summary>
+        /// Creates a mutable typed state pointer to Verse state.
+        /// </summary>
+        public static CultMeshMutableStatePointer<TValue> MutableStatePointer<TValue>(
+            string pointerId,
+            Func<Task<TValue?>> resolve,
+            Func<R3.Observable<TValue>> watch,
+            Func<TValue, Task> replace,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null)
+        {
+            return new CultMeshMutableStatePointer<TValue>(
+                pointerId,
+                resolve,
+                watch,
+                replace,
+                routeHint,
+                sources);
+        }
+
+        /// <summary>
+        /// Creates a mutable typed state pointer to Verse state that can operate through a query context.
+        /// </summary>
+        public static CultMeshMutableStatePointer<TValue> MutableStatePointer<TValue>(
+            string pointerId,
+            Func<CultMeshQueryContext, Task<TValue?>> resolve,
+            Func<CultMeshQueryContext, R3.Observable<TValue>> watch,
+            Func<CultMeshQueryContext, TValue, Task> replace,
+            CultMeshRouteHint? routeHint = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null)
+        {
+            return new CultMeshMutableStatePointer<TValue>(
+                pointerId,
+                resolve,
+                watch,
+                replace,
+                routeHint,
+                sources);
+        }
+
+        /// <summary>
+        /// Creates a typed projection source descriptor.
+        /// </summary>
+        public static CultMeshProjectionSource ProjectionSource(
+            string sourceId,
+            string? schemaId = null,
+            string? description = null)
+        {
+            return new CultMeshProjectionSource(sourceId, schemaId, description);
+        }
+
+        /// <summary>
+        /// Creates a named state-reference resolver for portable UI/tool surfaces.
+        /// </summary>
+        public static CultMeshStateRefResolver StateRefResolver(
+            string resolverId,
+            Func<string, string?> resolve,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            if (resolve == null) throw new ArgumentNullException(nameof(resolve));
+            return new CultMeshStateRefResolver(
+                resolverId,
+                (stateRef, _context) => resolve(stateRef),
+                sources,
+                routeHint);
+        }
+
+        /// <summary>
+        /// Creates a named state-reference resolver for portable UI/tool surfaces.
+        /// </summary>
+        public static CultMeshStateRefResolver StateRefResolver(
+            string resolverId,
+            Func<string, CultMeshQueryContext, string?> resolve,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            return new CultMeshStateRefResolver(resolverId, resolve, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Describes a state-reference resolver for catalogs and tools.
+        /// </summary>
+        public static CultMeshStateRefResolverDiagnostic DescribeStateRefResolver(
+            CultMeshStateRefResolver resolver)
+        {
+            if (resolver == null) throw new ArgumentNullException(nameof(resolver));
+            return new CultMeshStateRefResolverDiagnostic(
+                resolver.ResolverId,
+                resolver.RouteHint,
+                resolver.Sources);
+        }
+
+        /// <summary>
+        /// Creates a UI/tool binding descriptor from a component property to a typed state pointer.
+        /// </summary>
+        public static CultMeshStateBindingDescriptor StateBinding<TValue>(
+            string targetProp,
+            CultMeshStatePointer<TValue> pointer)
+        {
+            return CultMeshStateBindingDescriptor.FromPointer(targetProp, pointer);
+        }
+
+        /// <summary>
+        /// Creates a UI/tool binding descriptor from a component property to a mutable typed state pointer.
+        /// </summary>
+        public static CultMeshStateBindingDescriptor StateBinding<TValue>(
+            string targetProp,
+            CultMeshMutableStatePointer<TValue> pointer)
+        {
+            if (pointer == null) throw new ArgumentNullException(nameof(pointer));
+            return CultMeshStateBindingDescriptor.FromPointer(targetProp, pointer.AsStatePointer());
+        }
+
+        /// <summary>
+        /// Creates a UI/tool binding descriptor from a component property to a state pointer id.
+        /// </summary>
+        public static CultMeshStateBindingDescriptor StateBinding(
+            string targetProp,
+            string pointerId,
+            string? sourceId = null,
+            string? schemaId = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            return new CultMeshStateBindingDescriptor(targetProp, pointerId, sourceId, schemaId, routeHint);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly fields from a state binding descriptor.
+        /// </summary>
+        public static CultMeshStateBindingRecord StateBindingRecord(CultMeshStateBindingDescriptor? binding)
+        {
+            return CultMeshStateBindingRecord.FromBinding(binding);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly state binding fields directly.
+        /// </summary>
+        public static CultMeshStateBindingRecord StateBindingRecord(
+            string? targetProp,
+            string? pointerId,
+            string? sourceId = null,
+            string? schemaId = null,
+            string? routeKind = null,
+            string? routeDescription = null)
+        {
+            return new CultMeshStateBindingRecord(
+                targetProp,
+                pointerId,
+                sourceId,
+                schemaId,
+                routeKind,
+                routeDescription);
+        }
+
+        /// <summary>
+        /// Creates a UI/tool command binding descriptor from a typed operation handle.
+        /// </summary>
+        public static CultMeshOperationBindingDescriptor OperationBinding<TRequest, TResponse>(
+            CultMeshOperationHandle<TRequest, TResponse> operation,
+            string? label = null,
+            string? schemaId = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            return CultMeshOperationBindingDescriptor.FromOperation(operation, label, schemaId, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a UI/tool command binding descriptor from a typed operation id.
+        /// </summary>
+        public static CultMeshOperationBindingDescriptor OperationBinding(
+            string operationId,
+            string? label = null,
+            string? schemaId = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            return new CultMeshOperationBindingDescriptor(operationId, label, schemaId, routeHint);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly fields from an operation binding descriptor.
+        /// </summary>
+        public static CultMeshOperationBindingRecord OperationBindingRecord(
+            CultMeshOperationBindingDescriptor? binding)
+        {
+            return CultMeshOperationBindingRecord.FromBinding(binding);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly operation binding fields directly.
+        /// </summary>
+        public static CultMeshOperationBindingRecord OperationBindingRecord(
+            string? operationId,
+            string? label = null,
+            string? schemaId = null,
+            string? routeKind = null,
+            string? routeDescription = null)
+        {
+            return new CultMeshOperationBindingRecord(
+                operationId,
+                label,
+                schemaId,
+                routeKind,
+                routeDescription);
+        }
+
+        /// <summary>
+        /// Creates a concrete invocation descriptor from an advertised operation binding.
+        /// </summary>
+        public static CultMeshOperationInvocationDescriptor OperationInvocation(
+            CultMeshOperationBindingDescriptor binding,
+            string? idempotencyKey = null)
+        {
+            return CultMeshOperationInvocationDescriptor.FromBinding(binding, idempotencyKey);
+        }
+
+        /// <summary>
+        /// Creates a concrete invocation descriptor from a typed operation handle.
+        /// </summary>
+        public static CultMeshOperationInvocationDescriptor OperationInvocation<TRequest, TResponse>(
+            CultMeshOperationHandle<TRequest, TResponse> operation,
+            string? schemaId = null,
+            CultMeshRouteHint? routeHint = null,
+            string? idempotencyKey = null)
+        {
+            return CultMeshOperationInvocationDescriptor.FromOperation(
+                operation,
+                schemaId,
+                routeHint,
+                idempotencyKey);
+        }
+
+        /// <summary>
+        /// Creates a concrete invocation descriptor from a typed operation id.
+        /// </summary>
+        public static CultMeshOperationInvocationDescriptor OperationInvocation(
+            string operationId,
+            string? schemaId = null,
+            CultMeshRouteHint? routeHint = null,
+            string? idempotencyKey = null)
+        {
+            return new CultMeshOperationInvocationDescriptor(operationId, schemaId, routeHint, idempotencyKey);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly fields from a route hint.
+        /// </summary>
+        public static CultMeshRouteRecord RouteRecord(CultMeshRouteHint? routeHint)
+        {
+            return CultMeshRouteRecord.FromRoute(routeHint);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly route fields directly.
+        /// </summary>
+        public static CultMeshRouteRecord RouteRecord(string? kind, string? description = null)
+        {
+            return new CultMeshRouteRecord(kind, description);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly fields from a typed operation invocation.
+        /// </summary>
+        public static CultMeshOperationInvocationRecord OperationInvocationRecord(
+            CultMeshOperationInvocationDescriptor? invocation,
+            string? fallbackOperationId = null,
+            string? fallbackSchemaId = null,
+            CultMeshRouteHint? fallbackRouteHint = null,
+            string? fallbackIdempotencyKey = null)
+        {
+            return CultMeshOperationInvocationRecord.FromInvocation(
+                invocation,
+                fallbackOperationId,
+                fallbackSchemaId,
+                fallbackRouteHint,
+                fallbackIdempotencyKey);
+        }
+
+        /// <summary>
+        /// Creates transport-friendly operation invocation fields directly.
+        /// </summary>
+        public static CultMeshOperationInvocationRecord OperationInvocationRecord(
+            string? operationId,
+            string? schemaId = null,
+            string? routeKind = null,
+            string? routeDescription = null,
+            string? idempotencyKey = null)
+        {
+            return new CultMeshOperationInvocationRecord(
+                operationId,
+                schemaId,
+                routeKind,
+                routeDescription,
+                idempotencyKey);
+        }
+
+        /// <summary>
+        /// Creates an empty shared operation payload.
+        /// </summary>
+        public static CultMeshOperationPayload OperationPayload()
+        {
+            return CultMeshOperationPayload.Empty;
+        }
+
+        /// <summary>
+        /// Creates a shared operation payload from string-compatible fields.
+        /// </summary>
+        public static CultMeshOperationPayload OperationPayload(
+            IEnumerable<KeyValuePair<string, string>>? fields)
+        {
+            return CultMeshOperationPayload.FromStrings(fields);
+        }
+
+        /// <summary>
+        /// Creates a shared operation payload from key/value pairs.
+        /// </summary>
+        public static CultMeshOperationPayload OperationPayload(params (string Key, string Value)[] fields)
+        {
+            var pairs = fields?.Select(field => new KeyValuePair<string, string>(field.Key, field.Value));
+            return CultMeshOperationPayload.FromStrings(pairs);
+        }
+
+        /// <summary>
+        /// Creates a reusable projection recipe over typed source state.
+        /// </summary>
+        public static CultMeshProjectionRecipe<TParameters, TResult> ProjectionRecipe<TParameters, TResult>(
+            string projectionId,
+            IEnumerable<CultMeshProjectionSource> sources,
+            Func<TParameters, CultMeshQueryContext, Task<TResult>> project,
+            CultMeshRouteHint? routeHint = null,
+            Func<TParameters, CultMeshQueryContext, R3.Observable<TResult>>? watch = null)
+        {
+            return new CultMeshProjectionRecipe<TParameters, TResult>(
+                projectionId,
+                sources,
+                project,
+                routeHint,
+                watch);
+        }
+
+        /// <summary>
+        /// Creates a typed live feed surface for coherent client snapshots.
+        /// </summary>
+        public static CultMeshLiveFeed<TParameters, TResult> LiveFeed<TParameters, TResult>(
+            string feedId,
+            Func<TParameters, CultMeshQueryContext, Task<TResult>> snapshot,
+            Func<TParameters, CultMeshQueryContext, R3.Observable<TResult>>? watch = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+        {
+            return new CultMeshLiveFeed<TParameters, TResult>(
+                feedId,
+                snapshot,
+                watch,
+                sources,
+                routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle from snapshot/watch delegates and binds it to a Verse context.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerseContext context,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (latest == null) throw new ArgumentNullException(nameof(latest));
+            if (watch == null) throw new ArgumentNullException(nameof(watch));
+
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
+                documentId,
+                (_parameters, queryContext) => latest(queryContext),
+                (_parameters, queryContext) => watch(queryContext),
+                sources,
+                routeHint);
+            return BindDocument(context, feed);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle from snapshot/watch delegates and binds it to a Verse.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string documentId,
+            CultMeshVerse verse,
+            Func<CultMeshQueryContext, Task<TDocument>> latest,
+            Func<CultMeshQueryContext, R3.Observable<TDocument>> watch,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document(documentId, verse.Context, latest, watch, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Describes a typed live feed surface for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshLiveFeedDiagnostic DescribeLiveFeed<TParameters, TResult>(
+            CultMeshLiveFeed<TParameters, TResult> feed)
+        {
+            if (feed == null) throw new ArgumentNullException(nameof(feed));
+            return new CultMeshLiveFeedDiagnostic(feed.FeedId, feed.RouteHint, feed.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed query surface for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshQuerySurfaceDiagnostic DescribeQuerySurface<TParameters, TResult>(
+            CultMeshQuerySurface<TParameters, TResult> query)
+        {
+            if (query == null) throw new ArgumentNullException(nameof(query));
+            return new CultMeshQuerySurfaceDiagnostic(query.QueryId, query.RouteHint, query.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed operation handle for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshOperationHandleDiagnostic DescribeOperationHandle<TRequest, TResponse>(
+            CultMeshOperationHandle<TRequest, TResponse> operation)
+        {
+            if (operation == null) throw new ArgumentNullException(nameof(operation));
+            return new CultMeshOperationHandleDiagnostic(operation.OperationId);
+        }
+
+        /// <summary>
+        /// Describes a typed state pointer for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshStatePointerDiagnostic DescribeStatePointer<TValue>(
+            CultMeshStatePointer<TValue> pointer)
+        {
+            if (pointer == null) throw new ArgumentNullException(nameof(pointer));
+            return new CultMeshStatePointerDiagnostic(pointer.PointerId, pointer.RouteHint, pointer.Sources);
+        }
+
+        /// <summary>
+        /// Describes a mutable typed state pointer for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshStatePointerDiagnostic DescribeStatePointer<TValue>(
+            CultMeshMutableStatePointer<TValue> pointer)
+        {
+            if (pointer == null) throw new ArgumentNullException(nameof(pointer));
+            return new CultMeshStatePointerDiagnostic(pointer.PointerId, pointer.RouteHint, pointer.Sources);
+        }
+
+        /// <summary>
+        /// Describes a native slice view for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshNativeSliceViewDiagnostic DescribeNativeSliceView(
+            CultMeshNativeSliceViewDescriptor view)
+        {
+            return new CultMeshNativeSliceViewDiagnostic(view);
+        }
+
+        /// <summary>
+        /// Describes a typed projection recipe for tooling, UI, and diagnostics.
+        /// </summary>
+        public static CultMeshProjectionRecipeDiagnostic DescribeProjectionRecipe<TParameters, TResult>(
+            CultMeshProjectionRecipe<TParameters, TResult> recipe)
+        {
+            if (recipe == null) throw new ArgumentNullException(nameof(recipe));
+            return new CultMeshProjectionRecipeDiagnostic(recipe.ProjectionId, recipe.RouteHint, recipe.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed query surface as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TParameters, TResult>(
+            CultMeshQuerySurface<TParameters, TResult> query)
+        {
+            if (query == null) throw new ArgumentNullException(nameof(query));
+            return new CultMeshSurfaceDiagnostic(CultMeshSurfaceKind.Query, query.QueryId, query.RouteHint, query.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed operation handle as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TRequest, TResponse>(
+            CultMeshOperationHandle<TRequest, TResponse> operation)
+        {
+            if (operation == null) throw new ArgumentNullException(nameof(operation));
+            return new CultMeshSurfaceDiagnostic(CultMeshSurfaceKind.Operation, operation.OperationId);
+        }
+
+        /// <summary>
+        /// Describes a typed projection recipe as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TParameters, TResult>(
+            CultMeshProjectionRecipe<TParameters, TResult> recipe)
+        {
+            if (recipe == null) throw new ArgumentNullException(nameof(recipe));
+            return new CultMeshSurfaceDiagnostic(CultMeshSurfaceKind.ProjectionRecipe, recipe.ProjectionId, recipe.RouteHint, recipe.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed live feed as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TParameters, TResult>(
+            CultMeshLiveFeed<TParameters, TResult> feed)
+        {
+            if (feed == null) throw new ArgumentNullException(nameof(feed));
+            return new CultMeshSurfaceDiagnostic(CultMeshSurfaceKind.LiveFeed, feed.FeedId, feed.RouteHint, feed.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed state pointer as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TValue>(
+            CultMeshStatePointer<TValue> pointer)
+        {
+            if (pointer == null) throw new ArgumentNullException(nameof(pointer));
+            return new CultMeshSurfaceDiagnostic(
+                CultMeshSurfaceKind.StatePointer,
+                pointer.PointerId,
+                pointer.RouteHint,
+                pointer.Sources);
+        }
+
+        /// <summary>
+        /// Describes a mutable typed state pointer as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TValue>(
+            CultMeshMutableStatePointer<TValue> pointer)
+        {
+            if (pointer == null) throw new ArgumentNullException(nameof(pointer));
+            return new CultMeshSurfaceDiagnostic(
+                CultMeshSurfaceKind.StatePointer,
+                pointer.PointerId,
+                pointer.RouteHint,
+                pointer.Sources);
+        }
+
+        /// <summary>
+        /// Describes a native slice view as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface(
+            CultMeshNativeSliceViewDescriptor view)
+        {
+            if (view == null) throw new ArgumentNullException(nameof(view));
+            return new CultMeshSurfaceDiagnostic(CultMeshSurfaceKind.NativeSliceView, view.ViewId, view.Route);
+        }
+
+        /// <summary>
+        /// Creates a typed surface catalog diagnostic for tooling, UI, and generated bindings.
+        /// </summary>
+        public static CultMeshSurfaceCatalogDiagnostic DescribeSurfaceCatalog(
+            string catalogId,
+            IEnumerable<CultMeshSurfaceDiagnostic> surfaces)
+        {
+            return new CultMeshSurfaceCatalogDiagnostic(catalogId, surfaces);
+        }
+
+        /// <summary>
+        /// Creates a kind-indexed surface catalog diagnostic for generated bindings, UI, and tools.
+        /// </summary>
+        public static CultMeshSurfaceCatalogIndexDiagnostic DescribeSurfaceCatalogIndex(
+            CultMeshSurfaceCatalogDiagnostic catalog)
+        {
+            if (catalog == null) throw new ArgumentNullException(nameof(catalog));
+            return catalog.IndexByKind();
+        }
+
+        /// <summary>
+        /// Creates a timer-backed query watcher for runtimes that do not yet have native reactive transport.
+        /// </summary>
+        public static Func<TParameters, CultMeshQueryContext, R3.Observable<TResult>> PollingQueryWatcher<TParameters, TResult>(
+            Func<TParameters, CultMeshQueryContext, Task<TResult>> sample,
+            CultMeshPollingWatchOptions<TResult>? options = null)
+        {
+            if (sample == null) throw new ArgumentNullException(nameof(sample));
+            var resolvedOptions = options ?? new CultMeshPollingWatchOptions<TResult>();
+            return (parameters, context) => R3.Observable.Create<TResult>(observer =>
+            {
+                var watcher = new CultMeshPollingWatcher<TParameters, TResult>(
+                    sample,
+                    parameters,
+                    context,
+                    resolvedOptions);
+                var subscription = watcher.Observable.Subscribe(observer);
+                return new CultMeshCompositeDisposable(subscription, watcher);
+            });
         }
 
         /// <summary>

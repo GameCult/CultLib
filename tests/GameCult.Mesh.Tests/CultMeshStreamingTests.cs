@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
+using MessagePack;
 using NUnit.Framework;
 using R3;
 
@@ -10,6 +13,833 @@ namespace GameCult.Mesh.Tests;
 
 public sealed class CultMeshStreamingTests
 {
+    [Test]
+    public async Task TypedOperationHandle_CarriesAuthorityAndRouteContext()
+    {
+        var handle = new CultMeshOperationHandle<MeshMoveRequest, CultMeshOperationReceipt>(
+            "aetheria.entity.pilot.move",
+            (request, context) => Task.FromResult(new CultMeshOperationReceipt(
+                "aetheria.entity.pilot.move",
+                accepted: request.EntityId == 7 &&
+                          context.Claims.Count == 1 &&
+                          context.Claims[0].Role == "pilot-control" &&
+                          context.RouteHint.Kind == CultMeshLocalityKind.InProcess,
+                context.RouteHint)));
+
+        var receipt = await handle.InvokeAsync(
+            new MeshMoveRequest(7, 1, -1),
+            CultMeshOperationContext
+                .ForRuntime("unity-raven")
+                .WithClaim(new CultMeshAuthorityClaim("pilot-control", shardId: "zone:local-rts"))
+                .WithRoute(new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "co-located daemon"))
+                .WithIdempotencyKey("move-7-001"));
+
+        receipt.Accepted.Should().BeTrue();
+        receipt.Route.Kind.Should().Be(CultMeshLocalityKind.InProcess);
+
+        var diagnostic = CultMesh.DescribeOperationHandle(handle);
+        diagnostic.OperationId.Should().Be("aetheria.entity.pilot.move");
+    }
+
+    [Test]
+    public void ContextBuilders_MakeTypedHandleCallsReadLikeVerseOperations()
+    {
+        var operationContext = CultMesh.OperationContextFor("unity-raven")
+            .Claim("pilot-control", shardId: "zone:local-rts", leaseId: "lease:raven")
+            .Route(CultMeshLocalityKind.SharedMemory, "co-located daemon")
+            .Idempotency("move-7-001")
+            .Build();
+
+        operationContext.RuntimeId.Should().Be("unity-raven");
+        operationContext.Claims.Should().ContainSingle();
+        operationContext.Claims[0].Role.Should().Be("pilot-control");
+        operationContext.Claims[0].ShardId.Should().Be("zone:local-rts");
+        operationContext.Claims[0].LeaseId.Should().Be("lease:raven");
+        operationContext.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        operationContext.IdempotencyKey.Should().Be("move-7-001");
+
+        var queryContext = CultMesh.QueryContextFor("browser-starfire")
+            .Route(CultMeshLocalityKind.Wasm, "browser-local projection")
+            .Build();
+
+        queryContext.RuntimeId.Should().Be("browser-starfire");
+        queryContext.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Wasm);
+        queryContext.RouteHint.Description.Should().Be("browser-local projection");
+    }
+
+    [Test]
+    public async Task VerseContext_LetsGeneratedDomainSugarUseSharedTypedContexts()
+    {
+        var verse = await CultMesh.ConnectVerseAsync(
+            "starbridge",
+            "unity-raven",
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located Verse"),
+            new[] { new CultMeshAuthorityClaim("pilot-control", shardId: "zone:raven", leaseId: "lease:raven") });
+        var commandVerse = verse.WithRoute(new CultMeshRouteHint(CultMeshLocalityKind.Network, "remote command route"));
+
+        var aetheria = commandVerse.Use(context => new MeshAetheriaDomain(context));
+        var receipt = await aetheria.Entity(7).Pilot.MoveAsync(new MeshVec2(1, 0), "move:raven:1");
+        var viewport = await aetheria.Zone("zone:raven").Objects.VisibleWithinAsync(new MeshViewportRequest(-16, 16));
+
+        verse.VerseId.Should().Be("starbridge");
+        verse.RuntimeId.Should().Be("unity-raven");
+        verse.QueryContext().RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        commandVerse.OperationContext("move:raven:2").RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
+        commandVerse.OperationContext("move:raven:2").IdempotencyKey.Should().Be("move:raven:2");
+        receipt.OperationId.Should().Be("aetheria.entity.pilot.move");
+        receipt.Accepted.Should().BeTrue();
+        receipt.Route.Kind.Should().Be(CultMeshLocalityKind.Network);
+        viewport.Should().Equal("unity-raven:zone:raven:-16:16:Network");
+    }
+
+    [Test]
+    public async Task QuerySurfaceAndStatePointer_ExposeTypedReactiveState()
+    {
+        var query = new CultMeshQuerySurface<MeshViewportRequest, string[]>(
+            "aetheria.zone.objects.visible",
+            (request, context) => Task.FromResult(new[] { $"{context.RuntimeId}:{request.MinX}:{request.MaxX}" }));
+
+        var queryResult = await query.ExecuteAsync(
+            new MeshViewportRequest(-8, 8),
+            CultMeshQueryContext.ForRuntime("browser-starfire"));
+
+        queryResult.Should().Equal("browser-starfire:-8:8");
+
+        var queryDiagnostic = CultMesh.DescribeQuerySurface(query);
+        queryDiagnostic.QueryId.Should().Be("aetheria.zone.objects.visible");
+        queryDiagnostic.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Automatic);
+        queryDiagnostic.Sources.Should().BeEmpty();
+
+        var subject = new Subject<string>();
+        var pointer = CultMesh.StatePointer(
+            "aetheria.selection.current",
+            () => Task.FromResult("entity:station:0"),
+            () => subject,
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located selection cache"),
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.selection.current.v1",
+                    schemaId: "gamecult.aetheria.selection.v1")
+            });
+
+        string observed = null!;
+        using var subscription = pointer.Watch().Subscribe(value => observed = value);
+
+        (await pointer.ResolveAsync()).Should().Be("entity:station:0");
+        subject.OnNext("entity:pawn:7");
+        observed.Should().Be("entity:pawn:7");
+
+        var pointerDiagnostic = CultMesh.DescribeStatePointer(pointer);
+        pointerDiagnostic.PointerId.Should().Be("aetheria.selection.current");
+        pointerDiagnostic.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        pointerDiagnostic.Sources.Should().ContainSingle().Which.SchemaId.Should().Be("gamecult.aetheria.selection.v1");
+    }
+
+    [Test]
+    public async Task StatePointer_CanBindToVerseContextForUiAndTools()
+    {
+        var subject = new Subject<string>();
+        var pointer = CultMesh.StatePointer(
+            "aetheria.daemon.frame.latest",
+            context => Task.FromResult($"{context.RuntimeId}:{context.RouteHint.Kind}"),
+            context => subject.Select(value => $"{context.RuntimeId}:{value}:{context.RouteHint.Kind}"),
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located daemon frame"),
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.frame.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_frame.v1")
+            });
+
+        var verse = CultMesh.Verse(
+            "aetheria.local",
+            "bifrost-tool",
+            new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "tool bridge"));
+        var bound = verse.BindStatePointer(pointer);
+
+        (await bound.ResolveAsync()).Should().Be("bifrost-tool:Ipc");
+
+        string observed = null!;
+        using var subscription = bound.Watch().Subscribe(value => observed = value);
+        subject.OnNext("frame:12");
+
+        bound.PointerId.Should().Be("aetheria.daemon.frame.latest");
+        bound.Sources.Should().ContainSingle().Which.SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+        observed.Should().Be("bifrost-tool:frame:12:Ipc");
+    }
+
+    [Test]
+    public async Task MutableStatePointer_HoistsReadWatchReplaceDocumentHandles()
+    {
+        var subject = new Subject<string>();
+        var stored = "frame:0";
+        var observedContexts = new List<string>();
+        var pointer = CultMesh.MutableStatePointer(
+            "aetheria.daemon.frame.latest",
+            context =>
+            {
+                observedContexts.Add($"read:{context.RuntimeId}:{context.RouteHint.Kind}");
+                return Task.FromResult<string?>(stored);
+            },
+            context => subject.Select(value => $"{context.RuntimeId}:{value}:{context.RouteHint.Kind}"),
+            (context, value) =>
+            {
+                observedContexts.Add($"replace:{context.RuntimeId}:{context.RouteHint.Kind}");
+                stored = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located daemon frame"),
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.frame.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_frame.v1")
+            });
+
+        var verse = CultMesh.Verse(
+            "aetheria.local",
+            "unity-raven",
+            new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "tool bridge"));
+        var bound = verse.BindMutableStatePointer(pointer);
+
+        string observed = null!;
+        using var subscription = bound.Watch().Subscribe(value => observed = value);
+
+        (await bound.ReadAsync()).Should().Be("frame:0");
+        await bound.ReplaceAsync("frame:1");
+
+        stored.Should().Be("frame:1");
+        observed.Should().Be("unity-raven:frame:1:Ipc");
+        observedContexts.Should().Equal("read:unity-raven:Ipc", "replace:unity-raven:Ipc");
+
+        var diagnostic = CultMesh.DescribeStatePointer(pointer);
+        diagnostic.PointerId.Should().Be("aetheria.daemon.frame.latest");
+        diagnostic.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+
+        var binding = CultMesh.StateBinding("frame", pointer);
+        binding.PointerId.Should().Be("aetheria.daemon.frame.latest");
+        binding.SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+    }
+
+    [Test]
+    public void StateBindingDescriptor_BindsUiPropsToTypedStatePointers()
+    {
+        var pointer = CultMesh.StatePointer(
+            "aetheria.selection.current",
+            () => Task.FromResult("entity:station:0"),
+            () => new Subject<string>(),
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located selection cache"),
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.selection.current.v1",
+                    schemaId: "gamecult.aetheria.selection.v1")
+            });
+
+        var binding = CultMesh.StateBinding("value", pointer);
+        var explicitBinding = CultMesh.StateBinding(
+            "label",
+            "aetheria.selection.label",
+            sourceId: "daemon:aetheria.selection.label.v1",
+            schemaId: "gamecult.aetheria.selection_label.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "tool bridge"));
+
+        binding.TargetProp.Should().Be("value");
+        binding.PointerId.Should().Be("aetheria.selection.current");
+        binding.SourceId.Should().Be("daemon:aetheria.selection.current.v1");
+        binding.SchemaId.Should().Be("gamecult.aetheria.selection.v1");
+        binding.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        binding.RouteHint.Description.Should().Be("co-located selection cache");
+
+        explicitBinding.TargetProp.Should().Be("label");
+        explicitBinding.PointerId.Should().Be("aetheria.selection.label");
+        explicitBinding.SourceId.Should().Be("daemon:aetheria.selection.label.v1");
+        explicitBinding.SchemaId.Should().Be("gamecult.aetheria.selection_label.v1");
+        explicitBinding.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Ipc);
+    }
+
+    [Test]
+    public void StateBindingRecord_FlattensAndRehydratesPointerBindingFields()
+    {
+        var binding = CultMesh.StateBinding(
+            "status",
+            "aetheria.current.status",
+            sourceId: "daemon:aetheria.frame.latest.v1",
+            schemaId: "gamecult.aetheria.daemon_frame.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located frame slab"));
+
+        var record = CultMesh.StateBindingRecord(binding);
+        record.TargetProp.Should().Be("status");
+        record.PointerId.Should().Be("aetheria.current.status");
+        record.SourceId.Should().Be("daemon:aetheria.frame.latest.v1");
+        record.SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+        record.RouteKind.Should().Be(nameof(CultMeshLocalityKind.SharedMemory));
+        record.RouteDescription.Should().Be("co-located frame slab");
+
+        var fromTypescript = CultMesh.StateBindingRecord(
+            "value",
+            "aetheria.selection.current",
+            "daemon:aetheria.selection.current.v1",
+            "gamecult.aetheria.selection.v1",
+            "shared-memory",
+            "browser-adjacent cache").ToBinding();
+
+        fromTypescript.TargetProp.Should().Be("value");
+        fromTypescript.PointerId.Should().Be("aetheria.selection.current");
+        fromTypescript.SourceId.Should().Be("daemon:aetheria.selection.current.v1");
+        fromTypescript.SchemaId.Should().Be("gamecult.aetheria.selection.v1");
+        fromTypescript.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        fromTypescript.RouteHint.Description.Should().Be("browser-adjacent cache");
+    }
+
+    [Test]
+    public void OperationBindingDescriptor_BindsUiCommandsToTypedOperations()
+    {
+        var operation = new CultMeshOperationHandle<MeshMoveRequest, CultMeshOperationReceipt>(
+            "aetheria.entity.pilot.move",
+            (_request, _context) => Task.FromResult(new CultMeshOperationReceipt("aetheria.entity.pilot.move", true)));
+
+        var binding = CultMesh.OperationBinding(
+            operation,
+            label: "Move",
+            schemaId: "gamecult.aetheria.pilot_move.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "remote Verse peer"));
+        var explicitBinding = CultMesh.OperationBinding(
+            "aetheria.surface.refresh",
+            label: "Refresh");
+
+        binding.OperationId.Should().Be("aetheria.entity.pilot.move");
+        binding.Label.Should().Be("Move");
+        binding.SchemaId.Should().Be("gamecult.aetheria.pilot_move.v1");
+        binding.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
+        binding.RouteHint.Description.Should().Be("remote Verse peer");
+
+        explicitBinding.OperationId.Should().Be("aetheria.surface.refresh");
+        explicitBinding.Label.Should().Be("Refresh");
+        explicitBinding.SchemaId.Should().Be("");
+        explicitBinding.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Automatic);
+    }
+
+    [Test]
+    public void OperationBindingRecord_FlattensAndRehydratesSurfaceCommandFields()
+    {
+        var binding = CultMesh.OperationBinding(
+            "aetheria.entity.pilot.move",
+            label: "Move",
+            schemaId: "gamecult.aetheria.pilot_move.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "remote Verse peer"));
+
+        var record = CultMesh.OperationBindingRecord(binding);
+        record.OperationId.Should().Be("aetheria.entity.pilot.move");
+        record.Label.Should().Be("Move");
+        record.SchemaId.Should().Be("gamecult.aetheria.pilot_move.v1");
+        record.RouteKind.Should().Be(nameof(CultMeshLocalityKind.Network));
+        record.RouteDescription.Should().Be("remote Verse peer");
+
+        var fromTypescript = CultMesh.OperationBindingRecord(
+            "aetheria.surface.refresh",
+            "Refresh",
+            "gamecult.aetheria.refresh.v1",
+            "in-process",
+            "embedded UI runtime").ToBinding();
+
+        fromTypescript.OperationId.Should().Be("aetheria.surface.refresh");
+        fromTypescript.Label.Should().Be("Refresh");
+        fromTypescript.SchemaId.Should().Be("gamecult.aetheria.refresh.v1");
+        fromTypescript.RouteHint.Kind.Should().Be(CultMeshLocalityKind.InProcess);
+        fromTypescript.RouteHint.Description.Should().Be("embedded UI runtime");
+    }
+
+    [Test]
+    public void OperationInvocationDescriptor_CarriesTypedOperationIdentityThroughUiRequests()
+    {
+        var binding = CultMesh.OperationBinding(
+            "aetheria.entity.pilot.move",
+            label: "Move",
+            schemaId: "gamecult.aetheria.pilot_move.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "local Verse node"));
+
+        var invocation = CultMesh.OperationInvocation(binding, idempotencyKey: "move:42");
+        var explicitInvocation = CultMesh.OperationInvocation(
+            "aetheria.surface.refresh",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "remote Verse peer"));
+
+        invocation.OperationId.Should().Be("aetheria.entity.pilot.move");
+        invocation.SchemaId.Should().Be("gamecult.aetheria.pilot_move.v1");
+        invocation.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Ipc);
+        invocation.RouteHint.Description.Should().Be("local Verse node");
+        invocation.IdempotencyKey.Should().Be("move:42");
+
+        explicitInvocation.OperationId.Should().Be("aetheria.surface.refresh");
+        explicitInvocation.SchemaId.Should().Be("");
+        explicitInvocation.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
+        explicitInvocation.IdempotencyKey.Should().BeNull();
+    }
+
+    [Test]
+    public void OperationPayload_ReadsCommonSurfaceScalarFields()
+    {
+        var payload = CultMesh.OperationPayload(
+            ("value", "42.5"),
+            ("tierIndex", "3"),
+            ("enabled", "on"),
+            ("name", "Starfire"));
+        var updated = payload.With("enabled", "false");
+
+        payload.GetString("name").Should().Be("Starfire");
+        payload.GetString("missing", "fallback").Should().Be("fallback");
+        payload.GetInt32("tierIndex", -1).Should().Be(3);
+        payload.GetInt32("missing", -1).Should().Be(-1);
+        payload.GetDouble("value", -1).Should().Be(42.5);
+        payload.GetBoolean("enabled").Should().BeTrue();
+        updated.GetBoolean("enabled", true).Should().BeFalse();
+        updated.GetString("name").Should().Be("Starfire");
+        payload.GetBoolean("missing", true).Should().BeTrue();
+        payload.Should().ContainKey("value");
+        payload.Count.Should().Be(4);
+    }
+
+    [Test]
+    public void OperationInvocationRecord_FlattensAndRehydratesTransportFields()
+    {
+        var invocation = CultMesh.OperationInvocation(
+            "aetheria.entity.pilot.move",
+            "gamecult.aetheria.pilot_move.v1",
+            new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "local Verse node"),
+            "move:42");
+
+        var record = CultMesh.OperationInvocationRecord(invocation);
+        var restored = record.ToInvocation(
+            fallbackOperationId: "fallback.operation",
+            fallbackSchemaId: "fallback.schema",
+            fallbackRouteHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "fallback route"));
+        var fallback = CultMesh.OperationInvocationRecord(
+                operationId: "",
+                schemaId: "",
+                routeKind: "not-a-route",
+                routeDescription: "",
+                idempotencyKey: "")
+            .ToInvocation(
+                fallbackOperationId: "fallback.operation",
+                fallbackSchemaId: "fallback.schema",
+                fallbackRouteHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "fallback route"),
+                fallbackIdempotencyKey: "fallback-key");
+        var payloadFields = CultMesh.OperationPayload(("value", "Raven")).ToDictionary();
+
+        record.OperationId.Should().Be("aetheria.entity.pilot.move");
+        record.SchemaId.Should().Be("gamecult.aetheria.pilot_move.v1");
+        record.RouteKind.Should().Be("Ipc");
+        record.RouteDescription.Should().Be("local Verse node");
+        record.IdempotencyKey.Should().Be("move:42");
+        restored.OperationId.Should().Be("aetheria.entity.pilot.move");
+        restored.SchemaId.Should().Be("gamecult.aetheria.pilot_move.v1");
+        restored.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Ipc);
+        restored.IdempotencyKey.Should().Be("move:42");
+        fallback.OperationId.Should().Be("fallback.operation");
+        fallback.SchemaId.Should().Be("fallback.schema");
+        fallback.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
+        fallback.RouteHint.Description.Should().Be("fallback route");
+        fallback.IdempotencyKey.Should().Be("fallback-key");
+        payloadFields["value"].Should().Be("Raven");
+    }
+
+    [Test]
+    public void RouteRecord_FlattensAndParsesCrossRuntimeRouteKinds()
+    {
+        var record = CultMesh.RouteRecord(new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located slab"));
+        var restored = record.ToRoute();
+        var fromTypescript = CultMesh.RouteRecord("in-process", "").ToRoute(
+            new CultMeshRouteHint(CultMeshLocalityKind.Network, "fallback route"));
+        var fallback = CultMesh.RouteRecord("not-real", "").ToRoute(
+            new CultMeshRouteHint(CultMeshLocalityKind.Ipc, "fallback route"));
+
+        record.Kind.Should().Be("SharedMemory");
+        record.Description.Should().Be("co-located slab");
+        restored.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        restored.Description.Should().Be("co-located slab");
+        fromTypescript.Kind.Should().Be(CultMeshLocalityKind.InProcess);
+        fromTypescript.Description.Should().Be("fallback route");
+        fallback.Kind.Should().Be(CultMeshLocalityKind.Ipc);
+        fallback.Description.Should().Be("fallback route");
+    }
+
+    [Test]
+    public void StateRefResolver_ComposesNamedSurfaceResolution()
+    {
+        var route = new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "embedded renderer");
+        var daemon = CultMesh.StateRefResolver(
+            "aetheria.daemon.refs",
+            (stateRef, context) => stateRef == "aetheria.daemon/frame/id"
+                ? $"{context.RuntimeId}:{context.RouteHint.Kind}:42"
+                : "",
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.frame.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_frame.v1")
+            },
+            route);
+        var itemStats = CultMesh.StateRefResolver(
+            "aetheria.item_stats.refs",
+            stateRef => stateRef == "aetheria.item_stats/laser/damage" ? "12.5" : "");
+        var resolver = daemon.Or(itemStats);
+
+        resolver.Resolve(
+                "aetheria.daemon/frame/id",
+                CultMesh.QueryContextFor("unity-raven")
+                    .Route(CultMeshLocalityKind.Network, "remote peer")
+                    .Build())
+            .Should()
+            .Be("unity-raven:Network:42");
+        resolver.Resolve("aetheria.item_stats/laser/damage").Should().Be("12.5");
+        resolver.TryResolve("missing", out var missing).Should().BeFalse();
+        missing.Should().Be("");
+        resolver.AsFunc()("aetheria.item_stats/laser/damage").Should().Be("12.5");
+
+        var diagnostic = CultMesh.DescribeStateRefResolver(resolver);
+        diagnostic.ResolverId.Should().Be("aetheria.daemon.refs|aetheria.item_stats.refs");
+        diagnostic.RouteHint.Kind.Should().Be(CultMeshLocalityKind.InProcess);
+        diagnostic.Sources.Should().ContainSingle();
+        diagnostic.Sources[0].SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+    }
+
+    [Test]
+    public async Task ProjectionRecipe_NamesSourcesAndCanBecomeQuerySurface()
+    {
+        var recipe = CultMesh.ProjectionRecipe<MeshViewportRequest, string[]>(
+            "aetheria.zone.objects.visible",
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.frame.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_frame.v1",
+                    description: "latest daemon frame"),
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.authority.policy.v1",
+                    schemaId: "gamecult.aetheria.authority_policy.v1")
+            },
+            (request, context) => Task.FromResult(new[]
+            {
+                $"{context.RuntimeId}:{request.MinX}:{request.MaxX}:{context.RouteHint.Kind}"
+            }),
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located frame slab"));
+
+        recipe.Sources.Should().HaveCount(2);
+        recipe.Sources[0].SourceId.Should().Be("daemon:aetheria.frame.latest.v1");
+        recipe.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+
+        var recipeDiagnostic = CultMesh.DescribeProjectionRecipe(recipe);
+        recipeDiagnostic.ProjectionId.Should().Be("aetheria.zone.objects.visible");
+        recipeDiagnostic.RouteHint.Description.Should().Be("co-located frame slab");
+        recipeDiagnostic.Sources.Should().HaveCount(2);
+        recipeDiagnostic.Sources[0].SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+        recipeDiagnostic.Sources.Should().NotBeSameAs(recipe.Sources);
+
+        var result = await recipe.ProjectAsync(
+            new MeshViewportRequest(-16, 16),
+            CultMesh.QueryContextFor("browser-starfire")
+                .Route(CultMeshLocalityKind.Wasm, "browser-local projection")
+                .Build());
+
+        result.Should().Equal("browser-starfire:-16:16:Wasm");
+
+        var query = recipe.AsQuerySurface();
+        var queryResult = await query.ExecuteAsync(
+            new MeshViewportRequest(-4, 4),
+            "unity-raven");
+
+        query.QueryId.Should().Be(recipe.ProjectionId);
+        query.Sources.Should().HaveCount(2);
+        query.Sources[0].SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+        query.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        queryResult.Should().Equal("unity-raven:-4:4:SharedMemory");
+
+        var queryDiagnostic = CultMesh.DescribeQuerySurface(query);
+        queryDiagnostic.QueryId.Should().Be("aetheria.zone.objects.visible");
+        queryDiagnostic.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        queryDiagnostic.Sources.Should().HaveCount(2);
+        queryDiagnostic.Sources.Should().NotBeSameAs(query.Sources);
+    }
+
+    [Test]
+    public async Task LiveFeed_DescribesAndWatchesCoherentClientSnapshots()
+    {
+        var subject = new Subject<string>();
+        var feed = CultMesh.LiveFeed<MeshViewportRequest, string>(
+            "aetheria.rts.viewport.feed",
+            (request, context) => Task.FromResult(
+                $"{context.RuntimeId}:{request.MinX}:{request.MaxX}:{context.RouteHint.Kind}"),
+            (_request, context) => subject.Select(value => $"{context.RuntimeId}:{value}:{context.RouteHint.Kind}"),
+            new[]
+            {
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.frame.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_frame.v1"),
+                CultMesh.ProjectionSource(
+                    "daemon:aetheria.health.latest.v1",
+                    schemaId: "gamecult.aetheria.daemon_health.v1")
+            },
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located RTS cache"));
+
+        feed.FeedId.Should().Be("aetheria.rts.viewport.feed");
+        feed.Sources.Should().HaveCount(2);
+        feed.Sources[0].SchemaId.Should().Be("gamecult.aetheria.daemon_frame.v1");
+        feed.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+
+        var diagnostic = CultMesh.DescribeLiveFeed(feed);
+        diagnostic.FeedId.Should().Be("aetheria.rts.viewport.feed");
+        diagnostic.RouteHint.Description.Should().Be("co-located RTS cache");
+        diagnostic.Sources.Should().HaveCount(2);
+        diagnostic.Sources[1].SourceId.Should().Be("daemon:aetheria.health.latest.v1");
+        diagnostic.Sources.Should().NotBeSameAs(feed.Sources);
+
+        var inherited = await feed.SnapshotAsync(
+            new MeshViewportRequest(-32, 32),
+            "browser-starfire");
+
+        inherited.Should().Be("browser-starfire:-32:32:SharedMemory");
+
+        var explicitRoute = await feed.SnapshotAsync(
+            new MeshViewportRequest(-32, 32),
+            CultMesh.QueryContextFor("unity-raven")
+                .Route(CultMeshLocalityKind.InProcess, "embedded Verse")
+                .Build());
+
+        explicitRoute.Should().Be("unity-raven:-32:32:InProcess");
+
+        string observed = null!;
+        using var subscription = feed
+            .Watch(new MeshViewportRequest(-1, 1), CultMeshQueryContext.ForRuntime("browser-starfire"))
+            .Subscribe(value => observed = value);
+
+        subject.OnNext("frame:42");
+        observed.Should().Be("browser-starfire:frame:42:SharedMemory");
+    }
+
+    [Test]
+    public async Task DocumentHandle_ExposesTypedSnapshotsAndSameSchemaAliases()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located document slab");
+        var sources = new[]
+        {
+            CultMesh.ProjectionSource(
+                "daemon:mesh.note.current",
+                schemaId: "tests.mesh_note.v1")
+        };
+        var context = CultMesh.Verse("starbridge", "unity-pilot", route).Context;
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "primary",
+            Revision = 1
+        };
+
+        var handle = CultMesh.Document(
+            "mesh.note.current",
+            context,
+            _ => Task.FromResult(current),
+            _ => subject,
+            sources,
+            route);
+
+        handle.DocumentId.Should().Be("mesh.note.current");
+        handle.DocumentType.Should().Be(typeof(MeshNoteDocument));
+        handle.SchemaName.Should().Be("tests.mesh_note");
+        handle.SchemaVersion.Should().Be("tests.mesh_note.v1");
+        handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be("daemon:mesh.note.current");
+
+        var snapshot = await handle.LatestAsync();
+        snapshot.Text.Should().Be("primary");
+
+        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
+        var aliasSnapshot = await alias.LatestAsync();
+        alias.DocumentId.Should().Be(handle.DocumentId);
+        alias.SchemaName.Should().Be(handle.SchemaName);
+        alias.SchemaVersion.Should().Be(handle.SchemaVersion);
+        aliasSnapshot.Text.Should().Be("primary");
+        aliasSnapshot.Revision.Should().Be(1);
+
+        MeshNoteAliasDocument observed = null!;
+        using var subscription = alias.Watch(value => observed = value);
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "reactive",
+            Revision = 2
+        });
+
+        observed.Text.Should().Be("reactive");
+        observed.Revision.Should().Be(2);
+    }
+
+    [Test]
+    public void DocumentHandle_RejectsAliasTypesWithDifferentSchemaIdentity()
+    {
+        var handle = CultMesh.Document(
+            "mesh.note.current",
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            _ => Task.FromResult(new MeshNoteDocument
+            {
+                Schema = "tests.mesh_note.v1",
+                Text = "primary",
+                Revision = 1
+            }),
+            _ => new Subject<MeshNoteDocument>());
+
+        Action act = () => handle.AsSchemaAlias<MeshOtherDocument>();
+
+        act.Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage("*tests.mesh_other*tests.mesh_note*");
+    }
+
+    [Test]
+    public void SurfaceCatalog_DescribesTypedRuntimeSurfaces()
+    {
+        var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located frame slab");
+        var sources = new[]
+        {
+            CultMesh.ProjectionSource(
+                "daemon:aetheria.frame.latest.v1",
+                schemaId: "gamecult.aetheria.daemon_frame.v1")
+        };
+        var query = new CultMeshQuerySurface<MeshViewportRequest, string[]>(
+            "aetheria.zone.objects.visible",
+            (_request, _context) => Task.FromResult(Array.Empty<string>()),
+            sources: sources,
+            routeHint: route);
+        var feed = CultMesh.LiveFeed<MeshViewportRequest, string>(
+            "aetheria.rts.viewport.feed",
+            (_request, _context) => Task.FromResult("frame"),
+            sources: sources,
+            routeHint: route);
+        var operation = new CultMeshOperationHandle<MeshMoveRequest, CultMeshOperationReceipt>(
+            "aetheria.entity.pilot.move",
+            (_request, _context) => Task.FromResult(new CultMeshOperationReceipt("aetheria.entity.pilot.move", true)));
+        var pointer = CultMesh.StatePointer(
+            "aetheria.selection.current",
+            async () => "entity:ship:1",
+            () => new Subject<string>(),
+            route,
+            sources);
+        var nativeView = new CultMeshNativeSliceViewDescriptor(
+            "aetheria.zone.render",
+            "gamecult.aetheria.render_body.v1",
+            rowCount: 128,
+            new[] { CultMeshNativeSliceColumn.For<MeshVec2>("position") },
+            route);
+
+        var catalog = CultMesh.DescribeSurfaceCatalog(
+            "gamecult.aetheria.rts.surfaces.v1",
+            new[]
+            {
+                CultMesh.DescribeSurface(query),
+                CultMesh.DescribeSurface(feed),
+                CultMesh.DescribeSurface(operation),
+                CultMesh.DescribeSurface(pointer),
+                CultMesh.DescribeSurface(nativeView)
+            });
+
+        catalog.CatalogId.Should().Be("gamecult.aetheria.rts.surfaces.v1");
+        catalog.Surfaces.Should().HaveCount(5);
+        catalog.Surfaces[0].Kind.Should().Be(CultMeshSurfaceKind.Query);
+        catalog.Surfaces[0].SurfaceId.Should().Be("aetheria.zone.objects.visible");
+        catalog.Surfaces[0].RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        catalog.Surfaces[0].Sources.Should().HaveCount(1);
+        catalog.Find("aetheria.rts.viewport.feed")!.Kind.Should().Be(CultMeshSurfaceKind.LiveFeed);
+        catalog.Find("aetheria.entity.pilot.move")!.Kind.Should().Be(CultMeshSurfaceKind.Operation);
+        catalog.Find("aetheria.selection.current")!.Kind.Should().Be(CultMeshSurfaceKind.StatePointer);
+        catalog.Find("aetheria.selection.current")!.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        catalog.Find("aetheria.selection.current")!.Sources.Should().ContainSingle();
+        catalog.Find("aetheria.zone.render")!.Kind.Should().Be(CultMeshSurfaceKind.NativeSliceView);
+        catalog.Find("aetheria.zone.render")!.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        catalog.Find("missing").Should().BeNull();
+        catalog.FindByKind(CultMeshSurfaceKind.Operation)
+            .Should()
+            .ContainSingle()
+            .Which
+            .SurfaceId
+            .Should()
+            .Be("aetheria.entity.pilot.move");
+        catalog.FindByKind(CultMeshSurfaceKind.Query).Should().ContainSingle();
+
+        var index = CultMesh.DescribeSurfaceCatalogIndex(catalog);
+        index.CatalogId.Should().Be(catalog.CatalogId);
+        index.Queries.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.zone.objects.visible");
+        index.LiveFeeds.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.rts.viewport.feed");
+        index.Operations.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.entity.pilot.move");
+        index.StatePointers.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.selection.current");
+        index.NativeSliceViews.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.zone.render");
+        index.ProjectionRecipes.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task PollingQueryWatcher_TurnsSnapshotsIntoReactiveFeed()
+    {
+        var frameId = 0;
+        var observed = new List<int>();
+        var feed = CultMesh.LiveFeed<MeshViewportRequest, int>(
+            "aetheria.rts.viewport.feed",
+            (_request, _context) => Task.FromResult(frameId),
+            CultMesh.PollingQueryWatcher<MeshViewportRequest, int>(
+                (_request, _context) => Task.FromResult(frameId),
+                new CultMeshPollingWatchOptions<int>(TimeSpan.FromMilliseconds(5))));
+
+        using (feed
+            .Watch(new MeshViewportRequest(-1, 1), CultMeshQueryContext.ForRuntime("browser-starfire"))
+            .Subscribe(value => observed.Add(value)))
+        {
+            await Task.Delay(35);
+            frameId = 1;
+            await Task.Delay(35);
+            frameId = 1;
+            await Task.Delay(25);
+            frameId = 2;
+            await Task.Delay(35);
+        }
+
+        frameId = 3;
+        await Task.Delay(25);
+
+        observed.Should().Equal(0, 1, 2);
+    }
+
+    [Test]
+    public void NativeSliceDescriptor_DescribesSharedColumnsWithoutOpeningTransport()
+    {
+        var descriptor = new CultMeshNativeSliceViewDescriptor(
+            "aetheria.zone.render",
+            "gamecult.aetheria.render_body.v1",
+            rowCount: 128,
+            new[]
+            {
+                CultMeshNativeSliceColumn.For<MeshVec2>("position"),
+                CultMeshNativeSliceColumn.For<MeshVec2>("velocity")
+            },
+            new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "CultCache slab"),
+            nativeHandle: "cultcache-slab:aetheria-zone-render");
+
+        descriptor.Route.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        descriptor.Columns.Should().HaveCount(2);
+        descriptor.Columns[0].Name.Should().Be("position");
+        descriptor.DenseRowStrideBytes.Should().Be(16);
+        descriptor.FindColumn("velocity")!.ElementSizeBytes.Should().Be(8);
+
+        var diagnostic = CultMesh.DescribeNativeSliceView(descriptor);
+        diagnostic.ViewId.Should().Be("aetheria.zone.render");
+        diagnostic.SchemaId.Should().Be("gamecult.aetheria.render_body.v1");
+        diagnostic.RowCount.Should().Be(128);
+        diagnostic.Route.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        diagnostic.NativeHandle.Should().Be("cultcache-slab:aetheria-zone-render");
+        diagnostic.DenseRowStrideBytes.Should().Be(16);
+        diagnostic.Columns.Should().HaveCount(2);
+        diagnostic.Columns.Should().NotBeSameAs(descriptor.Columns);
+    }
+
     [Test]
     public async Task ManagedDocument_Commits_Through_MeshDatabase_And_Watches_Networked_Updates()
     {
@@ -220,5 +1050,174 @@ public sealed class CultMeshStreamingTests
 
         [MessagePack.Key(2)]
         public int Health;
+    }
+
+    [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]
+    [MessagePackObject(AllowPrivate = true)]
+    internal sealed class MeshNoteDocument
+    {
+        [Key(0)]
+        public string Schema { get; set; } = string.Empty;
+
+        [Key(1)]
+        public string Text { get; set; } = string.Empty;
+
+        [Key(2)]
+        public int Revision { get; set; }
+    }
+
+    [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]
+    [MessagePackObject(AllowPrivate = true)]
+    internal sealed class MeshNoteAliasDocument
+    {
+        [Key(0)]
+        public string Schema { get; set; } = string.Empty;
+
+        [Key(1)]
+        public string Text { get; set; } = string.Empty;
+
+        [Key(2)]
+        public int Revision { get; set; }
+    }
+
+    [CultDocument("tests.mesh_other", "tests.mesh_other.v1")]
+    [MessagePackObject(AllowPrivate = true)]
+    internal sealed class MeshOtherDocument
+    {
+        [Key(0)]
+        public string Schema { get; set; } = string.Empty;
+
+        [Key(1)]
+        public string Text { get; set; } = string.Empty;
+    }
+}
+
+public readonly struct MeshMoveRequest
+{
+    public MeshMoveRequest(int entityId, float x, float y)
+    {
+        EntityId = entityId;
+        X = x;
+        Y = y;
+    }
+
+    public int EntityId { get; }
+    public float X { get; }
+    public float Y { get; }
+}
+
+public readonly struct MeshViewportRequest
+{
+    public MeshViewportRequest(float minX, float maxX)
+    {
+        MinX = minX;
+        MaxX = maxX;
+    }
+
+    public float MinX { get; }
+    public float MaxX { get; }
+}
+
+public readonly struct MeshVec2
+{
+    public MeshVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public float X { get; }
+    public float Y { get; }
+}
+
+public sealed class MeshAetheriaDomain
+{
+    private readonly CultMeshVerseContext _context;
+
+    public MeshAetheriaDomain(CultMeshVerseContext context)
+    {
+        _context = context;
+    }
+
+    public MeshEntityFacade Entity(int entityId)
+    {
+        return new MeshEntityFacade(_context, entityId);
+    }
+
+    public MeshZoneFacade Zone(string zoneId)
+    {
+        return new MeshZoneFacade(_context, zoneId);
+    }
+}
+
+public sealed class MeshEntityFacade
+{
+    public MeshEntityFacade(CultMeshVerseContext context, int entityId)
+    {
+        Pilot = new MeshPilotFacade(context, entityId);
+    }
+
+    public MeshPilotFacade Pilot { get; }
+}
+
+public sealed class MeshPilotFacade
+{
+    private readonly int _entityId;
+    private readonly CultMeshBoundOperationHandle<MeshMoveRequest, CultMeshOperationReceipt> _move;
+
+    public MeshPilotFacade(CultMeshVerseContext context, int entityId)
+    {
+        _entityId = entityId;
+        _move = CultMesh.BindOperation(
+            context,
+            new CultMeshOperationHandle<MeshMoveRequest, CultMeshOperationReceipt>(
+            "aetheria.entity.pilot.move",
+            (request, context) => Task.FromResult(new CultMeshOperationReceipt(
+                "aetheria.entity.pilot.move",
+                accepted: request.EntityId == _entityId &&
+                          Math.Abs(request.X) > 0 &&
+                          context.Claims.Any(claim => claim.Role == "pilot-control"),
+                context.RouteHint))));
+    }
+
+    public Task<CultMeshOperationReceipt> MoveAsync(MeshVec2 direction, string idempotencyKey)
+    {
+        return _move.InvokeAsync(
+            new MeshMoveRequest(_entityId, direction.X, direction.Y),
+            idempotencyKey);
+    }
+}
+
+public sealed class MeshZoneFacade
+{
+    public MeshZoneFacade(CultMeshVerseContext context, string zoneId)
+    {
+        Objects = new MeshObjectsFacade(context, zoneId);
+    }
+
+    public MeshObjectsFacade Objects { get; }
+}
+
+public sealed class MeshObjectsFacade
+{
+    private readonly string _zoneId;
+    private readonly CultMeshBoundQuerySurface<MeshViewportRequest, string[]> _visibleObjects;
+
+    public MeshObjectsFacade(CultMeshVerseContext context, string zoneId)
+    {
+        _zoneId = zoneId;
+        _visibleObjects = CultMesh.BindQuery(
+            context,
+            new CultMeshQuerySurface<MeshViewportRequest, string[]>(
+            "aetheria.zone.objects.visible",
+            (parameters, context) => Task.FromResult(new[]
+            {
+                $"{context.RuntimeId}:{_zoneId}:{parameters.MinX}:{parameters.MaxX}:{context.RouteHint.Kind}"
+            })));
+    }
+
+    public Task<string[]> VisibleWithinAsync(MeshViewportRequest request)
+    {
+        return _visibleObjects.ExecuteAsync(request);
     }
 }
