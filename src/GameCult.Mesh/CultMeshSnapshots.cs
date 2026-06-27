@@ -84,6 +84,55 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Describes one typed document handle to bind from a snapshot endpoint.
+    /// </summary>
+    public interface ICultMeshSnapshotDocumentBinding
+    {
+        /// <summary>Gets the CLR document type requested by this binding.</summary>
+        Type DocumentType { get; }
+
+        /// <summary>Gets the remote record key to read.</summary>
+        string RecordKey { get; }
+
+        /// <summary>Gets the optional semantic document id for the resulting handle.</summary>
+        string? DocumentId { get; }
+
+        /// <summary>Binds this document request to an endpoint-backed handle.</summary>
+        ICultMeshDocumentHandle Bind(CultMeshSnapshotEndpoint endpoint);
+    }
+
+    /// <summary>
+    /// Describes one typed document handle to bind from a snapshot endpoint.
+    /// </summary>
+    public sealed class CultMeshSnapshotDocumentBinding<TDocument> : ICultMeshSnapshotDocumentBinding
+        where TDocument : class
+    {
+        internal CultMeshSnapshotDocumentBinding(string recordKey, string? documentId)
+        {
+            RecordKey = string.IsNullOrWhiteSpace(recordKey)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(recordKey))
+                : recordKey;
+            DocumentId = documentId;
+        }
+
+        /// <inheritdoc />
+        public Type DocumentType => typeof(TDocument);
+
+        /// <inheritdoc />
+        public string RecordKey { get; }
+
+        /// <inheritdoc />
+        public string? DocumentId { get; }
+
+        /// <inheritdoc />
+        public ICultMeshDocumentHandle Bind(CultMeshSnapshotEndpoint endpoint)
+        {
+            if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
+            return endpoint.Document<TDocument>(RecordKey, DocumentId);
+        }
+    }
+
+    /// <summary>
     /// Result from syncing a remote snapshot into a local CultMesh node.
     /// </summary>
     public sealed class CultMeshSnapshotSyncResult
@@ -266,6 +315,17 @@ namespace GameCult.Mesh
             return CultMesh.Documents(documents);
         }
 
+        /// <summary>Creates a schema-aware catalog from endpoint-backed typed document bindings.</summary>
+        public CultMeshDocumentCatalog Documents(params ICultMeshSnapshotDocumentBinding[] documents)
+        {
+            if (documents == null) throw new ArgumentNullException(nameof(documents));
+            return CultMesh.Documents(documents.Select(document =>
+            {
+                if (document == null) throw new ArgumentNullException(nameof(documents));
+                return document.Bind(this);
+            }));
+        }
+
         private CultMeshSnapshotRequestOptions CreateRequest(
             IReadOnlyList<string>? schemaIds,
             IReadOnlyList<string>? recordKeys)
@@ -316,6 +376,17 @@ namespace GameCult.Mesh
             CultMeshSnapshotEndpointOptions? options = null)
         {
             return new CultMeshSnapshotEndpoint(endpoint, options);
+        }
+
+        /// <summary>
+        /// Describes one typed document to bind from a CultMesh snapshot endpoint.
+        /// </summary>
+        public static CultMeshSnapshotDocumentBinding<TDocument> SnapshotDocument<TDocument>(
+            string recordKey,
+            string? documentId = null)
+            where TDocument : class
+        {
+            return new CultMeshSnapshotDocumentBinding<TDocument>(recordKey, documentId);
         }
 
         /// <summary>

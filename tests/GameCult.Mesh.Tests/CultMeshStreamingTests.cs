@@ -1221,13 +1221,15 @@ public sealed class CultMeshStreamingTests
         var syncedAlias = await surface.SyncDocumentAsync<MeshNoteAliasDocument>(node, key.Value);
         var aliasHandle = surface.Document<MeshNoteAliasDocument>(key.Value);
         var aliasLatest = await aliasHandle.LatestAsync();
-        var catalog = surface.Documents(surface.Document<MeshNoteDocument>(key.Value));
+        var catalog = surface.Documents(
+            CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value, "daemon:mesh-note:snapshot-endpoint"));
         var catalogAlias = await catalog.LatestAsync<MeshNoteAliasDocument>();
 
         fetchedAlias.Text.Should().Be("snapshot-endpoint");
         syncedAlias.Text.Should().Be("snapshot-endpoint");
         node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(19);
         aliasLatest.Revision.Should().Be(19);
+        catalog.Document<MeshNoteDocument>().DocumentId.Should().Be("daemon:mesh-note:snapshot-endpoint");
         catalogAlias.Text.Should().Be("snapshot-endpoint");
         requests.Should().HaveCount(4);
         requests.Should().OnlyContain(request =>
