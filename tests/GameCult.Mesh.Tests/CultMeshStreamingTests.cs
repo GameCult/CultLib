@@ -2665,12 +2665,40 @@ public sealed class CultMeshStreamingTests
 
         var collection = CultMesh.Collection<MeshNoteDocument>(cache);
         var alias = collection.AsSchemaAlias<MeshNoteAliasDocument>();
+        var catalog = CultMesh.Collections(collection);
 
         alias.CollectionId.Should().Be(collection.CollectionId);
         alias.SchemaName.Should().Be(collection.SchemaName);
+        catalog.Collections.Should().ContainSingle().Which.Should().BeSameAs(collection);
+        catalog.TryGetCollection<MeshNoteAliasDocument>(out var catalogAlias).Should().BeTrue();
+        catalogAlias.CollectionId.Should().Be(collection.CollectionId);
+        catalog.TryGetCollectionBySchema("tests.mesh_note.v1", out var byVersion).Should().BeTrue();
+        byVersion.Should().BeSameAs(collection);
+        catalog.CollectionBySchema("tests.mesh_note").Should().BeSameAs(collection);
+        catalog.CollectionBySchema(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId)
+            .Should()
+            .BeSameAs(collection);
 
         var snapshot = await alias.LatestAsync();
         snapshot.Should().ContainSingle().Which.Text.Should().Be("collection-alias");
+        var catalogSnapshot = await catalog.LatestAsync<MeshNoteAliasDocument>();
+        catalogSnapshot.Should().ContainSingle().Which.Revision.Should().Be(4);
+
+        CultMeshCollectionChange<MeshNoteAliasDocument> observed = null!;
+        using var subscription = catalog.WatchChanges<MeshNoteAliasDocument>(change => observed = change);
+        await cache.UpsertAsync(
+            new MeshNoteDocument
+            {
+                Schema = "tests.mesh_note.v1",
+                Text = "collection-alias-updated",
+                Revision = 5
+            },
+            new CultRecordHandle<MeshNoteDocument>(new CultRecordKey("mesh-note:collection")));
+
+        observed.Kind.Should().Be(CultMeshCollectionChangeKind.Updated);
+        observed.Document!.Text.Should().Be("collection-alias-updated");
+        observed.Document.Revision.Should().Be(5);
+        observed.PreviousDocument!.Text.Should().Be("collection-alias");
     }
 
     [Test]

@@ -1783,6 +1783,22 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Creates a schema-aware catalog over typed collection handles.
+        /// </summary>
+        public static CultMeshCollectionCatalog Collections(IEnumerable<ICultMeshCollectionHandle> collections)
+        {
+            return new CultMeshCollectionCatalog(collections);
+        }
+
+        /// <summary>
+        /// Creates a schema-aware catalog over typed collection handles.
+        /// </summary>
+        public static CultMeshCollectionCatalog Collections(params ICultMeshCollectionHandle[] collections)
+        {
+            return new CultMeshCollectionCatalog(collections);
+        }
+
+        /// <summary>
         /// Reads two typed document handles and projects them into one caller-defined view.
         /// </summary>
         public static async Task<TResult> LatestAsync<TFirst, TSecond, TResult>(

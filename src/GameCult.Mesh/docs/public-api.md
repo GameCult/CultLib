@@ -191,6 +191,12 @@ portable machinery that makes it feel native.
   Collection handles can represent all records of a document type, a named
   document view, or an indexed value view, and they support the same
   same-schema CLR alias conversion as document handles.
+- `CultMeshCollectionCatalog` is the collection sibling of
+  `CultMeshDocumentCatalog`. It indexes typed collection handles by CLR
+  document type, schema id, schema name, and schema version, then exposes
+  `Collection<T>()`, `LatestAsync<T>()`, and `WatchChanges<T>()` so domain
+  facades can publish typed multi-record state without maintaining parallel
+  schema lookup tables.
 - `CultMeshProjectionRecipe<TParameters, TResult>` names a reusable projection
   from typed source state into derived state. It records source handles,
   route hints, and projection execution, and can be exposed as a typed query
@@ -321,6 +327,10 @@ var currentAllies = await allies.LatestAsync();
 using var changes = allies.WatchChanges(change => UpdateRoster(change));
 
 var uiAllies = allies.AsSchemaAlias<PlayerShipUiDocument>();
+
+var collections = CultMesh.Collections(allies);
+var uiRoster = await collections.LatestAsync<PlayerShipUiDocument>();
+using var uiRosterChanges = collections.WatchChanges<PlayerShipUiDocument>(RenderRoster);
 ```
 
 ```ts

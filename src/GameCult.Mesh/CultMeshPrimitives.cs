@@ -1764,6 +1764,163 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Inspectable typed collection handle exposed by CultMesh.
+    /// </summary>
+    public interface ICultMeshCollectionHandle
+    {
+        /// <summary>Gets the CLR document type presented by this collection.</summary>
+        Type DocumentType { get; }
+
+        /// <summary>Gets the semantic collection id.</summary>
+        string CollectionId { get; }
+
+        /// <summary>Gets the stable CultCache schema name.</summary>
+        string SchemaName { get; }
+
+        /// <summary>Gets the stable CultCache schema version.</summary>
+        string SchemaVersion { get; }
+
+        /// <summary>Gets the content-derived schema identifier.</summary>
+        string SchemaId { get; }
+
+        /// <summary>Gets the preferred or observed route for collection access.</summary>
+        CultMeshRouteHint RouteHint { get; }
+
+        /// <summary>Gets typed state sources this collection handle depends on, when known.</summary>
+        IReadOnlyList<CultMeshProjectionSource> Sources { get; }
+
+        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
+        CultMeshCollectionHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
+    }
+
+    /// <summary>
+    /// Schema-aware lookup table for typed CultMesh collection handles.
+    /// </summary>
+    public sealed class CultMeshCollectionCatalog
+    {
+        private readonly IReadOnlyList<ICultMeshCollectionHandle> _collections;
+        private readonly IReadOnlyDictionary<Type, ICultMeshCollectionHandle> _collectionsByType;
+        private readonly IReadOnlyDictionary<string, ICultMeshCollectionHandle> _collectionsBySchema;
+
+        /// <summary>Creates a collection catalog from known handles.</summary>
+        public CultMeshCollectionCatalog(IEnumerable<ICultMeshCollectionHandle> collections)
+        {
+            if (collections == null) throw new ArgumentNullException(nameof(collections));
+
+            var collectionList = collections
+                .Where(collection => collection != null)
+                .ToArray();
+            var byType = new Dictionary<Type, ICultMeshCollectionHandle>();
+            var bySchema = new Dictionary<string, ICultMeshCollectionHandle>(StringComparer.Ordinal);
+            foreach (var collection in collectionList)
+            {
+                byType[collection.DocumentType] = collection;
+                if (!string.IsNullOrWhiteSpace(collection.SchemaId))
+                    bySchema[collection.SchemaId] = collection;
+                if (!string.IsNullOrWhiteSpace(collection.SchemaVersion))
+                    bySchema[collection.SchemaVersion] = collection;
+                if (!string.IsNullOrWhiteSpace(collection.SchemaName))
+                    bySchema[collection.SchemaName] = collection;
+            }
+
+            _collections = collectionList;
+            _collectionsByType = byType;
+            _collectionsBySchema = bySchema;
+        }
+
+        /// <summary>Gets the handles in this catalog.</summary>
+        public IReadOnlyList<ICultMeshCollectionHandle> Collections => _collections;
+
+        /// <summary>Looks up a collection handle by schema id, shared schema name, or schema version.</summary>
+        public bool TryGetCollectionBySchema(
+            string schema,
+            out ICultMeshCollectionHandle collection)
+        {
+            if (!string.IsNullOrWhiteSpace(schema) &&
+                _collectionsBySchema.TryGetValue(schema, out collection!))
+            {
+                return true;
+            }
+
+            collection = null!;
+            return false;
+        }
+
+        /// <summary>Looks up a collection handle by schema id, shared schema name, or schema version.</summary>
+        public ICultMeshCollectionHandle CollectionBySchema(string schema)
+        {
+            if (TryGetCollectionBySchema(schema, out var collection))
+                return collection;
+
+            throw new NotSupportedException(
+                $"CultMesh collection catalog does not expose a collection for schema '{schema}'.");
+        }
+
+        /// <summary>Looks up a typed collection handle by CLR type or same-schema alias.</summary>
+        public bool TryGetCollection<TDocument>(
+            out CultMeshCollectionHandle<TDocument> collection)
+            where TDocument : class
+        {
+            if (_collectionsByType.TryGetValue(typeof(TDocument), out var untypedCollection) &&
+                untypedCollection is CultMeshCollectionHandle<TDocument> typedCollection)
+            {
+                collection = typedCollection;
+                return true;
+            }
+
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            if (_collectionsBySchema.TryGetValue(descriptor.SchemaId, out var schemaCollection) ||
+                _collectionsBySchema.TryGetValue(descriptor.SchemaVersion, out schemaCollection!) ||
+                _collectionsBySchema.TryGetValue(descriptor.SchemaName, out schemaCollection!))
+            {
+                if (schemaCollection is CultMeshCollectionHandle<TDocument> schemaTypedCollection)
+                {
+                    collection = schemaTypedCollection;
+                    return true;
+                }
+
+                collection = schemaCollection.AsSchemaAlias<TDocument>();
+                return true;
+            }
+
+            collection = null!;
+            return false;
+        }
+
+        /// <summary>Looks up a typed collection handle by CLR type or same-schema alias.</summary>
+        public CultMeshCollectionHandle<TDocument> Collection<TDocument>()
+            where TDocument : class
+        {
+            if (TryGetCollection<TDocument>(out var collection))
+                return collection;
+
+            throw new NotSupportedException(
+                $"CultMesh collection catalog does not expose a collection for {typeof(TDocument).FullName}.");
+        }
+
+        /// <summary>Reads one typed collection snapshot by CLR type or same-schema alias.</summary>
+        public Task<IReadOnlyList<TDocument>> LatestAsync<TDocument>()
+            where TDocument : class
+        {
+            return Collection<TDocument>().LatestAsync();
+        }
+
+        /// <summary>Watches one typed collection by CLR type or same-schema alias.</summary>
+        public Observable<CultMeshCollectionChange<TDocument>> WatchChanges<TDocument>()
+            where TDocument : class
+        {
+            return Collection<TDocument>().WatchChanges();
+        }
+
+        /// <summary>Subscribes to one typed collection by CLR type or same-schema alias.</summary>
+        public IDisposable WatchChanges<TDocument>(Action<CultMeshCollectionChange<TDocument>> onNext)
+            where TDocument : class
+        {
+            return Collection<TDocument>().WatchChanges(onNext);
+        }
+    }
+
+    /// <summary>
     /// Describes how a CultMesh collection document changed.
     /// </summary>
     public enum CultMeshCollectionChangeKind
@@ -1829,7 +1986,7 @@ namespace GameCult.Mesh
     /// <summary>
     /// Typed reactive collection handle with schema-aware alias conversion.
     /// </summary>
-    public sealed class CultMeshCollectionHandle<TDocument>
+    public sealed class CultMeshCollectionHandle<TDocument> : ICultMeshCollectionHandle
         where TDocument : class
     {
         private static readonly CultDocumentDescriptor Descriptor =
