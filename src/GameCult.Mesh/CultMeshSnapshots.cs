@@ -511,6 +511,80 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Fetches one typed snapshot document and syncs it into a local node in one call.
+        /// </summary>
+        public static Task<TDocument> SyncDocumentFromPeerSnapshotAsync<TDocument>(
+            CultMeshNode node,
+            string endpoint,
+            string recordKey,
+            CultMeshSnapshotEndpointOptions? options = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+
+            return SnapshotEndpoint(endpoint, options).SyncDocumentAsync<TDocument>(node, recordKey, flush);
+        }
+
+        /// <summary>
+        /// Fetches one typed snapshot document through a caller-provided schema client and syncs it into a local node in one call.
+        /// </summary>
+        public static Task<TDocument> SyncDocumentFromPeerSnapshotAsync<TDocument>(
+            CultMeshNode node,
+            Func<ICultNetSchemaClient> createClient,
+            string endpoint,
+            string recordKey,
+            CultMeshSnapshotEndpointOptions? options = null,
+            bool flush = false)
+            where TDocument : class
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            if (createClient == null) throw new ArgumentNullException(nameof(createClient));
+            if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+
+            var request = CloneSnapshotFacadeRequestOptions(options?.Request);
+            request.CreateClient = createClient;
+            var resolvedOptions = new CultMeshSnapshotEndpointOptions
+            {
+                Context = options?.Context,
+                DocumentRegistry = options?.DocumentRegistry,
+                Request = request,
+                SourceId = options?.SourceId,
+                RouteHint = options?.RouteHint,
+                PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250)
+            };
+            return SnapshotEndpoint(endpoint, resolvedOptions).SyncDocumentAsync<TDocument>(node, recordKey, flush);
+        }
+
+        private static CultMeshSnapshotRequestOptions CloneSnapshotFacadeRequestOptions(CultMeshSnapshotRequestOptions? source)
+        {
+            if (source == null)
+                return new CultMeshSnapshotRequestOptions();
+
+            return new CultMeshSnapshotRequestOptions
+            {
+                SchemaIds = source.SchemaIds,
+                RecordKeys = source.RecordKeys,
+                ShardId = source.ShardId,
+                ShardEpoch = source.ShardEpoch,
+                ResponseTimeout = source.ResponseTimeout,
+                ConnectTimeout = source.ConnectTimeout,
+                MessageIdPrefix = source.MessageIdPrefix,
+                Security = source.Security,
+                ConfigureClient = source.ConfigureClient,
+                CreateClient = source.CreateClient,
+                RudpRuntimeId = source.RudpRuntimeId,
+                RudpConnectionId = source.RudpConnectionId,
+                RudpConnectPayload = source.RudpConnectPayload,
+                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
+                RudpResendDelayMs = source.RudpResendDelayMs
+            };
+        }
+
+        /// <summary>
         /// Fetches one scoped raw CultNet snapshot from an endpoint.
         /// </summary>
         public static Task<CultNetSnapshotResponseRawMessage> FetchSnapshotAsync(

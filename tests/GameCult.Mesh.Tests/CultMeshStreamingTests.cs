@@ -2481,6 +2481,60 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotFacade_SyncsRemoteDocumentIntoLocalNodeWithSameSchemaAlias()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:facade-sync-alias");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "facade-synced",
+            Revision = 46
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(Path.GetTempPath(), $"cultmesh-facade-sync-alias-{Guid.NewGuid():N}.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                CacheOptions = new CultCacheOpenOptions
+                {
+                    Registry = sourceCache.Registry,
+                    PullOnOpen = false
+                },
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    DocumentRegistry = registry
+                }
+            });
+
+        var synced = await CultMesh.SyncDocumentFromPeerSnapshotAsync<MeshNoteAliasDocument>(
+            node,
+            () => new MeshSnapshotSchemaClient(request =>
+            {
+                requests.Add(request);
+                return registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request);
+            }),
+            "cultnet://facade-sync.test:3075",
+            key.Value,
+            new CultMeshSnapshotEndpointOptions
+            {
+                DocumentRegistry = registry,
+                Context = CultMesh.Verse("starbridge", "unity-raven").Context
+            });
+        var localAlias = await node.Document<MeshNoteAliasDocument>(key.Value, CultMesh.Verse("starbridge", "unity-raven"))
+            .LatestAsync();
+
+        synced.Text.Should().Be("facade-synced");
+        synced.Revision.Should().Be(46);
+        localAlias.Text.Should().Be("facade-synced");
+        node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(46);
+        requests.Should().ContainSingle().Which.RecordKeys.Should().Equal(key.Value);
+    }
+
+    [Test]
     public async Task DocumentRegistryHelpers_CreateTypedNetworkRegistriesForAliases()
     {
         var sourceCache = new CultCache();

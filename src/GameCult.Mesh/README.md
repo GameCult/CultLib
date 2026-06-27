@@ -186,6 +186,21 @@ Use `DocumentFromPublication<T>()` when the caller should provide a configured
 source instead of branching between local files, backing stores, and remote
 CultNet snapshots itself.
 
+When the remote snapshot should hydrate a local node, use the direct sync
+facade and keep the rest of the code on local typed handles:
+
+```csharp
+var syncedHealth = await CultMesh.SyncDocumentFromPeerSnapshotAsync<DaemonHealthUi>(
+    node,
+    "cultnet://daemon.local:3075",
+    "daemon:aetheria.health.v1",
+    new CultMeshSnapshotEndpointOptions { DocumentRegistry = daemonRegistry });
+
+var localHealth = await node
+    .Document<DaemonHealthUi>("daemon:aetheria.health.v1", verse)
+    .LatestAsync();
+```
+
 ## Game Session
 
 `CultMeshGameSession` wires the common gameplay loop: local catalogs,
