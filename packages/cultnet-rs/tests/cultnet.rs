@@ -17,6 +17,7 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetReactiveDocumentOptions;
 use cultnet_rs::CultNetReconnectController;
 use cultnet_rs::CultNetReconnectPolicyOptions;
 use cultnet_rs::CultNetRudpPacket;
@@ -161,6 +162,30 @@ struct GhostlightAgentStateUiFixture {
     agent_id: String,
     #[cultcache(key = 2)]
     display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "ghostlight.reactive-note",
+    schema = "GhostlightReactiveNoteFixture"
+)]
+struct GhostlightReactiveNoteFixture {
+    #[cultcache(key = 0)]
+    body: String,
+    #[cultcache(key = 1)]
+    revision: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "ghostlight.reactive-note.ui",
+    schema = "GhostlightReactiveNoteUiFixture"
+)]
+struct GhostlightReactiveNoteUiFixture {
+    #[cultcache(key = 0)]
+    body: String,
+    #[cultcache(key = 1)]
+    revision: i32,
 }
 
 #[test]
@@ -1763,6 +1788,149 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
         target.get_required::<GhostlightAgentStateUiFixture>("epiphany.persona")?,
         applied
     );
+    Ok(())
+}
+
+#[test]
+fn reactive_document_coalesces_direct_same_schema_alias_member_writes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let target_store = temp.path().join("target-reactive-alias.msgpack");
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightReactiveNoteUiFixture,
+    >(
+        "ghostlight.reactive_note.v0".to_string(),
+        "ghostlight.reactive_note.v0".to_string(),
+    ));
+    let cache = Arc::new(Mutex::new(CultCache::new()));
+    {
+        let mut cache = cache.lock().expect("cache mutex");
+        cache.register_entry_type::<GhostlightReactiveNoteUiFixture>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+        cache.pull_all_backing_stores()?;
+        cache.put(
+            "note:reactive",
+            &GhostlightReactiveNoteUiFixture {
+                body: "initial".to_string(),
+                revision: 1,
+            },
+        )?;
+    }
+
+    let reactive = registry.reactive_document::<GhostlightReactiveNoteUiFixture>(
+        Arc::clone(&cache),
+        "note:reactive",
+        CultNetReactiveDocumentOptions {
+            flush_delay: StdDuration::from_millis(5),
+            ..CultNetReactiveDocumentOptions::default()
+        },
+    )?;
+    {
+        let current = reactive.current();
+        let mut current = current.lock().expect("reactive current mutex");
+        current.body = "first-local-edit".to_string();
+        current.body = "second-local-edit".to_string();
+        current.revision = 2;
+    }
+
+    for _ in 0..30 {
+        let body = cache
+            .lock()
+            .expect("cache mutex")
+            .get_required::<GhostlightReactiveNoteUiFixture>("note:reactive")?
+            .body;
+        if body == "second-local-edit" {
+            break;
+        }
+        thread::sleep(StdDuration::from_millis(5));
+    }
+
+    let stored = cache
+        .lock()
+        .expect("cache mutex")
+        .get_required::<GhostlightReactiveNoteUiFixture>("note:reactive")?;
+    assert_eq!(stored.body, "second-local-edit");
+    assert_eq!(stored.revision, 2);
+    assert!(!reactive.is_dirty());
+    assert!(reactive.last_error().is_none());
+    Ok(())
+}
+
+#[test]
+fn reactive_document_tracks_canonical_reconciliation_delta() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let target_store = temp.path().join("target-reactive-reconcile.msgpack");
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightReactiveNoteFixture,
+    >(
+        "ghostlight.reactive_note.v0".to_string(),
+        "ghostlight.reactive_note.v0".to_string(),
+    ));
+    let cache = Arc::new(Mutex::new(CultCache::new()));
+    {
+        let mut cache = cache.lock().expect("cache mutex");
+        cache.register_entry_type::<GhostlightReactiveNoteFixture>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+        cache.pull_all_backing_stores()?;
+        cache.put(
+            "note:reconcile",
+            &GhostlightReactiveNoteFixture {
+                body: "initial".to_string(),
+                revision: 1,
+            },
+        )?;
+    }
+
+    let reactive = registry.reactive_document::<GhostlightReactiveNoteFixture>(
+        Arc::clone(&cache),
+        "note:reconcile",
+        CultNetReactiveDocumentOptions {
+            flush_delay: StdDuration::from_secs(60),
+            detect_local_changes: false,
+            ..CultNetReactiveDocumentOptions::default()
+        },
+    )?;
+    reactive.update(|note| {
+        note.body = "local-prediction".to_string();
+        note.revision = 2;
+    })?;
+    let authoritative = registry.create_document_put_message(
+        "put-authoritative",
+        "note:reconcile",
+        &GhostlightReactiveNoteFixture {
+            body: "authoritative".to_string(),
+            revision: 7,
+        },
+        CultNetDocumentPutOptions::default(),
+    )?;
+
+    reactive.apply_document_put_message(&authoritative)?;
+
+    let current = reactive.current();
+    let current = current.lock().expect("reactive current mutex").clone();
+    assert_eq!(current.body, "local-prediction");
+    let reconciliation = reactive
+        .reconciliation()
+        .expect("dirty canonical apply records reconciliation");
+    assert_eq!(reconciliation.canonical.body, "authoritative");
+    assert_eq!(reconciliation.predicted.body, "local-prediction");
+    assert_eq!(
+        reconciliation.delta.get("0"),
+        Some(&serde_json::json!("local-prediction"))
+    );
+    assert_eq!(
+        reconciliation.delta.get("1"),
+        Some(&serde_json::json!(-5.0))
+    );
+
+    reactive.flush()?;
+    let stored = cache
+        .lock()
+        .expect("cache mutex")
+        .get_required::<GhostlightReactiveNoteFixture>("note:reconcile")?;
+    assert_eq!(stored.body, "local-prediction");
+    assert!(reactive.reconciliation().is_none());
     Ok(())
 }
 

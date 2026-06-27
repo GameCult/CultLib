@@ -136,6 +136,40 @@ honest. The win is narrower and realer: identical payload bytes stop getting
 decoded into generic sludge and then encoded right back into the same bytes for
 no reason.
 
+## Reactive Documents
+
+For local state that should feel owned by the caller, Rust can wrap a registered
+CultCache record as a managed reactive document:
+
+```rust
+use std::sync::{Arc, Mutex};
+use cultnet_rs::{CultNetReactiveDocumentOptions, CultNetDocumentRegistry};
+
+let cache = Arc::new(Mutex::new(target_cache));
+let note = registry.reactive_document::<UiNote>(
+    Arc::clone(&cache),
+    "note:bridge",
+    CultNetReactiveDocumentOptions::default(),
+)?;
+
+{
+    let current = note.current();
+    current.lock().unwrap().body = "local prediction".to_string();
+}
+```
+
+The handle polls the serialized `current` value on the configured debounce
+cadence and flushes changed state back through the typed cache. `update(...)`,
+`set_current(...)`, `mark_dirty()`, and `flush()` are available when the caller
+wants a more explicit Rust shape.
+
+When a canonical document put arrives while local state is dirty,
+`apply_document_put_message(...)` or `apply_raw_document_put_message(...)`
+records a `CultNetReactiveDocumentReconciliation`: the canonical value, the
+predicted local value, and a delta that can be smoothed by the caller. CultCache
+payloads serialize by numeric field slot, so Rust tuple-backed deltas use slot
+keys such as `"0"` and `"1"` when field names are not present on the wire.
+
 ## CultMesh Rust Facade
 
 Rust is still the low-level substrate runtime, not a clone of the C# game
