@@ -104,11 +104,19 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   assert.equal((await alias.latest()).body, "updated");
 
   const catalog = CultMesh.documents(document);
+  assert.equal(catalog.canReplace(noteAliasDocument), true);
+  await catalog.replace(noteAliasDocument, {
+    noteId: "note:1",
+    body: "catalog-updated",
+  }, {
+    parse: value => noteAliasDocument.schema.parse(value),
+    context: "browser-client",
+  });
   assert.equal(
     (await catalog.latest(noteAliasDocument, "browser-client", {
       parse: value => noteAliasDocument.schema.parse(value),
     })).body,
-    "updated",
+    "catalog-updated",
   );
   assert.throws(
     () => document.asSchemaAlias({ schemaId: "cultmesh.other.v0" }),
@@ -138,14 +146,18 @@ test("CultMesh TS document handles submit predictions through configured authori
   );
   const verse = CultMesh.verse("starbridge", "pilot-a");
   const bound = document.bind(verse);
+  const catalog = CultMesh.documents(document);
 
   assert.equal(document.canReplace, false);
   assert.equal(document.canSubmitPrediction, true);
   assert.equal(bound.canSubmitPrediction, true);
+  assert.equal(catalog.canSubmitPrediction(noteAliasDocument), true);
 
-  await bound.submitPrediction({
+  await catalog.submitPrediction(noteAliasDocument, "pilot-a", {
     noteId: "note:prediction",
     body: "predicted",
+  }, {
+    parse: value => noteAliasDocument.schema.parse(value),
   });
 
   assert.deepEqual(contexts, ["pilot-a:network"]);

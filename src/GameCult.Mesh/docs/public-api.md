@@ -178,7 +178,10 @@ portable machinery that makes it feel native.
   schema version, and resolves same-schema CLR aliases by delegating to
   `CultMeshDocumentHandle<TDocument>.AsSchemaAlias<TAlias>()`. Domain facades
   can expose `Document<T>()`, `DocumentBySchema(...)`, `LatestAsync<T>()`, and
-  `Watch<T>()` without owning schema dictionaries or alias serializers.
+  `Watch<T>()` without owning schema dictionaries or alias serializers. Mutable
+  facades can also call `ReplaceAsync<T>(...)` or
+  `SubmitPredictionAsync<T>(...)` directly on the catalog when they only need
+  the schema-aliased operation and not the intermediate handle.
 - `CultMeshCollectionHandle<TDocument>` is the typed reactive edge for
   multi-record state. It exposes one `LatestAsync()` collection snapshot and a
   `WatchChanges()` stream while hiding whether the backing source is an

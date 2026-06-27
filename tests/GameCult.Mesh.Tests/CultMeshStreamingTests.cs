@@ -775,11 +775,21 @@ public sealed class CultMeshStreamingTests
         observed.Text.Should().Be("cache-replaced");
         observed.Revision.Should().Be(2);
 
+        var catalog = CultMesh.Documents(handle);
+        catalog.CanReplace<MeshNoteAliasDocument>().Should().BeTrue();
+        await catalog.ReplaceAsync(new MeshNoteAliasDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "cache-catalog-replaced",
+            Revision = 3
+        });
+        cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("cache-catalog-replaced");
+
         Func<Task> act = () => alias.SubmitPredictionAsync(new MeshNoteAliasDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "cache-predicted",
-            Revision = 3
+            Revision = 4
         });
         await act.Should().ThrowAsync<NotSupportedException>();
     }
@@ -820,10 +830,12 @@ public sealed class CultMeshStreamingTests
 
         handle.CanReplace.Should().BeTrue();
         alias.CanSubmitPrediction.Should().BeTrue();
+        var catalog = CultMesh.Documents(handle);
+        catalog.CanSubmitPrediction<MeshNoteAliasDocument>().Should().BeTrue();
 
         MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
-        await alias.SubmitPredictionAsync(new MeshNoteAliasDocument
+        await catalog.SubmitPredictionAsync(new MeshNoteAliasDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "predicted-thermal",

@@ -1177,6 +1177,34 @@ namespace GameCult.Mesh
             return Document<TDocument>().Latest();
         }
 
+        /// <summary>Gets whether one typed document can be replaced by CLR type or same-schema alias.</summary>
+        public bool CanReplace<TDocument>()
+            where TDocument : class
+        {
+            return TryGetDocument<TDocument>(out var document) && document.CanReplace;
+        }
+
+        /// <summary>Replaces one typed document by CLR type or same-schema alias.</summary>
+        public Task ReplaceAsync<TDocument>(TDocument value)
+            where TDocument : class
+        {
+            return Document<TDocument>().ReplaceAsync(value);
+        }
+
+        /// <summary>Gets whether one typed document can submit client predictions by CLR type or same-schema alias.</summary>
+        public bool CanSubmitPrediction<TDocument>()
+            where TDocument : class
+        {
+            return TryGetDocument<TDocument>(out var document) && document.CanSubmitPrediction;
+        }
+
+        /// <summary>Submits a client prediction for one typed document by CLR type or same-schema alias.</summary>
+        public Task SubmitPredictionAsync<TDocument>(TDocument value)
+            where TDocument : class
+        {
+            return Document<TDocument>().SubmitPredictionAsync(value);
+        }
+
         /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>
         public Observable<TDocument> Watch<TDocument>()
             where TDocument : class
