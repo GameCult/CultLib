@@ -893,6 +893,112 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_CoalescesLocalEditsIntoOnePrediction()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+        var catalog = CultMesh.Documents(handle);
+
+        using var reactive = await catalog.ReactiveAsync<MeshNoteAliasDocument>(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Current.Text.Should().Be("initial");
+        reactive.Update(document =>
+        {
+            document.Text = "first-local-edit";
+            document.Revision++;
+        });
+        reactive.Update(document =>
+        {
+            document.Text = "second-local-edit";
+            document.Revision++;
+        });
+
+        predictions.Should().BeEmpty();
+
+        await reactive.FlushAsync();
+
+        predictions.Should().ContainSingle();
+        predictions[0].Text.Should().Be("second-local-edit");
+        predictions[0].Revision.Should().Be(3);
+        current.Text.Should().Be("second-local-edit");
+    }
+
+    [Test]
+    public async Task ReactiveDocument_TracksCanonicalSnapshotDuringDirtyPrediction()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.reconciliation",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Update(document =>
+        {
+            document.Text = "local-prediction";
+            document.Revision = 2;
+        });
+
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "canonical-correction",
+            Revision = 7
+        });
+
+        reactive.Current.Text.Should().Be("local-prediction");
+        reactive.Reconciliation.Should().NotBeNull();
+        reactive.Reconciliation!.Canonical.Text.Should().Be("canonical-correction");
+        reactive.Reconciliation.Predicted.Text.Should().Be("local-prediction");
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsSchemaPublicationsFromSingleFileStores()
     {
         using var directory = new TemporaryDirectory();

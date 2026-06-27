@@ -1052,6 +1052,26 @@ namespace GameCult.Mesh
             return next;
         }
 
+        /// <summary>
+        /// Creates a managed reactive document mirror whose local edits can be coalesced into one prediction or replacement.
+        /// </summary>
+        public async Task<CultMeshReactiveDocument<TDocument>> ReactiveAsync(
+            CultMeshReactiveDocumentOptions? options = null)
+        {
+            var current = CloneDocument(await LatestAsync().ConfigureAwait(false));
+            var reactive = new CultMeshReactiveDocument<TDocument>(this, current, options);
+            reactive.Start();
+            return reactive;
+        }
+
+        /// <summary>
+        /// Creates a managed reactive document mirror synchronously for host APIs that cannot be async.
+        /// </summary>
+        public CultMeshReactiveDocument<TDocument> Reactive(CultMeshReactiveDocumentOptions? options = null)
+        {
+            return ReactiveAsync(options).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         public CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
         {
@@ -1085,7 +1105,17 @@ namespace GameCult.Mesh
             return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context), replace, submitPrediction);
         }
 
-        private static TTarget ConvertDocument<TSource, TTarget>(TSource document)
+        internal static TDocumentValue CloneDocument<TDocumentValue>(TDocumentValue document)
+            where TDocumentValue : class
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocumentValue));
+            return (TDocumentValue)CultDocumentMessagePackSerialization.DeserializeUntyped(
+                typeof(TDocumentValue),
+                payload);
+        }
+
+        internal static TTarget ConvertDocument<TSource, TTarget>(TSource document)
             where TSource : class
             where TTarget : class
         {
@@ -1097,6 +1127,256 @@ namespace GameCult.Mesh
 
             var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TSource));
             return (TTarget)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TTarget), payload);
+        }
+    }
+
+    /// <summary>
+    /// Configures a managed CultMesh reactive document mirror.
+    /// </summary>
+    public sealed class CultMeshReactiveDocumentOptions
+    {
+        /// <summary>
+        /// Gets or sets the write coalescing window. The default approximates a frame boundary for non-Unity hosts.
+        /// </summary>
+        public TimeSpan FlushDelay { get; set; } = TimeSpan.FromMilliseconds(16);
+
+        /// <summary>Gets or sets whether canonical snapshots replace dirty local predictions immediately.</summary>
+        public bool ReplaceDirtyCurrentOnCanonicalSnapshot { get; set; }
+    }
+
+    /// <summary>
+    /// Captures a canonical snapshot that arrived while the local reactive document had an outstanding prediction.
+    /// </summary>
+    public sealed class CultMeshReactiveDocumentReconciliation<TDocument>
+        where TDocument : class
+    {
+        internal CultMeshReactiveDocumentReconciliation(
+            TDocument canonical,
+            TDocument predicted,
+            DateTimeOffset receivedAt)
+        {
+            Canonical = canonical;
+            Predicted = predicted;
+            ReceivedAt = receivedAt;
+        }
+
+        /// <summary>Gets the authoritative canonical document snapshot.</summary>
+        public TDocument Canonical { get; }
+
+        /// <summary>Gets the locally predicted document snapshot that was active when the canonical value arrived.</summary>
+        public TDocument Predicted { get; }
+
+        /// <summary>Gets when the canonical snapshot was received.</summary>
+        public DateTimeOffset ReceivedAt { get; }
+    }
+
+    /// <summary>
+    /// Managed typed document mirror that keeps an editable current value and coalesces local edits into CultMesh mutations.
+    /// </summary>
+    public sealed class CultMeshReactiveDocument<TDocument> : IDisposable
+        where TDocument : class
+    {
+        private readonly CultMeshDocumentHandle<TDocument> _document;
+        private readonly CultMeshReactiveDocumentOptions _options;
+        private readonly object _gate = new();
+        private IDisposable? _subscription;
+        private Timer? _timer;
+        private bool _dirty;
+        private bool _flushQueued;
+        private bool _flushing;
+        private bool _disposed;
+
+        internal CultMeshReactiveDocument(
+            CultMeshDocumentHandle<TDocument> document,
+            TDocument current,
+            CultMeshReactiveDocumentOptions? options)
+        {
+            _document = document ?? throw new ArgumentNullException(nameof(document));
+            Current = current ?? throw new ArgumentNullException(nameof(current));
+            _options = options ?? new CultMeshReactiveDocumentOptions();
+        }
+
+        /// <summary>Gets the underlying document handle.</summary>
+        public CultMeshDocumentHandle<TDocument> Document => _document;
+
+        /// <summary>Gets the editable local document value.</summary>
+        public TDocument Current { get; private set; }
+
+        /// <summary>Gets whether local edits are waiting to be sent.</summary>
+        public bool IsDirty
+        {
+            get
+            {
+                lock (_gate)
+                    return _dirty;
+            }
+        }
+
+        /// <summary>Gets the most recent reconciliation snapshot, when a canonical value arrived during local prediction.</summary>
+        public CultMeshReactiveDocumentReconciliation<TDocument>? Reconciliation { get; private set; }
+
+        internal void Start()
+        {
+            _subscription = _document.Watch(ApplyCanonicalSnapshot);
+        }
+
+        /// <summary>Marks the current value dirty and schedules a coalesced prediction or replacement.</summary>
+        public void MarkDirty()
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                _dirty = true;
+                ScheduleFlushLocked();
+            }
+        }
+
+        /// <summary>Mutates the current value and schedules a coalesced prediction or replacement.</summary>
+        public TDocument Update(Action<TDocument> update)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                update(Current);
+                _dirty = true;
+                ScheduleFlushLocked();
+                return Current;
+            }
+        }
+
+        /// <summary>Replaces the current local value and schedules a coalesced prediction or replacement.</summary>
+        public TDocument SetCurrent(TDocument value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                Current = CultMeshDocumentHandle<TDocument>.CloneDocument(value);
+                _dirty = true;
+                ScheduleFlushLocked();
+                return Current;
+            }
+        }
+
+        /// <summary>Reads a fresh canonical snapshot and adopts it as the current value.</summary>
+        public async Task<TDocument> RefreshAsync()
+        {
+            ThrowIfDisposed();
+            var latest = CultMeshDocumentHandle<TDocument>.CloneDocument(
+                await _document.LatestAsync().ConfigureAwait(false));
+            lock (_gate)
+            {
+                Current = latest;
+                _dirty = false;
+                Reconciliation = null;
+                return Current;
+            }
+        }
+
+        /// <summary>Immediately sends the latest local dirty value, if any, through the document authority shape.</summary>
+        public async Task FlushAsync()
+        {
+            TDocument predicted;
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (!_dirty)
+                    return;
+                if (_flushing)
+                {
+                    _flushQueued = true;
+                    return;
+                }
+
+                _timer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                _flushing = true;
+                _dirty = false;
+                predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(Current);
+            }
+
+            try
+            {
+                await _document.SetAsync(predicted).ConfigureAwait(false);
+            }
+            finally
+            {
+                var shouldFlushAgain = false;
+                lock (_gate)
+                {
+                    _flushing = false;
+                    shouldFlushAgain = _flushQueued || _dirty;
+                    _flushQueued = false;
+                }
+
+                if (shouldFlushAgain)
+                    await FlushAsync().ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>Clears the most recent reconciliation metadata.</summary>
+        public void ClearReconciliation()
+        {
+            ThrowIfDisposed();
+            Reconciliation = null;
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+            }
+
+            _subscription?.Dispose();
+            _timer?.Dispose();
+        }
+
+        private void ApplyCanonicalSnapshot(TDocument canonical)
+        {
+            if (canonical == null)
+                return;
+
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+
+                var nextCanonical = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
+                if (_dirty || _flushing)
+                {
+                    Reconciliation = new CultMeshReactiveDocumentReconciliation<TDocument>(
+                        nextCanonical,
+                        CultMeshDocumentHandle<TDocument>.CloneDocument(Current),
+                        DateTimeOffset.UtcNow);
+                    if (!_options.ReplaceDirtyCurrentOnCanonicalSnapshot)
+                        return;
+                }
+
+                Current = nextCanonical;
+                Reconciliation = null;
+            }
+        }
+
+        private void ScheduleFlushLocked()
+        {
+            if (_options.FlushDelay <= TimeSpan.Zero)
+            {
+                _ = Task.Run(FlushAsync);
+                return;
+            }
+
+            _timer ??= new Timer(_ => _ = Task.Run(FlushAsync));
+            _timer.Change(_options.FlushDelay, Timeout.InfiniteTimeSpan);
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(CultMeshReactiveDocument<TDocument>));
         }
     }
 
@@ -1284,6 +1564,22 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             return Document<TDocument>().Watch(onNext);
+        }
+
+        /// <summary>Creates a managed reactive document mirror by CLR type or same-schema alias.</summary>
+        public Task<CultMeshReactiveDocument<TDocument>> ReactiveAsync<TDocument>(
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            return Document<TDocument>().ReactiveAsync(options);
+        }
+
+        /// <summary>Creates a managed reactive document mirror synchronously by CLR type or same-schema alias.</summary>
+        public CultMeshReactiveDocument<TDocument> Reactive<TDocument>(
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            return Document<TDocument>().Reactive(options);
         }
     }
 
