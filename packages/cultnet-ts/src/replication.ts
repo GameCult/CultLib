@@ -57,7 +57,15 @@ export class CultNetDocumentRegistry {
   }
 
   getBySchemaId(schemaId: string): CultNetDocumentBinding | undefined {
-    return this.#schemaBindings.get(schemaId);
+    const exact = this.#schemaBindings.get(schemaId);
+    if (exact) {
+      return exact;
+    }
+
+    const requestedSchemaIds = new Set([schemaId]);
+    return this.#uniqueBindings().find(binding =>
+      schemaMatchesBinding(schemaIdForBinding(binding), binding, requestedSchemaIds),
+    );
   }
 
   createDocumentPutMessage<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -354,6 +362,9 @@ function schemaMatchesBinding(
     return true;
   }
   if (definition.schemaName && requestedSchemaIds.has(definition.schemaName)) {
+    return true;
+  }
+  if (definition.schemaVersion && requestedSchemaIds.has(definition.schemaVersion)) {
     return true;
   }
   if (definition.compatibleSchemaIds?.some(candidate => requestedSchemaIds.has(candidate))) {

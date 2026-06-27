@@ -1316,6 +1316,63 @@ test("CultNet document registry filters snapshots by schema aliases", async () =
   }
 });
 
+test("CultNet document registry applies typed put and delete messages by schema alias", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-alias-typed-"));
+
+  try {
+    const documentDefinition = defineDocumentType({
+      type: "cultnet.typed_alias_note",
+      schemaId: "sha256:cultnet-typed-alias-note",
+      schemaName: "cultnet.typed_alias_note",
+      schemaVersion: "cultnet.typed_alias_note.v1",
+      schema: z.object({
+        schema_version: z.string(),
+        noteId: z.string(),
+        body: z.string(),
+      }),
+      name: "noteId",
+    });
+    const registry = new CultNetDocumentRegistry([
+      defineCultNetDocumentBinding({ definition: documentDefinition }),
+    ]);
+    const cache = CultCache.builder()
+      .withDocumentType(documentDefinition)
+      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "typed-alias.msgpack")))
+      .build();
+
+    await registry.applyDocumentPutMessage(cache, {
+      schemaVersion: "cultnet.document_put.v0",
+      messageId: "typed-alias-put",
+      document: {
+        schemaId: "cultnet.typed_alias_note.v1",
+        recordKey: "note:typed-alias",
+        storedAt: "2026-06-27T00:00:00.000Z",
+        payload: {
+          schema_version: "cultnet.typed_alias_note.v1",
+          noteId: "note:typed-alias",
+          body: "typed alias applied",
+        },
+      },
+    });
+
+    assert.equal(
+      cache.getRequired(documentDefinition, "note:typed-alias").body,
+      "typed alias applied",
+    );
+    assert.equal(registry.getBySchemaId("cultnet.typed_alias_note.v1")?.definition.type, documentDefinition.type);
+
+    assert.equal(await registry.applyDocumentDeleteMessage(cache, {
+      schemaVersion: "cultnet.document_delete.v0",
+      messageId: "typed-alias-delete",
+      schemaId: "cultnet.typed_alias_note.v1",
+      recordKey: "note:typed-alias",
+    }), true);
+    assert.equal(cache.get(documentDefinition, "note:typed-alias"), undefined);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CultNet interop slot compatibility defaults missing trailing fields and rejects mismatched slots", () => {
   const note: InteropNote = {
     schemaVersion: INTEROP_SCHEMA_VERSION,
