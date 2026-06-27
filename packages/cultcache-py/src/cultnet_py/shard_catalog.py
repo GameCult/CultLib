@@ -60,7 +60,7 @@ class CultNetShardDescriptor:
         return wire
 
     def serves(self, *, schema_id: str | None = None, record_key: str | None = None) -> bool:
-        if schema_id is not None and self.schema_ids and schema_id not in self.schema_ids:
+        if schema_id is not None and self.schema_ids and not _schema_ids_match_any(self.schema_ids, (schema_id,)):
             return False
         if record_key is not None and self.key_prefix and not record_key.startswith(self.key_prefix):
             return False
@@ -122,11 +122,36 @@ def _shard_matches(
     requested_schema_ids: set[str],
     requested_record_keys: list[str],
 ) -> bool:
-    if requested_schema_ids and not any(schema_id in shard.schema_ids for schema_id in requested_schema_ids):
+    if requested_schema_ids and not _schema_ids_match_any(shard.schema_ids, requested_schema_ids):
         return False
     if requested_record_keys and not any(shard.serves(record_key=record_key) for record_key in requested_record_keys):
         return False
     return True
+
+
+def _schema_ids_match_any(
+    advertised_schema_ids: tuple[str, ...],
+    requested_schema_ids: set[str] | tuple[str, ...],
+) -> bool:
+    return any(
+        _schema_ids_match(advertised, requested)
+        for advertised in advertised_schema_ids
+        for requested in requested_schema_ids
+    )
+
+
+def _schema_ids_match(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return (_infer_schema_name(left) or left) == (_infer_schema_name(right) or right)
+
+
+def _infer_schema_name(schema_id: str) -> str | None:
+    marker = schema_id.rfind(".v")
+    if marker <= 0 or marker + 2 >= len(schema_id):
+        return None
+    version = schema_id[marker + 2:]
+    return schema_id[:marker] if version.isdigit() else None
 
 
 def _string_tuple(value: Any) -> tuple[str, ...]:

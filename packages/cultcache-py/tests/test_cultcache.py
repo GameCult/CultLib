@@ -2339,7 +2339,7 @@ class CultCacheTests(unittest.TestCase):
             owner_runtime_id="python-runtime",
             epoch=2,
             is_primary=True,
-            schema_ids=("schema-note",),
+            schema_ids=("schema-note.v1",),
             key_prefix="note:",
             primary_endpoints=("cultnet://127.0.0.1:3075",),
             read_replica_endpoints=("cultnet://127.0.0.1:3075",),
@@ -2354,8 +2354,10 @@ class CultCacheTests(unittest.TestCase):
             "primaryEndpoints": ["cultnet://127.0.0.1:3076"],
         })
 
+        self.assertTrue(primary.serves(schema_id="schema-note.v1", record_key="note:1"))
         self.assertTrue(primary.serves(schema_id="schema-note", record_key="note:1"))
         self.assertFalse(primary.serves(schema_id="schema-note", record_key="fact:1"))
+        self.assertEqual(catalog.list(schema_ids=["schema-note.v1"]), [primary])
         self.assertEqual(catalog.list(schema_ids=["schema-note"]), [primary])
         self.assertEqual(catalog.list(record_keys=["note:1"]), [primary])
 
