@@ -34,6 +34,24 @@ const noteAliasDocument = defineDocumentType({
   name: "noteId",
 });
 
+const foreignNoteDocument = defineDocumentType({
+  type: "runtime.generated.cultmesh.note",
+  schemaId: "runtime.generated.cultmesh.note.ui.42",
+  schema: z.object({
+    noteId: z.string(),
+    body: z.string(),
+  }),
+  name: "noteId",
+});
+
+const incompatibleNoteDocument = defineDocumentType({
+  type: "runtime.generated.incompatible-note",
+  schemaId: "runtime.generated.incompatible-note.v1",
+  schema: z.object({
+    nope: z.string(),
+  }),
+});
+
 async function waitFor(predicate: () => boolean, description: string): Promise<void> {
   const startedAt = Date.now();
   while (!predicate()) {
@@ -2363,6 +2381,76 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
     assert.deepEqual(await alias.latest(), {
       noteId: "note:remote",
       body: "remote handles feel local",
+    });
+  } finally {
+    peer?.close();
+    server.close();
+  }
+});
+
+test("CultMesh TS peer snapshot handles choose compatible foreign schema payloads", async () => {
+  const connectionId = 0x10203049;
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-foreign-snapshot-")), "node.ccmp"),
+    {
+      documents: [incompatibleNoteDocument, foreignNoteDocument],
+    },
+  );
+  await node.put(incompatibleNoteDocument, "note:foreign", {
+    nope: "not the requested shape",
+  });
+  await node.put(foreignNoteDocument, "note:foreign", {
+    noteId: "note:foreign",
+    body: "foreign schema id, local shape",
+  });
+
+  const server = CultMesh.createRudpDocumentServer(
+    "cultmesh-ts-rudp-foreign-snapshot-server",
+    connectionId,
+    {
+      documents: new CultNetDocumentRegistry([
+        defineCultNetDocumentBinding({ definition: incompatibleNoteDocument }),
+        defineCultNetDocumentBinding({ definition: foreignNoteDocument }),
+      ]),
+      getCache: () => node.cache,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+
+  let peer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    peer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-rudp-foreign-snapshot-client",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+
+    const alias = CultMesh.documentFromPeerSnapshot(
+      peer,
+      noteAliasDocument,
+      "note:foreign",
+      {
+        documentId: "note:foreign.alias",
+        timeoutMs: 1_000,
+      },
+    );
+
+    assert.deepEqual(await alias.latest(), {
+      noteId: "note:foreign",
+      body: "foreign schema id, local shape",
     });
   } finally {
     peer?.close();

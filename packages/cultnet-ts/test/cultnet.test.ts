@@ -1215,6 +1215,57 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
   }
 });
 
+test("CultNet raw replication applies compatible foreign-schema snapshots", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-foreign-schema-raw-"));
+
+  try {
+    const documentDefinition = defineDocumentType({
+      type: "cultnet.note",
+      schemaId: "cultnet.note.v1",
+      schemaName: "cultnet.note",
+      schemaVersion: "cultnet.note.v1",
+      schema: z.object({
+        schema_version: z.string(),
+        noteId: z.string(),
+        body: z.string(),
+      }),
+      name: "noteId",
+    });
+    const registry = new CultNetDocumentRegistry([
+      defineCultNetDocumentBinding({ definition: documentDefinition }),
+    ]);
+    const originCache = CultCache.builder()
+      .withDocumentType(documentDefinition)
+      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "origin.msgpack")))
+      .build();
+    const targetCache = CultCache.builder()
+      .withDocumentType(documentDefinition)
+      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "target.msgpack")))
+      .build();
+
+    await originCache.put(documentDefinition, "note:foreign-schema", {
+      schema_version: "cultnet.note.v1",
+      noteId: "note:foreign-schema",
+      body: "accepted by payload shape",
+    });
+    const rawSnapshot = registry.createRawSnapshotResponse(originCache, "foreign-schema-raw");
+    rawSnapshot.documents[0]!.schemaId = "runtime.generated.cultnet.note.ui.99";
+
+    await registry.applyRawSnapshotResponse(targetCache, rawSnapshot);
+
+    assert.equal(
+      targetCache.getRequired(documentDefinition, "note:foreign-schema").body,
+      "accepted by payload shape",
+    );
+    assert.equal(
+      targetCache.getRequiredEnvelope(documentDefinition, "note:foreign-schema").schemaId,
+      "cultnet.note.v1",
+    );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CultNet interop slot compatibility defaults missing trailing fields and rejects mismatched slots", () => {
   const note: InteropNote = {
     schemaVersion: INTEROP_SCHEMA_VERSION,

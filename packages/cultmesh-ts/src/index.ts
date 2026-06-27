@@ -2549,6 +2549,16 @@ export function cultMeshDocumentFromPeerSnapshot(
           {
             timeoutMs: options.timeoutMs,
             messageIdPrefix: options.messageIdPrefix ?? documentId,
+            accepts: typeof schemaOrDefinition === "string"
+              ? undefined
+              : record => {
+                  try {
+                    schemaOrDefinition.schema.parse(decodeCultNetRawDocumentPayload(record));
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
           },
         ),
       ),
@@ -5718,6 +5728,7 @@ async function requestCultNetRawSnapshotDocument(
   options: {
     timeoutMs?: number;
     messageIdPrefix?: string;
+    accepts?: (document: CultNetRawDocumentRecord) => boolean;
   } = {},
 ): Promise<CultNetRawDocumentRecord> {
   const peer = await resolveCultNetPeer(peerOrProvider);
@@ -5727,7 +5738,10 @@ async function requestCultNetRawSnapshotDocument(
     timeoutMs: options.timeoutMs,
   });
   const candidates = response.documents.filter(candidate => candidate.recordKey === recordKey);
-  const document = candidates.find(candidate => candidate.schemaId === schemaId) ?? candidates[0];
+  const document =
+    candidates.find(candidate => candidate.schemaId === schemaId) ??
+    (options.accepts ? candidates.find(options.accepts) : undefined) ??
+    candidates[0];
   if (!document) {
     throw new Error(`CultMesh peer snapshot did not return ${schemaId} at ${recordKey}.`);
   }

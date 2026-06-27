@@ -238,11 +238,14 @@ export class CultNetDocumentRegistry {
     cache: CultCache,
     message: CultNetDocumentPutRawMessage,
   ): Promise<unknown> {
-    const binding = this.#requireSchemaBinding(message.document.schemaId);
+    const resolution = this.#resolveRawDocumentBinding(message.document);
+    const { binding } = resolution;
     return cache.putEnvelope(binding.definition, {
       key: message.document.recordKey,
       type: binding.definition.type,
-      schemaId: message.document.schemaId,
+      schemaId: resolution.preserveIncomingSchemaId
+        ? message.document.schemaId
+        : schemaIdForBinding(binding),
       payload: new Uint8Array(message.document.payload),
       storedAt: message.document.storedAt,
     });
@@ -290,6 +293,35 @@ export class CultNetDocumentRegistry {
     }
 
     return binding;
+  }
+
+  #resolveRawDocumentBinding(document: CultNetRawDocumentRecord): {
+    binding: CultNetDocumentBinding;
+    preserveIncomingSchemaId: boolean;
+  } {
+    const exact = this.getBySchemaId(document.schemaId);
+    if (exact) {
+      return { binding: exact, preserveIncomingSchemaId: true };
+    }
+
+    const payload = new Uint8Array(document.payload);
+    for (const binding of this.#uniqueBindings()) {
+      try {
+        decodeDocumentValue(binding.definition, payload);
+        return { binding, preserveIncomingSchemaId: false };
+      } catch {
+        // Keep looking; a foreign schema id is acceptable only when the payload validates locally.
+      }
+    }
+
+    throw new Error(`No CultNet document binding is registered for schema "${document.schemaId}".`);
+  }
+
+  #uniqueBindings(): CultNetDocumentBinding[] {
+    return [...new Set([
+      ...this.#schemaBindings.values(),
+      ...this.#bindings.values(),
+    ])];
   }
 
   #createRawDocumentRecord(envelope: CultCacheEnvelope): CultNetRawDocumentRecord {
