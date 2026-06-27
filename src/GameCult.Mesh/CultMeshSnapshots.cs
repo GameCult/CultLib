@@ -291,7 +291,7 @@ namespace GameCult.Mesh
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
             return CultMesh.FetchSnapshotDocumentsAsync<TDocument>(
                 Endpoint,
-                CreateRequest(schemaIds ?? new[] { descriptor.SchemaId }, recordKeys),
+                CreateRequest(ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor), recordKeys),
                 DocumentRegistry);
         }
 
@@ -308,7 +308,7 @@ namespace GameCult.Mesh
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
             var result = await SyncSnapshotAsync(
                     node,
-                    schemaIds ?? new[] { descriptor.SchemaId },
+                    ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor),
                     recordKeys,
                     flush)
                 .ConfigureAwait(false);
@@ -446,6 +446,19 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(request.MessageIdPrefix))
                 request.MessageIdPrefix = $"cultmesh:{Context.RuntimeId}:snapshot";
             return request;
+        }
+
+        private static IReadOnlyList<string>? ResolveDefaultSchemaFilter(
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys,
+            CultDocumentDescriptor descriptor)
+        {
+            if (schemaIds != null)
+                return schemaIds;
+
+            return recordKeys is { Count: > 0 }
+                ? null
+                : new[] { descriptor.SchemaId };
         }
 
         private static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(CultMeshSnapshotRequestOptions? source)

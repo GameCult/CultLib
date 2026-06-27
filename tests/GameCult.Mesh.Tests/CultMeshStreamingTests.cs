@@ -2486,10 +2486,7 @@ public sealed class CultMeshStreamingTests
         syncedCatalogAlias.Text.Should().Be("snapshot-endpoint-catalog-synced");
         requests.Should().HaveCount(6);
         requests.Should().OnlyContain(request =>
-            request.SchemaIds!.SequenceEqual(new[]
-            {
-                CultDocumentRegistry.Shared.GetRequired<MeshNoteAliasDocument>().SchemaId
-            }) &&
+            request.SchemaIds == null &&
             request.RecordKeys!.SequenceEqual(new[] { key.Value }) &&
             request.ShardId == "primary" &&
             request.ShardEpoch == 9 &&
