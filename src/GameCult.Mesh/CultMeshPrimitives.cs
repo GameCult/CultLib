@@ -903,6 +903,9 @@ namespace GameCult.Mesh
         /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
         bool CanSubmitPrediction { get; }
 
+        /// <summary>Gets whether this handle can accept a transparent document mutation.</summary>
+        bool CanSet { get; }
+
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
@@ -964,6 +967,9 @@ namespace GameCult.Mesh
         /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
         public bool CanSubmitPrediction => _submitPrediction != null;
 
+        /// <summary>Gets whether this handle can accept a transparent document mutation.</summary>
+        public bool CanSet => CanSubmitPrediction || CanReplace;
+
         /// <summary>Reads one coherent document snapshot.</summary>
         public Task<TDocument> LatestAsync()
         {
@@ -1011,6 +1017,39 @@ namespace GameCult.Mesh
             }
 
             return _submitPrediction(value);
+        }
+
+        /// <summary>
+        /// Sets the document value through the configured authority shape.
+        /// Prediction-backed documents publish a prediction; mutable documents replace authoritatively.
+        /// </summary>
+        public Task SetAsync(TDocument value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            if (_submitPrediction != null)
+                return _submitPrediction(value);
+            if (_replace != null)
+                return _replace(value);
+
+            throw new NotSupportedException($"Document handle '{DocumentId}' does not accept mutations.");
+        }
+
+        /// <summary>Reads, updates, and sets the document value through the configured authority shape.</summary>
+        public async Task<TDocument> UpdateAsync(Func<TDocument, TDocument> update)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            var next = update(await LatestAsync().ConfigureAwait(false));
+            await SetAsync(next).ConfigureAwait(false);
+            return next;
+        }
+
+        /// <summary>Reads, updates, and sets the document value through the configured authority shape.</summary>
+        public async Task<TDocument> UpdateAsync(Func<TDocument, Task<TDocument>> update)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            var next = await update(await LatestAsync().ConfigureAwait(false)).ConfigureAwait(false);
+            await SetAsync(next).ConfigureAwait(false);
+            return next;
         }
 
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
@@ -1198,11 +1237,39 @@ namespace GameCult.Mesh
             return TryGetDocument<TDocument>(out var document) && document.CanSubmitPrediction;
         }
 
+        /// <summary>Gets whether one typed document can accept transparent mutations by CLR type or same-schema alias.</summary>
+        public bool CanSet<TDocument>()
+            where TDocument : class
+        {
+            return TryGetDocument<TDocument>(out var document) && document.CanSet;
+        }
+
         /// <summary>Submits a client prediction for one typed document by CLR type or same-schema alias.</summary>
         public Task SubmitPredictionAsync<TDocument>(TDocument value)
             where TDocument : class
         {
             return Document<TDocument>().SubmitPredictionAsync(value);
+        }
+
+        /// <summary>Sets one typed document through its configured authority shape by CLR type or same-schema alias.</summary>
+        public Task SetAsync<TDocument>(TDocument value)
+            where TDocument : class
+        {
+            return Document<TDocument>().SetAsync(value);
+        }
+
+        /// <summary>Reads, updates, and sets one typed document through its configured authority shape.</summary>
+        public Task<TDocument> UpdateAsync<TDocument>(Func<TDocument, TDocument> update)
+            where TDocument : class
+        {
+            return Document<TDocument>().UpdateAsync(update);
+        }
+
+        /// <summary>Reads, updates, and sets one typed document through its configured authority shape.</summary>
+        public Task<TDocument> UpdateAsync<TDocument>(Func<TDocument, Task<TDocument>> update)
+            where TDocument : class
+        {
+            return Document<TDocument>().UpdateAsync(update);
         }
 
         /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>

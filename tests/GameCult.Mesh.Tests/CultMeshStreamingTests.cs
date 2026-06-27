@@ -863,12 +863,14 @@ public sealed class CultMeshStreamingTests
 
         handle.CanReplace.Should().BeTrue();
         alias.CanSubmitPrediction.Should().BeTrue();
+        alias.CanSet.Should().BeTrue();
         var catalog = CultMesh.Documents(handle);
         catalog.CanSubmitPrediction<MeshNoteAliasDocument>().Should().BeTrue();
+        catalog.CanSet<MeshNoteAliasDocument>().Should().BeTrue();
 
         MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
-        await catalog.SubmitPredictionAsync(new MeshNoteAliasDocument
+        await catalog.SetAsync(new MeshNoteAliasDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "predicted-thermal",
@@ -879,6 +881,15 @@ public sealed class CultMeshStreamingTests
         observed.Text.Should().Be("predicted-thermal");
         observed.Revision.Should().Be(5);
         (await handle.LatestAsync()).Text.Should().Be("predicted-thermal");
+
+        var updated = await alias.UpdateAsync(value => new MeshNoteAliasDocument
+        {
+            Schema = value.Schema,
+            Text = "updated-as-prediction",
+            Revision = value.Revision + 1
+        });
+        updated.Text.Should().Be("updated-as-prediction");
+        cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(6);
     }
 
     [Test]
