@@ -2203,7 +2203,7 @@ public sealed class CultMeshStreamingTests
             .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
         var requests = new List<CultNetSnapshotRequestMessage>();
 
-        var handle = CultMesh.DocumentFromPublication<MeshNoteDocument>(
+        var handle = CultMesh.DocumentFromPublication<MeshNoteAliasDocument>(
             CultMeshDocumentPublicationSource.PeerSnapshot(
                 () => new MeshSnapshotSchemaClient(request =>
                 {
@@ -2218,13 +2218,13 @@ public sealed class CultMeshStreamingTests
                 PollInterval = TimeSpan.FromMilliseconds(10),
                 MessageIdPrefix = "mesh-test-snapshot"
             });
-        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
         var catalog = CultMesh.Documents(handle);
 
-        var snapshot = await alias.LatestAsync();
+        var snapshot = await handle.LatestAsync();
 
         snapshot.Text.Should().Be("remote-snapshot");
         snapshot.Revision.Should().Be(9);
+        handle.DocumentType.Should().Be(typeof(MeshNoteAliasDocument));
         handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
         handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be(key.Value);
         requests.Should().ContainSingle();
@@ -2233,7 +2233,7 @@ public sealed class CultMeshStreamingTests
         requests[0].RecordKeys.Should().ContainSingle().Which.Should().Be(key.Value);
         (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("remote-snapshot");
 
-        var aliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
+        var aliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "alias-schema",
@@ -2261,7 +2261,7 @@ public sealed class CultMeshStreamingTests
 
         (await aliasSchemaHandle.LatestAsync()).Text.Should().Be("record-key-fallback");
 
-        var mixedAliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
+        var mixedAliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "alias-schema-with-neighbor",

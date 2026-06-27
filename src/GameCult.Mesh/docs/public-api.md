@@ -287,19 +287,20 @@ id, response filtering, raw MessagePack payload decode, route metadata, and
 polling watch fallback:
 
 ```csharp
-var remoteHealth = CultMesh.DocumentFromPeerSnapshot<DaemonHealthDocument>(
+var remoteHealth = CultMesh.DocumentFromPeerSnapshot<DaemonHealthUiDocument>(
     "cultnet://daemon.local:3075",
     "daemon:aetheria.health.v1",
     verse);
 
-var health = await remoteHealth.LatestAsync();
-var uiHealth = remoteHealth.AsSchemaAlias<DaemonHealthUiDocument>();
+var uiHealth = await remoteHealth.LatestAsync();
 ```
 
 Snapshot requests are record-key-first so same logical documents can still be
 read when another runtime generated a different schema id for a compatible
 schema alias. The decode path prefers exact schema id matches when present and
-falls back to the requested record key.
+falls back to the requested record key. Ask for the runtime-facing alias type
+directly; `AsSchemaAlias<TAlias>()` is for adapting handles that were already
+constructed elsewhere.
 
 A domain facade can still collect existing handles into one schema-aware
 catalog when it is composing pre-built surfaces:
@@ -368,7 +369,7 @@ const stopRoster = pilots.watchChanges(change => refreshRoster(change));
 
 const remoteHealth = CultMesh.documentFromPeerSnapshot(
   () => daemonPeer,
-  "gamecult.aetheria.daemon_health.v1",
+  daemonHealthUiDocument,
   "daemon:aetheria.health.v1",
 );
 const health = await remoteHealth.latest();
@@ -503,12 +504,12 @@ fragmentation, and channel semantics.
 
 TypeScript runtimes can also wrap a CultNet peer snapshot as a normal document
 handle with `CultMesh.documentFromPeerSnapshot(...)`. The caller supplies the
-peer or peer factory, schema id, and record key; CultMesh sends the snapshot
-request, waits for the matching response, decodes the raw MessagePack document,
-and returns the same `latest()`/`watch()` document surface used by local cache
-and single-file documents. Exact schema ids are preferred, but record-key
-publications remain readable when two runtimes alias the same logical document
-through different schema names.
+peer or peer factory, document definition or schema id, and record key; CultMesh
+sends the snapshot request, waits for the matching response, decodes the raw
+MessagePack document, and returns the same `latest()`/`watch()` document surface
+used by local cache and single-file documents. Exact schema ids are preferred,
+but record-key publications remain readable when two runtimes alias the same
+logical document through different schema names.
 
 ### Shard Authority
 
