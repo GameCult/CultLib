@@ -1627,6 +1627,87 @@ export class CultMeshCollectionHandle<TDocument> {
   }
 }
 
+export class CultMeshCollectionCatalog {
+  readonly #byCollectionId = new Map<string, CultMeshCollectionHandle<any>>();
+  readonly #byType = new Map<string, CultMeshCollectionHandle<any>>();
+  readonly #bySchemaId = new Map<string, CultMeshCollectionHandle<any>>();
+  readonly #bySchemaNameVersion = new Map<string, CultMeshCollectionHandle<any>>();
+
+  public constructor(collections: Iterable<CultMeshCollectionHandle<any>>) {
+    for (const collection of collections) {
+      this.add(collection);
+    }
+  }
+
+  public get collections(): readonly CultMeshCollectionHandle<any>[] {
+    return [...this.#byCollectionId.values()];
+  }
+
+  public add<TDocument>(collection: CultMeshCollectionHandle<TDocument>): this {
+    this.#byCollectionId.set(collection.collectionId, collection as CultMeshCollectionHandle<any>);
+    if (collection.schema.type) {
+      this.#byType.set(collection.schema.type, collection as CultMeshCollectionHandle<any>);
+    }
+    if (collection.schema.schemaId) {
+      this.#bySchemaId.set(collection.schema.schemaId, collection as CultMeshCollectionHandle<any>);
+    }
+    const key = cultMeshSchemaNameVersionKey(collection.schema);
+    if (key) {
+      this.#bySchemaNameVersion.set(key, collection as CultMeshCollectionHandle<any>);
+    }
+    return this;
+  }
+
+  public tryCollection<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): CultMeshCollectionHandle<TDocument> | undefined {
+    const descriptor = normalizeCultMeshDocumentSchema(schema);
+    const exact =
+      (descriptor.type ? this.#byType.get(descriptor.type) : undefined) ??
+      (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
+      (() => {
+        const key = cultMeshSchemaNameVersionKey(descriptor);
+        return key ? this.#bySchemaNameVersion.get(key) : undefined;
+      })();
+
+    if (!exact) {
+      return undefined;
+    }
+
+    return cultMeshSchemasAreCompatible(exact.schema, descriptor)
+      ? exact.asSchemaAlias(descriptor, options)
+      : undefined;
+  }
+
+  public collection<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): CultMeshCollectionHandle<TDocument> {
+    const collection = this.tryCollection(schema, options);
+    if (!collection) {
+      throw new Error(`Collection catalog has no collection for ${cultMeshSchemaLabel(schema)}.`);
+    }
+    return collection;
+  }
+
+  public latest<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    context: CultMeshQueryContext | string = "local",
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): Promise<CultMeshCollectionSnapshot<TDocument>> {
+    return this.collection(schema, options).latest(context);
+  }
+
+  public watchChanges<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    callback: (change: CultMeshCollectionChange<TDocument>) => void,
+    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
+  ): CultMeshUnsubscribe {
+    return this.collection(schema, options).watchChanges(options.context ?? "local", callback);
+  }
+}
+
 export class CultMeshBoundCollectionHandle<TDocument> {
   public constructor(
     public readonly verse: CultMeshVerseContext,
@@ -2795,6 +2876,12 @@ export function cultMeshCollection<TDocument>(
   } = {},
 ): CultMeshCollectionHandle<TDocument> {
   return new CultMeshCollectionHandle(collectionId, schema, snapshotCollection, options);
+}
+
+export function cultMeshCollections(
+  ...collections: readonly CultMeshCollectionHandle<any>[]
+): CultMeshCollectionCatalog {
+  return new CultMeshCollectionCatalog(collections);
 }
 
 export function cultMeshCollectionFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -4754,6 +4841,12 @@ export class CultMesh {
     } = {},
   ): CultMeshCollectionHandle<TDocument> {
     return cultMeshCollection(collectionId, schema, snapshotCollection, options);
+  }
+
+  public static collections(
+    ...collections: readonly CultMeshCollectionHandle<any>[]
+  ): CultMeshCollectionCatalog {
+    return cultMeshCollections(...collections);
   }
 
   public static collectionFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(

@@ -740,7 +740,68 @@ test("CultMesh TS collection handles expose typed snapshots and reset watches", 
     }).latest()).map(note => note.body).sort(),
     ["alpha", "bravo"],
   );
+  const catalog = CultMesh.collections(collection);
+  assert.deepEqual(
+    (await catalog.latest(noteAliasDocument, "local", {
+      parse: value => noteAliasDocument.schema.parse(value),
+    })).map(note => note.body).sort(),
+    ["alpha", "bravo"],
+  );
+  assert.equal(
+    catalog.collection({ schemaId: "cultmesh.note.v0" }).collectionId,
+    collection.collectionId,
+  );
+  assert.equal(catalog.tryCollection({ schemaId: "cultmesh.missing.v1" }), undefined);
   assert.ok(changes.every(kind => kind === "reset"));
+});
+
+test("CultMesh TS collection catalogs resolve same-schema alias watches", async () => {
+  const current = [{
+    noteId: "note:catalog-watch",
+    body: "initial",
+  }];
+  let watcher: ((change: { kind: "updated"; value: typeof current[number] }) => void) | undefined;
+  const collection = CultMesh.collection(
+    "daemon:catalog-watch",
+    {
+      schemaId: "sha256:runtime-generated-note",
+      schemaName: "cultmesh.note",
+      schemaVersion: "cultmesh.note.v1",
+    },
+    async () => current,
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "collection catalog"),
+      watchCollection: (_context, callback) => {
+        watcher = callback as typeof watcher;
+        return () => {
+          watcher = undefined;
+        };
+      },
+    },
+  );
+  const catalog = CultMesh.collections(collection);
+  const observed: string[] = [];
+  const semanticAlias = { schemaId: "cultmesh.note.v1" };
+  const unsubscribe = catalog.watchChanges<z.infer<typeof noteAliasDocument.schema>>(semanticAlias, change => {
+    if (change.value) {
+      observed.push(change.value.body);
+    }
+  }, {
+    parse: value => noteAliasDocument.schema.parse(value),
+  });
+
+  watcher?.({
+    kind: "updated",
+    value: {
+      noteId: "note:catalog-watch",
+      body: "through-catalog-alias",
+    },
+  });
+  unsubscribe();
+
+  assert.deepEqual(observed, ["through-catalog-alias"]);
+  assert.equal(watcher, undefined);
+  assert.equal(catalog.collection(semanticAlias).routeHint.description, "collection catalog");
 });
 
 test("CultMesh TS local authority leases do not trust peer cards by contact alone", () => {
