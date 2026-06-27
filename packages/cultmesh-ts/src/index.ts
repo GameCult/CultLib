@@ -99,6 +99,38 @@ export interface CultMeshQueryContext {
 
 export type CultMeshUnsubscribe = () => void;
 
+export type CultMeshDocumentWatcher<TDocument> = (
+  context: CultMeshQueryContext,
+  callback: (value: TDocument) => void,
+) => CultMeshUnsubscribe;
+
+export type CultMeshDocumentReplacer<TDocument> = (
+  context: CultMeshQueryContext,
+  value: TDocument,
+) => Promise<void>;
+
+export type CultMeshCollectionSnapshot<TDocument> = readonly TDocument[];
+
+export type CultMeshCollectionChangeKind = "added" | "updated" | "removed" | "reset";
+
+export interface CultMeshCollectionChange<TDocument> {
+  readonly kind: CultMeshCollectionChangeKind;
+  readonly key?: string;
+  readonly value?: TDocument;
+}
+
+export type CultMeshCollectionWatcher<TDocument> = (
+  context: CultMeshQueryContext,
+  callback: (change: CultMeshCollectionChange<TDocument>) => void,
+) => CultMeshUnsubscribe;
+
+export interface CultMeshDocumentSchemaDescriptor {
+  readonly type?: string;
+  readonly schemaId?: string;
+  readonly schemaName?: string;
+  readonly schemaVersion?: string;
+}
+
 export type CultMeshStatePointerResolver<T> = (
   context: CultMeshQueryContext,
 ) => Promise<T | undefined>;
@@ -406,6 +438,18 @@ export class CultMeshVerse {
     return cultMeshBindLiveFeed(this.context, feed);
   }
 
+  public bindDocument<TDocument>(
+    document: CultMeshDocumentHandle<TDocument>,
+  ): CultMeshBoundDocumentHandle<TDocument> {
+    return cultMeshBindDocument(this.context, document);
+  }
+
+  public bindCollection<TDocument>(
+    collection: CultMeshCollectionHandle<TDocument>,
+  ): CultMeshBoundCollectionHandle<TDocument> {
+    return cultMeshBindCollection(this.context, collection);
+  }
+
   public bindStatePointer<T>(
     pointer: CultMeshStatePointer<T>,
   ): CultMeshBoundStatePointer<T> {
@@ -657,6 +701,401 @@ export class CultMeshBoundLiveFeed<TParameters, TResult> {
     callback: (value: TResult) => void,
   ): CultMeshUnsubscribe {
     return this.feed.watch(parameters, cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+}
+
+export class CultMeshDocumentHandle<TDocument> {
+  public readonly schema: CultMeshDocumentSchemaDescriptor;
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly documentId: string,
+    schema: CultMeshDocumentSchemaDescriptor,
+    private readonly snapshotDocument: (context: CultMeshQueryContext) => Promise<TDocument>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchDocument?: CultMeshDocumentWatcher<TDocument>;
+      replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+    } = {},
+  ) {
+    requireNonEmpty(documentId, "documentId");
+    this.schema = normalizeCultMeshDocumentSchema(schema);
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+    this.watchDocument = options.watchDocument;
+    this.replaceDocument = options.replaceDocument;
+  }
+
+  private readonly watchDocument: CultMeshDocumentWatcher<TDocument> | undefined;
+  private readonly replaceDocument: CultMeshDocumentReplacer<TDocument> | undefined;
+
+  public get canReplace(): boolean {
+    return this.replaceDocument !== undefined;
+  }
+
+  public latest(context: CultMeshQueryContext | string = "local"): Promise<TDocument> {
+    return this.snapshotDocument(
+      this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
+    );
+  }
+
+  public read(context: CultMeshQueryContext | string = "local"): Promise<TDocument> {
+    return this.latest(context);
+  }
+
+  public watch(callback: (value: TDocument) => void): CultMeshUnsubscribe;
+  public watch(context: CultMeshQueryContext | string, callback: (value: TDocument) => void): CultMeshUnsubscribe;
+  public watch(
+    contextOrCallback: CultMeshQueryContext | string | ((value: TDocument) => void),
+    maybeCallback?: (value: TDocument) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchDocument) {
+      throw new Error(`Document '${this.documentId}' does not support watches.`);
+    }
+
+    const callback =
+      typeof contextOrCallback === "function" ? contextOrCallback : maybeCallback;
+    if (!callback) {
+      throw new Error(`Document '${this.documentId}' requires a watch callback.`);
+    }
+
+    const context =
+      typeof contextOrCallback === "function"
+        ? cultMeshQueryContext("local")
+        : typeof contextOrCallback === "string"
+          ? cultMeshQueryContext(contextOrCallback)
+          : contextOrCallback;
+
+    return this.watchDocument(this.resolveContext(context), callback);
+  }
+
+  public replace(value: TDocument): Promise<void>;
+  public replace(context: CultMeshQueryContext | string, value: TDocument): Promise<void>;
+  public replace(
+    contextOrValue: CultMeshQueryContext | string | TDocument,
+    maybeValue?: TDocument,
+  ): Promise<void> {
+    if (!this.replaceDocument) {
+      throw new Error(`Document '${this.documentId}' does not support replacement.`);
+    }
+
+    const hasContext =
+      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
+    const context = hasContext
+      ? typeof contextOrValue === "string"
+        ? cultMeshQueryContext(contextOrValue)
+        : contextOrValue as CultMeshQueryContext
+      : cultMeshQueryContext("local");
+    const value = hasContext ? maybeValue : contextOrValue as TDocument;
+    if (value === undefined) {
+      throw new Error(`Document '${this.documentId}' requires a replacement value.`);
+    }
+
+    return this.replaceDocument(this.resolveContext(context), value);
+  }
+
+  public asSchemaAlias<TAlias>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TAlias } = {},
+  ): CultMeshDocumentHandle<TAlias> {
+    const aliasSchema = normalizeCultMeshDocumentSchema(schema);
+    if (!cultMeshSchemasAreCompatible(this.schema, aliasSchema)) {
+      throw new Error(
+        `Document '${this.documentId}' schema ${cultMeshSchemaLabel(this.schema)} is not compatible with alias ${cultMeshSchemaLabel(aliasSchema)}.`,
+      );
+    }
+
+    const parse = options.parse ?? ((value: unknown) => value as TAlias);
+    return new CultMeshDocumentHandle<TAlias>(
+      this.documentId,
+      aliasSchema,
+      async (context) => parse(await this.latest(context)),
+      {
+        sources: this.sources,
+        routeHint: this.routeHint,
+        watchDocument: this.watchDocument
+          ? (context, callback) => this.watch(context, value => callback(parse(value)))
+          : undefined,
+        replaceDocument: this.replaceDocument
+          ? (context, value) => this.replace(context, value as unknown as TDocument)
+          : undefined,
+      },
+    );
+  }
+
+  public bind(verse: CultMeshVerseContext | CultMeshVerse): CultMeshBoundDocumentHandle<TDocument> {
+    return cultMeshBindDocument(verse, this);
+  }
+
+  private resolveContext(context: CultMeshQueryContext): CultMeshQueryContext {
+    if (context.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return context;
+    }
+
+    return cultMeshQueryContext(context.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export class CultMeshBoundDocumentHandle<TDocument> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly document: CultMeshDocumentHandle<TDocument>,
+  ) {}
+
+  public get documentId(): string {
+    return this.document.documentId;
+  }
+
+  public get schema(): CultMeshDocumentSchemaDescriptor {
+    return this.document.schema;
+  }
+
+  public get canReplace(): boolean {
+    return this.document.canReplace;
+  }
+
+  public latest(): Promise<TDocument> {
+    return this.document.latest(cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public read(): Promise<TDocument> {
+    return this.latest();
+  }
+
+  public watch(callback: (value: TDocument) => void): CultMeshUnsubscribe {
+    return this.document.watch(cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+
+  public replace(value: TDocument): Promise<void> {
+    return this.document.replace(cultMeshQueryContextFromVerse(this.verse), value);
+  }
+
+  public asSchemaAlias<TAlias>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TAlias } = {},
+  ): CultMeshBoundDocumentHandle<TAlias> {
+    return cultMeshBindDocument(this.verse, this.document.asSchemaAlias(schema, options));
+  }
+}
+
+export class CultMeshDocumentCatalog {
+  readonly #byDocumentId = new Map<string, CultMeshDocumentHandle<any>>();
+  readonly #byType = new Map<string, CultMeshDocumentHandle<any>>();
+  readonly #bySchemaId = new Map<string, CultMeshDocumentHandle<any>>();
+  readonly #bySchemaNameVersion = new Map<string, CultMeshDocumentHandle<any>>();
+
+  public constructor(documents: Iterable<CultMeshDocumentHandle<any>>) {
+    for (const document of documents) {
+      this.add(document);
+    }
+  }
+
+  public get documents(): readonly CultMeshDocumentHandle<any>[] {
+    return [...this.#byDocumentId.values()];
+  }
+
+  public add<TDocument>(document: CultMeshDocumentHandle<TDocument>): this {
+    this.#byDocumentId.set(document.documentId, document as CultMeshDocumentHandle<any>);
+    if (document.schema.type) {
+      this.#byType.set(document.schema.type, document as CultMeshDocumentHandle<any>);
+    }
+    if (document.schema.schemaId) {
+      this.#bySchemaId.set(document.schema.schemaId, document as CultMeshDocumentHandle<any>);
+    }
+    const key = cultMeshSchemaNameVersionKey(document.schema);
+    if (key) {
+      this.#bySchemaNameVersion.set(key, document as CultMeshDocumentHandle<any>);
+    }
+    return this;
+  }
+
+  public tryDocument<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): CultMeshDocumentHandle<TDocument> | undefined {
+    const descriptor = normalizeCultMeshDocumentSchema(schema);
+    const exact =
+      (descriptor.type ? this.#byType.get(descriptor.type) : undefined) ??
+      (descriptor.schemaId ? this.#bySchemaId.get(descriptor.schemaId) : undefined) ??
+      (() => {
+        const key = cultMeshSchemaNameVersionKey(descriptor);
+        return key ? this.#bySchemaNameVersion.get(key) : undefined;
+      })();
+
+    if (!exact) {
+      return undefined;
+    }
+
+    return cultMeshSchemasAreCompatible(exact.schema, descriptor)
+      ? exact.asSchemaAlias(descriptor, options)
+      : undefined;
+  }
+
+  public document<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): CultMeshDocumentHandle<TDocument> {
+    const document = this.tryDocument(schema, options);
+    if (!document) {
+      throw new Error(`Document catalog has no document for ${cultMeshSchemaLabel(schema)}.`);
+    }
+    return document;
+  }
+
+  public latest<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    context: CultMeshQueryContext | string = "local",
+    options: { parse?: (value: unknown) => TDocument } = {},
+  ): Promise<TDocument> {
+    return this.document(schema, options).latest(context);
+  }
+
+  public watch<TDocument>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    callback: (value: TDocument) => void,
+    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
+  ): CultMeshUnsubscribe {
+    return this.document(schema, options).watch(options.context ?? "local", callback);
+  }
+}
+
+export class CultMeshCollectionHandle<TDocument> {
+  public readonly schema: CultMeshDocumentSchemaDescriptor;
+  public readonly sources: readonly CultMeshProjectionSource[];
+  public readonly routeHint: CultMeshRouteHint;
+
+  public constructor(
+    public readonly collectionId: string,
+    schema: CultMeshDocumentSchemaDescriptor,
+    private readonly snapshotCollection: (context: CultMeshQueryContext) => Promise<CultMeshCollectionSnapshot<TDocument>>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchCollection?: CultMeshCollectionWatcher<TDocument>;
+    } = {},
+  ) {
+    requireNonEmpty(collectionId, "collectionId");
+    this.schema = normalizeCultMeshDocumentSchema(schema);
+    this.sources = [...(options.sources ?? [])];
+    this.routeHint = options.routeHint ?? cultMeshRouteHint();
+    this.watchCollection = options.watchCollection;
+  }
+
+  private readonly watchCollection: CultMeshCollectionWatcher<TDocument> | undefined;
+
+  public latest(context: CultMeshQueryContext | string = "local"): Promise<CultMeshCollectionSnapshot<TDocument>> {
+    return this.snapshotCollection(
+      this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
+    );
+  }
+
+  public watchChanges(callback: (change: CultMeshCollectionChange<TDocument>) => void): CultMeshUnsubscribe;
+  public watchChanges(
+    context: CultMeshQueryContext | string,
+    callback: (change: CultMeshCollectionChange<TDocument>) => void,
+  ): CultMeshUnsubscribe;
+  public watchChanges(
+    contextOrCallback:
+      | CultMeshQueryContext
+      | string
+      | ((change: CultMeshCollectionChange<TDocument>) => void),
+    maybeCallback?: (change: CultMeshCollectionChange<TDocument>) => void,
+  ): CultMeshUnsubscribe {
+    if (!this.watchCollection) {
+      throw new Error(`Collection '${this.collectionId}' does not support watches.`);
+    }
+
+    const callback =
+      typeof contextOrCallback === "function" ? contextOrCallback : maybeCallback;
+    if (!callback) {
+      throw new Error(`Collection '${this.collectionId}' requires a watch callback.`);
+    }
+
+    const context =
+      typeof contextOrCallback === "function"
+        ? cultMeshQueryContext("local")
+        : typeof contextOrCallback === "string"
+          ? cultMeshQueryContext(contextOrCallback)
+          : contextOrCallback;
+
+    return this.watchCollection(this.resolveContext(context), callback);
+  }
+
+  public asSchemaAlias<TAlias>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TAlias } = {},
+  ): CultMeshCollectionHandle<TAlias> {
+    const aliasSchema = normalizeCultMeshDocumentSchema(schema);
+    if (!cultMeshSchemasAreCompatible(this.schema, aliasSchema)) {
+      throw new Error(
+        `Collection '${this.collectionId}' schema ${cultMeshSchemaLabel(this.schema)} is not compatible with alias ${cultMeshSchemaLabel(aliasSchema)}.`,
+      );
+    }
+
+    const parse = options.parse ?? ((value: unknown) => value as TAlias);
+    return new CultMeshCollectionHandle<TAlias>(
+      this.collectionId,
+      aliasSchema,
+      async (context) => (await this.latest(context)).map(value => parse(value)),
+      {
+        sources: this.sources,
+        routeHint: this.routeHint,
+        watchCollection: this.watchCollection
+          ? (context, callback) => this.watchChanges(context, change => callback({
+              ...change,
+              value: change.value === undefined ? undefined : parse(change.value),
+            }))
+          : undefined,
+      },
+    );
+  }
+
+  public bind(verse: CultMeshVerseContext | CultMeshVerse): CultMeshBoundCollectionHandle<TDocument> {
+    return cultMeshBindCollection(verse, this);
+  }
+
+  private resolveContext(context: CultMeshQueryContext): CultMeshQueryContext {
+    if (context.routeHint.kind !== "automatic" || this.routeHint.kind === "automatic") {
+      return context;
+    }
+
+    return cultMeshQueryContext(context.runtimeId, {
+      routeHint: this.routeHint,
+    });
+  }
+}
+
+export class CultMeshBoundCollectionHandle<TDocument> {
+  public constructor(
+    public readonly verse: CultMeshVerseContext,
+    public readonly collection: CultMeshCollectionHandle<TDocument>,
+  ) {}
+
+  public get collectionId(): string {
+    return this.collection.collectionId;
+  }
+
+  public get schema(): CultMeshDocumentSchemaDescriptor {
+    return this.collection.schema;
+  }
+
+  public latest(): Promise<CultMeshCollectionSnapshot<TDocument>> {
+    return this.collection.latest(cultMeshQueryContextFromVerse(this.verse));
+  }
+
+  public watchChanges(callback: (change: CultMeshCollectionChange<TDocument>) => void): CultMeshUnsubscribe {
+    return this.collection.watchChanges(cultMeshQueryContextFromVerse(this.verse), callback);
+  }
+
+  public asSchemaAlias<TAlias>(
+    schema: CultMeshDocumentSchemaDescriptor,
+    options: { parse?: (value: unknown) => TAlias } = {},
+  ): CultMeshBoundCollectionHandle<TAlias> {
+    return cultMeshBindCollection(this.verse, this.collection.asSchemaAlias(schema, options));
   }
 }
 
@@ -1191,6 +1630,20 @@ export function cultMeshBindMutableStatePointer<T>(
   return new CultMeshBoundMutableStatePointer(resolveCultMeshVerseContext(verse), pointer);
 }
 
+export function cultMeshBindDocument<TDocument>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  document: CultMeshDocumentHandle<TDocument>,
+): CultMeshBoundDocumentHandle<TDocument> {
+  return new CultMeshBoundDocumentHandle(resolveCultMeshVerseContext(verse), document);
+}
+
+export function cultMeshBindCollection<TDocument>(
+  verse: CultMeshVerseContext | CultMeshVerse,
+  collection: CultMeshCollectionHandle<TDocument>,
+): CultMeshBoundCollectionHandle<TDocument> {
+  return new CultMeshBoundCollectionHandle(resolveCultMeshVerseContext(verse), collection);
+}
+
 function resolveCultMeshVerseContext(verse: CultMeshVerseContext | CultMeshVerse): CultMeshVerseContext {
   return verse instanceof CultMeshVerse ? verse.context : verse;
 }
@@ -1326,6 +1779,125 @@ export function cultMeshLiveFeed<TParameters, TResult>(
   return new CultMeshLiveFeed(feedId, snapshotFeed, options);
 }
 
+export function cultMeshDocument<TDocument>(
+  documentId: string,
+  schema: CultMeshDocumentSchemaDescriptor,
+  snapshotDocument: (context: CultMeshQueryContext) => Promise<TDocument>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+    watchDocument?: CultMeshDocumentWatcher<TDocument>;
+    replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+  } = {},
+): CultMeshDocumentHandle<TDocument> {
+  return new CultMeshDocumentHandle(documentId, schema, snapshotDocument, options);
+}
+
+export function cultMeshDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+  cache: CultCache,
+  definition: TDefinition,
+  key: string,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    pollMs?: number;
+  } = {},
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  requireNonEmpty(key, "key");
+  const documentId = options.documentId ?? `${definition.type}:${key}`;
+  const schema = cultMeshSchemaFromDefinition(definition);
+  return cultMeshDocument(
+    documentId,
+    schema,
+    async () => cache.getRequired(definition, key),
+    {
+      routeHint: options.routeHint ?? cultMeshRouteHint("in-process", "CultCache"),
+      sources: [cultMeshProjectionSource(documentId, { schemaId: schema.schemaId })],
+      watchDocument: cultMeshPollingDocumentWatcher(
+        async () => cache.getRequired(definition, key),
+        { intervalMs: options.pollMs ?? 50 },
+      ),
+      replaceDocument: async (_context, value) => {
+        await cache.put(definition, key, value);
+      },
+    },
+  );
+}
+
+export function cultMeshGlobalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+  cache: CultCache,
+  definition: TDefinition,
+  options: {
+    documentId?: string;
+    routeHint?: CultMeshRouteHint;
+    pollMs?: number;
+  } = {},
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  const documentId = options.documentId ?? `${definition.type}:global`;
+  const schema = cultMeshSchemaFromDefinition(definition);
+  return cultMeshDocument(
+    documentId,
+    schema,
+    async () => cache.getRequiredGlobal(definition),
+    {
+      routeHint: options.routeHint ?? cultMeshRouteHint("in-process", "CultCache"),
+      sources: [cultMeshProjectionSource(documentId, { schemaId: schema.schemaId })],
+      watchDocument: cultMeshPollingDocumentWatcher(
+        async () => cache.getRequiredGlobal(definition),
+        { intervalMs: options.pollMs ?? 50 },
+      ),
+      replaceDocument: async (_context, value) => {
+        await cache.putGlobal(definition, value);
+      },
+    },
+  );
+}
+
+export function cultMeshDocuments(
+  ...documents: readonly CultMeshDocumentHandle<any>[]
+): CultMeshDocumentCatalog {
+  return new CultMeshDocumentCatalog(documents);
+}
+
+export function cultMeshCollection<TDocument>(
+  collectionId: string,
+  schema: CultMeshDocumentSchemaDescriptor,
+  snapshotCollection: (context: CultMeshQueryContext) => Promise<CultMeshCollectionSnapshot<TDocument>>,
+  options: {
+    sources?: readonly CultMeshProjectionSource[];
+    routeHint?: CultMeshRouteHint;
+    watchCollection?: CultMeshCollectionWatcher<TDocument>;
+  } = {},
+): CultMeshCollectionHandle<TDocument> {
+  return new CultMeshCollectionHandle(collectionId, schema, snapshotCollection, options);
+}
+
+export function cultMeshCollectionFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+  cache: CultCache,
+  definition: TDefinition,
+  options: {
+    collectionId?: string;
+    routeHint?: CultMeshRouteHint;
+    pollMs?: number;
+  } = {},
+): CultMeshCollectionHandle<CultCacheDocumentValue<TDefinition>> {
+  const collectionId = options.collectionId ?? definition.type;
+  const schema = cultMeshSchemaFromDefinition(definition);
+  return cultMeshCollection(
+    collectionId,
+    schema,
+    async () => cache.getAll(definition),
+    {
+      routeHint: options.routeHint ?? cultMeshRouteHint("in-process", "CultCache"),
+      sources: [cultMeshProjectionSource(collectionId, { schemaId: schema.schemaId })],
+      watchCollection: cultMeshPollingCollectionWatcher(
+        async () => cache.getAll(definition),
+        { intervalMs: options.pollMs ?? 50 },
+      ),
+    },
+  );
+}
+
 export function cultMeshDescribeLiveFeed(
   feed: {
     readonly feedId: string;
@@ -1388,6 +1960,33 @@ export function cultMeshPollingQueryWatcher<TParameters, TResult>(
       }
     };
   };
+}
+
+export function cultMeshPollingDocumentWatcher<TDocument>(
+  readDocument: (context: CultMeshQueryContext) => Promise<TDocument>,
+  options: CultMeshPollingWatchOptions<TDocument> = {},
+): CultMeshDocumentWatcher<TDocument> {
+  const watch = cultMeshPollingQueryWatcher<void, TDocument>(
+    async (_parameters, context) => readDocument(context),
+    options,
+  );
+  return (context, callback) => watch(undefined, context, callback);
+}
+
+export function cultMeshPollingCollectionWatcher<TDocument>(
+  readCollection: (context: CultMeshQueryContext) => Promise<CultMeshCollectionSnapshot<TDocument>>,
+  options: CultMeshPollingWatchOptions<CultMeshCollectionSnapshot<TDocument>> = {},
+): CultMeshCollectionWatcher<TDocument> {
+  const watch = cultMeshPollingQueryWatcher<void, CultMeshCollectionSnapshot<TDocument>>(
+    async (_parameters, context) => readCollection(context),
+    {
+      ...options,
+      equals: options.equals ?? ((left, right) => JSON.stringify(left) === JSON.stringify(right)),
+    },
+  );
+  return (context, callback) => watch(undefined, context, () => callback({
+    kind: "reset",
+  }));
 }
 
 export function cultMeshStatePointer<T>(
@@ -2122,6 +2721,40 @@ export class CultMeshNode {
     return this.cache.delete(definition, key);
   }
 
+  public document<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromCache(this.cache, definition, key, options);
+  }
+
+  public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshGlobalDocumentFromCache(this.cache, definition, options);
+  }
+
+  public collection<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    options: {
+      collectionId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshCollectionHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshCollectionFromCache(this.cache, definition, options);
+  }
+
   public async flush(soft = false): Promise<void> {
     await this.store.pushAll?.(this.cache.snapshot(), { soft });
   }
@@ -2817,6 +3450,90 @@ export class CultMesh {
     } = {},
   ): CultMeshLiveFeed<TParameters, TResult> {
     return cultMeshLiveFeed(feedId, snapshotFeed, options);
+  }
+
+  public static document<TDocument>(
+    documentId: string,
+    schema: CultMeshDocumentSchemaDescriptor,
+    snapshotDocument: (context: CultMeshQueryContext) => Promise<TDocument>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchDocument?: CultMeshDocumentWatcher<TDocument>;
+      replaceDocument?: CultMeshDocumentReplacer<TDocument>;
+    } = {},
+  ): CultMeshDocumentHandle<TDocument> {
+    return cultMeshDocument(documentId, schema, snapshotDocument, options);
+  }
+
+  public static documentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+    cache: CultCache,
+    definition: TDefinition,
+    key: string,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromCache(cache, definition, key, options);
+  }
+
+  public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+    cache: CultCache,
+    definition: TDefinition,
+    options: {
+      documentId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshGlobalDocumentFromCache(cache, definition, options);
+  }
+
+  public static documents(
+    ...documents: readonly CultMeshDocumentHandle<any>[]
+  ): CultMeshDocumentCatalog {
+    return cultMeshDocuments(...documents);
+  }
+
+  public static bindDocument<TDocument>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    document: CultMeshDocumentHandle<TDocument>,
+  ): CultMeshBoundDocumentHandle<TDocument> {
+    return cultMeshBindDocument(verse, document);
+  }
+
+  public static collection<TDocument>(
+    collectionId: string,
+    schema: CultMeshDocumentSchemaDescriptor,
+    snapshotCollection: (context: CultMeshQueryContext) => Promise<CultMeshCollectionSnapshot<TDocument>>,
+    options: {
+      sources?: readonly CultMeshProjectionSource[];
+      routeHint?: CultMeshRouteHint;
+      watchCollection?: CultMeshCollectionWatcher<TDocument>;
+    } = {},
+  ): CultMeshCollectionHandle<TDocument> {
+    return cultMeshCollection(collectionId, schema, snapshotCollection, options);
+  }
+
+  public static collectionFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
+    cache: CultCache,
+    definition: TDefinition,
+    options: {
+      collectionId?: string;
+      routeHint?: CultMeshRouteHint;
+      pollMs?: number;
+    } = {},
+  ): CultMeshCollectionHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshCollectionFromCache(cache, definition, options);
+  }
+
+  public static bindCollection<TDocument>(
+    verse: CultMeshVerseContext | CultMeshVerse,
+    collection: CultMeshCollectionHandle<TDocument>,
+  ): CultMeshBoundCollectionHandle<TDocument> {
+    return cultMeshBindCollection(verse, collection);
   }
 
   public static describeLiveFeed(
@@ -3658,6 +4375,69 @@ export class CultMesh {
     }
     return CultMesh.createRudpPeerForPeer(runtimeId, connectionId, peer, options);
   }
+}
+
+function cultMeshSchemaFromDefinition(
+  definition: AnyCultCacheDocumentDefinition,
+): CultMeshDocumentSchemaDescriptor {
+  return {
+    type: definition.type,
+    schemaId: definition.schemaId ?? definition.type,
+    schemaName: definition.schemaName,
+    schemaVersion: definition.schemaVersion,
+  };
+}
+
+function normalizeCultMeshDocumentSchema(
+  schema: CultMeshDocumentSchemaDescriptor,
+): CultMeshDocumentSchemaDescriptor {
+  const normalized = {
+    type: schema.type?.trim() || undefined,
+    schemaId: schema.schemaId?.trim() || undefined,
+    schemaName: schema.schemaName?.trim() || undefined,
+    schemaVersion: schema.schemaVersion?.trim() || undefined,
+  };
+
+  if (!normalized.type && !normalized.schemaId && !normalized.schemaName) {
+    throw new Error("Document schema must include type, schemaId, or schemaName.");
+  }
+
+  return normalized;
+}
+
+function cultMeshSchemaNameVersionKey(
+  schema: CultMeshDocumentSchemaDescriptor,
+): string | undefined {
+  return schema.schemaName
+    ? `${schema.schemaName}@${schema.schemaVersion ?? ""}`
+    : undefined;
+}
+
+function cultMeshSchemasAreCompatible(
+  left: CultMeshDocumentSchemaDescriptor,
+  right: CultMeshDocumentSchemaDescriptor,
+): boolean {
+  if (left.schemaId && right.schemaId && left.schemaId === right.schemaId) {
+    return true;
+  }
+
+  if (
+    left.schemaName &&
+    right.schemaName &&
+    left.schemaName === right.schemaName &&
+    (left.schemaVersion ?? "") === (right.schemaVersion ?? "")
+  ) {
+    return true;
+  }
+
+  return Boolean(left.type && right.type && left.type === right.type);
+}
+
+function cultMeshSchemaLabel(schema: CultMeshDocumentSchemaDescriptor): string {
+  return schema.schemaId ??
+    cultMeshSchemaNameVersionKey(schema) ??
+    schema.type ??
+    "<anonymous-schema>";
 }
 
 function requireNonEmpty(value: string, name: string): void {

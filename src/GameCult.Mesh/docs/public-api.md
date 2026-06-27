@@ -307,6 +307,38 @@ const objects = await visibleObjects.execute(viewportRequest);
 await movePilot.invoke({ actorEntityKey, directionX: 1, directionY: 0 });
 ```
 
+TypeScript runtimes expose the same document and collection handle shape:
+
+```ts
+const station = await CultMesh.startNode(statePath, {
+  documents: [stationStockDocument, currentDockingDocument],
+});
+
+const stock = station.document(stationStockDocument, "station:starbridge:stock");
+const docking = station.document(currentDockingDocument, "player:raven:docking");
+const catalog = CultMesh.documents(stock, docking);
+
+const stockUi = catalog.document(stationStockUiDocument, {
+  parse: value => stationStockUiDocument.schema.parse(value),
+});
+
+const currentStock = await stockUi.latest();
+const unsubscribe = stockUi.watch(next => renderStock(next));
+await stockUi.replace(updatedStock);
+unsubscribe();
+
+const pilots = station.collection(playerShipDocument);
+const currentPilots = await pilots.latest();
+const stopRoster = pilots.watchChanges(change => refreshRoster(change));
+```
+
+Projected, remote, shared-memory, IPC, WASM, and local-cache documents all use
+the same TS handle contract. The caller names the typed document or collection
+it wants; the handle owns route defaults, snapshot reads, reactive watches,
+schema alias validation, and replacement when the backing source is mutable.
+Generated Aetheria and Ymir facades should bind those handles to a Verse once
+and keep transport, quorum, and cache mechanics behind CultMesh.
+
 Native view descriptors can name unmanaged columns without hand-entered byte
 sizes:
 

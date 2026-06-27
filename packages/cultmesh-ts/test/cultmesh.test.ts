@@ -24,6 +24,16 @@ const noteDocument = defineDocumentType({
   name: "noteId",
 });
 
+const noteAliasDocument = defineDocumentType({
+  type: "cultmesh.note.ui",
+  schemaId: "cultmesh.note.v0",
+  schema: z.object({
+    noteId: z.string(),
+    body: z.string(),
+  }),
+  name: "noteId",
+});
+
 async function waitFor(predicate: () => boolean, description: string): Promise<void> {
   const startedAt = Date.now();
   while (!predicate()) {
@@ -56,6 +66,89 @@ test("CultMesh TS opens a durable local node and registers document bindings", a
   );
   assert.ok(reopened.documents.get("cultmesh.note"));
   assert.ok(reopened.documents.getBySchemaId("cultmesh.note.v0"));
+});
+
+test("CultMesh TS document handles hide local cache plumbing behind typed reactive reads", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-doc-")), "node.ccmp");
+  const node = await CultMesh.startNode(filePath, {
+    documents: [noteDocument],
+  });
+  await node.put(noteDocument, "note:1", {
+    noteId: "note:1",
+    body: "initial",
+  });
+
+  const document = node.document(noteDocument, "note:1", { pollMs: 5 });
+  const verse = CultMesh.verse("local", "browser-client", {
+    routeHint: CultMesh.routeHint("shared-memory", "local cache"),
+  });
+  const bound = verse.bindDocument(document);
+  const observed: string[] = [];
+  const unsubscribe = bound.watch(note => observed.push(note.body));
+
+  assert.equal(document.documentId, "cultmesh.note:note:1");
+  assert.equal(document.canReplace, true);
+  assert.equal((await bound.latest()).body, "initial");
+
+  await bound.replace({
+    noteId: "note:1",
+    body: "updated",
+  });
+  await waitFor(() => observed.includes("updated"), "document handle update");
+  unsubscribe();
+
+  const alias = bound.asSchemaAlias(noteAliasDocument, {
+    parse: value => noteAliasDocument.schema.parse(value),
+  });
+  assert.equal((await alias.latest()).body, "updated");
+
+  const catalog = CultMesh.documents(document);
+  assert.equal(
+    (await catalog.latest(noteAliasDocument, "browser-client", {
+      parse: value => noteAliasDocument.schema.parse(value),
+    })).body,
+    "updated",
+  );
+  assert.throws(
+    () => document.asSchemaAlias({ schemaId: "cultmesh.other.v0" }),
+    /not compatible/,
+  );
+});
+
+test("CultMesh TS collection handles expose typed snapshots and reset watches", async () => {
+  const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-coll-")), "node.ccmp");
+  const node = await CultMesh.startNode(filePath, {
+    documents: [noteDocument],
+  });
+  await node.put(noteDocument, "note:a", {
+    noteId: "note:a",
+    body: "alpha",
+  });
+
+  const collection = node.collection(noteDocument, { pollMs: 5 });
+  const bound = CultMesh.bindCollection(
+    CultMesh.verse("local", "rts-client").withRoute("shared-memory", "local cache"),
+    collection,
+  );
+  const changes: string[] = [];
+  const unsubscribe = bound.watchChanges(change => changes.push(change.kind));
+
+  assert.deepEqual((await bound.latest()).map(note => note.body), ["alpha"]);
+
+  await node.put(noteDocument, "note:b", {
+    noteId: "note:b",
+    body: "bravo",
+  });
+  await waitFor(() => changes.length >= 2, "collection reset after update");
+  unsubscribe();
+
+  assert.deepEqual(
+    (await collection.asSchemaAlias(noteAliasDocument, {
+      parse: value => noteAliasDocument.schema.parse(value),
+    }).latest()).map(note => note.body).sort(),
+    ["alpha", "bravo"],
+  );
+  assert.ok(changes.every(kind => kind === "reset"));
 });
 
 test("CultMesh TS local authority leases do not trust peer cards by contact alone", () => {
