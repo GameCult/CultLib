@@ -201,6 +201,21 @@ export interface CultMeshPollingWatchOptions<TResult> {
   readonly equals?: (left: TResult, right: TResult) => boolean;
 }
 
+export interface CultMeshReactiveDocumentOptions {
+  readonly context?: CultMeshQueryContext | string;
+  readonly watch?: boolean;
+  readonly debounceMs?: number;
+  readonly onError?: (error: unknown) => void;
+}
+
+export interface CultMeshReactiveDocument<TDocument extends object> {
+  readonly current: TDocument;
+  readonly ready: Promise<TDocument>;
+  readonly disposed: boolean;
+  refresh(): Promise<TDocument>;
+  dispose(): void;
+}
+
 export interface CultMeshNativeSliceColumn {
   readonly name: string;
   readonly valueType: string;
@@ -929,6 +944,15 @@ export class CultMeshDocumentHandle<TDocument> {
     return next;
   }
 
+  public reactive<TObject extends TDocument & object>(
+    options: CultMeshReactiveDocumentOptions = {},
+  ): CultMeshReactiveDocument<TObject> {
+    return new CultMeshReactiveDocumentHandle<TObject>(
+      this as unknown as CultMeshDocumentHandle<TObject>,
+      options,
+    );
+  }
+
   public asSchemaAlias<TAlias>(
     schema: CultMeshDocumentSchemaDescriptor,
     options: { parse?: (value: unknown) => TAlias } = {},
@@ -974,6 +998,162 @@ export class CultMeshDocumentHandle<TDocument> {
       routeHint: this.routeHint,
     });
   }
+}
+
+class CultMeshReactiveDocumentHandle<TDocument extends object>
+  implements CultMeshReactiveDocument<TDocument> {
+  readonly #document: CultMeshDocumentHandle<TDocument>;
+  readonly #context: CultMeshQueryContext | string;
+  readonly #onError: (error: unknown) => void;
+  readonly #debounceMs: number;
+  #current: TDocument;
+  #disposed = false;
+  #applyingRemote = false;
+  #pendingSet: Promise<void> = Promise.resolve();
+  #flushScheduled = false;
+  #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #unsubscribe: CultMeshUnsubscribe | undefined;
+
+  public readonly ready: Promise<TDocument>;
+
+  public constructor(
+    document: CultMeshDocumentHandle<TDocument>,
+    options: CultMeshReactiveDocumentOptions = {},
+  ) {
+    this.#document = document;
+    this.#context = options.context ?? "local";
+    this.#debounceMs = options.debounceMs ?? 0;
+    this.#onError = options.onError ?? ((error) => {
+      queueMicrotask(() => {
+        throw error;
+      });
+    });
+    this.#current = this.createProxy({} as TDocument);
+    this.ready = this.refresh();
+
+    if (options.watch !== false) {
+      try {
+        this.#unsubscribe = document.watch(this.#context, value => {
+          this.applySnapshot(value);
+        });
+      } catch (error) {
+        this.#onError(error);
+      }
+    }
+  }
+
+  public get current(): TDocument {
+    return this.#current;
+  }
+
+  public get disposed(): boolean {
+    return this.#disposed;
+  }
+
+  public async refresh(): Promise<TDocument> {
+    const latest = await this.#document.latest(this.#context);
+    this.applySnapshot(latest);
+    return this.#current;
+  }
+
+  public dispose(): void {
+    this.#disposed = true;
+    if (this.#flushTimer !== undefined) {
+      clearTimeout(this.#flushTimer);
+      this.#flushTimer = undefined;
+    }
+    this.#flushScheduled = false;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+  }
+
+  private applySnapshot(value: TDocument): void {
+    this.#applyingRemote = true;
+    try {
+      for (const key of Reflect.ownKeys(this.#current)) {
+        if (!Reflect.has(value, key)) {
+          Reflect.deleteProperty(this.#current, key);
+        }
+      }
+      Object.assign(this.#current, cloneCultMeshDocument(value));
+    } finally {
+      this.#applyingRemote = false;
+    }
+  }
+
+  private createProxy(seed: TDocument): TDocument {
+    return new Proxy(seed, {
+      set: (target, property, value) => {
+        const changed = !Object.is(Reflect.get(target, property), value);
+        const ok = Reflect.set(target, property, value);
+        if (ok && changed && !this.#applyingRemote) {
+          this.queueSet();
+        }
+        return ok;
+      },
+      deleteProperty: (target, property) => {
+        const hadProperty = Reflect.has(target, property);
+        const ok = Reflect.deleteProperty(target, property);
+        if (ok && hadProperty && !this.#applyingRemote) {
+          this.queueSet();
+        }
+        return ok;
+      },
+    });
+  }
+
+  private queueSet(): void {
+    if (this.#disposed) {
+      return;
+    }
+    if (this.#flushScheduled) {
+      return;
+    }
+
+    this.#flushScheduled = true;
+    const flush = () => {
+      this.#flushScheduled = false;
+      this.#flushTimer = undefined;
+      if (this.#disposed) {
+        return;
+      }
+
+      const snapshot = cloneCultMeshDocument(this.#current);
+      this.#pendingSet = this.#pendingSet
+        .catch(() => undefined)
+        .then(() => this.#document.set(this.#context, snapshot))
+        .catch(error => this.#onError(error));
+    };
+
+    const debounceMs = this.#debounceMs;
+    if (debounceMs > 0) {
+      this.#flushTimer = setTimeout(flush, debounceMs);
+      return;
+    }
+
+    const requestFrame = (globalThis as {
+      requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+    }).requestAnimationFrame;
+    if (typeof requestFrame === "function") {
+      requestFrame(() => flush());
+      return;
+    }
+
+    this.#flushTimer = setTimeout(flush, 0);
+  }
+}
+
+function cloneCultMeshDocument<TDocument>(value: TDocument): TDocument {
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(value);
+    } catch (error) {
+      if ((error as { name?: string }).name !== "DataCloneError") {
+        throw error;
+      }
+    }
+  }
+  return JSON.parse(JSON.stringify(value)) as TDocument;
 }
 
 export class CultMeshBoundDocumentHandle<TDocument> {
@@ -1028,6 +1208,15 @@ export class CultMeshBoundDocumentHandle<TDocument> {
 
   public update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument> {
     return this.document.update(cultMeshQueryContextFromVerse(this.verse), update);
+  }
+
+  public reactive<TObject extends TDocument & object>(
+    options: Omit<CultMeshReactiveDocumentOptions, "context"> = {},
+  ): CultMeshReactiveDocument<TObject> {
+    return this.document.reactive<TObject>({
+      ...options,
+      context: cultMeshQueryContextFromVerse(this.verse),
+    });
   }
 
   public asSchemaAlias<TAlias>(

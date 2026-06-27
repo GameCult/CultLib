@@ -202,6 +202,44 @@ test("CultMesh TS document handles submit predictions through configured authori
   );
 });
 
+test("CultMesh TS reactive documents submit predictions from member writes", async () => {
+  let current = {
+    noteId: "note:reactive",
+    body: "initial",
+  };
+  const predictions: string[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:reactive",
+    noteDocument,
+    async () => current,
+    {
+      routeHint: CultMesh.routeHint("network", "CultNet prediction"),
+      submitPrediction: async (_context, value) => {
+        predictions.push(value.body);
+        current = value;
+      },
+    },
+  );
+
+  const reactive = document.reactive<typeof current>({
+    watch: false,
+  });
+  await reactive.ready;
+  reactive.current.body = "member-write-prediction";
+  reactive.current.body = "member-write-prediction-final";
+  await waitFor(
+    () => predictions.includes("member-write-prediction-final"),
+    "reactive member write prediction",
+  );
+
+  assert.equal(current.body, "member-write-prediction-final");
+  assert.deepEqual(predictions, ["member-write-prediction-final"]);
+  reactive.dispose();
+  reactive.current.body = "after-dispose";
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(predictions, ["member-write-prediction-final"]);
+});
+
 test("CultMesh TS document handles read schema publications from single-file stores", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-")), "publication.ccmp");
   const node = await CultMesh.startNode(filePath, {
