@@ -655,9 +655,11 @@ public sealed class CultMeshStreamingTests
 
         var snapshot = await handle.LatestAsync();
         snapshot.Text.Should().Be("primary");
+        handle.Latest().Text.Should().Be("primary");
 
         var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
         var aliasSnapshot = await alias.LatestAsync();
+        alias.Latest().Text.Should().Be("primary");
         alias.DocumentId.Should().Be(handle.DocumentId);
         alias.SchemaName.Should().Be(handle.SchemaName);
         alias.SchemaVersion.Should().Be(handle.SchemaVersion);
@@ -729,6 +731,7 @@ public sealed class CultMeshStreamingTests
         var aliasSnapshot = await catalog.LatestAsync<MeshNoteAliasDocument>();
         aliasSnapshot.Text.Should().Be("catalog-primary");
         aliasSnapshot.Revision.Should().Be(3);
+        catalog.Latest<MeshNoteAliasDocument>().Text.Should().Be("catalog-primary");
     }
 
     [Test]

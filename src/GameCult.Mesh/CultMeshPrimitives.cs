@@ -961,6 +961,12 @@ namespace GameCult.Mesh
             return _feed.SnapshotAsync(CultMeshDocumentQueryParameters.Empty);
         }
 
+        /// <summary>Reads the latest document snapshot synchronously for host APIs that cannot be async.</summary>
+        public TDocument Latest()
+        {
+            return LatestAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+
         /// <summary>Watches coherent document snapshots.</summary>
         public Observable<TDocument> Watch()
         {
@@ -1138,6 +1144,13 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             return Document<TDocument>().LatestAsync();
+        }
+
+        /// <summary>Reads one typed document synchronously by CLR type or same-schema alias.</summary>
+        public TDocument Latest<TDocument>()
+            where TDocument : class
+        {
+            return Document<TDocument>().Latest();
         }
 
         /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>
