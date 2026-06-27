@@ -59,8 +59,186 @@ namespace GameCult.Mesh
         public long RudpResendDelayMs { get; set; } = 25;
     }
 
+    /// <summary>
+    /// Options for a typed remote snapshot surface bound to one CultNet endpoint.
+    /// </summary>
+    public sealed class CultMeshSnapshotEndpointOptions
+    {
+        /// <summary>Gets or sets the Verse context used by handles from this endpoint.</summary>
+        public CultMeshVerseContext? Context { get; set; }
+
+        /// <summary>Gets or sets the document registry used for raw snapshot payload decoding.</summary>
+        public CultNetDocumentRegistry? DocumentRegistry { get; set; }
+
+        /// <summary>Gets or sets request options applied to each snapshot fetch.</summary>
+        public CultMeshSnapshotRequestOptions? Request { get; set; }
+
+        /// <summary>Gets or sets the source id advertised by diagnostics. Defaults to the endpoint.</summary>
+        public string? SourceId { get; set; }
+
+        /// <summary>Gets or sets the route hint for resulting handles.</summary>
+        public CultMeshRouteHint? RouteHint { get; set; }
+
+        /// <summary>Gets or sets the polling interval for watch fallback.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+    }
+
+    /// <summary>
+    /// Typed snapshot surface for one remote CultNet endpoint.
+    /// </summary>
+    public sealed class CultMeshSnapshotEndpoint
+    {
+        internal CultMeshSnapshotEndpoint(string endpoint, CultMeshSnapshotEndpointOptions? options)
+        {
+            Endpoint = string.IsNullOrWhiteSpace(endpoint)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
+                : endpoint;
+
+            var resolvedOptions = options ?? new CultMeshSnapshotEndpointOptions();
+            Context = resolvedOptions.Context ?? CultMesh.Verse("remote", "cultmesh-snapshot-client").Context;
+            DocumentRegistry = resolvedOptions.DocumentRegistry ?? new CultNetDocumentRegistry();
+            Request = CloneSnapshotRequestOptions(resolvedOptions.Request);
+            RouteHint = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Network, Endpoint);
+            SourceId = string.IsNullOrWhiteSpace(resolvedOptions.SourceId) ? Endpoint : resolvedOptions.SourceId!;
+            PollInterval = resolvedOptions.PollInterval;
+        }
+
+        /// <summary>Gets the endpoint this typed surface reads from.</summary>
+        public string Endpoint { get; }
+
+        /// <summary>Gets the Verse context used by document handles from this endpoint.</summary>
+        public CultMeshVerseContext Context { get; }
+
+        /// <summary>Gets the document registry used for raw snapshot payload decoding.</summary>
+        public CultNetDocumentRegistry DocumentRegistry { get; }
+
+        /// <summary>Gets request options applied to each snapshot fetch.</summary>
+        public CultMeshSnapshotRequestOptions Request { get; }
+
+        /// <summary>Gets the source id advertised by diagnostics.</summary>
+        public string SourceId { get; }
+
+        /// <summary>Gets the route hint for resulting handles.</summary>
+        public CultMeshRouteHint RouteHint { get; }
+
+        /// <summary>Gets the polling interval for watch fallback.</summary>
+        public TimeSpan PollInterval { get; }
+
+        /// <summary>Fetches one raw snapshot with this endpoint's configured request policy.</summary>
+        public Task<CultNetSnapshotResponseRawMessage> FetchSnapshotAsync(
+            IReadOnlyList<string>? schemaIds = null,
+            IReadOnlyList<string>? recordKeys = null)
+        {
+            return CultMesh.FetchSnapshotAsync(Endpoint, CreateRequest(schemaIds, recordKeys));
+        }
+
+        /// <summary>Fetches and decodes documents assignable to the requested type or matching its schema.</summary>
+        public Task<IReadOnlyList<TDocument>> FetchDocumentsAsync<TDocument>(
+            IReadOnlyList<string>? recordKeys = null,
+            IReadOnlyList<string>? schemaIds = null)
+            where TDocument : class
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            return CultMesh.FetchSnapshotDocumentsAsync<TDocument>(
+                Endpoint,
+                CreateRequest(schemaIds ?? new[] { descriptor.SchemaId }, recordKeys),
+                DocumentRegistry);
+        }
+
+        /// <summary>Fetches one typed document by record key.</summary>
+        public async Task<TDocument> FetchDocumentAsync<TDocument>(string recordKey)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            var documents = await FetchDocumentsAsync<TDocument>(new[] { recordKey }).ConfigureAwait(false);
+            return documents.FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    $"CultNet snapshot endpoint '{Endpoint}' did not return {typeof(TDocument).FullName} record '{recordKey}'.");
+        }
+
+        /// <summary>Creates a typed document handle over one remote endpoint record.</summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string recordKey,
+            string? documentId = null)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var sources = new[]
+            {
+                CultMesh.ProjectionSource($"{SourceId}:{recordKey}", descriptor.SchemaId, "CultNet snapshot endpoint")
+            };
+            var watch = CultMesh.PollingQueryWatcher<CultMeshDocumentQueryParameters, TDocument>(
+                async (_parameters, _context) => await FetchDocumentAsync<TDocument>(recordKey).ConfigureAwait(false),
+                new CultMeshPollingWatchOptions<TDocument>(PollInterval));
+
+            return CultMesh.Document<TDocument>(
+                string.IsNullOrWhiteSpace(documentId) ? recordKey : documentId!,
+                Context,
+                _ => FetchDocumentAsync<TDocument>(recordKey),
+                queryContext => watch(CultMeshDocumentQueryParameters.Empty, queryContext),
+                sources,
+                RouteHint);
+        }
+
+        /// <summary>Creates a schema-aware catalog over endpoint-backed document handles.</summary>
+        public CultMeshDocumentCatalog Documents(params ICultMeshDocumentHandle[] documents)
+        {
+            return CultMesh.Documents(documents);
+        }
+
+        private CultMeshSnapshotRequestOptions CreateRequest(
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys)
+        {
+            var request = CloneSnapshotRequestOptions(Request);
+            request.SchemaIds = schemaIds ?? request.SchemaIds;
+            request.RecordKeys = recordKeys ?? request.RecordKeys;
+            if (string.IsNullOrWhiteSpace(request.RudpRuntimeId))
+                request.RudpRuntimeId = Context.RuntimeId;
+            if (string.IsNullOrWhiteSpace(request.MessageIdPrefix))
+                request.MessageIdPrefix = $"cultmesh:{Context.RuntimeId}:snapshot";
+            return request;
+        }
+
+        private static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(CultMeshSnapshotRequestOptions? source)
+        {
+            if (source == null)
+                return new CultMeshSnapshotRequestOptions();
+
+            return new CultMeshSnapshotRequestOptions
+            {
+                SchemaIds = source.SchemaIds,
+                RecordKeys = source.RecordKeys,
+                ShardId = source.ShardId,
+                ShardEpoch = source.ShardEpoch,
+                ResponseTimeout = source.ResponseTimeout,
+                ConnectTimeout = source.ConnectTimeout,
+                MessageIdPrefix = source.MessageIdPrefix,
+                Security = source.Security,
+                ConfigureClient = source.ConfigureClient,
+                CreateClient = source.CreateClient,
+                RudpRuntimeId = source.RudpRuntimeId,
+                RudpConnectionId = source.RudpConnectionId,
+                RudpConnectPayload = source.RudpConnectPayload,
+                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
+                RudpResendDelayMs = source.RudpResendDelayMs
+            };
+        }
+    }
+
     public static partial class CultMesh
     {
+        /// <summary>
+        /// Binds one CultNet endpoint as a typed snapshot surface.
+        /// </summary>
+        public static CultMeshSnapshotEndpoint SnapshotEndpoint(
+            string endpoint,
+            CultMeshSnapshotEndpointOptions? options = null)
+        {
+            return new CultMeshSnapshotEndpoint(endpoint, options);
+        }
+
         /// <summary>
         /// Fetches one scoped raw CultNet snapshot from an endpoint.
         /// </summary>
@@ -232,6 +410,7 @@ namespace GameCult.Mesh
             if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
             if (registry == null) throw new ArgumentNullException(nameof(registry));
 
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
             var documents = new List<TDocument>(snapshot.Documents.Length);
             foreach (var record in snapshot.Documents)
             {
@@ -239,7 +418,12 @@ namespace GameCult.Mesh
                     continue;
 
                 var binding = registry.GetBySchemaId(record.SchemaId);
-                if (binding == null || !typeof(TDocument).IsAssignableFrom(binding.DocumentType))
+                var canDeserializeWithBinding =
+                    binding != null &&
+                    typeof(TDocument).IsAssignableFrom(binding.DocumentType);
+                var canDeserializeAsSchemaAlias =
+                    string.Equals(record.SchemaId, descriptor.SchemaId, StringComparison.Ordinal);
+                if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
 
                 if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))
@@ -248,7 +432,9 @@ namespace GameCult.Mesh
                         $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{record.PayloadEncoding}\".");
                 }
 
-                documents.Add((TDocument)binding.PayloadDeserializer(record.Payload));
+                documents.Add(canDeserializeWithBinding
+                    ? (TDocument)binding!.PayloadDeserializer(record.Payload)
+                    : CultDocumentMessagePackSerialization.Deserialize<TDocument>(record.Payload));
             }
 
             return documents;

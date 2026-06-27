@@ -133,11 +133,35 @@ namespace GameCult.Mesh
         /// <summary>Gets or sets the message id prefix used for snapshot requests.</summary>
         public string? MessageIdPrefix { get; set; }
 
+        /// <summary>Gets or sets schema ids to request. Empty means the document type schema is requested.</summary>
+        public IReadOnlyList<string>? SchemaIds { get; set; }
+
+        /// <summary>Gets or sets the target shard id, when the endpoint is shard-aware.</summary>
+        public string? ShardId { get; set; }
+
+        /// <summary>Gets or sets the target shard epoch, when the endpoint is shard-aware.</summary>
+        public long? ShardEpoch { get; set; }
+
         /// <summary>Gets or sets client security options for endpoint-created clients.</summary>
         public ClientSecurityOptions? Security { get; set; }
 
         /// <summary>Gets or sets a callback used to configure endpoint-created LiteNetLib clients.</summary>
         public Action<Client>? ConfigureClient { get; set; }
+
+        /// <summary>Gets or sets the runtime id used by endpoint-created RUDP clients.</summary>
+        public string? RudpRuntimeId { get; set; }
+
+        /// <summary>Gets or sets the connection id used by endpoint-created RUDP clients.</summary>
+        public uint RudpConnectionId { get; set; } = 0x43554c54;
+
+        /// <summary>Gets or sets the connect payload used by endpoint-created RUDP clients.</summary>
+        public string RudpConnectPayload { get; set; } = "cultnet-schema-rudp";
+
+        /// <summary>Gets or sets the maximum fragment size used by endpoint-created RUDP clients.</summary>
+        public int RudpMaxFragmentBytes { get; set; } = 1024;
+
+        /// <summary>Gets or sets the resend delay used by endpoint-created RUDP clients.</summary>
+        public long RudpResendDelayMs { get; set; } = 25;
     }
 
     /// <summary>
@@ -2086,73 +2110,44 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            var messageId = CreateSnapshotMessageId(options, context);
-            var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            using var client = createClient();
-            client.OnCultNet<CultNetSnapshotResponseRawMessage>(response =>
-            {
-                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
-                {
-                    completion.TrySetResult(response);
-                }
-            });
-            client.OnCultNet<CultNetErrorMessage>(error =>
-                completion.TrySetException(new InvalidOperationException(error.Error)));
-
-            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
-            client.Connect(host, port);
-            await WaitForSchemaClientConnectionAsync(client, endpoint, options.ConnectTimeout).ConfigureAwait(false);
-            client.SendCultNet(new CultNetSnapshotRequestMessage
-            {
-                MessageId = messageId,
-                RecordKeys = new[] { recordKey }
-            });
-
-            return await WaitForPeerSnapshotResponseAsync(completion.Task, endpoint, options.ResponseTimeout)
+            return await FetchSnapshotAsync(
+                    createClient,
+                    endpoint,
+                    ToSnapshotRequestOptions(
+                        options,
+                        context,
+                        options.SchemaIds ?? new[] { descriptor.SchemaId },
+                        new[] { recordKey }))
                 .ConfigureAwait(false);
         }
 
-        private static string CreateSnapshotMessageId(
+        private static CultMeshSnapshotRequestOptions ToSnapshotRequestOptions(
             CultMeshPeerSnapshotDocumentOptions options,
-            CultMeshQueryContext context)
+            CultMeshQueryContext context,
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys)
         {
-            var prefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
-                ? $"cultmesh:{context.RuntimeId}:snapshot"
-                : options.MessageIdPrefix!;
-            return $"{prefix}:{Guid.NewGuid():N}";
-        }
-
-        private static async Task WaitForSchemaClientConnectionAsync(
-            ICultNetSchemaClient client,
-            string endpoint,
-            TimeSpan timeout)
-        {
-            var deadline = DateTimeOffset.UtcNow + timeout;
-            while (!client.Connected)
+            return new CultMeshSnapshotRequestOptions
             {
-                if (DateTimeOffset.UtcNow >= deadline)
-                {
-                    throw new TimeoutException($"Timed out connecting to CultNet snapshot endpoint {endpoint}.");
-                }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
-            }
-        }
-
-        private static async Task<CultNetSnapshotResponseRawMessage> WaitForPeerSnapshotResponseAsync(
-            Task<CultNetSnapshotResponseRawMessage> responseTask,
-            string endpoint,
-            TimeSpan timeout)
-        {
-            var timeoutTask = Task.Delay(timeout);
-            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
-            if (completed != responseTask)
-            {
-                throw new TimeoutException($"Timed out waiting for CultNet snapshot response from {endpoint}.");
-            }
-
-            return await responseTask.ConfigureAwait(false);
+                SchemaIds = schemaIds,
+                RecordKeys = recordKeys,
+                ShardId = options.ShardId,
+                ShardEpoch = options.ShardEpoch,
+                ResponseTimeout = options.ResponseTimeout,
+                ConnectTimeout = options.ConnectTimeout,
+                MessageIdPrefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
+                    ? $"cultmesh:{context.RuntimeId}:snapshot"
+                    : options.MessageIdPrefix,
+                Security = options.Security,
+                ConfigureClient = options.ConfigureClient,
+                RudpRuntimeId = string.IsNullOrWhiteSpace(options.RudpRuntimeId)
+                    ? context.RuntimeId
+                    : options.RudpRuntimeId,
+                RudpConnectionId = options.RudpConnectionId,
+                RudpConnectPayload = options.RudpConnectPayload,
+                RudpMaxFragmentBytes = options.RudpMaxFragmentBytes,
+                RudpResendDelayMs = options.RudpResendDelayMs
+            };
         }
 
         private static TDocument ReadDocumentFromSnapshotResponse<TDocument>(

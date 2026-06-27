@@ -1004,7 +1004,8 @@ public sealed class CultMeshStreamingTests
         handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
         handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be(key.Value);
         requests.Should().ContainSingle();
-        requests[0].SchemaIds.Should().BeNull();
+        requests[0].SchemaIds.Should().ContainSingle().Which
+            .Should().Be(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId);
         requests[0].RecordKeys.Should().ContainSingle().Which.Should().Be(key.Value);
         (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("remote-snapshot");
 
@@ -1098,6 +1099,60 @@ public sealed class CultMeshStreamingTests
             request.ShardId == "primary" &&
             request.ShardEpoch == 7 &&
             request.MessageId.StartsWith("mesh-test-scoped-snapshot:", StringComparison.Ordinal));
+    }
+
+    [Test]
+    public async Task SnapshotEndpoint_ProvidesTypedHandlesAndSchemaAliases()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var key = new CultRecordKey("mesh-note:snapshot-endpoint");
+        await sourceCache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "snapshot-endpoint",
+            Revision = 19
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+        var endpoint = "cultnet://snapshot-endpoint.test:3076";
+        var surface = CultMesh.SnapshotEndpoint(
+            endpoint,
+            new CultMeshSnapshotEndpointOptions
+            {
+                Context = CultMesh.Verse("starbridge", "browser-starfire").Context,
+                DocumentRegistry = registry,
+                Request = new CultMeshSnapshotRequestOptions
+                {
+                    ShardId = "primary",
+                    ShardEpoch = 9,
+                    CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                    {
+                        requests.Add(request);
+                        return registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request);
+                    })
+                }
+            });
+
+        var fetchedAlias = await surface.FetchDocumentAsync<MeshNoteAliasDocument>(key.Value);
+        var aliasHandle = surface.Document<MeshNoteAliasDocument>(key.Value);
+        var aliasLatest = await aliasHandle.LatestAsync();
+        var catalog = surface.Documents(surface.Document<MeshNoteDocument>(key.Value));
+        var catalogAlias = await catalog.LatestAsync<MeshNoteAliasDocument>();
+
+        fetchedAlias.Text.Should().Be("snapshot-endpoint");
+        aliasLatest.Revision.Should().Be(19);
+        catalogAlias.Text.Should().Be("snapshot-endpoint");
+        requests.Should().HaveCount(3);
+        requests.Should().OnlyContain(request =>
+            request.SchemaIds!.SequenceEqual(new[]
+            {
+                CultDocumentRegistry.Shared.GetRequired<MeshNoteAliasDocument>().SchemaId
+            }) &&
+            request.RecordKeys!.SequenceEqual(new[] { key.Value }) &&
+            request.ShardId == "primary" &&
+            request.ShardEpoch == 9 &&
+            request.MessageId.StartsWith("cultmesh:browser-starfire:snapshot:", StringComparison.Ordinal));
     }
 
     [Test]
