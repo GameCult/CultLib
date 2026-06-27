@@ -1140,6 +1140,9 @@ namespace GameCult.Mesh
         /// </summary>
         public TimeSpan FlushDelay { get; set; } = TimeSpan.FromMilliseconds(16);
 
+        /// <summary>Gets or sets whether direct edits to Current should be detected and flushed automatically.</summary>
+        public bool DetectLocalChanges { get; set; } = true;
+
         /// <summary>Gets or sets whether canonical snapshots replace dirty local predictions immediately.</summary>
         public bool ReplaceDirtyCurrentOnCanonicalSnapshot { get; set; }
     }
@@ -1180,7 +1183,9 @@ namespace GameCult.Mesh
         private readonly CultMeshReactiveDocumentOptions _options;
         private readonly object _gate = new();
         private IDisposable? _subscription;
-        private Timer? _timer;
+        private Timer? _flushTimer;
+        private Timer? _changeDetectionTimer;
+        private byte[] _lastCleanSnapshot;
         private bool _dirty;
         private bool _flushQueued;
         private bool _flushing;
@@ -1194,6 +1199,7 @@ namespace GameCult.Mesh
             _document = document ?? throw new ArgumentNullException(nameof(document));
             Current = current ?? throw new ArgumentNullException(nameof(current));
             _options = options ?? new CultMeshReactiveDocumentOptions();
+            _lastCleanSnapshot = SerializeDocument(Current);
         }
 
         /// <summary>Gets the underlying document handle.</summary>
@@ -1218,6 +1224,14 @@ namespace GameCult.Mesh
         internal void Start()
         {
             _subscription = _document.Watch(ApplyCanonicalSnapshot);
+            if (_options.DetectLocalChanges && _document.CanSet)
+            {
+                var interval = _options.FlushDelay <= TimeSpan.Zero
+                    ? TimeSpan.FromMilliseconds(1)
+                    : _options.FlushDelay;
+                _changeDetectionTimer = new Timer(_ => _ = Task.Run(DetectLocalChangesAsync));
+                _changeDetectionTimer.Change(interval, interval);
+            }
         }
 
         /// <summary>Marks the current value dirty and schedules a coalesced prediction or replacement.</summary>
@@ -1268,6 +1282,7 @@ namespace GameCult.Mesh
             lock (_gate)
             {
                 Current = latest;
+                _lastCleanSnapshot = SerializeDocument(Current);
                 _dirty = false;
                 Reconciliation = null;
                 return Current;
@@ -1281,6 +1296,8 @@ namespace GameCult.Mesh
             lock (_gate)
             {
                 ThrowIfDisposed();
+                if (!_dirty && _document.CanSet)
+                    DetectLocalChangesLocked();
                 if (!_dirty)
                     return;
                 if (_flushing)
@@ -1289,10 +1306,11 @@ namespace GameCult.Mesh
                     return;
                 }
 
-                _timer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                _flushTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 _flushing = true;
                 _dirty = false;
                 predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(Current);
+                _lastCleanSnapshot = SerializeDocument(predicted);
             }
 
             try
@@ -1332,7 +1350,8 @@ namespace GameCult.Mesh
             }
 
             _subscription?.Dispose();
-            _timer?.Dispose();
+            _flushTimer?.Dispose();
+            _changeDetectionTimer?.Dispose();
         }
 
         private void ApplyCanonicalSnapshot(TDocument canonical)
@@ -1357,8 +1376,31 @@ namespace GameCult.Mesh
                 }
 
                 Current = nextCanonical;
+                _lastCleanSnapshot = SerializeDocument(Current);
                 Reconciliation = null;
             }
+        }
+
+        private Task DetectLocalChangesAsync()
+        {
+            lock (_gate)
+            {
+                if (_disposed || !_document.CanSet || _dirty || _flushing)
+                    return Task.CompletedTask;
+                DetectLocalChangesLocked();
+                if (_dirty)
+                    ScheduleFlushLocked();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        private void DetectLocalChangesLocked()
+        {
+            var currentSnapshot = SerializeDocument(Current);
+            if (_lastCleanSnapshot.SequenceEqual(currentSnapshot))
+                return;
+            _dirty = true;
         }
 
         private void ScheduleFlushLocked()
@@ -1369,8 +1411,13 @@ namespace GameCult.Mesh
                 return;
             }
 
-            _timer ??= new Timer(_ => _ = Task.Run(FlushAsync));
-            _timer.Change(_options.FlushDelay, Timeout.InfiniteTimeSpan);
+            _flushTimer ??= new Timer(_ => _ = Task.Run(FlushAsync));
+            _flushTimer.Change(_options.FlushDelay, Timeout.InfiniteTimeSpan);
+        }
+
+        private static byte[] SerializeDocument(TDocument document)
+        {
+            return CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument));
         }
 
         private void ThrowIfDisposed()

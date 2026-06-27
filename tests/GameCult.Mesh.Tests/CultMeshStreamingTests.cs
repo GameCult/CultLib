@@ -1657,6 +1657,99 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task ReactiveDocument_DetectsDirectMemberEditsWithoutMarkDirty()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.direct-member-auto",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMilliseconds(10)
+            });
+
+        reactive.Current.Text = "direct-member-edit";
+        reactive.Current.Revision = 2;
+        reactive.Current.Text = "direct-member-edit-final";
+        reactive.Current.Revision = 3;
+
+        await WaitForAsync(() => predictions.Count == 1);
+
+        predictions[0].Text.Should().Be("direct-member-edit-final");
+        predictions[0].Revision.Should().Be(3);
+        reactive.IsDirty.Should().BeFalse();
+    }
+
+    [Test]
+    public async Task ReactiveDocument_FlushAsyncCapturesDirectMemberEdit()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var predictions = new List<MeshNoteDocument>();
+        var handle = CultMesh.Document(
+            "mesh.note.reactive.direct-member-flush",
+            CultMesh.Verse("starbridge", "pilot-a"),
+            _ => Task.FromResult(current),
+            _ => subject,
+            value =>
+            {
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            },
+            value =>
+            {
+                predictions.Add(value);
+                current = value;
+                subject.OnNext(value);
+                return Task.CompletedTask;
+            });
+
+        using var reactive = await handle.ReactiveAsync(
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+
+        reactive.Current.Text = "direct-member-flush";
+        reactive.Current.Revision = 4;
+        await reactive.FlushAsync();
+
+        predictions.Should().ContainSingle();
+        predictions[0].Text.Should().Be("direct-member-flush");
+        predictions[0].Revision.Should().Be(4);
+    }
+
+    [Test]
     public async Task ReactiveDocument_CleanFlushDoesNotWrite()
     {
         var current = new MeshNoteDocument
