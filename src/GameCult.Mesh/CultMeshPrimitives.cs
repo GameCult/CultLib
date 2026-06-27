@@ -1502,6 +1502,12 @@ namespace GameCult.Mesh
         /// <summary>A typed operation handle.</summary>
         Operation,
 
+        /// <summary>A typed reactive document handle.</summary>
+        Document,
+
+        /// <summary>A typed reactive collection handle.</summary>
+        Collection,
+
         /// <summary>A typed pointer to Verse state.</summary>
         StatePointer,
 
@@ -1608,6 +1614,8 @@ namespace GameCult.Mesh
             ProjectionRecipes = catalog.FindByKind(CultMeshSurfaceKind.ProjectionRecipe);
             LiveFeeds = catalog.FindByKind(CultMeshSurfaceKind.LiveFeed);
             Operations = catalog.FindByKind(CultMeshSurfaceKind.Operation);
+            Documents = catalog.FindByKind(CultMeshSurfaceKind.Document);
+            Collections = catalog.FindByKind(CultMeshSurfaceKind.Collection);
             StatePointers = catalog.FindByKind(CultMeshSurfaceKind.StatePointer);
             NativeSliceViews = catalog.FindByKind(CultMeshSurfaceKind.NativeSliceView);
         }
@@ -1626,6 +1634,12 @@ namespace GameCult.Mesh
 
         /// <summary>Gets typed operation handles.</summary>
         public IReadOnlyList<CultMeshSurfaceDiagnostic> Operations { get; }
+
+        /// <summary>Gets typed reactive document handles.</summary>
+        public IReadOnlyList<CultMeshSurfaceDiagnostic> Documents { get; }
+
+        /// <summary>Gets typed reactive collection handles.</summary>
+        public IReadOnlyList<CultMeshSurfaceDiagnostic> Collections { get; }
 
         /// <summary>Gets typed pointers to Verse state.</summary>
         public IReadOnlyList<CultMeshSurfaceDiagnostic> StatePointers { get; }

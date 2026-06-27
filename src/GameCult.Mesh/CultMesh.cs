@@ -1455,6 +1455,35 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Describes a typed document handle as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface(
+            ICultMeshDocumentHandle document)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            return new CultMeshSurfaceDiagnostic(
+                CultMeshSurfaceKind.Document,
+                document.DocumentId,
+                document.RouteHint,
+                document.Sources);
+        }
+
+        /// <summary>
+        /// Describes a typed collection handle as one entry in a surface catalog.
+        /// </summary>
+        public static CultMeshSurfaceDiagnostic DescribeSurface<TDocument>(
+            CultMeshCollectionHandle<TDocument> collection)
+            where TDocument : class
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            return new CultMeshSurfaceDiagnostic(
+                CultMeshSurfaceKind.Collection,
+                collection.CollectionId,
+                collection.RouteHint,
+                collection.Sources);
+        }
+
+        /// <summary>
         /// Describes a typed state pointer as one entry in a surface catalog.
         /// </summary>
         public static CultMeshSurfaceDiagnostic DescribeSurface<TValue>(

@@ -646,6 +646,24 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
       routeHint,
     },
   );
+  const document = CultMesh.document(
+    "daemon:aetheria.frame.latest.v1",
+    { schemaId: "gamecult.aetheria.daemon_frame.v1" },
+    async () => ({ frameId: 1 }),
+    {
+      sources: [source],
+      routeHint,
+    },
+  );
+  const collection = CultMesh.collection(
+    "daemon:aetheria.contacts.v1",
+    { schemaId: "gamecult.aetheria.contact.v1" },
+    async () => [],
+    {
+      sources: [source],
+      routeHint,
+    },
+  );
   const nativeView = CultMesh.nativeSliceView(
     "aetheria.zone.render",
     "gamecult.aetheria.render_body.v1",
@@ -658,17 +676,23 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
   const feedSurface = CultMesh.describeSurface(feed);
   const operationSurface = CultMesh.describeSurface(operation);
   const pointerSurface = CultMesh.describeSurface(pointer);
+  const documentSurface = CultMesh.describeSurface(document);
+  const collectionSurface = CultMesh.describeSurface(collection);
   const nativeViewSurface = CultMesh.describeSurface(nativeView);
   const catalog = CultMesh.describeSurfaceCatalog("gamecult.aetheria.rts.surfaces.v1", [
     querySurface,
     feedSurface,
     operationSurface,
+    documentSurface,
+    collectionSurface,
     pointerSurface,
     nativeViewSurface,
   ]);
 
   assert.equal(querySurface.kind, "query");
   assert.equal(feedSurface.kind, "live-feed");
+  assert.equal(documentSurface.kind, "document");
+  assert.equal(collectionSurface.kind, "collection");
   assert.equal(pointerSurface.kind, "state-pointer");
   assert.equal(pointerSurface.routeHint.kind, "shared-memory");
   assert.deepEqual(pointerSurface.sources.map(next => next.schemaId), [
@@ -680,6 +704,8 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
     "aetheria.zone.objects.visible",
     "aetheria.rts.viewport.feed",
     "aetheria.pilot.set_move_vector",
+    "daemon:aetheria.frame.latest.v1",
+    "daemon:aetheria.contacts.v1",
     "aetheria.selection.current",
     "aetheria.zone.render",
   ]);
@@ -689,11 +715,15 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
   ]);
   assert.notEqual(catalog.surfaces[0], querySurface);
   assert.notEqual(catalog.surfaces[0].sources, querySurface.sources);
-  assert.equal(catalog.surfaces[4].routeHint.kind, "shared-memory");
+  assert.equal(catalog.surfaces[6].routeHint.kind, "shared-memory");
 
   assert.equal(
     CultMesh.findSurface(catalog, "aetheria.selection.current")?.kind,
     "state-pointer",
+  );
+  assert.equal(
+    CultMesh.findSurface(catalog, "daemon:aetheria.frame.latest.v1")?.kind,
+    "document",
   );
   assert.equal(CultMesh.findSurface(catalog, "missing"), undefined);
 
@@ -714,6 +744,12 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
   ]);
   assert.deepEqual(index.operations.map(surface => surface.surfaceId), [
     "aetheria.pilot.set_move_vector",
+  ]);
+  assert.deepEqual(index.documents.map(surface => surface.surfaceId), [
+    "daemon:aetheria.frame.latest.v1",
+  ]);
+  assert.deepEqual(index.collections.map(surface => surface.surfaceId), [
+    "daemon:aetheria.contacts.v1",
   ]);
   assert.deepEqual(index.statePointers.map(surface => surface.surfaceId), [
     "aetheria.selection.current",

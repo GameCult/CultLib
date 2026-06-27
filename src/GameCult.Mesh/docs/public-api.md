@@ -388,19 +388,20 @@ diagnostic shape for generated clients, Eve/CultUI inspectors, MCP tools, and
 surface catalogs. Tooling should ask CultMesh for these descriptors instead of
 copying source lists and route hints by convention.
 `CultMesh.DescribeSurface(...)` and `CultMesh.DescribeSurfaceCatalog(...)`
-collect query surfaces, projection recipes, live feeds, operations, state
-pointers, and native views into one inspectable catalog for a runtime or
-generated binding package. State pointers are advertised by pointer id; native
-slice views are advertised by view id and route while the full column layout
-stays in `CultMeshNativeSliceViewDescriptor`.
+collect query surfaces, projection recipes, live feeds, operations, document
+handles, collection handles, state pointers, and native views into one
+inspectable catalog for a runtime or generated binding package. Documents are
+advertised by document id, collections by collection id, state pointers by
+pointer id, and native slice views by view id and route while the full column
+layout stays in `CultMeshNativeSliceViewDescriptor`.
 Catalog diagnostics support exact id lookup and kind filtering so tools can
 discover, for example, every operation or native view without local scan
 conventions. `CultMesh.DescribeSurfaceCatalogIndex(...)` / TS
 `CultMesh.surfaceCatalogIndex(...)` promotes that grouping into a shared
 diagnostic shape with `queries`, `projectionRecipes`, `liveFeeds`,
-`operations`, `statePointers`, and `nativeSliceViews`, so generated bindings
-and tools can ask for the semantic bucket they need without copying catalog
-scan logic.
+`operations`, `documents`, `collections`, `statePointers`, and
+`nativeSliceViews`, so generated bindings and tools can ask for the semantic
+bucket they need without copying catalog scan logic.
 
 Live feeds compose several query surfaces into one client-facing snapshot
 without making the UI own refresh loops:

@@ -280,6 +280,8 @@ export type CultMeshSurfaceKind =
   | "projection-recipe"
   | "live-feed"
   | "operation"
+  | "document"
+  | "collection"
   | "state-pointer"
   | "native-slice-view";
 
@@ -301,6 +303,8 @@ export interface CultMeshSurfaceCatalogIndexDiagnostic {
   readonly projectionRecipes: readonly CultMeshSurfaceDiagnostic[];
   readonly liveFeeds: readonly CultMeshSurfaceDiagnostic[];
   readonly operations: readonly CultMeshSurfaceDiagnostic[];
+  readonly documents: readonly CultMeshSurfaceDiagnostic[];
+  readonly collections: readonly CultMeshSurfaceDiagnostic[];
   readonly statePointers: readonly CultMeshSurfaceDiagnostic[];
   readonly nativeSliceViews: readonly CultMeshSurfaceDiagnostic[];
 }
@@ -2505,6 +2509,16 @@ export function cultMeshDescribeSurface(
         readonly sources: readonly CultMeshProjectionSource[];
       }
     | {
+        readonly documentId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly collectionId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
         readonly pointerId: string;
         readonly routeHint?: CultMeshRouteHint;
         readonly sources?: readonly CultMeshProjectionSource[];
@@ -2524,6 +2538,20 @@ export function cultMeshDescribeSurface(
 
   if ("pointerId" in surface) {
     return cultMeshSurfaceDiagnostic("state-pointer", surface.pointerId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    });
+  }
+
+  if ("documentId" in surface) {
+    return cultMeshSurfaceDiagnostic("document", surface.documentId, {
+      routeHint: surface.routeHint,
+      sources: surface.sources,
+    });
+  }
+
+  if ("collectionId" in surface) {
+    return cultMeshSurfaceDiagnostic("collection", surface.collectionId, {
       routeHint: surface.routeHint,
       sources: surface.sources,
     });
@@ -2608,6 +2636,8 @@ export function cultMeshSurfaceCatalogIndex(
     projectionRecipes: cultMeshSurfacesByKind(catalog, "projection-recipe"),
     liveFeeds: cultMeshSurfacesByKind(catalog, "live-feed"),
     operations: cultMeshSurfacesByKind(catalog, "operation"),
+    documents: cultMeshSurfacesByKind(catalog, "document"),
+    collections: cultMeshSurfacesByKind(catalog, "collection"),
     statePointers: cultMeshSurfacesByKind(catalog, "state-pointer"),
     nativeSliceViews: cultMeshSurfacesByKind(catalog, "native-slice-view"),
   };
@@ -3848,6 +3878,16 @@ export class CultMesh {
       }
     | {
         readonly pointerId: string;
+      }
+    | {
+        readonly documentId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
+      }
+    | {
+        readonly collectionId: string;
+        readonly routeHint: CultMeshRouteHint;
+        readonly sources: readonly CultMeshProjectionSource[];
       }
     | CultMeshNativeSliceViewDescriptor,
   ): CultMeshSurfaceDiagnostic {

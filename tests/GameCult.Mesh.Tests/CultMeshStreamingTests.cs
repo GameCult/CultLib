@@ -911,6 +911,19 @@ public sealed class CultMeshStreamingTests
             () => new Subject<string>(),
             route,
             sources);
+        var document = CultMesh.Document(
+            "daemon:aetheria.frame.latest.v1",
+            CultMesh.Verse("aetheria.local", "unity-raven").Context,
+            _context => Task.FromResult(new MeshNoteDocument { Schema = "frame", Text = "current", Revision = 1 }),
+            _context => new Subject<MeshNoteDocument>(),
+            sources,
+            route);
+        var collection = new CultMeshCollectionHandle<MeshNoteDocument>(
+            "daemon:aetheria.contacts.v1",
+            () => Task.FromResult<IReadOnlyList<MeshNoteDocument>>(Array.Empty<MeshNoteDocument>()),
+            () => new Subject<CultMeshCollectionChange<MeshNoteDocument>>(),
+            sources,
+            route);
         var nativeView = new CultMeshNativeSliceViewDescriptor(
             "aetheria.zone.render",
             "gamecult.aetheria.render_body.v1",
@@ -925,18 +938,22 @@ public sealed class CultMeshStreamingTests
                 CultMesh.DescribeSurface(query),
                 CultMesh.DescribeSurface(feed),
                 CultMesh.DescribeSurface(operation),
+                CultMesh.DescribeSurface(document),
+                CultMesh.DescribeSurface(collection),
                 CultMesh.DescribeSurface(pointer),
                 CultMesh.DescribeSurface(nativeView)
             });
 
         catalog.CatalogId.Should().Be("gamecult.aetheria.rts.surfaces.v1");
-        catalog.Surfaces.Should().HaveCount(5);
+        catalog.Surfaces.Should().HaveCount(7);
         catalog.Surfaces[0].Kind.Should().Be(CultMeshSurfaceKind.Query);
         catalog.Surfaces[0].SurfaceId.Should().Be("aetheria.zone.objects.visible");
         catalog.Surfaces[0].RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
         catalog.Surfaces[0].Sources.Should().HaveCount(1);
         catalog.Find("aetheria.rts.viewport.feed")!.Kind.Should().Be(CultMeshSurfaceKind.LiveFeed);
         catalog.Find("aetheria.entity.pilot.move")!.Kind.Should().Be(CultMeshSurfaceKind.Operation);
+        catalog.Find("daemon:aetheria.frame.latest.v1")!.Kind.Should().Be(CultMeshSurfaceKind.Document);
+        catalog.Find("daemon:aetheria.contacts.v1")!.Kind.Should().Be(CultMeshSurfaceKind.Collection);
         catalog.Find("aetheria.selection.current")!.Kind.Should().Be(CultMeshSurfaceKind.StatePointer);
         catalog.Find("aetheria.selection.current")!.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
         catalog.Find("aetheria.selection.current")!.Sources.Should().ContainSingle();
@@ -957,6 +974,8 @@ public sealed class CultMeshStreamingTests
         index.Queries.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.zone.objects.visible");
         index.LiveFeeds.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.rts.viewport.feed");
         index.Operations.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.entity.pilot.move");
+        index.Documents.Should().ContainSingle().Which.SurfaceId.Should().Be("daemon:aetheria.frame.latest.v1");
+        index.Collections.Should().ContainSingle().Which.SurfaceId.Should().Be("daemon:aetheria.contacts.v1");
         index.StatePointers.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.selection.current");
         index.NativeSliceViews.Should().ContainSingle().Which.SurfaceId.Should().Be("aetheria.zone.render");
         index.ProjectionRecipes.Should().BeEmpty();
