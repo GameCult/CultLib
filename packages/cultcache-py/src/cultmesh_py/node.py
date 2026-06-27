@@ -807,14 +807,36 @@ class CultMeshDatabase:
                 schema_id = document.get("schemaId")
                 record_key = document.get("recordKey")
                 if schema_id and record_key:
-                    records.add((str(schema_id), str(record_key)))
+                    records.add(self._canonical_shard_record_key(str(schema_id), str(record_key), document))
             delete = entry.get("delete")
             if isinstance(delete, dict):
                 schema_id = delete.get("schemaId")
                 record_key = delete.get("recordKey")
                 if schema_id and record_key:
-                    records.discard((str(schema_id), str(record_key)))
+                    records.discard(self._canonical_shard_record_key(str(schema_id), str(record_key)))
         return records
+
+    def _canonical_shard_record_key(
+        self,
+        schema_id: str,
+        record_key: str,
+        raw_record: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        documents_by_schema_id = schema_document_map(self.documents)
+        if raw_record is not None:
+            try:
+                _, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
+                    documents_by_schema_id,
+                    schema_id,
+                    raw_record,
+                )
+                return resolved_schema_id, record_key
+            except KeyError:
+                pass
+        document = documents_by_schema_id.get(schema_id)
+        if document is not None:
+            return document.catalog_entry().schema_id, record_key
+        return schema_id, record_key
 
     def _shard_log_entries(
         self,

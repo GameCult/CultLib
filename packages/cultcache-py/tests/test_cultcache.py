@@ -5295,6 +5295,71 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(shard_catalog["shards"][0]["schemaIds"], [local_schema_id])
         self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
 
+    def test_cultmesh_shard_snapshot_keeps_foreign_schema_alias_membership(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_shard_note",
+            [
+                ("schema_version", 0),
+                ("body", 1),
+            ],
+            schema_id="sha256:mesh-alias-shard-note",
+            schema_name="mesh.alias_shard_note",
+            schema_version="mesh.alias_shard_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-shard-server")
+        node.database.register_document(document)
+
+        node.database.apply_raw_put_message(document_put_raw(
+            message_id="put-foreign-shard-alias",
+            key="note:foreign-shard",
+            schema_id="runtime.generated.mesh.alias_shard_note.ui.99",
+            stored_at="2026-06-27T00:00:00Z",
+            payload=document.encode_payload({
+                "schema_version": "mesh.alias_shard_note.v1",
+                "body": "visible through shard snapshot",
+            }),
+            shard_id="notes",
+            shard_epoch=1,
+        ).to_wire())
+        node.database.put_raw_message(
+            document,
+            "note:other-shard",
+            {
+                "schema_version": "mesh.alias_shard_note.v1",
+                "body": "hidden by shard filter",
+            },
+            shard_id="other",
+            shard_epoch=1,
+        )
+
+        response = node.database.build_snapshot_response(
+            schema_ids=["mesh.alias_shard_note.v1"],
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(response.shard_id, "notes")
+        self.assertEqual(response.shard_epoch, 1)
+        self.assertEqual([(record.schema_id, record.record_key) for record in response.documents], [
+            (local_schema_id, "note:foreign-shard"),
+        ])
+        self.assertEqual(node.cache.get_required_envelope(document, "note:foreign-shard").schema_id, local_schema_id)
+
+        node.database.apply_raw_delete_message(document_delete(
+            message_id="delete-foreign-shard-alias",
+            schema_id="mesh.alias_shard_note.v1",
+            record_key="note:foreign-shard",
+            shard_id="notes",
+            shard_epoch=1,
+        ).to_wire())
+        deleted_response = node.database.build_snapshot_response(
+            schema_ids=["mesh.alias_shard_note.v1"],
+            shard_id="notes",
+            shard_epoch=1,
+        )
+        self.assertEqual(deleted_response.documents, ())
+
     def test_cultmesh_local_server_notifies_schema_alias_subscription_for_raw_put(self) -> None:
         document = define_database_entry_type(
             "mesh.alias_sub_note",
