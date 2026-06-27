@@ -2054,6 +2054,77 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(log_changes[0].change_kind, "updated")
         self.assertEqual(node.get_required(document, "item:node").value, 9)
 
+    def test_cultmesh_node_sync_document_returns_requested_alias_type(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.sync_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.sync_alias_note.v1",
+            schema_name="mesh.sync_alias_note",
+            schema_version="mesh.sync_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.sync_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.sync_alias_note.v1",
+            schema_name="mesh.sync_alias_note",
+            schema_version="mesh.sync_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        requests: list[dict[str, Any]] = []
+
+        class SnapshotClient:
+            def fetch_snapshot_response(
+                self,
+                *,
+                schema_ids: list[str] | None = None,
+                record_keys: list[str] | None = None,
+                shard_id: str | None = None,
+                shard_epoch: int | None = None,
+            ) -> dict[str, Any]:
+                requests.append({
+                    "schema_ids": schema_ids,
+                    "record_keys": record_keys,
+                    "shard_id": shard_id,
+                    "shard_epoch": shard_epoch,
+                })
+                return {
+                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                    "messageId": "sync-document",
+                    "documents": [
+                        {
+                            "schemaId": document.catalog_entry().schema_id,
+                            "recordKey": "note:remote",
+                            "storedAt": "2026-06-27T00:00:00Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(CanonicalNote("synced-alias")),
+                        }
+                    ],
+                }
+
+        synced = node.sync_document(SnapshotClient(), alias, "note:remote")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "synced-alias")
+        self.assertEqual(node.get_required(document, "note:remote").body, "synced-alias")
+        self.assertIsInstance(node.get_required(alias, "note:remote"), UiNote)
+        self.assertEqual(requests, [{
+            "schema_ids": ["mesh.sync_alias_note.v1"],
+            "record_keys": ["note:remote"],
+            "shard_id": None,
+            "shard_epoch": None,
+        }])
+
     def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
         document = define_database_entry_type(
             "mesh.emit_item",

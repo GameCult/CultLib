@@ -180,6 +180,23 @@ class CultMeshNode:
             shard_epoch=shard_epoch,
         )
 
+    def sync_document(
+        self,
+        client: CultNetRawClient,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> Any:
+        return self.database.sync_document(
+            client,
+            document,
+            key,
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+
     def sync_shard_log(
         self,
         client: CultNetRawClient,
@@ -629,6 +646,29 @@ class CultMeshDatabase:
             shard_epoch=shard_epoch,
         )
         return self.apply_snapshot_response(response)
+
+    def sync_document(
+        self,
+        client: CultNetRawClient,
+        document: DocumentDefinition[Any],
+        key: str,
+        *,
+        shard_id: str | None = None,
+        shard_epoch: int | None = None,
+    ) -> Any:
+        if not key:
+            raise ValueError("key must be non-empty")
+        requested = document
+        registered = self._resolve_document_alias(document)
+        schema_id = registered.catalog_entry().schema_id
+        self.sync_snapshot(
+            client,
+            schema_ids=[schema_id],
+            record_keys=[key],
+            shard_id=shard_id,
+            shard_epoch=shard_epoch,
+        )
+        return self.get_required(requested, key)
 
     def sync_shard_log(
         self,
