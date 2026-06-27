@@ -1751,6 +1751,59 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_ApplyRawPut_ResolvesForeignSchemaIdFromPayload()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "network-notes",
+                "runtime-a",
+                epoch: 3,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "network-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3075"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("network-note:foreign-schema-put");
+            var changes = new List<CultNetDatabaseChange<NetworkSchemaNote>>();
+            using var subscription = database.WatchRecord<NetworkSchemaNote>(key)
+                .Subscribe(change => changes.Add(change));
+            var message = new CultNetDocumentPutRawMessage
+            {
+                MessageId = "put-foreign-schema",
+                ShardId = shard.ShardId,
+                ShardEpoch = shard.Epoch,
+                Document = new CultNetRawDocumentRecord
+                {
+                    SchemaId = "runtime.generated.network-note.ui.42",
+                    RecordKey = key.Value,
+                    StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                    PayloadEncoding = "messagepack",
+                    Payload = CultDocumentMessagePackSerialization.Serialize(new NetworkSchemaNote
+                    {
+                        Schema = "tests.networking_note.v1",
+                        Text = "payload-routed",
+                        Revision = 5
+                    })
+                }
+            };
+
+            var applied = await database.ApplyPutAsync(message);
+
+            Assert.That(applied, Is.TypeOf<NetworkSchemaNote>());
+            Assert.That(cache.Get<NetworkSchemaNote>(key)!.Text, Is.EqualTo("payload-routed"));
+            Assert.That(changes, Has.Count.EqualTo(1));
+            Assert.That(changes[0].SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(changes[0].Document!.Revision, Is.EqualTo(5));
+        }
+
+        [Test]
         public async Task CultNetDatabaseServer_Creates_Filtered_SnapshotResponse()
         {
             var cache = new CultCache();
@@ -4124,6 +4177,20 @@ namespace GameCult.Networking.Tests
 
             [MessagePack.Key(1)]
             public string Body { get; set; } = string.Empty;
+        }
+
+        [CultDocument("tests.networking_note", "tests.networking_note.v1")]
+        [MessagePack.MessagePackObject]
+        public sealed class NetworkSchemaNote
+        {
+            [MessagePack.Key(0)]
+            public string Schema { get; set; } = string.Empty;
+
+            [MessagePack.Key(1)]
+            public string Text { get; set; } = string.Empty;
+
+            [MessagePack.Key(2)]
+            public int Revision { get; set; }
         }
 
         private sealed class EnvironmentVariableScope : IDisposable

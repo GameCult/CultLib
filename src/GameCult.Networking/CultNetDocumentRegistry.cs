@@ -395,7 +395,7 @@ namespace GameCult.Networking
             return applied;
         }
 
-        private CultDocumentDescriptor ResolveDescriptorForRawDocument(CultNetRawDocumentRecord document)
+        internal CultDocumentDescriptor ResolveDescriptorForRawDocument(CultNetRawDocumentRecord document)
         {
             try
             {

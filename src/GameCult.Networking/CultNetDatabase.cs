@@ -593,7 +593,7 @@ namespace GameCult.Networking
             foreach (var document in response.Documents.Where(document => ShardMatchesRawDocument(shard, document)))
             {
                 var key = new CultRecordKey(document.RecordKey);
-                var descriptor = _cache.Registry.GetRequiredBySchemaId(document.SchemaId);
+                var descriptor = _documents.ResolveDescriptorForRawDocument(document);
                 var previous = _cache.Get(key);
                 var applied = await _documents.ApplyRawDocumentPutMessageAsync(
                     _cache,
@@ -608,7 +608,7 @@ namespace GameCult.Networking
                     descriptor.DocumentType,
                     previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
                     key,
-                    document.SchemaId,
+                    descriptor.SchemaId,
                     shard,
                     applied,
                     previous);
@@ -830,9 +830,9 @@ namespace GameCult.Networking
             }
 
             var key = new CultRecordKey(message.Document.RecordKey);
-            var shard = ResolveShardInternal(message.Document.SchemaId, key);
-            EnsurePrimary(shard, message.Document.SchemaId, key, message.ShardEpoch);
-            var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
+            var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
+            var shard = ResolveShardInternal(descriptor.SchemaId, key);
+            EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
             var kind = previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated;
@@ -1097,10 +1097,22 @@ namespace GameCult.Networking
 
         private bool ShardMatchesRawDocument(CultNetShardDescriptor shard, CultNetRawDocumentRecord document)
         {
-            return document != null &&
-                   !string.IsNullOrWhiteSpace(document.SchemaId) &&
-                   !string.IsNullOrWhiteSpace(document.RecordKey) &&
-                   shard.Matches(document.SchemaId, new CultRecordKey(document.RecordKey));
+            if (document == null ||
+                string.IsNullOrWhiteSpace(document.SchemaId) ||
+                string.IsNullOrWhiteSpace(document.RecordKey))
+            {
+                return false;
+            }
+
+            try
+            {
+                var descriptor = _documents.ResolveDescriptorForRawDocument(document);
+                return shard.Matches(descriptor.SchemaId, new CultRecordKey(document.RecordKey));
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
 
         private void RemoveTrackedDocument(Type documentType, CultRecordKey key)
@@ -1249,7 +1261,7 @@ namespace GameCult.Networking
             }
 
             var key = new CultRecordKey(message.Document.RecordKey);
-            var descriptor = _cache.Registry.GetRequiredBySchemaId(message.Document.SchemaId);
+            var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
             var previous = _cache.Get(key);
             var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
             var kind = ChangeKindFromWire(entry.ChangeKind);
