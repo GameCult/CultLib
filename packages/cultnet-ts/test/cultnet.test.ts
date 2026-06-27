@@ -936,13 +936,15 @@ test("CultNet shard catalog filters descriptors and answers catalog requests", (
 
   assert.equal(watchedShardId, "profiles-a");
   assert.equal(shardServes(catalog.get("notes-a")!, { schemaId: "note.v1", recordKey: "note:1" }), true);
+  assert.equal(shardServes(catalog.get("notes-a")!, { schemaId: "note", recordKey: "note:1" }), true);
   assert.equal(shardServes(catalog.get("notes-a")!, { schemaId: "profile.v1", recordKey: "note:1" }), false);
   assert.deepEqual(catalog.list({ schemaIds: ["note.v1"], recordKeys: ["note:1"] }).map((shard) => shard.shardId), ["notes-a"]);
+  assert.deepEqual(catalog.list({ schemaIds: ["note"], recordKeys: ["note:1"] }).map((shard) => shard.shardId), ["notes-a"]);
 
   const response = catalog.createCatalogResponse({
     schemaVersion: "cultnet.shard_catalog_request.v0",
     messageId: "shards",
-    schemaIds: ["note.v1"],
+    schemaIds: ["note"],
     recordKeys: ["note:2"],
   });
   assert.equal(response.schemaVersion, "cultnet.shard_catalog_response.v0");
@@ -987,7 +989,7 @@ test("CultNet peer can request and sync shard catalogs by message id", async () 
   const synced = new CultNetShardCatalog();
   const applied = await requester.syncShardCatalog(synced, {
     messageId: "peer-shards",
-    schemaIds: ["note.v1"],
+    schemaIds: ["note"],
     recordKeys: ["note:local"],
     timeoutMs: 1_000,
   });

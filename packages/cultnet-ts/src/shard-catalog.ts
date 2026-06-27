@@ -47,11 +47,11 @@ export class CultNetShardCatalog {
   }
 
   list(options: CultNetShardCatalogOptions = {}): CultNetShardDescriptor[] {
-    const requestedSchemaIds = options.schemaIds ? new Set(options.schemaIds) : null;
+    const requestedSchemaIds = options.schemaIds ?? [];
     const requestedRecordKeys = options.recordKeys ?? [];
 
     return this.shards.filter((shard) => {
-      if (requestedSchemaIds && !shard.schemaIds?.some((schemaId) => requestedSchemaIds.has(schemaId))) {
+      if (requestedSchemaIds.length > 0 && !schemaIdsMatchAny(shard.schemaIds ?? [], requestedSchemaIds)) {
         return false;
       }
       if (requestedRecordKeys.length > 0 && !requestedRecordKeys.some((recordKey) => shardServes(shard, { recordKey }))) {
@@ -86,13 +86,47 @@ export function shardServes(
   shard: CultNetShardDescriptor,
   options: { schemaId?: string; recordKey?: string } = {},
 ): boolean {
-  if (options.schemaId !== undefined && shard.schemaIds !== undefined && shard.schemaIds.length > 0 && !shard.schemaIds.includes(options.schemaId)) {
+  if (
+    options.schemaId !== undefined &&
+    shard.schemaIds !== undefined &&
+    shard.schemaIds.length > 0 &&
+    !schemaIdsMatchAny(shard.schemaIds, [options.schemaId])
+  ) {
     return false;
   }
   if (options.recordKey !== undefined && shard.keyPrefix !== undefined && !options.recordKey.startsWith(shard.keyPrefix)) {
     return false;
   }
   return true;
+}
+
+function schemaIdsMatchAny(
+  advertisedSchemaIds: readonly string[],
+  requestedSchemaIds: readonly string[],
+): boolean {
+  return advertisedSchemaIds.some(advertised =>
+    requestedSchemaIds.some(requested => schemaIdsMatch(advertised, requested)),
+  );
+}
+
+function schemaIdsMatch(left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  const leftName = inferSchemaName(left) ?? left;
+  const rightName = inferSchemaName(right) ?? right;
+  return leftName === rightName;
+}
+
+function inferSchemaName(schemaId: string): string | undefined {
+  const marker = schemaId.lastIndexOf(".v");
+  if (marker <= 0 || marker + 2 >= schemaId.length) {
+    return undefined;
+  }
+
+  const version = schemaId.slice(marker + 2);
+  return /^\d+$/u.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
 function cloneShardDescriptor(descriptor: CultNetShardDescriptor): CultNetShardDescriptor {
