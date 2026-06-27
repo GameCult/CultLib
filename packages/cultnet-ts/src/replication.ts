@@ -159,7 +159,7 @@ export class CultNetDocumentRegistry {
       const binding = this.#requireBinding(envelope.type);
       const schemaId = schemaIdForEnvelope(envelope, binding);
 
-      if (requestedSchemaIds && !requestedSchemaIds.has(schemaId)) {
+      if (requestedSchemaIds && !schemaMatchesBinding(schemaId, binding, requestedSchemaIds)) {
         continue;
       }
 
@@ -196,7 +196,7 @@ export class CultNetDocumentRegistry {
       const binding = this.#requireBinding(envelope.type);
       const schemaId = schemaIdForEnvelope(envelope, binding);
 
-      if (requestedSchemaIds && !requestedSchemaIds.has(schemaId)) {
+      if (requestedSchemaIds && !schemaMatchesBinding(schemaId, binding, requestedSchemaIds)) {
         continue;
       }
 
@@ -338,6 +338,39 @@ export class CultNetDocumentRegistry {
 
 function schemaIdForBinding(binding: CultNetDocumentBinding): string {
   return binding.definition.schemaId ?? binding.definition.type;
+}
+
+function schemaMatchesBinding(
+  schemaId: string,
+  binding: CultNetDocumentBinding,
+  requestedSchemaIds: Set<string>,
+): boolean {
+  if (requestedSchemaIds.has(schemaId)) {
+    return true;
+  }
+
+  const definition = binding.definition;
+  if (definition.schemaId && requestedSchemaIds.has(definition.schemaId)) {
+    return true;
+  }
+  if (definition.schemaName && requestedSchemaIds.has(definition.schemaName)) {
+    return true;
+  }
+  if (definition.compatibleSchemaIds?.some(candidate => requestedSchemaIds.has(candidate))) {
+    return true;
+  }
+
+  return Array.from(requestedSchemaIds)
+    .some(candidate => inferSchemaName(candidate) === definition.schemaName);
+}
+
+function inferSchemaName(schemaId: string): string | undefined {
+  const marker = schemaId.lastIndexOf(".v");
+  if (marker <= 0 || marker + 2 >= schemaId.length) {
+    return undefined;
+  }
+  const version = schemaId.slice(marker + 2);
+  return /^\d+$/u.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
 function schemaIdForEnvelope(

@@ -1266,6 +1266,56 @@ test("CultNet raw replication applies compatible foreign-schema snapshots", asyn
   }
 });
 
+test("CultNet document registry filters snapshots by schema aliases", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-alias-snapshot-"));
+
+  try {
+    const documentDefinition = defineDocumentType({
+      type: "cultnet.alias_note",
+      schemaId: "sha256:cultnet-alias-note",
+      schemaName: "cultnet.alias_note",
+      schemaVersion: "cultnet.alias_note.v1",
+      schema: z.object({
+        schema_version: z.string(),
+        noteId: z.string(),
+        body: z.string(),
+      }),
+      name: "noteId",
+    });
+    const registry = new CultNetDocumentRegistry([
+      defineCultNetDocumentBinding({ definition: documentDefinition }),
+    ]);
+    const cache = CultCache.builder()
+      .withDocumentType(documentDefinition)
+      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "alias.msgpack")))
+      .build();
+
+    await cache.put(documentDefinition, "note:alias", {
+      schema_version: "cultnet.alias_note.v1",
+      noteId: "note:alias",
+      body: "filtered by alias",
+    });
+
+    const typedSnapshot = registry.createSnapshotResponse(cache, "typed-alias", {
+      schemaVersion: "cultnet.snapshot_request.v0",
+      messageId: "typed-alias",
+      schemaIds: ["cultnet.alias_note.v1"],
+    });
+    const rawSnapshot = registry.createRawSnapshotResponse(cache, "raw-alias", {
+      schemaVersion: "cultnet.snapshot_request.v0",
+      messageId: "raw-alias",
+      schemaIds: ["cultnet.alias_note.v1"],
+    });
+
+    assert.equal(typedSnapshot.documents[0]?.schemaId, "sha256:cultnet-alias-note");
+    assert.equal(typedSnapshot.documents[0]?.recordKey, "note:alias");
+    assert.equal(rawSnapshot.documents[0]?.schemaId, "sha256:cultnet-alias-note");
+    assert.equal(rawSnapshot.documents[0]?.recordKey, "note:alias");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("CultNet interop slot compatibility defaults missing trailing fields and rejects mismatched slots", () => {
   const note: InteropNote = {
     schemaVersion: INTEROP_SCHEMA_VERSION,
