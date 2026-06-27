@@ -1840,10 +1840,13 @@ class CultCacheTests(unittest.TestCase):
         }
 
         applied_snapshot = apply_raw_snapshot(cache, [document], snapshot)
-        self.assertEqual(applied_snapshot[0].schema_id, stale_schema_id)
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(applied_snapshot[0].schema_id, local_schema_id)
         self.assertEqual(cache.get_required(document, "policy:1")["value"], "still synced")
+        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
         direct_applied = apply_raw_document_record(cache, schema_document_map([document]), record)
-        self.assertEqual(direct_applied.schema_id, stale_schema_id)
+        self.assertEqual(direct_applied.schema_id, local_schema_id)
+        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
 
         shard_log = {
             "schemaVersion": "cultnet.shard_log_response.v0",
@@ -1874,8 +1877,59 @@ class CultCacheTests(unittest.TestCase):
         }
 
         applied_log = apply_shard_log_response(cache, [document], shard_log)
-        self.assertEqual(applied_log[0].schema_id, stale_schema_id)
+        self.assertEqual(applied_log[0].schema_id, local_schema_id)
         self.assertEqual(cache.get_required(document, "policy:1")["value"], "updated through log")
+        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
+
+    def test_cultmesh_node_applies_foreign_schema_snapshot_as_local_update(self) -> None:
+        document = define_database_entry_type(
+            "mesh.runtime-policy",
+            [
+                ("schema_version", 0),
+                ("name", 1),
+                ("value", 2),
+            ],
+            schema_id="mesh.runtime-policy.current",
+            schema_name="mesh.runtime_policy",
+            schema_version="mesh.runtime_policy.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        node.put(document, "policy:1", {
+            "schema_version": "mesh.runtime_policy.v1",
+            "name": "policy",
+            "value": "old",
+        })
+        observed: list[CultMeshDatabaseChange] = []
+        unsubscribe = node.database.watch_record(document, "policy:1", observed.append)
+        try:
+            applied = node.database.apply_snapshot_response({
+                "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                "messageId": "foreign-schema-snapshot",
+                "documents": [
+                    {
+                        "schemaId": "sha256:foreign-mesh-runtime-policy",
+                        "recordKey": "policy:1",
+                        "storedAt": "2026-06-25T00:00:00Z",
+                        "payloadEncoding": "messagepack",
+                        "payload": document.encode_payload({
+                            "schema_version": "mesh.runtime_policy.v1",
+                            "name": "policy",
+                            "value": "new",
+                        }),
+                    },
+                ],
+            })
+        finally:
+            unsubscribe()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(applied[0].schema_id, local_schema_id)
+        self.assertEqual(observed[0].schema_id, local_schema_id)
+        self.assertEqual(observed[0].change_kind, "updated")
+        self.assertEqual(observed[0].previous_value["value"], "old")
+        self.assertEqual(observed[0].value["value"], "new")
+        self.assertEqual(node.cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
 
     def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:
         import msgpack  # type: ignore

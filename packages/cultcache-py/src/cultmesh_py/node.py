@@ -22,6 +22,7 @@ from cultnet_py import (
     apply_shard_log_response as apply_cultnet_shard_log_response,
     document_delete,
     document_put_raw,
+    resolve_document_and_schema_id_for_raw_record,
     schema_document_map,
 )
 
@@ -432,15 +433,21 @@ class CultMeshDatabase:
         if not isinstance(document_record, dict):
             return None
         schema_id = str(document_record.get("schemaId") or "")
-        document = self._document_for_schema(schema_id)
-        if document is None:
+        documents_by_schema_id = schema_document_map(self.documents)
+        try:
+            document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
+                documents_by_schema_id,
+                schema_id,
+                document_record,
+            )
+        except KeyError:
             return None
         record_key = str(document_record["recordKey"])
         previous = self.cache.get(document, record_key)
         envelope = CultCacheEnvelope(
             key=record_key,
             type=document.type,
-            schema_id=schema_id,
+            schema_id=resolved_schema_id,
             payload=bytes(document_record["payload"]),
             stored_at=str(document_record.get("storedAt") or ""),
             catalog_entry=document.catalog_entry(),
@@ -931,11 +938,16 @@ class CultMeshDatabase:
             if not isinstance(record, dict):
                 continue
             schema_id = str(record.get("schemaId"))
-            document = documents_by_schema_id.get(schema_id)
-            if document is None:
+            try:
+                document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
+                    documents_by_schema_id,
+                    schema_id,
+                    record,
+                )
+            except KeyError:
                 continue
             record_key = str(record.get("recordKey"))
-            previous[(schema_id, record_key)] = self.cache.get(document, record_key)
+            previous[(resolved_schema_id, record_key)] = self.cache.get(document, record_key)
         return previous
 
 

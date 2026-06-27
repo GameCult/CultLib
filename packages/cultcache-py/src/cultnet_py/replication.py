@@ -36,11 +36,15 @@ def apply_raw_document_record(
 ) -> CultNetAppliedRecord:
     wire = record.to_wire() if isinstance(record, CultNetRawDocumentRecord) else record
     schema_id = str(wire["schemaId"])
-    document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, wire)
-    envelope = raw_record_to_envelope(document, schema_id, wire)
+    document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
+        documents_by_schema_id,
+        schema_id,
+        wire,
+    )
+    envelope = raw_record_to_envelope(document, resolved_schema_id, wire)
     value = cache.put_envelope(document, envelope)
     return CultNetAppliedRecord(
-        schema_id=schema_id,
+        schema_id=resolved_schema_id,
         record_key=envelope.key,
         change_kind="added",
         value=value,
@@ -77,11 +81,15 @@ def apply_raw_snapshot(
         if not isinstance(record, dict):
             continue
         schema_id = str(record["schemaId"])
-        document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, record)
-        envelope = raw_record_to_envelope(document, schema_id, record)
+        document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
+            documents_by_schema_id,
+            schema_id,
+            record,
+        )
+        envelope = raw_record_to_envelope(document, resolved_schema_id, record)
         batch = batches.setdefault(document.type, (document, []))
-        batch[1].append((schema_id, envelope))
-        order.append((document, schema_id, envelope))
+        batch[1].append((resolved_schema_id, envelope))
+        order.append((document, resolved_schema_id, envelope))
 
     values_by_key: dict[tuple[str, str], Any] = {}
     for document, entries in batches.values():
@@ -154,13 +162,22 @@ def resolve_document_for_raw_record(
     schema_id: str,
     record: dict[str, Any],
 ) -> DocumentDefinition[Any]:
+    return resolve_document_and_schema_id_for_raw_record(documents_by_schema_id, schema_id, record)[0]
+
+
+def resolve_document_and_schema_id_for_raw_record(
+    documents_by_schema_id: dict[str, DocumentDefinition[Any]],
+    schema_id: str,
+    record: dict[str, Any],
+) -> tuple[DocumentDefinition[Any], str]:
     document = documents_by_schema_id.get(schema_id)
     if document is not None:
-        return document
+        return document, schema_id
     schema_version = _infer_schema_version_from_payload(bytes(record["payload"]))
     schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
     if schema_name is not None and schema_name in documents_by_schema_id:
-        return documents_by_schema_id[schema_name]
+        document = documents_by_schema_id[schema_name]
+        return document, document.catalog_entry().schema_id
     raise KeyError(schema_id)
 
 

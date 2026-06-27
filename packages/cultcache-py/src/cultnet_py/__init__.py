@@ -37,6 +37,7 @@ from .replication import (
     apply_raw_document_record,
     apply_raw_snapshot,
     apply_shard_log_response,
+    resolve_document_and_schema_id_for_raw_record,
     schema_document_map,
 )
 from .schema_catalog import (
@@ -168,6 +169,7 @@ __all__ = [
     "apply_raw_document_record",
     "apply_raw_snapshot",
     "apply_shard_log_response",
+    "resolve_document_and_schema_id_for_raw_record",
     "compute_simulation_claim_hash",
     "compute_reconnect_delay_ms",
     "create_reconnect_policy",
