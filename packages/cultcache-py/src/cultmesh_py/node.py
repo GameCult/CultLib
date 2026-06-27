@@ -81,6 +81,15 @@ class CultMeshNode:
     def get_required(self, document: DocumentDefinition[Any], key: str) -> Any:
         return self.database.get_required(document, key)
 
+    def get_all(self, document: DocumentDefinition[Any]) -> list[Any]:
+        return self.database.get_all(document)
+
+    def get_by_name(self, document: DocumentDefinition[Any], name: str) -> Any:
+        return self.database.get_by_name(document, name)
+
+    def get_by_index(self, document: DocumentDefinition[Any], index: str, value: str) -> Any:
+        return self.database.get_by_index(document, index, value)
+
     def get_global(self, document: DocumentDefinition[Any]) -> Any:
         return self.database.get_global(document)
 
@@ -389,6 +398,23 @@ class CultMeshDatabase:
         if value is None:
             raise CultCacheError(f"Missing {document.type}:{key}")
         return value
+
+    def get_all(self, document: DocumentDefinition[Any]) -> list[Any]:
+        registered = self._resolve_document_alias(document)
+        return [
+            self._convert_document_value(value, registered, document)
+            for value in self.cache.get_all(registered)
+        ]
+
+    def get_by_name(self, document: DocumentDefinition[Any], name: str) -> Any:
+        registered = self._resolve_document_alias(document)
+        value = self.cache.get_by_name(registered, name)
+        return None if value is None else self._convert_document_value(value, registered, document)
+
+    def get_by_index(self, document: DocumentDefinition[Any], index: str, value: str) -> Any:
+        registered = self._resolve_document_alias(document)
+        result = self.cache.get_by_index(registered, index, value)
+        return None if result is None else self._convert_document_value(result, registered, document)
 
     def get_global(self, document: DocumentDefinition[Any]) -> Any:
         return self.get(document, self.cache.GLOBAL_KEY)
