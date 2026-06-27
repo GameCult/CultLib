@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -335,6 +336,114 @@ namespace GameCult.Mesh
         public Task FlushAsync(bool soft = false)
         {
             return _host.FlushAsync(soft);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one distributed record hosted by this node.
+        /// </summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            return CultMesh.Document<TDocument>(Database, key, context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one distributed record hosted by this node.
+        /// </summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            CultRecordKey key,
+            CultMeshVerse verse,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document<TDocument>(key, verse.Context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one distributed record hosted by this node.
+        /// </summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string recordKey,
+            CultMeshVerseContext context,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            return Document<TDocument>(new CultRecordKey(recordKey), context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a typed document handle over one distributed record hosted by this node.
+        /// </summary>
+        public CultMeshDocumentHandle<TDocument> Document<TDocument>(
+            string recordKey,
+            CultMeshVerse verse,
+            string? documentId = null,
+            IEnumerable<CultMeshProjectionSource>? sources = null,
+            CultMeshRouteHint? routeHint = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return Document<TDocument>(recordKey, verse.Context, documentId, sources, routeHint);
+        }
+
+        /// <summary>
+        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
+        /// </summary>
+        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            return Document<TDocument>(key, context).ReactiveAsync(options);
+        }
+
+        /// <summary>
+        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
+        /// </summary>
+        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
+            CultRecordKey key,
+            CultMeshVerse verse,
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return ReactiveDocumentAsync<TDocument>(key, verse.Context, options);
+        }
+
+        /// <summary>
+        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
+        /// </summary>
+        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
+            string recordKey,
+            CultMeshVerseContext context,
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            return ReactiveDocumentAsync<TDocument>(new CultRecordKey(recordKey), context, options);
+        }
+
+        /// <summary>
+        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
+        /// </summary>
+        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
+            string recordKey,
+            CultMeshVerse verse,
+            CultMeshReactiveDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return ReactiveDocumentAsync<TDocument>(recordKey, verse.Context, options);
         }
 
         /// <inheritdoc />
@@ -1457,17 +1566,15 @@ namespace GameCult.Mesh
             return Document<TDocument>(
                 ResolveDocumentId(documentId, key),
                 context,
-                async _ => await ReadRequiredAsync<TDocument>(database, key).ConfigureAwait(false),
-                _ => database.WatchRecord<TDocument>(key)
-                    .Where(change => change.Document != null)
-                    .Select(change => change.Document!),
+                async _ => await ReadDatabaseDocumentRequiredAsync<TDocument>(database, key).ConfigureAwait(false),
+                _ => WatchDatabaseRecordAs<TDocument>(database, key),
                 async value =>
                 {
-                    await database.PutAsync(key, value).ConfigureAwait(false);
+                    await PutDatabaseDocumentAsync(database, key, value, predicted: false).ConfigureAwait(false);
                 },
                 async value =>
                 {
-                    await database.PutPredictedAsync(key, value).ConfigureAwait(false);
+                    await PutDatabaseDocumentAsync(database, key, value, predicted: true).ConfigureAwait(false);
                 },
                 sourceList,
                 route);
@@ -2642,6 +2749,147 @@ namespace GameCult.Mesh
             return document
                    ?? throw new KeyNotFoundException(
                        $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
+        }
+
+        private static async Task<TDocument> ReadDatabaseDocumentRequiredAsync<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key)
+            where TDocument : class
+        {
+            var document = await database.GetAsync<TDocument>(key).ConfigureAwait(false);
+            if (document != null)
+                return document;
+
+            var untyped = database.Cache.Get(key);
+            if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
+                return ConvertUntypedDocument<TDocument>(untyped);
+
+            throw new KeyNotFoundException(
+                $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
+        }
+
+        private static R3.Observable<TDocument> WatchDatabaseRecordAs<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key)
+            where TDocument : class
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            return database.WatchAllChanges()
+                .Where(change => TryConvertDatabaseChange(change, key, descriptor, out TDocument? _))
+                .Select(change =>
+                {
+                    TryConvertDatabaseChange(change, key, descriptor, out TDocument? document);
+                    return document!;
+                });
+        }
+
+        private static bool TryConvertDatabaseChange<TDocument>(
+            object change,
+            CultRecordKey key,
+            CultDocumentDescriptor descriptor,
+            out TDocument? document)
+            where TDocument : class
+        {
+            document = null;
+            if (change == null) return false;
+
+            var changeType = change.GetType();
+            if (changeType.GetProperty("Key")?.GetValue(change) is not CultRecordKey changedKey ||
+                !changedKey.Equals(key))
+            {
+                return false;
+            }
+
+            var current = changeType.GetProperty("Document")?.GetValue(change);
+            if (current == null)
+                return false;
+
+            var schemaId = changeType.GetProperty("SchemaId")?.GetValue(change) as string;
+            if (!IsSameCultDocumentSchema(current.GetType(), descriptor, schemaId))
+                return false;
+
+            document = current as TDocument ?? ConvertUntypedDocument<TDocument>(current);
+            return true;
+        }
+
+        private static bool IsSameCultDocumentSchema<TDocument>(Type documentType)
+            where TDocument : class
+        {
+            return IsSameCultDocumentSchema(
+                documentType,
+                CultDocumentRegistry.Shared.GetRequired<TDocument>());
+        }
+
+        private static bool IsSameCultDocumentSchema(
+            Type documentType,
+            CultDocumentDescriptor descriptor,
+            string? schemaId = null)
+        {
+            if (!string.IsNullOrWhiteSpace(schemaId) &&
+                string.Equals(schemaId, descriptor.SchemaId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            CultDocumentDescriptor storedDescriptor;
+            try
+            {
+                storedDescriptor = CultDocumentRegistry.Shared.GetRequired(documentType);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            return string.Equals(storedDescriptor.SchemaName, descriptor.SchemaName, StringComparison.Ordinal) &&
+                   string.Equals(storedDescriptor.SchemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal);
+        }
+
+        private static TDocument ConvertUntypedDocument<TDocument>(object document)
+            where TDocument : class
+        {
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType());
+            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
+        }
+
+        private static object ConvertUntypedDocument(object document, Type targetType)
+        {
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType());
+            return CultDocumentMessagePackSerialization.DeserializeUntyped(targetType, payload);
+        }
+
+        private static async Task PutDatabaseDocumentAsync<TDocument>(
+            CultNetDatabase database,
+            CultRecordKey key,
+            TDocument value,
+            bool predicted)
+            where TDocument : class
+        {
+            var stored = database.Cache.Get(key);
+            object outgoing = value;
+            var outgoingType = typeof(TDocument);
+            if (stored != null &&
+                !outgoingType.IsInstanceOfType(stored) &&
+                IsSameCultDocumentSchema(stored.GetType(), CultDocumentRegistry.Shared.GetRequired<TDocument>()))
+            {
+                outgoing = ConvertUntypedDocument(value, stored.GetType());
+                outgoingType = stored.GetType();
+            }
+
+            var method = typeof(CultNetDatabase)
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .Where(candidate => candidate.Name == (predicted
+                    ? nameof(CultNetDatabase.PutPredictedAsync)
+                    : nameof(CultNetDatabase.PutAsync)))
+                .Single(candidate =>
+                    candidate.IsGenericMethodDefinition &&
+                    candidate.GetParameters() is { Length: 2 } parameters &&
+                    parameters[0].ParameterType == typeof(CultRecordKey));
+
+            var task = (Task)method
+                .MakeGenericMethod(outgoingType)
+                .Invoke(database, new object[] { key, outgoing })!;
+            await task.ConfigureAwait(false);
         }
     }
 }

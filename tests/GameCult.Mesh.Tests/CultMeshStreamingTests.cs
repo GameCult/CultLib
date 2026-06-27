@@ -1398,6 +1398,73 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task NodeReactiveDocument_OpensSameSchemaAliasWithOneCall()
+    {
+        var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
+        using var temp = new TemporaryDirectory();
+        using var node = await CultMesh.CreateNodeAsync(
+            Path.Combine(temp.Path, "node-reactive-alias.ccmp"),
+            new CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = new CultNetDatabaseOptions
+                {
+                    RuntimeId = "pilot-a",
+                    Shards = new[]
+                    {
+                        new CultNetShardDescriptor(
+                            "pilot-inputs",
+                            "server",
+                            epoch: 1,
+                            isPrimary: false,
+                            schemaIds: new[] { schemaId },
+                            keyPrefix: "input:")
+                    },
+                    ClientAuthorityScopes = new[]
+                    {
+                        new CultNetClientAuthorityScope(
+                            "pilot-a",
+                            schemaIds: new[] { schemaId },
+                            keyPrefix: "input:pilot-a")
+                    }
+                }
+            });
+        var key = new CultRecordKey("input:pilot-a:node-reactive");
+        await node.Cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "node-initial",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+
+        using var pilotReactive = await node.ReactiveDocumentAsync<MeshNoteAliasDocument>(
+            key,
+            CultMesh.Verse("starbridge", "pilot-a"),
+            new CultMeshReactiveDocumentOptions
+            {
+                FlushDelay = TimeSpan.FromMinutes(1)
+            });
+        var commanderHandle = node.Document<MeshNoteDocument>(
+            key.Value,
+            CultMesh.Verse("starbridge", "commander-rts"));
+        var observedByCommander = new List<MeshNoteDocument>();
+        using var commanderSubscription = commanderHandle.Watch(observedByCommander.Add);
+
+        pilotReactive.Update(document =>
+        {
+            document.Text = "node-one-call-prediction";
+            document.Revision = 2;
+        });
+        await pilotReactive.FlushAsync();
+
+        await WaitForAsync(() => observedByCommander.Any(document => document.Text == "node-one-call-prediction"));
+        pilotReactive.Document.DocumentId.Should().Be(key.Value);
+        pilotReactive.Document.Context.RuntimeId.Should().Be("pilot-a");
+        node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("node-one-call-prediction");
+        (await commanderHandle.AsSchemaAlias<MeshNoteAliasDocument>().LatestAsync()).Revision.Should().Be(2);
+    }
+
+    [Test]
     public async Task ReactiveDocument_SyncedSnapshotEndpointCapturesCanonicalCorrectionAcrossRuntimeBoundary()
     {
         var sourceCache = new CultCache();
