@@ -27,6 +27,8 @@ from .node import (
     CultMeshNode,
     CultMeshNodeOptions,
     CultMeshPublicationDocumentBinding,
+    CultMeshReactiveDocument,
+    CultMeshReactiveDocumentOptions,
     create_node,
 )
 from .server import CultMeshLocalServer
@@ -297,6 +299,15 @@ class CultMesh:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+
+    @staticmethod
+    def reactive_document(
+        node: CultMeshNode,
+        document: DocumentDefinition[Any],
+        key: str,
+        options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> CultMeshReactiveDocument:
+        return node.reactive_document(document, key, options)
 
     @staticmethod
     def publication_source_from_peer_snapshot(

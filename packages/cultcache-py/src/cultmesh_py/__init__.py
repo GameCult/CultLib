@@ -17,6 +17,9 @@ from .node import (
     CultMeshNode,
     CultMeshNodeOptions,
     CultMeshPublicationDocumentBinding,
+    CultMeshReactiveDocument,
+    CultMeshReactiveDocumentOptions,
+    CultMeshReactiveDocumentReconciliation,
     create_node,
 )
 from .server import CultMeshLocalServer
@@ -67,6 +70,9 @@ __all__ = [
     "CultMeshDocumentPublicationSource",
     "CultMesh",
     "CultMeshPublicationDocumentBinding",
+    "CultMeshReactiveDocument",
+    "CultMeshReactiveDocumentOptions",
+    "CultMeshReactiveDocumentReconciliation",
     "CultMeshGameSession",
     "CultMeshGameSessionOptions",
     "CultMeshLocalServer",

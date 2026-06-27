@@ -119,6 +119,7 @@ from cultmesh_py import (
     CultMeshDatabaseChange,
     CultMeshGameSessionOptions,
     CultMeshNodeOptions,
+    CultMeshReactiveDocumentOptions,
     CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshSimulationFact,
@@ -2446,6 +2447,101 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(delete["schemaId"], "mesh.alias_note.v1")
         self.assertIsNone(node.get(alias, "note:alias"))
         self.assertEqual(node.get_all(alias), [])
+
+    def test_cultmesh_reactive_document_coalesces_direct_alias_member_writes(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+            revision: int
+
+        @dataclass
+        class UiNote:
+            body: str
+            revision: int
+
+        document = define_database_entry_type(
+            "mesh.reactive_alias_note",
+            [("body", 0), ("revision", 1)],
+            cls=CanonicalNote,
+            schema_id="mesh.reactive_alias_note.v1",
+            schema_name="mesh.reactive_alias_note",
+            schema_version="mesh.reactive_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.reactive_alias_note.ui",
+            [("body", 0), ("revision", 1)],
+            cls=UiNote,
+            schema_id="mesh.reactive_alias_note.v1",
+            schema_name="mesh.reactive_alias_note",
+            schema_version="mesh.reactive_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-reactive")
+        node.register_document(document)
+        node.put(document, "note:reactive", CanonicalNote("initial", 1))
+        seen: list[CultMeshDatabaseChange] = []
+        node.database.watch_record(alias, "note:reactive", seen.append)
+
+        reactive = node.reactive_document(
+            alias,
+            "note:reactive",
+            CultMeshReactiveDocumentOptions(flush_delay_seconds=0.02),
+        )
+        try:
+            self.assertIsInstance(reactive.current, UiNote)
+            reactive.current.body = "first-local-edit"
+            reactive.current.body = "second-local-edit"
+            reactive.current.revision = 2
+
+            self._wait_until(lambda: node.get_required(alias, "note:reactive").body == "second-local-edit")
+
+            self.assertFalse(reactive.is_dirty)
+            self.assertEqual(node.get_required(document, "note:reactive").revision, 2)
+            self.assertEqual(seen[-1].value.body, "second-local-edit")
+        finally:
+            reactive.dispose()
+
+    def test_cultmesh_reactive_document_tracks_canonical_reconciliation_delta(self) -> None:
+        @dataclass
+        class Note:
+            body: str
+            revision: int
+
+        document = define_database_entry_type(
+            "mesh.reactive_reconcile_note",
+            [("body", 0), ("revision", 1)],
+            cls=Note,
+            schema_id="mesh.reactive_reconcile_note.v1",
+            schema_name="mesh.reactive_reconcile_note",
+            schema_version="mesh.reactive_reconcile_note.v1",
+        )
+        node = create_node(runtime_id="python-reactive-reconcile")
+        node.register_document(document)
+        node.put(document, "note:reconcile", Note("initial", 1))
+
+        reactive = CultMesh.reactive_document(
+            node,
+            document,
+            "note:reconcile",
+            CultMeshReactiveDocumentOptions(flush_delay_seconds=60),
+        )
+        try:
+            reactive.update(lambda note: setattr(note, "body", "local-prediction"))
+            reactive.current.revision = 2
+
+            node.put(document, "note:reconcile", Note("authoritative", 7))
+
+            self.assertEqual(reactive.current.body, "local-prediction")
+            self.assertIsNotNone(reactive.reconciliation)
+            self.assertEqual(reactive.reconciliation.canonical.body, "authoritative")
+            self.assertEqual(reactive.reconciliation.predicted.body, "local-prediction")
+            self.assertEqual(reactive.reconciliation.delta["body"], "local-prediction")
+            self.assertEqual(reactive.reconciliation.delta["revision"], -5)
+
+            reactive.flush()
+            self.assertEqual(node.get_required(document, "note:reconcile").body, "local-prediction")
+            self.assertIsNone(reactive.reconciliation)
+        finally:
+            reactive.dispose()
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(

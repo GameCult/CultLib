@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +70,22 @@ class CultMeshPublicationDocumentBinding:
     document: DocumentDefinition[Any]
     key: str
     source: CultMeshDocumentPublicationSource | None = None
+
+
+@dataclass(frozen=True)
+class CultMeshReactiveDocumentReconciliation:
+    canonical: Any
+    predicted: Any
+    delta: dict[str, Any]
+    version: int
+    received_at: datetime
+
+
+@dataclass(frozen=True)
+class CultMeshReactiveDocumentOptions:
+    flush_delay_seconds: float = 0.016
+    detect_local_changes: bool = True
+    replace_dirty_current_on_canonical_snapshot: bool = False
 
 
 @dataclass
@@ -230,6 +247,14 @@ class CultMeshNode:
             shard_id=shard_id,
             shard_epoch=shard_epoch,
         )
+
+    def reactive_document(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> "CultMeshReactiveDocument":
+        return self.database.reactive_document(document, key, options)
 
     def sync_document_from_publication(
         self,
@@ -718,6 +743,18 @@ class CultMeshDatabase:
             shard_epoch=shard_epoch,
         )
         return self.get_required(requested, key)
+
+    def reactive_document(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+        options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> "CultMeshReactiveDocument":
+        if not key:
+            raise ValueError("key must be non-empty")
+        if not any(self._documents_alias(document, registered) for registered in self.documents):
+            self.register_document(document)
+        return CultMeshReactiveDocument(self, document, key, options)
 
     def sync_document_from_publication(
         self,
@@ -1215,6 +1252,230 @@ def _document_matches_schema_id(document: DocumentDefinition[Any], schema_id: st
     if schema_id in entry.compatible_schema_ids:
         return True
     return _infer_schema_name(schema_id) == entry.schema_name
+
+
+class CultMeshReactiveDocument:
+    def __init__(
+        self,
+        database: CultMeshDatabase,
+        document: DocumentDefinition[Any],
+        key: str,
+        options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> None:
+        self._database = database
+        self._document = document
+        self._key = key
+        self._options = options or CultMeshReactiveDocumentOptions()
+        self._lock = threading.RLock()
+        self._disposed = False
+        self._dirty = False
+        self._flushing = False
+        self._flush_queued = False
+        self._flush_timer: threading.Timer | None = None
+        self._detect_timer: threading.Timer | None = None
+        self._reconciliation_version = 0
+        self.reconciliation: CultMeshReactiveDocumentReconciliation | None = None
+        self.current = self._clone(self._database.get_required(document, key))
+        self._last_clean_payload = self._serialize(self.current)
+        self._unsubscribe = self._database.watch_record(document, key, self._apply_canonical_change)
+        if self._options.detect_local_changes:
+            self._schedule_detection()
+
+    @property
+    def document(self) -> DocumentDefinition[Any]:
+        return self._document
+
+    @property
+    def key(self) -> str:
+        return self._key
+
+    @property
+    def is_dirty(self) -> bool:
+        with self._lock:
+            return self._dirty
+
+    def update(self, callback: Callable[[Any], None]) -> Any:
+        with self._lock:
+            self._raise_if_disposed()
+            callback(self.current)
+            self._dirty = True
+            self._schedule_flush_locked()
+            return self.current
+
+    def set_current(self, value: Any) -> Any:
+        with self._lock:
+            self._raise_if_disposed()
+            self.current = self._clone(value)
+            self._dirty = True
+            self._schedule_flush_locked()
+            return self.current
+
+    def mark_dirty(self) -> None:
+        with self._lock:
+            self._raise_if_disposed()
+            self._dirty = True
+            self._schedule_flush_locked()
+
+    def refresh(self) -> Any:
+        with self._lock:
+            self._raise_if_disposed()
+            self.current = self._clone(self._database.get_required(self._document, self._key))
+            self._last_clean_payload = self._serialize(self.current)
+            self._dirty = False
+            self.reconciliation = None
+            return self.current
+
+    def flush(self) -> None:
+        with self._lock:
+            self._raise_if_disposed()
+            if not self._dirty:
+                self._detect_local_changes_locked()
+            if not self._dirty:
+                return
+            if self._flushing:
+                self._flush_queued = True
+                return
+            if self._flush_timer is not None:
+                self._flush_timer.cancel()
+                self._flush_timer = None
+            self._flushing = True
+            self._dirty = False
+            predicted = self._clone(self.current)
+            self._last_clean_payload = self._serialize(predicted)
+
+        try:
+            self._database.put(self._document, self._key, predicted)
+        finally:
+            should_flush_again = False
+            with self._lock:
+                self._flushing = False
+                self._detect_local_changes_locked()
+                should_flush_again = self._flush_queued or self._dirty
+                self._flush_queued = False
+            if should_flush_again:
+                self.flush()
+
+    def clear_reconciliation(self) -> None:
+        with self._lock:
+            self._raise_if_disposed()
+            self.reconciliation = None
+
+    def dispose(self) -> None:
+        with self._lock:
+            if self._disposed:
+                return
+            self._disposed = True
+            if self._flush_timer is not None:
+                self._flush_timer.cancel()
+            if self._detect_timer is not None:
+                self._detect_timer.cancel()
+        self._unsubscribe()
+
+    def __enter__(self) -> "CultMeshReactiveDocument":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.dispose()
+
+    def _apply_canonical_change(self, change: CultMeshDatabaseChange) -> None:
+        if change.value is None:
+            return
+        with self._lock:
+            if self._disposed:
+                return
+            canonical = self._clone(change.value)
+            if self._dirty or self._flushing:
+                predicted = self._clone(self.current)
+                delta = self._create_delta(predicted, canonical)
+                if delta:
+                    self._reconciliation_version += 1
+                    self.reconciliation = CultMeshReactiveDocumentReconciliation(
+                        canonical=canonical,
+                        predicted=predicted,
+                        delta=delta,
+                        version=self._reconciliation_version,
+                        received_at=datetime.now(UTC),
+                    )
+                else:
+                    self.reconciliation = None
+                if not self._options.replace_dirty_current_on_canonical_snapshot:
+                    return
+            self.current = canonical
+            self._last_clean_payload = self._serialize(self.current)
+            self.reconciliation = None
+
+    def _schedule_detection(self) -> None:
+        delay = max(self._options.flush_delay_seconds, 0.001)
+        timer = threading.Timer(delay, self._detect_timer_elapsed)
+        timer.daemon = True
+        self._detect_timer = timer
+        timer.start()
+
+    def _detect_timer_elapsed(self) -> None:
+        with self._lock:
+            if self._disposed:
+                return
+            if not self._dirty and not self._flushing:
+                self._detect_local_changes_locked()
+                if self._dirty:
+                    self._schedule_flush_locked()
+            if not self._disposed and self._options.detect_local_changes:
+                self._schedule_detection()
+
+    def _detect_local_changes_locked(self) -> None:
+        if self._serialize(self.current) != self._last_clean_payload:
+            self._dirty = True
+
+    def _schedule_flush_locked(self) -> None:
+        if self._options.flush_delay_seconds <= 0:
+            threading.Thread(target=self.flush, daemon=True).start()
+            return
+        if self._flush_timer is not None:
+            self._flush_timer.cancel()
+        timer = threading.Timer(self._options.flush_delay_seconds, self.flush)
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
+    def _serialize(self, value: Any) -> bytes:
+        return self._document.encode_payload(value)
+
+    def _clone(self, value: Any) -> Any:
+        return self._document.decode_payload(self._document.encode_payload(value))
+
+    @staticmethod
+    def _create_delta(predicted: Any, canonical: Any) -> dict[str, Any]:
+        delta: dict[str, Any] = {}
+        canonical_members = _public_document_members(canonical)
+        for name, predicted_value in _public_document_members(predicted).items():
+            canonical_value = canonical_members.get(name)
+            if predicted_value == canonical_value:
+                continue
+            if isinstance(predicted_value, (int, float)) and isinstance(canonical_value, (int, float)):
+                delta[name] = predicted_value - canonical_value
+            else:
+                delta[name] = predicted_value
+        return delta
+
+    def _raise_if_disposed(self) -> None:
+        if self._disposed:
+            raise RuntimeError("CultMeshReactiveDocument has been disposed")
+
+
+def _public_document_members(value: Any) -> dict[str, Any]:
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            name: getattr(value, name)
+            for name in value.__dataclass_fields__  # type: ignore[attr-defined]
+            if not name.startswith("_")
+        }
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    return {
+        name: item
+        for name, item in vars(value).items()
+        if not name.startswith("_")
+    }
 
 
 def create_node(
