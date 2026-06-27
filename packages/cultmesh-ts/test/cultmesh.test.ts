@@ -679,6 +679,34 @@ test("CultMesh TS binds publication document catalogs from source resolvers", as
   assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
 });
 
+test("CultMesh TS document catalogs resolve semantic schema versions passed as schema ids", async () => {
+  const current = {
+    noteId: "note:semantic",
+    body: "semantic alias",
+  };
+  const document = CultMesh.document(
+    "daemon:semantic-note",
+    {
+      schemaId: "sha256:runtime-generated-note",
+      schemaName: "cultmesh.note",
+      schemaVersion: "cultmesh.note.v1",
+    },
+    async () => current,
+    {
+      routeHint: CultMesh.routeHint("shared-memory", "semantic alias catalog"),
+    },
+  );
+  const catalog = CultMesh.documents(document);
+
+  const alias = catalog.document({
+    schemaId: "cultmesh.note.v1",
+  });
+
+  assert.equal(alias.documentId, "daemon:semantic-note");
+  assert.equal(alias.routeHint.description, "semantic alias catalog");
+  assert.deepEqual(await alias.latest(), current);
+});
+
 test("CultMesh TS collection handles expose typed snapshots and reset watches", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-coll-")), "node.ccmp");
   const node = await CultMesh.startNode(filePath, {

@@ -5640,11 +5640,13 @@ function cultMeshSchemaFromDefinition(
 function normalizeCultMeshDocumentSchema(
   schema: CultMeshDocumentSchemaDescriptor,
 ): CultMeshDocumentSchemaDescriptor {
+  const schemaId = schema.schemaId?.trim() || undefined;
+  const inferredSchemaName = schema.schemaName?.trim() || inferCultMeshSchemaName(schemaId);
   const normalized = {
     type: schema.type?.trim() || undefined,
-    schemaId: schema.schemaId?.trim() || undefined,
-    schemaName: schema.schemaName?.trim() || undefined,
-    schemaVersion: schema.schemaVersion?.trim() || undefined,
+    schemaId,
+    schemaName: inferredSchemaName,
+    schemaVersion: schema.schemaVersion?.trim() || (inferredSchemaName ? schemaId : undefined),
   };
 
   if (!normalized.type && !normalized.schemaId && !normalized.schemaName) {
@@ -5680,6 +5682,18 @@ function cultMeshSchemasAreCompatible(
   }
 
   return Boolean(left.type && right.type && left.type === right.type);
+}
+
+function inferCultMeshSchemaName(schemaId: string | undefined): string | undefined {
+  if (!schemaId) {
+    return undefined;
+  }
+  const marker = schemaId.lastIndexOf(".v");
+  if (marker <= 0 || marker + 2 >= schemaId.length) {
+    return undefined;
+  }
+  const version = schemaId.slice(marker + 2);
+  return /^\d+$/.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
 function resolveCultMeshStoreDocumentRecord(
