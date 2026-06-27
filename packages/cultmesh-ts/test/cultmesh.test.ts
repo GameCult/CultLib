@@ -240,6 +240,68 @@ test("CultMesh TS reactive documents submit predictions from member writes", asy
   assert.deepEqual(predictions, ["member-write-prediction-final"]);
 });
 
+test("CultMesh TS reactive documents store reconciliation deltas after misprediction", async () => {
+  let current = {
+    noteId: "note:reconcile",
+    body: "initial",
+    revision: 1,
+  };
+  let watcher: ((value: typeof current) => void) | undefined;
+  const predictions: typeof current[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:reconcile",
+    { schemaId: "cultmesh.note.reconcile.v0" },
+    async () => current,
+    {
+      routeHint: CultMesh.routeHint("network", "CultNet prediction"),
+      submitPrediction: async (_context, value) => {
+        predictions.push(value);
+        current = value;
+      },
+      watchDocument: (_context, callback) => {
+        watcher = callback;
+        return () => {
+          watcher = undefined;
+        };
+      },
+    },
+  );
+
+  const reactive = document.reactive<typeof current>();
+  await reactive.ready;
+  reactive.current.body = "predicted";
+  reactive.current.revision = 7;
+  await waitFor(() => predictions.length === 1, "reactive reconciliation prediction");
+
+  watcher?.({
+    noteId: "note:reconcile",
+    body: "authoritative",
+    revision: 5,
+  });
+
+  assert.equal(reactive.current.body, "authoritative");
+  assert.equal(reactive.current.revision, 5);
+  assert.equal(reactive.reconciliation?.version, 1);
+  assert.deepEqual(reactive.reconciliation?.canonical, {
+    noteId: "note:reconcile",
+    body: "authoritative",
+    revision: 5,
+  });
+  assert.deepEqual(reactive.reconciliation?.predicted, {
+    noteId: "note:reconcile",
+    body: "predicted",
+    revision: 7,
+  });
+  assert.deepEqual(reactive.reconciliation?.delta, {
+    body: "predicted",
+    revision: 2,
+  });
+
+  reactive.clearReconciliation();
+  assert.equal(reactive.reconciliation, undefined);
+  reactive.dispose();
+});
+
 test("CultMesh TS document handles read schema publications from single-file stores", async () => {
   const filePath = join(await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-")), "publication.ccmp");
   const node = await CultMesh.startNode(filePath, {

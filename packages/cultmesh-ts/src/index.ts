@@ -208,10 +208,24 @@ export interface CultMeshReactiveDocumentOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+export type CultMeshReactiveDocumentDelta<TDocument extends object> = Partial<{
+  readonly [K in keyof TDocument]: TDocument[K] extends number ? number : TDocument[K];
+}>;
+
+export interface CultMeshReactiveDocumentReconciliation<TDocument extends object> {
+  readonly version: number;
+  readonly canonical: TDocument;
+  readonly predicted: TDocument;
+  readonly delta: CultMeshReactiveDocumentDelta<TDocument>;
+  readonly receivedAtMs: number;
+}
+
 export interface CultMeshReactiveDocument<TDocument extends object> {
   readonly current: TDocument;
+  readonly reconciliation: CultMeshReactiveDocumentReconciliation<TDocument> | undefined;
   readonly ready: Promise<TDocument>;
   readonly disposed: boolean;
+  clearReconciliation(): void;
   refresh(): Promise<TDocument>;
   dispose(): void;
 }
@@ -1013,6 +1027,9 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   #flushScheduled = false;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
   #unsubscribe: CultMeshUnsubscribe | undefined;
+  #lastPredicted: TDocument | undefined;
+  #reconciliation: CultMeshReactiveDocumentReconciliation<TDocument> | undefined;
+  #reconciliationVersion = 0;
 
   public readonly ready: Promise<TDocument>;
 
@@ -1046,6 +1063,10 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
     return this.#current;
   }
 
+  public get reconciliation(): CultMeshReactiveDocumentReconciliation<TDocument> | undefined {
+    return this.#reconciliation;
+  }
+
   public get disposed(): boolean {
     return this.#disposed;
   }
@@ -1054,6 +1075,10 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
     const latest = await this.#document.latest(this.#context);
     this.applySnapshot(latest);
     return this.#current;
+  }
+
+  public clearReconciliation(): void {
+    this.#reconciliation = undefined;
   }
 
   public dispose(): void {
@@ -1068,17 +1093,42 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   }
 
   private applySnapshot(value: TDocument): void {
+    const canonical = cloneCultMeshDocument(value);
+    this.captureReconciliation(canonical);
     this.#applyingRemote = true;
     try {
       for (const key of Reflect.ownKeys(this.#current)) {
-        if (!Reflect.has(value, key)) {
+        if (!Reflect.has(canonical, key)) {
           Reflect.deleteProperty(this.#current, key);
         }
       }
-      Object.assign(this.#current, cloneCultMeshDocument(value));
+      Object.assign(this.#current, canonical);
     } finally {
       this.#applyingRemote = false;
     }
+  }
+
+  private captureReconciliation(canonical: TDocument): void {
+    if (!this.#lastPredicted) {
+      return;
+    }
+
+    const predicted = this.#lastPredicted;
+    const delta = createCultMeshReconciliationDelta(predicted, canonical) as
+      CultMeshReactiveDocumentDelta<TDocument>;
+    if (Reflect.ownKeys(delta).length === 0) {
+      this.#lastPredicted = undefined;
+      return;
+    }
+
+    this.#reconciliation = {
+      version: ++this.#reconciliationVersion,
+      canonical: cloneCultMeshDocument(canonical),
+      predicted: cloneCultMeshDocument(predicted),
+      delta,
+      receivedAtMs: Date.now(),
+    };
+    this.#lastPredicted = undefined;
   }
 
   private createProxy(seed: TDocument): TDocument {
@@ -1119,6 +1169,7 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
       }
 
       const snapshot = cloneCultMeshDocument(this.#current);
+      this.#lastPredicted = snapshot;
       this.#pendingSet = this.#pendingSet
         .catch(() => undefined)
         .then(() => this.#document.set(this.#context, snapshot))
@@ -1154,6 +1205,45 @@ function cloneCultMeshDocument<TDocument>(value: TDocument): TDocument {
     }
   }
   return JSON.parse(JSON.stringify(value)) as TDocument;
+}
+
+function createCultMeshReconciliationDelta<TDocument extends object>(
+  predicted: TDocument,
+  canonical: TDocument,
+): Partial<Record<keyof TDocument, unknown>> {
+  const delta: Partial<Record<keyof TDocument, unknown>> = {};
+  const keys = new Set([
+    ...Reflect.ownKeys(predicted),
+    ...Reflect.ownKeys(canonical),
+  ]);
+
+  for (const key of keys) {
+    const predictedValue = Reflect.get(predicted, key);
+    const canonicalValue = Reflect.get(canonical, key);
+    if (cultMeshValuesEqual(predictedValue, canonicalValue)) {
+      continue;
+    }
+
+    const deltaKey = key as keyof TDocument;
+    delta[deltaKey] =
+      typeof predictedValue === "number" && typeof canonicalValue === "number"
+        ? predictedValue - canonicalValue
+        : predictedValue;
+  }
+
+  return delta;
+}
+
+function cultMeshValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (typeof left !== "object" || left === null ||
+      typeof right !== "object" || right === null) {
+    return false;
+  }
+
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export class CultMeshBoundDocumentHandle<TDocument> {
