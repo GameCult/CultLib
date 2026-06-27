@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -907,6 +908,63 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SingleFileDocumentHelpers_RoundTripTypedDocuments()
+    {
+        using var directory = new TemporaryDirectory();
+        var filePath = Path.Combine(directory.Path, "single-document.ccmp");
+        var key = new CultRecordKey("mesh-note:single-document");
+
+        CultMesh.WriteSingleFileDocument(
+            filePath,
+            key,
+            new MeshPublicationNoteDocument
+            {
+                Schema = "tests.mesh_publication_note.v1",
+                Text = "published-directly",
+                Revision = 3
+            },
+            storedAt: "2026-06-27T12:00:00.0000000Z");
+
+        var document = CultMesh.ReadSingleFileDocument<MeshPublicationNoteDocument>(filePath, key);
+
+        document.Text.Should().Be("published-directly");
+        document.Revision.Should().Be(3);
+
+        var cache = new CultCache();
+        cache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+        await cache.PullAllBackingStoresAsync();
+        cache.Get<MeshPublicationNoteDocument>(key)!.Text.Should().Be("published-directly");
+    }
+
+    [Test]
+    public void SingleFileDocumentHelpers_ReadLegacySingleDocumentSnapshots()
+    {
+        using var directory = new TemporaryDirectory();
+        var filePath = Path.Combine(directory.Path, "legacy-single-document.ccmp");
+        var key = new CultRecordKey("mesh-note:legacy-single-document");
+        var descriptor = CultDocumentRegistry.Shared.GetRequired<MeshPublicationNoteDocument>();
+        var payload = CultDocumentMessagePackSerialization.Serialize(new MeshPublicationNoteDocument
+        {
+            Schema = "tests.mesh_publication_note.v1",
+            Text = "legacy-published",
+            Revision = 4
+        });
+
+        File.WriteAllBytes(filePath, WriteLegacySingleDocumentSnapshot(
+            key.Value,
+            descriptor.SchemaId,
+            descriptor.SchemaName,
+            descriptor.SchemaVersion,
+            "2026-06-27T12:00:00.0000000Z",
+            payload));
+
+        var document = CultMesh.ReadSingleFileDocument<MeshPublicationNoteDocument>(filePath, key);
+
+        document.Text.Should().Be("legacy-published");
+        document.Revision.Should().Be(4);
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments()
     {
         var cache = new CultCache();
@@ -1436,6 +1494,39 @@ public sealed class CultMeshStreamingTests
 
         handle.UnavoidableCopyCount.Should().Be(1);
         ring.Stats().UnavoidableCopyCount.Should().Be(1);
+    }
+
+    private static byte[] WriteLegacySingleDocumentSnapshot(
+        string key,
+        string schemaId,
+        string schemaName,
+        string schemaVersion,
+        string storedAt,
+        byte[] payload)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+
+        writer.WriteArrayHeader(3);
+        writer.Write("cultcache.store.v1");
+        writer.WriteArrayHeader(1);
+        writer.WriteArrayHeader(7);
+        writer.Write(schemaId);
+        writer.Write(schemaName);
+        writer.Write(schemaVersion);
+        writer.Write("Legacy Aetheria single document");
+        writer.Write(storedAt);
+        writer.Write("legacy-hash");
+        writer.WriteArrayHeader(0);
+        writer.WriteArrayHeader(1);
+        writer.WriteArrayHeader(4);
+        writer.Write(key);
+        writer.Write(schemaId);
+        writer.Write(storedAt);
+        writer.Write(payload);
+        writer.Flush();
+
+        return buffer.WrittenSpan.ToArray();
     }
 
     private static CultMeshStreamCatalog CatalogWithByteStream()

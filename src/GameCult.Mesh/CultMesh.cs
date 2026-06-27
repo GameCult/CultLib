@@ -397,7 +397,7 @@ namespace GameCult.Mesh
     /// <summary>
     /// Public CultMesh entrypoints.
     /// </summary>
-    public static class CultMesh
+    public static partial class CultMesh
     {
         /// <summary>
         /// Creates a local CultMesh node with a durable CultCache and the canonical MessagePack backing store.
