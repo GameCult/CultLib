@@ -316,6 +316,18 @@ const health = CultMesh.documentFromPeerSnapshot(
 );
 
 const latestHealth = await health.latest();
+
+const syncedHealth = await station.syncDocumentFromPeerSnapshot(
+  () => client,
+  daemonHealthUiDocument,
+  "daemon:aetheria.health.v1",
+  {
+    timeoutMs: 5_000,
+  },
+);
+const localHealth = await station
+  .document(daemonHealthUiDocument, "daemon:aetheria.health.v1")
+  .latest();
 ```
 
 `CultMesh.createRudpPeerForPeer(...)` remains available for already trusted
@@ -335,6 +347,14 @@ alias the same logical document through different generated schema names can
 still read the publication with one CultMesh call. Pass a CultCache document
 definition instead of a raw schema id when you want a typed handle whose
 `latest()` result is parsed through that definition.
+
+Use `node.syncDocumentFromPeerSnapshot(...)` or
+`CultMesh.syncDocumentFromPeerSnapshot(...)` when a runtime should hydrate its
+local node from the remote snapshot. The helper requests the raw snapshot,
+applies it through the node's document registry, and returns the requested
+typed definition. Same-schema aliases stay local after the call: the caller can
+keep using `node.document(aliasDefinition, key)` or `node.reactiveDocument(...)`
+without re-threading the RUDP peer.
 
 The same typed-definition overload is available for
 `CultMesh.documentFromStore(...)` and `CultMesh.documentFromSingleFile(...)`, so

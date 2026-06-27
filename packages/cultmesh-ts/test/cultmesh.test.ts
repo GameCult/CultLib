@@ -2530,6 +2530,90 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
   }
 });
 
+test("CultMesh TS syncs remote RUDP snapshots into a local node with same-schema aliases", async () => {
+  const connectionId = 0x1020304a;
+  const source = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-sync-source-")), "node.ccmp"),
+    {
+      documents: [noteDocument],
+    },
+  );
+  await source.put(noteDocument, "note:sync-remote", {
+    noteId: "note:sync-remote",
+    body: "synced once, read as local",
+  });
+  const target = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-sync-target-")), "node.ccmp"),
+    {
+      documents: [noteDocument],
+    },
+  );
+
+  const server = CultMesh.createRudpDocumentServer(
+    "cultmesh-ts-rudp-sync-server",
+    connectionId,
+    {
+      documents: new CultNetDocumentRegistry([
+        defineCultNetDocumentBinding({ definition: noteDocument }),
+      ]),
+      getCache: () => source.cache,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      resendDelayMs: 25,
+      resendPollMs: 5,
+      maxFragmentBytes: 1024,
+      maxPendingReliablePackets: 16,
+    },
+  );
+
+  let peer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    peer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-rudp-sync-client",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      {
+        resendDelayMs: 25,
+        resendPollMs: 5,
+        maxFragmentBytes: 1024,
+        maxPendingReliablePackets: 16,
+        connectTimeoutMs: 1_000,
+      },
+    );
+
+    const synced = await target.syncDocumentFromPeerSnapshot(
+      peer,
+      noteAliasDocument,
+      "note:sync-remote",
+      {
+        timeoutMs: 1_000,
+      },
+    );
+    const facadeSynced = await CultMesh.syncDocumentFromPeerSnapshot(
+      target,
+      peer,
+      noteAliasDocument,
+      "note:sync-remote",
+      {
+        timeoutMs: 1_000,
+      },
+    );
+
+    assert.deepEqual(synced, {
+      noteId: "note:sync-remote",
+      body: "synced once, read as local",
+    });
+    assert.deepEqual(facadeSynced, synced);
+    assert.equal(target.getRequired(noteDocument, "note:sync-remote").body, "synced once, read as local");
+    assert.equal(target.getRequired(noteAliasDocument, "note:sync-remote").body, "synced once, read as local");
+    assert.equal((await target.document(noteAliasDocument, "note:sync-remote").latest()).body, "synced once, read as local");
+  } finally {
+    peer?.close();
+    server.close();
+  }
+});
+
 test("CultMesh TS peer snapshot handles choose compatible foreign schema payloads", async () => {
   const connectionId = 0x10203049;
   const node = await CultMesh.startNode(

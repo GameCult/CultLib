@@ -3815,6 +3815,46 @@ export class CultMeshNode {
       .reactive<CultCacheDocumentValue<TDefinition> & object>(reactiveOptions);
   }
 
+  public async syncDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
+    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+    definition: TDefinition,
+    key: string,
+    options: {
+      timeoutMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    const registered = this.resolveCacheDefinition(definition);
+    const schema = cultMeshSchemaFromDefinition(definition);
+    const schemaId = schema.schemaId ?? schema.type;
+    if (!schemaId) {
+      throw new Error("CultMesh synced document requires a schema id or document type.");
+    }
+    const document = await requestCultNetRawSnapshotDocument(
+      peer,
+      schemaId,
+      key,
+      {
+        timeoutMs: options.timeoutMs,
+        messageIdPrefix: options.messageIdPrefix ?? key,
+        accepts: record => {
+          try {
+            definition.schema.parse(decodeCultNetRawDocumentPayload(record));
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      },
+    );
+    await this.documents.applyRawDocumentPutMessage(this.cache, {
+      schemaVersion: "cultnet.document_put_raw.v0",
+      messageId: options.messageIdPrefix ?? `sync:${key}`,
+      document,
+    });
+    return this.parseDocumentValue(definition, this.cache.getRequired(registered, key));
+  }
+
   public globalDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     options: {
@@ -4790,6 +4830,19 @@ export class CultMesh {
     } = {},
   ): CultMeshReactiveDocument<CultCacheDocumentValue<TDefinition> & object> {
     return node.reactiveDocument(definition, key, options);
+  }
+
+  public static syncDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
+    node: CultMeshNode,
+    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
+    definition: TDefinition,
+    key: string,
+    options: {
+      timeoutMs?: number;
+      messageIdPrefix?: string;
+    } = {},
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return node.syncDocumentFromPeerSnapshot(peer, definition, key, options);
   }
 
   public static documents(
