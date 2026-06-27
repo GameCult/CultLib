@@ -24,6 +24,7 @@ def schema_document_map(documents: Iterable[DocumentDefinition[Any]]) -> dict[st
         catalog_entry = document.catalog_entry()
         mapped[catalog_entry.schema_id] = document
         mapped[catalog_entry.schema_name] = document
+        mapped[catalog_entry.schema_version] = document
         for compatible_schema_id in catalog_entry.compatible_schema_ids:
             mapped[compatible_schema_id] = document
     return mapped
@@ -140,8 +141,9 @@ def apply_shard_log_response(
             if schema_id not in documents_by_schema_id:
                 continue
             document = documents_by_schema_id[schema_id]
+            resolved_schema_id = document.catalog_entry().schema_id
             cache.delete(document, record_key)
-            applied.append(CultNetAppliedRecord(schema_id, record_key, "removed", None))
+            applied.append(CultNetAppliedRecord(resolved_schema_id, record_key, "removed", None))
     return applied
 
 

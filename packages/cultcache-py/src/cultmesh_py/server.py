@@ -382,7 +382,7 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="unregistered_document_delete",
             )]
-        return self._database_delete_notifications(message, subscriptions)
+        return self._database_delete_notifications(message, subscriptions, resolved_schema_id=change.schema_id)
 
     def _database_change_notifications(
         self,
@@ -415,13 +415,19 @@ class CultMeshLocalServer:
         self,
         message: dict[str, Any],
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        resolved_schema_id: str | None = None,
     ) -> list[dict[str, Any]]:
         schema_id = str(message.get("schemaId") or "")
         record_key = str(message.get("recordKey") or "")
         notifications = []
         document = {"schemaId": schema_id, "recordKey": record_key}
         for subscription in subscriptions.values():
-            if not self._subscription_matches_document(subscription, document):
+            if not self._subscription_matches_document(
+                subscription,
+                document,
+                resolved_schema_id=resolved_schema_id,
+            ):
                 continue
             message_id = message.get("messageId") or record_key or "change"
             notifications.append({
@@ -678,6 +684,7 @@ def _schema_document_map(documents: list[Any]) -> dict[str, Any]:
         entry = document.catalog_entry()
         mapped[entry.schema_id] = document
         mapped[entry.schema_name] = document
+        mapped[entry.schema_version] = document
         for compatible_schema_id in entry.compatible_schema_ids:
             mapped[compatible_schema_id] = document
     return mapped

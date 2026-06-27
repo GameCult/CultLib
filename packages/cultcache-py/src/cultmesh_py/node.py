@@ -848,8 +848,7 @@ class CultMeshDatabase:
 
     def _document_for_schema(self, schema_id: str) -> DocumentDefinition[Any] | None:
         for document in self.documents:
-            entry = document.catalog_entry()
-            if schema_id == entry.schema_id or schema_id in entry.compatible_schema_ids:
+            if _document_matches_schema_id(document, schema_id):
                 return document
         return None
 
@@ -931,7 +930,8 @@ class CultMeshDatabase:
             if document is None:
                 continue
             record_key = str(delete.get("recordKey"))
-            previous[(schema_id, record_key)] = self.cache.get(document, record_key)
+            resolved_schema_id = document.catalog_entry().schema_id
+            previous[(resolved_schema_id, record_key)] = self.cache.get(document, record_key)
         return previous
 
     def _previous_values_for_raw_records(self, records: Any) -> dict[tuple[str, str], Any]:
@@ -977,6 +977,15 @@ def _infer_schema_name(schema_id: str) -> str | None:
         return None
     version = schema_id[marker + 2:]
     return schema_id[:marker] if version.isdigit() else None
+
+
+def _document_matches_schema_id(document: DocumentDefinition[Any], schema_id: str) -> bool:
+    entry = document.catalog_entry()
+    if schema_id in (entry.schema_id, entry.schema_name, entry.schema_version):
+        return True
+    if schema_id in entry.compatible_schema_ids:
+        return True
+    return _infer_schema_name(schema_id) == entry.schema_name
 
 
 def create_node(

@@ -1881,6 +1881,32 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(cache.get_required(document, "policy:1")["value"], "updated through log")
         self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
 
+        delete_log = {
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "log-delete-alias",
+            "shardId": "interop",
+            "shardEpoch": 1,
+            "resyncRequired": False,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "changeKind": "removed",
+                    "delete": {
+                        "schemaVersion": "cultnet.document_delete.v0",
+                        "messageId": "delete-version-alias",
+                        "schemaId": "replica.runtime_policy.v1",
+                        "recordKey": "policy:1",
+                        "shardId": "interop",
+                        "shardEpoch": 1,
+                    },
+                }
+            ],
+        }
+        applied_delete = apply_shard_log_response(cache, [document], delete_log)
+        self.assertEqual(applied_delete[0].schema_id, local_schema_id)
+        self.assertEqual(applied_delete[0].change_kind, "removed")
+        self.assertIsNone(cache.get(document, "policy:1"))
+
     def test_cultmesh_node_applies_foreign_schema_snapshot_as_local_update(self) -> None:
         document = define_database_entry_type(
             "mesh.runtime-policy",
@@ -5313,6 +5339,50 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(change.raw_document.schema_id, "runtime.generated.mesh.alias_sub_note.ui.99")
         self.assertEqual(node.database.get_required(document, "note:alias-sub")["body"], "notified")
         self.assertEqual(node.cache.get_required_envelope(document, "note:alias-sub").schema_id, local_schema_id)
+
+    def test_cultmesh_local_server_notifies_schema_alias_subscription_for_delete(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_delete_note",
+            [("body", 0)],
+            schema_id="sha256:mesh-alias-delete-note",
+            schema_name="mesh.alias_delete_note",
+            schema_version="mesh.alias_delete_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-delete-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(
+            document,
+            "note:delete-alias",
+            {"body": "remove me"},
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with raw_client.subscribe_database(
+                subscription_id="sub-delete-alias",
+                schema_ids=[document.catalog_entry().schema_id],
+                include_snapshot=False,
+            ) as subscription:
+                subscription.send(document_delete(
+                    message_id="delete-foreign-alias",
+                    schema_id="mesh.alias_delete_note.v1",
+                    record_key="note:delete-alias",
+                    shard_id="notes",
+                    shard_epoch=1,
+                ))
+                change = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        self.assertEqual(change.subscription_id, "sub-delete-alias")
+        self.assertEqual(change.change_kind, "removed")
+        self.assertEqual(change.schema_id, "mesh.alias_delete_note.v1")
+        self.assertEqual(change.record_key, "note:delete-alias")
+        self.assertIsNone(change.raw_document)
+        self.assertIsNone(node.database.get(document, "note:delete-alias"))
 
     def test_cultmesh_local_server_rejects_oversized_snapshot_responses(self) -> None:
         document = define_database_entry_type(
