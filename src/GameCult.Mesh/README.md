@@ -166,6 +166,23 @@ using var sub = input.Watch()
     });
 ```
 
+Read-only CultCache publications can be lifted into the same document handle
+shape without local store plumbing:
+
+```csharp
+var health = CultMesh.DocumentFromSingleFile<DaemonHealth>(
+    "daemon-publication.ccmp",
+    new CultRecordKey("daemon:aetheria.health.v1"),
+    verse);
+
+using var healthSub = health.Watch().Subscribe(RenderHealth);
+var latestHealth = await health.LatestAsync();
+```
+
+`DocumentFromStore<T>()` accepts any `CacheBackingStore`; both helpers pull,
+decode, resolve persisted schema metadata, and poll for updates behind the
+`CultMeshDocumentHandle<T>` surface.
+
 ## Game Session
 
 `CultMeshGameSession` wires the common gameplay loop: local catalogs,

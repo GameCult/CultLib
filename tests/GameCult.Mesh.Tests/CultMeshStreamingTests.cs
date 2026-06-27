@@ -850,6 +850,63 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentHandle_ReadsSchemaPublicationsFromSingleFileStores()
+    {
+        using var directory = new TemporaryDirectory();
+        var filePath = Path.Combine(directory.Path, "publication.ccmp");
+        var key = new CultRecordKey("mesh-note:publication");
+
+        var writerCache = new CultCache();
+        writerCache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+        await writerCache.UpsertAsync(typeof(MeshPublicationNoteDocument), new MeshPublicationNoteDocument
+        {
+            Schema = "tests.mesh_publication_note.v1",
+            Text = "published",
+            Revision = 1
+        }, key);
+        writerCache.FlushAllBackingStores();
+        File.Exists(filePath).Should().BeTrue();
+
+        var directReadCache = new CultCache();
+        directReadCache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+        await directReadCache.PullAllBackingStoresAsync();
+        directReadCache.Get<MeshPublicationNoteDocument>(key)!.Text.Should().Be("published");
+
+        var handle = CultMesh.DocumentFromSingleFile<MeshPublicationNoteDocument>(
+            filePath,
+            key,
+            CultMesh.Verse("starbridge", "unity-pilot"),
+            new CultMeshStoreDocumentOptions
+            {
+                DocumentId = "daemon:tests.mesh_note.latest",
+                SourceId = "daemon:tests.mesh_note.latest.v1",
+                PollInterval = TimeSpan.FromMilliseconds(10)
+            });
+        var observed = new List<MeshPublicationNoteDocument>();
+        using var subscription = handle.Watch(value => observed.Add(value));
+
+        (await handle.LatestAsync()).Text.Should().Be("published");
+        handle.CanReplace.Should().BeFalse();
+        handle.CanSubmitPrediction.Should().BeFalse();
+        handle.DocumentId.Should().Be("daemon:tests.mesh_note.latest");
+        handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be("daemon:tests.mesh_note.latest.v1");
+
+        var republisher = new CultCache();
+        republisher.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+        await republisher.UpsertAsync(typeof(MeshPublicationNoteDocument), new MeshPublicationNoteDocument
+        {
+            Schema = "tests.mesh_publication_note.v1",
+            Text = "republished",
+            Revision = 2
+        }, key);
+        republisher.FlushAllBackingStores();
+
+        await WaitForAsync(() => observed.Any(value => value.Text == "republished"));
+        (await handle.LatestAsync()).Revision.Should().Be(2);
+    }
+
+    [Test]
     public async Task DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments()
     {
         var cache = new CultCache();
@@ -1393,6 +1450,22 @@ public sealed class CultMeshStreamingTests
         return catalog;
     }
 
+    private static async Task WaitForAsync(Func<bool> predicate)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(2);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (predicate())
+            {
+                return;
+            }
+
+            await Task.Delay(20);
+        }
+
+        predicate().Should().BeTrue();
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
@@ -1459,6 +1532,20 @@ public sealed class CultMeshStreamingTests
     [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]
     [MessagePackObject(AllowPrivate = true)]
     internal sealed class MeshNoteAliasDocument
+    {
+        [Key(0)]
+        public string Schema { get; set; } = string.Empty;
+
+        [Key(1)]
+        public string Text { get; set; } = string.Empty;
+
+        [Key(2)]
+        public int Revision { get; set; }
+    }
+
+    [CultDocument("tests.mesh_publication_note", "tests.mesh_publication_note.v1")]
+    [MessagePackObject(AllowPrivate = true)]
+    internal sealed class MeshPublicationNoteDocument
     {
         [Key(0)]
         public string Schema { get; set; } = string.Empty;

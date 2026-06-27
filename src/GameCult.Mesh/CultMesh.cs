@@ -141,6 +141,27 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Options for opening one typed document from a CultCache backing-store publication.
+    /// </summary>
+    public sealed class CultMeshStoreDocumentOptions
+    {
+        /// <summary>Gets or sets the semantic document id. Defaults to the record key.</summary>
+        public string? DocumentId { get; set; }
+
+        /// <summary>Gets or sets the source id advertised by diagnostics. Defaults to the record key.</summary>
+        public string? SourceId { get; set; }
+
+        /// <summary>Gets or sets the route hint for the resulting handle.</summary>
+        public CultMeshRouteHint? RouteHint { get; set; }
+
+        /// <summary>Gets or sets the polling interval for watch fallback.</summary>
+        public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+        /// <summary>Gets or sets the document registry used to resolve persisted schema aliases.</summary>
+        public CultDocumentRegistry? Registry { get; set; }
+    }
+
+    /// <summary>
     /// A locally hosted CultMesh node over CultCache, CultNet transport, and the mesh database facade.
     /// </summary>
     public sealed class CultMeshNode : IDisposable
@@ -1142,6 +1163,106 @@ namespace GameCult.Mesh
                 documentId,
                 sources,
                 routeHint);
+        }
+
+        /// <summary>
+        /// Creates a read-only typed document handle over one CultCache backing-store publication.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromStore<TDocument>(
+            CacheBackingStore store,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (store == null) throw new ArgumentNullException(nameof(store));
+            if (context == null) throw new ArgumentNullException(nameof(context));
+
+            var resolvedOptions = options ?? new CultMeshStoreDocumentOptions();
+            var cache = new CultCache(resolvedOptions.Registry ?? CultDocumentRegistry.Shared);
+            cache.AddBackingStore(store);
+
+            var descriptor = cache.Registry.GetRequired<TDocument>();
+            var documentId = ResolveDocumentId(resolvedOptions.DocumentId, key);
+            var route = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache backing store");
+            var sources = new[]
+            {
+                ProjectionSource(
+                    string.IsNullOrWhiteSpace(resolvedOptions.SourceId) ? key.Value : resolvedOptions.SourceId!,
+                    descriptor.SchemaId,
+                    "CultCache backing store")
+            };
+            Func<CultMeshQueryContext, Task<TDocument>> latest = async _ =>
+            {
+                await cache.PullAllBackingStoresAsync().ConfigureAwait(false);
+                return ReadRequired<TDocument>(cache, key);
+            };
+            var watch = PollingQueryWatcher<CultMeshDocumentQueryParameters, TDocument>(
+                async (_parameters, queryContext) => await latest(queryContext).ConfigureAwait(false),
+                new CultMeshPollingWatchOptions<TDocument>(resolvedOptions.PollInterval));
+
+            return Document<TDocument>(
+                documentId,
+                context,
+                latest,
+                queryContext => watch(CultMeshDocumentQueryParameters.Empty, queryContext),
+                sources,
+                route);
+        }
+
+        /// <summary>
+        /// Creates a read-only typed document handle over one CultCache backing-store publication.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromStore<TDocument>(
+            CacheBackingStore store,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromStore<TDocument>(store, key, verse.Context, options);
+        }
+
+        /// <summary>
+        /// Creates a read-only typed document handle over one single-file MessagePack CultCache publication.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromSingleFile<TDocument>(
+            string path,
+            CultRecordKey key,
+            CultMeshVerseContext context,
+            CultMeshStoreDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
+            var resolvedOptions = options ?? new CultMeshStoreDocumentOptions();
+            var fileOptions = new CultMeshStoreDocumentOptions
+            {
+                DocumentId = resolvedOptions.DocumentId,
+                SourceId = resolvedOptions.SourceId,
+                RouteHint = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, path),
+                PollInterval = resolvedOptions.PollInterval,
+                Registry = resolvedOptions.Registry
+            };
+            return DocumentFromStore<TDocument>(
+                new SingleFileMessagePackBackingStore(path),
+                key,
+                context,
+                fileOptions);
+        }
+
+        /// <summary>
+        /// Creates a read-only typed document handle over one single-file MessagePack CultCache publication.
+        /// </summary>
+        public static CultMeshDocumentHandle<TDocument> DocumentFromSingleFile<TDocument>(
+            string path,
+            CultRecordKey key,
+            CultMeshVerse verse,
+            CultMeshStoreDocumentOptions? options = null)
+            where TDocument : class
+        {
+            if (verse == null) throw new ArgumentNullException(nameof(verse));
+            return DocumentFromSingleFile<TDocument>(path, key, verse.Context, options);
         }
 
         /// <summary>
