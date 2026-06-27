@@ -517,6 +517,16 @@ namespace GameCult.Networking
         public TimeSpan ResponseTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
         /// <summary>
+        /// Gets or sets schema ids to request. Null or empty requests every schema allowed by the shard.
+        /// </summary>
+        public IReadOnlyList<string>? SchemaIds { get; set; }
+
+        /// <summary>
+        /// Gets or sets record keys to request. Null or empty requests every record allowed by the shard/schema filter.
+        /// </summary>
+        public IReadOnlyList<string>? RecordKeys { get; set; }
+
+        /// <summary>
         /// Gets or sets a callback used to customize each ephemeral fetch client.
         /// </summary>
         public Action<Client>? ConfigureClient { get; set; }
@@ -569,7 +579,8 @@ namespace GameCult.Networking
             client.SendCultNet(new CultNetSnapshotRequestMessage
             {
                 MessageId = messageId,
-                SchemaIds = shard.SchemaIds.Count == 0 ? null : shard.SchemaIds.ToArray(),
+                SchemaIds = ResolveRequestedSchemaIds(shard),
+                RecordKeys = ResolveRequestedRecordKeys(),
                 ShardId = shard.ShardId,
                 ShardEpoch = shard.Epoch
             });
@@ -581,6 +592,33 @@ namespace GameCult.Networking
         {
             return _options.CreateClient?.Invoke()
                    ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
+        }
+
+        private string[]? ResolveRequestedSchemaIds(CultNetShardDescriptor shard)
+        {
+            if (_options.SchemaIds is { Count: > 0 })
+            {
+                return _options.SchemaIds
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+            }
+
+            return shard.SchemaIds.Count == 0 ? null : shard.SchemaIds.ToArray();
+        }
+
+        private string[]? ResolveRequestedRecordKeys()
+        {
+            if (_options.RecordKeys is not { Count: > 0 })
+            {
+                return null;
+            }
+
+            var recordKeys = _options.RecordKeys
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            return recordKeys.Length == 0 ? null : recordKeys;
         }
 
         private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)

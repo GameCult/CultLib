@@ -1837,6 +1837,14 @@ namespace GameCult.Networking
             {
                 return null;
             }
+            catch (SocketException error) when (
+                error.SocketErrorCode == SocketError.ConnectionReset ||
+                error.SocketErrorCode == SocketError.ConnectionAborted ||
+                error.SocketErrorCode == SocketError.Shutdown)
+            {
+                DisconnectReason = Array.Empty<byte>();
+                return null;
+            }
 
             _stats.BytesReceived += received;
             if (_remoteEndPoint == null)
@@ -2160,6 +2168,13 @@ namespace GameCult.Networking
             catch (SocketException error) when (
                 error.SocketErrorCode == SocketError.WouldBlock ||
                 error.SocketErrorCode == SocketError.TimedOut)
+            {
+                return null;
+            }
+            catch (SocketException error) when (
+                error.SocketErrorCode == SocketError.ConnectionReset ||
+                error.SocketErrorCode == SocketError.ConnectionAborted ||
+                error.SocketErrorCode == SocketError.Shutdown)
             {
                 return null;
             }
