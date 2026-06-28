@@ -380,6 +380,7 @@ namespace GameCult.Mesh
             return local;
         }
     }
+
     /// <summary>
     /// A locally hosted CultMesh node over CultCache, CultNet transport, and the mesh database facade.
     /// </summary>
@@ -678,6 +679,110 @@ namespace GameCult.Mesh
         public static CultMeshStreamCatalog CreateStreamCatalog()
         {
             return new CultMeshStreamCatalog();
+        }
+
+        /// <summary>
+        /// Packs bytes into content-addressed CDN chunk documents and a versioned artifact manifest.
+        /// </summary>
+        public static CultMeshCdnArtifact PackCdnArtifact(
+            string artifactId,
+            byte[] payload,
+            CultMeshCdnPackOptions? options = null)
+        {
+            return CultMeshCdn.PackArtifact(artifactId, payload, options);
+        }
+
+        /// <summary>
+        /// Publishes a packed CDN artifact into a local cache.
+        /// </summary>
+        public static Task<CultMeshCdnArtifactManifest> PublishCdnArtifactAsync(
+            CultCache cache,
+            CultMeshCdnArtifact artifact)
+        {
+            return CultMeshCdn.PublishAsync(cache, artifact);
+        }
+
+        /// <summary>
+        /// Publishes a packed CDN artifact into a distributed CultNet database.
+        /// </summary>
+        public static Task<CultMeshCdnArtifactManifest> PublishCdnArtifactAsync(
+            CultNetDatabase database,
+            CultMeshCdnArtifact artifact)
+        {
+            return CultMeshCdn.PublishAsync(database, artifact);
+        }
+
+        /// <summary>
+        /// Reassembles and verifies a CDN artifact from a local cache.
+        /// </summary>
+        public static byte[] ReadCdnArtifact(
+            CultCache cache,
+            CultMeshCdnArtifactManifest manifest)
+        {
+            return CultMeshCdn.ReadArtifact(cache, manifest);
+        }
+
+        /// <summary>
+        /// Reassembles and verifies a CDN artifact from a distributed CultNet database.
+        /// </summary>
+        public static Task<byte[]> ReadCdnArtifactAsync(
+            CultNetDatabase database,
+            CultMeshCdnArtifactManifest manifest)
+        {
+            return CultMeshCdn.ReadArtifactAsync(database, manifest);
+        }
+
+        /// <summary>
+        /// Creates a CultNet document registry for CDN artifact manifests and chunks.
+        /// </summary>
+        public static CultNetDocumentRegistry CreateCdnDocumentRegistry(CultDocumentRegistry? documents = null)
+        {
+            return CultMeshCdn.CreateDocumentRegistry(documents);
+        }
+
+        /// <summary>
+        /// Computes and stamps the content hash for a portable entity prefab package.
+        /// </summary>
+        public static CultMeshEntityPrefabPackage FinalizeEntityPrefabPackage(
+            CultMeshEntityPrefabPackage package)
+        {
+            return CultMeshEntityPrefabs.FinalizePackage(package);
+        }
+
+        /// <summary>
+        /// Publishes a portable entity prefab package into a local cache.
+        /// </summary>
+        public static Task<CultMeshEntityPrefabPackage> PublishEntityPrefabPackageAsync(
+            CultCache cache,
+            CultMeshEntityPrefabPackage package)
+        {
+            return CultMeshEntityPrefabs.PublishAsync(cache, package);
+        }
+
+        /// <summary>
+        /// Publishes a portable entity prefab package into a distributed CultNet database.
+        /// </summary>
+        public static Task<CultMeshEntityPrefabPackage> PublishEntityPrefabPackageAsync(
+            CultNetDatabase database,
+            CultMeshEntityPrefabPackage package)
+        {
+            return CultMeshEntityPrefabs.PublishAsync(database, package);
+        }
+
+        /// <summary>
+        /// Creates a CultNet document registry for portable entity prefab packages.
+        /// </summary>
+        public static CultNetDocumentRegistry CreateEntityPrefabDocumentRegistry(CultDocumentRegistry? documents = null)
+        {
+            return CultMeshEntityPrefabs.CreateDocumentRegistry(documents);
+        }
+
+        /// <summary>
+        /// Creates a CultNet document registry for CDN assets and portable entity prefab packages.
+        /// </summary>
+        public static CultNetDocumentRegistry CreateAssetPipelineDocumentRegistry(CultDocumentRegistry? documents = null)
+        {
+            return CultMeshEntityPrefabs.CreateAssetPipelineDocumentRegistry(documents);
         }
 
         /// <summary>
@@ -1700,6 +1805,7 @@ namespace GameCult.Mesh
             if (verse == null) throw new ArgumentNullException(nameof(verse));
             return DocumentsFromPublication(source, bindings, verse.Context, storeOptions, peerOptions);
         }
+
         /// <summary>
         /// Reads configured publication documents, hydrates them into a local node, and returns local handles as a catalog.
         /// </summary>
@@ -1751,6 +1857,7 @@ namespace GameCult.Mesh
                 peerOptions,
                 flush);
         }
+
         /// <summary>
         /// Reads one typed document from a configured publication source and hydrates it into a local node.
         /// </summary>
@@ -1834,6 +1941,7 @@ namespace GameCult.Mesh
                 peerOptions,
                 flush);
         }
+
         internal static CultMeshStoreDocumentOptions WithPublicationBindingOptions(
             CultMeshStoreDocumentOptions? options,
             CultRecordKey key,
@@ -1881,6 +1989,7 @@ namespace GameCult.Mesh
                 RudpResendDelayMs = options?.RudpResendDelayMs ?? 25
             };
         }
+
         /// <summary>
         /// Creates a typed document handle directly over one distributed CultNet database record.
         /// </summary>

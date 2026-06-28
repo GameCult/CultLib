@@ -45,6 +45,23 @@ using var node = await CultMesh.StartNodeAsync("world.ccmp", new CultMeshNodeOpt
 If `ShardLogPath` is omitted, CultMesh stores logs beside the cache under
 `world.cultmesh/shard-logs`.
 
+## Distributed CDN
+
+CultMesh can distribute signed, content-addressed game assets through the same
+typed document lane as gameplay state. Asset manifests, chunks, and portable
+entity prefab packages are CultCache documents that can be replicated by
+CultNet snapshots, shard logs, central servers, LAN peers, or opted-out-capable
+internet peer caches.
+
+This is the canonical asset pipeline target for Aetheria. Brokkr-authored
+Blender prefab snapshots deploy into `CultMeshEntityPrefabPackage` documents
+that reference CDN artifact manifests for meshes, textures, materials, and
+other payloads. Unity and TypeScript clients should unpack the same package
+graph rather than maintaining separate Unity-prefab and Electron asset formats.
+
+See [docs/distributed-cdn.md](docs/distributed-cdn.md) for document shapes,
+publish/read helpers, peer asset sharing policy, and the Brokkr prefab flow.
+
 ## Verses
 
 A Verse is a rule-bearing consensus graph. Aetheria Main can be a
@@ -378,5 +395,6 @@ hot frame bodies remain in the cheapest storage both endpoints can share.
 - [Public API](docs/public-api.md)
 - [Durable Node Quickstart](docs/durable-node-quickstart.md)
 - [Typed Document Path](docs/typed-document-path.md)
+- [Distributed CDN Documents](docs/distributed-cdn.md)
 - [Research Notes](docs/research.md)
 - [Verse Model](docs/verses.md)
