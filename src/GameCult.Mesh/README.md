@@ -32,6 +32,54 @@ ends with a typed read/write through the public CultMesh surface, see
 If you want the lower-level typed-to-raw handoff that CultNet moves across the
 wire, see [docs/typed-document-path.md](docs/typed-document-path.md).
 
+## Eve / CultUI Surfaces
+
+CultMesh includes the portable Eve/CultUI surface document contract and a fluent
+builder for daemon-published UI. The builder is deliberately shaped like the
+legacy CultUI/Unity properties panel API: compose menus and forms in readable
+imperative code, while the emitted document carries typed CultMesh operation
+bindings, state bindings, style tokens, and embedded surface slots.
+
+```csharp
+var menu = EveSurface.Create("aetheria.main_menu.root")
+    .Provider("aetheria", "game.menu")
+    .TitleSubtitle("AETHERIA", "TERMINUS")
+    .ButtonColumn("aetheria.main_menu.root.actions", actions => actions
+        .Button("Continue", "aetheria.main_menu.root.continue")
+        .Button("New Game", "aetheria.main_menu.root.new_game")
+        .Button("Settings", "aetheria.main_menu.root.show_settings")
+        .Button("Quit", "aetheria.main_menu.root.quit"))
+    .Style("font.title.family", "Montserrat")
+    .Style("font.body.family", "Ubuntu")
+    .Build();
+```
+
+Forms accept typed CultMesh descriptors at authoring time and flatten them into
+MessagePack-safe Eve records in the document:
+
+```csharp
+var setName = CultMesh.OperationBinding(
+    "settings.player.name.set",
+    "Set Player Name",
+    "gamecult.settings.name.v1");
+
+var playerName = new CultMeshStateBindingDescriptor(
+    "value",
+    "player.settings.name",
+    "global:aetheria.player_settings.v1",
+    "gamecult.aetheria.player_settings.v1");
+
+var settings = EveSurface.Create("aetheria.main_menu.player_settings")
+    .Form("aetheria.main_menu.player_settings.form", form => form
+        .Text("Name", "Meta", setName, playerName))
+    .Build();
+```
+
+Nested UI is expressed with `surface.slot` components and
+`EveEmbeddedDocumentSlot` records. A runtime lowers the parent surface, resolves
+the child document through CultMesh, and renders the embedded document without
+the renderer becoming the owner of that UI.
+
 Enable durable authoritative shard logs when a node should serve replica
 catch-up after restart:
 
