@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using MessagePack;
 
 namespace GameCult.Caching.MessagePack;
@@ -274,7 +275,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
             if (File.Exists(path))
             {
-                File.Replace(tempPath, path, null);
+                ReplaceExistingFile(tempPath, path);
             }
             else
             {
@@ -288,5 +289,27 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 File.Delete(tempPath);
             }
         }
+    }
+
+    private static void ReplaceExistingFile(string sourcePath, string destinationPath)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                File.Replace(sourcePath, destinationPath, null);
+                return;
+            }
+            catch (IOException) when (attempt < 2)
+            {
+                Thread.Sleep(10 * (attempt + 1));
+            }
+            catch (UnauthorizedAccessException) when (attempt < 2)
+            {
+                Thread.Sleep(10 * (attempt + 1));
+            }
+        }
+
+        File.Copy(sourcePath, destinationPath, overwrite: true);
     }
 }
