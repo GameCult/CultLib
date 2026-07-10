@@ -1221,6 +1221,36 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
   }
 });
 
+test("operation envelopes preserve typed service routing and payload correlation", () => {
+  const request = parseCultNetMessage({
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId: "plugin-42",
+    serviceId: "sai.vn",
+    operation: "project",
+    payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzY2hlbWHEJ2dhbWVjdWx0LmV2ZS5wbHVnaW5fYWJpLnJlcXVlc3QudjE=",
+    sourceRuntimeId: "eve-unity",
+  });
+  assert.equal(request.schemaVersion, "cultnet.operation_request.v0");
+  assert.equal(request.messageId, "plugin-42");
+  assert.equal(request.serviceId, "sai.vn");
+
+  const response = parseCultNetMessage({
+    schemaVersion: "cultnet.operation_response.v0",
+    messageId: "plugin-42",
+    serviceId: "sai.vn",
+    operation: "project",
+    status: "ok",
+    payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzdGF0dXOkb2s=",
+    diagnostics: [],
+  });
+  assert.equal(response.schemaVersion, "cultnet.operation_response.v0");
+  assert.equal(response.messageId, request.messageId);
+});
+
 test("rudp sequence-neutral acknowledgements interoperate with ordered receivers", () => {
   const sender = new CultNetRudpSession({ connectionId: 125, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 125, initialSequence: 100 });
