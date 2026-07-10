@@ -354,6 +354,39 @@ pub enum CultNetMessage {
         message_id: String,
         shards: Vec<CultNetShardDescriptor>,
     },
+    #[serde(rename = "cultnet.operation_request.v0", rename_all = "camelCase")]
+    OperationRequest {
+        message_id: String,
+        service_id: String,
+        operation: String,
+        payload_schema: String,
+        #[serde(default = "messagepack_base64_encoding")]
+        payload_encoding: String,
+        payload: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_runtime_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_runtime_id: Option<String>,
+    },
+    #[serde(rename = "cultnet.operation_response.v0", rename_all = "camelCase")]
+    OperationResponse {
+        message_id: String,
+        service_id: String,
+        operation: String,
+        status: String,
+        payload_schema: String,
+        #[serde(default = "messagepack_base64_encoding")]
+        payload_encoding: String,
+        payload: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_runtime_id: Option<String>,
+    },
+}
+
+fn messagepack_base64_encoding() -> String {
+    "messagepack-base64".to_string()
 }
 
 pub fn parse_cultnet_message(
@@ -560,6 +593,45 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 validate_shard_descriptor(shard)?;
             }
         }
+        CultNetMessage::OperationRequest {
+            message_id,
+            service_id,
+            operation,
+            payload_schema,
+            payload_encoding,
+            payload,
+            source_runtime_id,
+            target_runtime_id,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_non_empty(service_id, "serviceId")?;
+            require_non_empty(operation, "operation")?;
+            require_non_empty(payload_schema, "payloadSchema")?;
+            require_exact(payload_encoding, "messagepack-base64", "payloadEncoding")?;
+            require_non_empty(payload, "payload")?;
+            require_optional_non_empty(source_runtime_id.as_deref(), "sourceRuntimeId")?;
+            require_optional_non_empty(target_runtime_id.as_deref(), "targetRuntimeId")?;
+        }
+        CultNetMessage::OperationResponse {
+            message_id,
+            service_id,
+            operation,
+            status,
+            payload_schema,
+            payload_encoding,
+            payload,
+            diagnostics: _,
+            source_runtime_id,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_non_empty(service_id, "serviceId")?;
+            require_non_empty(operation, "operation")?;
+            require_non_empty(status, "status")?;
+            require_non_empty(payload_schema, "payloadSchema")?;
+            require_exact(payload_encoding, "messagepack-base64", "payloadEncoding")?;
+            require_non_empty(payload, "payload")?;
+            require_optional_non_empty(source_runtime_id.as_deref(), "sourceRuntimeId")?;
+        }
     }
     Ok(())
 }
@@ -651,6 +723,13 @@ fn validate_shard_descriptor(shard: &CultNetShardDescriptor) -> Result<()> {
 fn require_non_empty(value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(anyhow!("CultNet field {field} must be non-empty"));
+    }
+    Ok(())
+}
+
+fn require_exact(value: &str, expected: &str, field: &str) -> Result<()> {
+    if value != expected {
+        return Err(anyhow!("{field} must be {expected}"));
     }
     Ok(())
 }
