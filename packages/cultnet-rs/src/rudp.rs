@@ -127,6 +127,7 @@ pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
+    initial_sequence: u32,
     next_sequence: u32,
     next_fragment_id: u16,
     connected: bool,
@@ -145,6 +146,7 @@ impl CultNetRudpSession {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
+            initial_sequence: options.initial_sequence,
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
             connected: false,
@@ -176,6 +178,19 @@ impl CultNetRudpSession {
 
     pub fn last_received_at_ms(&self) -> Option<u64> {
         self.last_received_at_ms
+    }
+
+    pub fn reset_peer_state(&mut self) {
+        self.next_sequence = self.initial_sequence;
+        self.next_fragment_id = 1;
+        self.connected = false;
+        self.last_received_at_ms = None;
+        self.highest_received_sequence = None;
+        self.received_sequences.clear();
+        self.pending_reliable.clear();
+        self.ordered_next_sequence_by_channel.clear();
+        self.ordered_buffers.clear();
+        self.fragment_buffers.clear();
     }
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
@@ -992,18 +1007,29 @@ impl CultNetRudpSocketTransportConnection {
         wire.truncate(received);
         self.stats.bytes_received += received as u64;
 
+        let packet = decode_rudp_packet(&wire)?;
         if let Some(expected) = self.remote_addr {
             if expected != remote_addr {
-                return Ok(None);
+                if self.mode == CultNetRudpSocketMode::Server
+                    && packet.packet_type == CultNetRudpPacketType::Connect
+                {
+                    self.remote_addr = Some(remote_addr);
+                } else {
+                    return Ok(None);
+                }
             }
         } else {
+            if self.mode == CultNetRudpSocketMode::Server
+                && packet.packet_type != CultNetRudpPacketType::Connect
+            {
+                return Ok(None);
+            }
             self.remote_addr = Some(remote_addr);
         }
-
-        let packet = decode_rudp_packet(&wire)?;
         if self.mode == CultNetRudpSocketMode::Server
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
+            self.session.reset_peer_state();
             let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
             self.send_packet(&accept)?;
             return Ok(None);
