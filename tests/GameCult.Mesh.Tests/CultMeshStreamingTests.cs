@@ -2821,6 +2821,35 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotSession_ReusesOneConnectedClientAcrossOrderedRequests()
+    {
+        var sourceCache = new CultCache();
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
+        registry.Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(sourceCache.Registry));
+        var firstKey = new CultRecordKey("mesh-note:session-first");
+        var secondKey = new CultRecordKey("mesh-note:session-second");
+        await sourceCache.UpsertAsync(
+            new MeshNoteDocument { Schema = "tests.mesh_note.v1", Text = "first", Revision = 1 },
+            new CultRecordHandle<MeshNoteDocument>(firstKey));
+        await sourceCache.UpsertAsync(
+            new MeshNoteDocument { Schema = "tests.mesh_note.v1", Text = "second", Revision = 2 },
+            new CultRecordHandle<MeshNoteDocument>(secondKey));
+        var client = new MeshSnapshotSchemaClient(request =>
+            registry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request));
+
+        using var session = CultMesh.SnapshotSession(
+            "cultnet://session.test:3075",
+            new CultMeshSnapshotRequestOptions { CreateClient = () => client },
+            registry);
+        var first = await session.FetchDocumentsAsync<MeshNoteDocument>(new[] { firstKey.Value });
+        var second = await session.FetchDocumentsAsync<MeshNoteDocument>(new[] { secondKey.Value });
+
+        client.ConnectCount.Should().Be(1);
+        first.Should().ContainSingle().Which.Text.Should().Be("first");
+        second.Should().ContainSingle().Which.Text.Should().Be("second");
+    }
+
+    [Test]
     public async Task DocumentRegistryHelpers_CreateTypedNetworkRegistriesForAliases()
     {
         var sourceCache = new CultCache();
@@ -3743,9 +3772,11 @@ internal sealed class MeshSnapshotSchemaClient : ICultNetSchemaClient
     }
 
     public bool Connected { get; private set; }
+    public int ConnectCount { get; private set; }
 
     public void Connect(string host, int port)
     {
+        ConnectCount++;
         Connected = true;
     }
 

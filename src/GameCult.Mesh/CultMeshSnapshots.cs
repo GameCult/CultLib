@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -58,6 +59,133 @@ namespace GameCult.Mesh
 
         /// <summary>Gets or sets the resend delay used by endpoint-created RUDP clients.</summary>
         public long RudpResendDelayMs { get; set; } = 25;
+    }
+
+    /// <summary>
+    /// Reuses one connected CultNet schema client for an ordered sequence of snapshot requests.
+    /// </summary>
+    public sealed class CultMeshSnapshotSession : IDisposable
+    {
+        private readonly string _endpoint;
+        private readonly CultMeshSnapshotRequestOptions _defaults;
+        private readonly ICultNetSchemaClient _client;
+        private readonly CultNetDocumentRegistry _registry;
+        private readonly SemaphoreSlim _requests = new(1, 1);
+        private readonly object _completionLock = new();
+        private TaskCompletionSource<CultNetSnapshotResponseRawMessage>? _completion;
+        private string? _messageId;
+        private bool _disposed;
+
+        internal CultMeshSnapshotSession(
+            string endpoint,
+            CultMeshSnapshotRequestOptions options,
+            CultNetDocumentRegistry? registry)
+        {
+            _endpoint = string.IsNullOrWhiteSpace(endpoint)
+                ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
+                : endpoint;
+            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _registry = registry ?? new CultNetDocumentRegistry();
+            _client = CultMesh.CreateSnapshotClient(endpoint, _defaults)();
+            _client.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
+            _client.OnCultNet<CultNetErrorMessage>(OnError);
+            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+            _client.Connect(host, port);
+        }
+
+        /// <summary>Fetches one raw snapshot while retaining the underlying endpoint connection.</summary>
+        public async Task<CultNetSnapshotResponseRawMessage> FetchSnapshotAsync(
+            IReadOnlyList<string>? schemaIds = null,
+            IReadOnlyList<string>? recordKeys = null)
+        {
+            ThrowIfDisposed();
+            await _requests.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await CultMesh.WaitForSnapshotClientConnectionAsync(
+                        _client,
+                        _endpoint,
+                        _defaults.ConnectTimeout)
+                    .ConfigureAwait(false);
+                var options = CultMesh.CloneSnapshotRequestOptions(_defaults);
+                options.SchemaIds = schemaIds ?? options.SchemaIds;
+                options.RecordKeys = recordKeys ?? options.RecordKeys;
+                var messageId = CultMesh.CreateSnapshotMessageId(options);
+                var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                lock (_completionLock)
+                {
+                    _messageId = messageId;
+                    _completion = completion;
+                }
+                _client.SendCultNet(new CultNetSnapshotRequestMessage
+                {
+                    MessageId = messageId,
+                    SchemaIds = CultMesh.CleanSnapshotFilter(options.SchemaIds),
+                    RecordKeys = CultMesh.CleanSnapshotFilter(options.RecordKeys),
+                    ShardId = string.IsNullOrWhiteSpace(options.ShardId) ? null : options.ShardId,
+                    ShardEpoch = options.ShardEpoch
+                });
+                return await CultMesh.WaitForSnapshotResponseAsync(
+                        completion.Task,
+                        _endpoint,
+                        options,
+                        messageId)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_completionLock)
+                {
+                    _messageId = null;
+                    _completion = null;
+                }
+                _requests.Release();
+            }
+        }
+
+        /// <summary>Fetches and decodes typed documents over the retained endpoint connection.</summary>
+        public async Task<IReadOnlyList<TDocument>> FetchDocumentsAsync<TDocument>(
+            IReadOnlyList<string>? recordKeys = null,
+            IReadOnlyList<string>? schemaIds = null)
+            where TDocument : class
+        {
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var resolvedSchemas = schemaIds ?? (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });
+            var snapshot = await FetchSnapshotAsync(resolvedSchemas, recordKeys).ConfigureAwait(false);
+            return CultMesh.DecodeSnapshotDocuments<TDocument>(snapshot, _registry);
+        }
+
+        /// <summary>Closes the retained endpoint connection and rejects any active request.</summary>
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            lock (_completionLock)
+                _completion?.TrySetException(new ObjectDisposedException(nameof(CultMeshSnapshotSession)));
+            _client.Dispose();
+            _requests.Dispose();
+        }
+
+        private void OnResponse(CultNetSnapshotResponseRawMessage response)
+        {
+            lock (_completionLock)
+            {
+                if (string.Equals(response.MessageId, _messageId, StringComparison.Ordinal))
+                    _completion?.TrySetResult(response);
+            }
+        }
+
+        private void OnError(CultNetErrorMessage error)
+        {
+            lock (_completionLock)
+                _completion?.TrySetException(new InvalidOperationException(error.Error));
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(CultMeshSnapshotSession));
+        }
     }
 
     /// <summary>
@@ -500,6 +628,20 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Opens one reusable CultNet snapshot connection for ordered bulk document transfer.
+        /// </summary>
+        public static CultMeshSnapshotSession SnapshotSession(
+            string endpoint,
+            CultMeshSnapshotRequestOptions? options = null,
+            CultNetDocumentRegistry? registry = null)
+        {
+            return new CultMeshSnapshotSession(
+                endpoint,
+                options ?? new CultMeshSnapshotRequestOptions(),
+                registry);
+        }
+
+        /// <summary>
         /// Describes one typed document to bind from a CultMesh snapshot endpoint.
         /// </summary>
         public static CultMeshSnapshotDocumentBinding<TDocument> SnapshotDocument<TDocument>(
@@ -667,7 +809,7 @@ namespace GameCult.Mesh
             return DecodeSnapshotDocuments<TDocument>(snapshot, registry ?? new CultNetDocumentRegistry());
         }
 
-        private static Func<ICultNetSchemaClient> CreateSnapshotClient(
+        internal static Func<ICultNetSchemaClient> CreateSnapshotClient(
             string endpoint,
             CultMeshSnapshotRequestOptions options)
         {
@@ -693,7 +835,31 @@ namespace GameCult.Mesh
             };
         }
 
-        private static string CreateSnapshotMessageId(CultMeshSnapshotRequestOptions options)
+        internal static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(
+            CultMeshSnapshotRequestOptions? source)
+        {
+            if (source == null) return new CultMeshSnapshotRequestOptions();
+            return new CultMeshSnapshotRequestOptions
+            {
+                SchemaIds = source.SchemaIds,
+                RecordKeys = source.RecordKeys,
+                ShardId = source.ShardId,
+                ShardEpoch = source.ShardEpoch,
+                ResponseTimeout = source.ResponseTimeout,
+                ConnectTimeout = source.ConnectTimeout,
+                MessageIdPrefix = source.MessageIdPrefix,
+                Security = source.Security,
+                ConfigureClient = source.ConfigureClient,
+                CreateClient = source.CreateClient,
+                RudpRuntimeId = source.RudpRuntimeId,
+                RudpConnectionId = source.RudpConnectionId,
+                RudpConnectPayload = source.RudpConnectPayload,
+                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
+                RudpResendDelayMs = source.RudpResendDelayMs
+            };
+        }
+
+        internal static string CreateSnapshotMessageId(CultMeshSnapshotRequestOptions options)
         {
             var prefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
                 ? "cultmesh:snapshot"
@@ -701,7 +867,7 @@ namespace GameCult.Mesh
             return $"{prefix}:{Guid.NewGuid():N}";
         }
 
-        private static async Task WaitForSnapshotClientConnectionAsync(
+        internal static async Task WaitForSnapshotClientConnectionAsync(
             ICultNetSchemaClient client,
             string endpoint,
             TimeSpan timeout)
@@ -716,7 +882,7 @@ namespace GameCult.Mesh
             }
         }
 
-        private static async Task<CultNetSnapshotResponseRawMessage> WaitForSnapshotResponseAsync(
+        internal static async Task<CultNetSnapshotResponseRawMessage> WaitForSnapshotResponseAsync(
             Task<CultNetSnapshotResponseRawMessage> responseTask,
             string endpoint,
             CultMeshSnapshotRequestOptions options,
@@ -735,7 +901,7 @@ namespace GameCult.Mesh
             return await responseTask.ConfigureAwait(false);
         }
 
-        private static string[]? CleanSnapshotFilter(IReadOnlyList<string>? values)
+        internal static string[]? CleanSnapshotFilter(IReadOnlyList<string>? values)
         {
             if (values is not { Count: > 0 })
                 return null;

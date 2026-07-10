@@ -682,9 +682,12 @@ namespace GameCult.Networking.Tests
             Assert.That(client.PendingReliableSequences, Is.Empty);
 
             var ack = client.CreateAck();
+            Assert.That(ack.Sequence, Is.Zero);
             Assert.That(ack.Ack, Is.EqualTo(100));
             server.Receive(ack, 30);
             Assert.That(server.PendingReliableSequences, Is.Empty);
+            var firstData = client.Send("schema", Encoding.UTF8.GetBytes("after-ack"));
+            Assert.That(firstData.Sequence, Is.EqualTo(2));
         }
 
         [Test]
@@ -840,6 +843,55 @@ namespace GameCult.Networking.Tests
             Assert.That(
                 receiver.Receive(second).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
                 Is.EqualTo(new[] { "second", "third" }));
+        }
+
+        [Test]
+        public void RudpSession_SequencedControlPacketReleasesBufferedOrderedFrame()
+        {
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 199,
+                InitialSequence = 1
+            });
+            receiver.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Accept,
+                ConnectionId = 199,
+                Sequence = 100,
+                ChannelId = "control"
+            });
+            var first = receiver.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Data,
+                ConnectionId = 199,
+                Sequence = 101,
+                ChannelId = "schema",
+                Reliable = true,
+                Ordered = true,
+                Payload = Encoding.UTF8.GetBytes("first")
+            });
+            var buffered = receiver.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Data,
+                ConnectionId = 199,
+                Sequence = 103,
+                ChannelId = "schema",
+                Reliable = true,
+                Ordered = true,
+                Payload = Encoding.UTF8.GetBytes("second")
+            });
+            var released = receiver.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Pong,
+                ConnectionId = 199,
+                Sequence = 102,
+                ChannelId = "control"
+            });
+
+            Assert.That(first.Delivered, Has.Count.EqualTo(1));
+            Assert.That(buffered.Delivered, Is.Empty);
+            Assert.That(released.Delivered, Has.Count.EqualTo(1));
+            Assert.That(Encoding.UTF8.GetString(released.Delivered[0].Payload), Is.EqualTo("second"));
         }
 
         [Test]

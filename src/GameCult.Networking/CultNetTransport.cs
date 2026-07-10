@@ -1079,9 +1079,11 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Ack || packet.PacketType == CultNetRudpPacketType.Pong)
             {
-                RememberReceived(packet.Sequence);
+                if (packet.PacketType == CultNetRudpPacketType.Pong)
+                    RememberReceived(packet.Sequence);
                 return new CultNetRudpReceiveResult
                 {
+                    Delivered = DrainUnblockedOrdered(),
                     Pong = packet.PacketType == CultNetRudpPacketType.Pong,
                     PongPayload = packet.PacketType == CultNetRudpPacketType.Pong
                         ? packet.Payload ?? Array.Empty<byte>()
@@ -1131,7 +1133,17 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateAck()
         {
-            return CreatePacket(CultNetRudpPacketType.Ack, "control", Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
+            var (ack, ackMask) = AckState();
+            return new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Ack,
+                ConnectionId = ConnectionId,
+                Sequence = 0,
+                Ack = ack,
+                AckMask = ackMask,
+                ChannelId = "control",
+                Payload = Array.Empty<byte>()
+            };
         }
 
         /// <summary>
@@ -1422,6 +1434,17 @@ namespace GameCult.Networking
                 SkipReceivedNonChannelSequences(channelId);
             }
 
+            return delivered;
+        }
+
+        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainUnblockedOrdered()
+        {
+            var delivered = new List<CultNetRudpDeliveredFrame>();
+            foreach (var channelId in _orderedBuffers.Keys.ToArray())
+            {
+                SkipReceivedNonChannelSequences(channelId);
+                delivered.AddRange(DrainOrdered(channelId));
+            }
             return delivered;
         }
 
@@ -1891,7 +1914,9 @@ namespace GameCult.Networking
             }
 
             var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
-            if (packet.PacketType == CultNetRudpPacketType.Accept || delivered != null)
+            if (packet.PacketType == CultNetRudpPacketType.Accept ||
+                packet.PacketType == CultNetRudpPacketType.Data ||
+                delivered != null)
             {
                 SendPacket(_session.CreateAck());
             }
