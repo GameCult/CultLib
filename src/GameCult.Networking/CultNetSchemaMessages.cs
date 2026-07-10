@@ -56,6 +56,14 @@ namespace GameCult.Networking
         /// </summary>
         public const string SampleChat = "cultnet.sample.chat.v0";
         /// <summary>
+        /// Generic typed service operation request contract identifier.
+        /// </summary>
+        public const string OperationRequest = "cultnet.operation_request.v0";
+        /// <summary>
+        /// Generic typed service operation response contract identifier.
+        /// </summary>
+        public const string OperationResponse = "cultnet.operation_response.v0";
+        /// <summary>
         /// document delete contract identifier.
         /// </summary>
         public const string DocumentDelete = "cultnet.document_delete.v0";
@@ -517,6 +525,60 @@ namespace GameCult.Networking
         /// Gets or sets the text.
         /// </summary>
         [Key("text")] public string Text { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Invokes one typed operation on an advertised service.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetOperationRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.OperationRequest;
+        /// <summary>Gets or sets the correlation id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the advertised service id.</summary>
+        [Key("serviceId")] public string ServiceId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the requested operation.</summary>
+        [Key("operation")] public string Operation { get; set; } = string.Empty;
+        /// <summary>Gets or sets the inner payload schema.</summary>
+        [Key("payloadSchema")] public string PayloadSchema { get; set; } = string.Empty;
+        /// <summary>Gets or sets the inner payload encoding.</summary>
+        [Key("payloadEncoding")] public string PayloadEncoding { get; set; } = "messagepack-base64";
+        /// <summary>Gets or sets the encoded inner payload.</summary>
+        [Key("payload")] public string Payload { get; set; } = string.Empty;
+        /// <summary>Gets or sets the calling runtime id.</summary>
+        [Key("sourceRuntimeId")] public string? SourceRuntimeId { get; set; }
+        /// <summary>Gets or sets an optional target runtime id.</summary>
+        [Key("targetRuntimeId")] public string? TargetRuntimeId { get; set; }
+    }
+
+    /// <summary>
+    /// Returns the correlated result of one typed service operation.
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetOperationResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.OperationResponse;
+        /// <summary>Gets or sets the request correlation id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the advertised service id.</summary>
+        [Key("serviceId")] public string ServiceId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the completed operation.</summary>
+        [Key("operation")] public string Operation { get; set; } = string.Empty;
+        /// <summary>Gets or sets the operation status.</summary>
+        [Key("status")] public string Status { get; set; } = string.Empty;
+        /// <summary>Gets or sets the inner payload schema.</summary>
+        [Key("payloadSchema")] public string PayloadSchema { get; set; } = string.Empty;
+        /// <summary>Gets or sets the inner payload encoding.</summary>
+        [Key("payloadEncoding")] public string PayloadEncoding { get; set; } = "messagepack-base64";
+        /// <summary>Gets or sets the encoded inner payload.</summary>
+        [Key("payload")] public string Payload { get; set; } = string.Empty;
+        /// <summary>Gets or sets transport-level diagnostics.</summary>
+        [Key("diagnostics")] public string[] Diagnostics { get; set; } = Array.Empty<string>();
+        /// <summary>Gets or sets the responding runtime id.</summary>
+        [Key("sourceRuntimeId")] public string? SourceRuntimeId { get; set; }
     }
 
     /// <summary>

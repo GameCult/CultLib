@@ -323,6 +323,20 @@ namespace GameCult.Networking
             },
             new SchemaResourceSpec
             {
+                FileName = "cultnet.operation-request.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.OperationRequest,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.operation-response.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.OperationResponse,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
                 FileName = "cultnet.document-delete.schema.json",
                 Kind = "wire_message",
                 SchemaVersion = CultNetSchemaVersions.DocumentDelete,

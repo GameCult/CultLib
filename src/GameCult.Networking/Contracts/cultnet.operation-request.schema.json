@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.operation-request.schema.json",
+  "title": "CultNet Operation Request",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "serviceId", "operation", "payloadSchema", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.operation_request.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "serviceId": { "type": "string", "minLength": 1 },
+    "operation": { "type": "string", "minLength": 1 },
+    "payloadSchema": { "type": "string", "minLength": 1 },
+    "payloadEncoding": { "const": "messagepack-base64" },
+    "payload": { "type": "string", "minLength": 1, "contentEncoding": "base64" },
+    "sourceRuntimeId": { "type": "string", "minLength": 1 },
+    "targetRuntimeId": { "type": "string", "minLength": 1 }
+  }
+}

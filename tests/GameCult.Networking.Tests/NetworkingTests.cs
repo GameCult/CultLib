@@ -432,6 +432,27 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultNetSchemaMessageSerialization_RoundTrips_OperationEnvelope()
+        {
+            var request = new CultNetOperationRequestMessage
+            {
+                MessageId = "plugin-42",
+                ServiceId = "sai.vn",
+                Operation = "project",
+                PayloadSchema = "gamecult.eve.plugin_abi.request.v1",
+                Payload = "gaZzY2hlbWHEJ2dhbWVjdWx0LmV2ZS5wbHVnaW5fYWJpLnJlcXVlc3QudjE=",
+                SourceRuntimeId = "eve-unity"
+            };
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(request);
+            var roundTrip = (CultNetOperationRequestMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(roundTrip.MessageId, Is.EqualTo(request.MessageId));
+            Assert.That(roundTrip.ServiceId, Is.EqualTo("sai.vn"));
+            Assert.That(roundTrip.PayloadSchema, Is.EqualTo("gamecult.eve.plugin_abi.request.v1"));
+        }
+
+        [Test]
         public void LiteNetLibTransportProfile_AdvertisesLegacyAndSchemaChannels()
         {
             var policy = CultNetReconnectPolicies.CreateDefault("client-policy", maxAttempts: 4);
