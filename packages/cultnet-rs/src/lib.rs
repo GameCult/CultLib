@@ -1,6 +1,7 @@
 mod contracts;
 mod cultmesh;
 mod framing;
+mod operation_service;
 mod replication;
 mod rudp;
 mod schema_discovery;
@@ -11,6 +12,7 @@ mod transport;
 pub use contracts::*;
 pub use cultmesh::*;
 pub use framing::*;
+pub use operation_service::*;
 pub use replication::*;
 pub use rudp::*;
 pub use schema_discovery::*;
