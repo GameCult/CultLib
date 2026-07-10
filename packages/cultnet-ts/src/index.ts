@@ -14,6 +14,8 @@ export {
   type CultNetHelloMessage,
   type CultNetLoginMessage,
   type CultNetLoginSuccessMessage,
+  type CultNetOperationRequestMessage,
+  type CultNetOperationResponseMessage,
   type CultNetMessage,
   type CultNetRegisterMessage,
   type CultNetSampleChangeNameMessage,
@@ -91,6 +93,13 @@ export {
   type CultNetRudpSessionOptions,
   type RudpTransportProfileOptions,
 } from "./rudp";
+export {
+  invokeCultNetOperation,
+  startCultNetOperationServer,
+  type CultNetOperationClientOptions,
+  type CultNetOperationServer,
+  type CultNetOperationServerOptions,
+} from "./operation-service";
 export {
   defineJsonSchemaContract,
   type JsonSchemaContract,

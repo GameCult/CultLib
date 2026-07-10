@@ -41,6 +41,8 @@ import {
   encodeRudpPacket,
   ghostlightAgentStateGeneratedContract,
   parseCultNetMessage,
+  invokeCultNetOperation,
+  startCultNetOperationServer,
   validateGhostlightAgentStateGenerated,
   validateGhostlightAgentState,
   shardServes,
@@ -1249,6 +1251,40 @@ test("operation envelopes preserve typed service routing and payload correlation
   });
   assert.equal(response.schemaVersion, "cultnet.operation_response.v0");
   assert.equal(response.messageId, request.messageId);
+});
+
+test("RUDP operation service correlates typed payload envelopes", async () => {
+  const server = await startCultNetOperationServer({
+    runtimeId: "sai-sidecar",
+    handler: request => ({
+      schemaVersion: "cultnet.operation_response.v0",
+      messageId: request.messageId,
+      serviceId: request.serviceId,
+      operation: request.operation,
+      status: "ok",
+      payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+      payloadEncoding: "messagepack-base64",
+      payload: request.payload,
+      diagnostics: [],
+      sourceRuntimeId: "sai-sidecar",
+    }),
+  });
+  try {
+    const response = await invokeCultNetOperation(server.endpoint, {
+      schemaVersion: "cultnet.operation_request.v0",
+      messageId: "service-1",
+      serviceId: "sai.vn",
+      operation: "describe",
+      payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+      payloadEncoding: "messagepack-base64",
+      payload: "gaZzY2hlbWHEJ2dhbWVjdWx0LmV2ZS5wbHVnaW5fYWJpLnJlcXVlc3QudjE=",
+    }, { runtimeId: "eve-test" });
+    assert.equal(response.messageId, "service-1");
+    assert.equal(response.serviceId, "sai.vn");
+    assert.equal(response.status, "ok");
+  } finally {
+    await server.close();
+  }
 });
 
 test("rudp sequence-neutral acknowledgements interoperate with ordered receivers", () => {
