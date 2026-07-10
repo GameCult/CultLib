@@ -177,6 +177,17 @@ export class CultNetRudpSession {
     return this.#lastReceivedAtMs;
   }
 
+  resetPeerState(): void {
+    this.#connected = false;
+    this.#lastReceivedAtMs = undefined;
+    this.#highestReceivedSequence = undefined;
+    this.#receivedSequences.clear();
+    this.#pendingReliable.clear();
+    this.#orderedNextSequenceByChannel.clear();
+    this.#orderedBuffers.clear();
+    this.#fragmentBuffers.clear();
+  }
+
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
     this.#ensureReliableCapacity(1);
     const packet = this.#createPacket({
@@ -196,8 +207,12 @@ export class CultNetRudpSession {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
-    this.#ensureReliableCapacity(1);
+    const wasConnected = this.#connected;
+    if (!wasConnected) {
+      this.#ensureReliableCapacity(1);
+    }
     this.#rememberReceived(packet.sequence);
+    this.#lastReceivedAtMs = nowMs;
     this.#connected = true;
     const response = this.#createPacket({
       packetType: "accept",
@@ -206,7 +221,9 @@ export class CultNetRudpSession {
       ordered: true,
       payload,
     });
-    this.#trackReliable(response, nowMs);
+    if (!wasConnected) {
+      this.#trackReliable(response, nowMs);
+    }
     return response;
   }
 
@@ -310,9 +327,9 @@ export class CultNetRudpSession {
     }
 
     if (packet.packetType === "ack" || packet.packetType === "pong") {
-      this.#rememberReceived(packet.sequence);
+      if (packet.packetType === "pong") this.#rememberReceived(packet.sequence);
       return {
-        delivered: [],
+        delivered: this.#drainUnblockedOrdered(),
         pong: packet.packetType === "pong",
         pongPayload: packet.packetType === "pong" ? packet.payload ?? new Uint8Array() : undefined,
       };
@@ -351,10 +368,22 @@ export class CultNetRudpSession {
   }
 
   createAck(): CultNetRudpPacket {
-    return this.#createPacket({
+    const { ack, ackMask } = this.#ackState();
+    return {
       packetType: "ack",
+      connectionId: this.connectionId,
+      sequence: 0,
+      ack,
+      ackMask,
       channelId: "control",
-    });
+      reliable: false,
+      ordered: false,
+      sequenced: false,
+      fragmentId: 0,
+      fragmentIndex: 0,
+      fragmentCount: 0,
+      payload: new Uint8Array(),
+    };
   }
 
   createPing(payload = new Uint8Array()): CultNetRudpPacket {
@@ -606,6 +635,15 @@ export class CultNetRudpSession {
     return delivered;
   }
 
+  #drainUnblockedOrdered(): CultNetRudpDeliveredFrame[] {
+    const delivered: CultNetRudpDeliveredFrame[] = [];
+    for (const channelId of this.#orderedBuffers.keys()) {
+      this.#skipReceivedNonChannelSequences(channelId);
+      delivered.push(...this.#drainOrdered(channelId));
+    }
+    return delivered;
+  }
+
   #skipReceivedNonChannelSequences(channelId: string): void {
     let next = this.#orderedNextSequenceByChannel.get(channelId);
     while (next !== undefined && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(channelId)?.has(next)) {
@@ -727,6 +765,13 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   close(): void {
     clearInterval(this.#resendTimer);
     if (!this.#closed) {
+      if (this.#session.connected && this.#remoteHost && this.#remotePort !== undefined) {
+        try {
+          this.#sendPacket(this.#session.createDisconnect());
+        } catch {
+          // Best-effort shutdown: close must still release the UDP socket.
+        }
+      }
       this.#closed = true;
       this.#socket.close();
     }
@@ -746,11 +791,17 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       this.#remoteHost = remote.address;
       this.#remotePort = remote.port;
     } else if (remote.address !== this.#remoteHost || remote.port !== this.#remotePort) {
-      return;
+      if (this.#mode === "server" && packet.packetType === "connect") {
+        this.#remoteHost = remote.address;
+        this.#remotePort = remote.port;
+      } else {
+        return;
+      }
     }
 
     try {
       if (this.#mode === "server" && packet.packetType === "connect") {
+        this.#session.resetPeerState();
         this.#sendPacket(this.#session.acceptConnect(packet, Date.now()));
         return;
       }
@@ -774,7 +825,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         this.emit("close");
         return;
       }
-      if (packet.packetType === "accept" || result.delivered.length > 0) {
+      if (packet.packetType === "accept" || packet.packetType === "data" || result.delivered.length > 0) {
         this.#sendPacket(this.#session.createAck());
       }
     } catch (error) {

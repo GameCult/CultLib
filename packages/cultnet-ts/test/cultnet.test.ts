@@ -418,6 +418,7 @@ test("rudp session handshake acks reliable connect and accept packets", () => {
   assert.deepEqual(client.pendingReliableSequences, []);
 
   const ack = client.createAck();
+  assert.equal(ack.sequence, 0);
   assert.equal(ack.ack, 100);
   server.receive(ack, 30);
   assert.deepEqual(server.pendingReliableSequences, []);
@@ -532,6 +533,9 @@ test("rudp session skips received control packets while ordering schema payloads
   const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
   const control = sender.createAck();
   const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true });
+
+  assert.equal(control.sequence, 0);
+  assert.equal(second.sequence, first.sequence + 1);
 
   assert.deepEqual(receiver.receive(first).delivered.map((frame) => Buffer.from(frame.payload).toString("utf8")), ["first"]);
   assert.deepEqual(receiver.receive(control).delivered, []);
@@ -1215,6 +1219,21 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("rudp sequence-neutral acknowledgements interoperate with ordered receivers", () => {
+  const sender = new CultNetRudpSession({ connectionId: 125, initialSequence: 1 });
+  const receiver = new CultNetRudpSession({ connectionId: 125, initialSequence: 100 });
+  sender.receive({ packetType: "accept", connectionId: 125, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId: 125, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+
+  const ack = sender.createAck();
+  const request = sender.send("schema", Buffer.from("snapshot"), { reliable: true, ordered: true });
+
+  assert.equal(ack.sequence, 0);
+  assert.equal(request.sequence, 1);
+  assert.deepEqual(receiver.receive(ack).delivered, []);
+  assert.deepEqual(receiver.receive(request).delivered.map(frame => Buffer.from(frame.payload).toString("utf8")), ["snapshot"]);
 });
 
 test("CultNet raw replication applies compatible foreign-schema snapshots", async () => {
