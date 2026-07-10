@@ -57,9 +57,11 @@ namespace GameCult.Mesh
     /// <summary>
     /// Flat, transport-friendly fields for a CultMesh route hint.
     /// </summary>
+    [MessagePackObject]
     public sealed class CultMeshRouteRecord
     {
         /// <summary>Creates flat route fields.</summary>
+        [SerializationConstructor]
         public CultMeshRouteRecord(string? kind = null, string? description = null)
         {
             Kind = kind ?? "";
@@ -67,10 +69,10 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Gets the serialized route locality kind.</summary>
-        public string Kind { get; }
+        [Key(0)] public string Kind { get; }
 
         /// <summary>Gets the serialized route description.</summary>
-        public string Description { get; }
+        [Key(1)] public string Description { get; }
 
         /// <summary>Creates flat route fields from a route hint.</summary>
         public static CultMeshRouteRecord FromRoute(CultMeshRouteHint? routeHint)
@@ -3171,9 +3173,11 @@ namespace GameCult.Mesh
     /// <summary>
     /// Transport-friendly fields for a typed state binding descriptor.
     /// </summary>
+    [MessagePackObject]
     public sealed class CultMeshStateBindingRecord
     {
         /// <summary>Creates a state binding record.</summary>
+        [SerializationConstructor]
         public CultMeshStateBindingRecord(
             string? targetProp = null,
             string? pointerId = null,
@@ -3191,22 +3195,22 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Gets the component property receiving the resolved state value.</summary>
-        public string TargetProp { get; }
+        [Key(0)] public string TargetProp { get; }
 
         /// <summary>Gets the semantic CultMesh state pointer id.</summary>
-        public string PointerId { get; }
+        [Key(1)] public string PointerId { get; }
 
         /// <summary>Gets the source document, cache, native view, or daemon source id.</summary>
-        public string SourceId { get; }
+        [Key(2)] public string SourceId { get; }
 
         /// <summary>Gets the source schema id.</summary>
-        public string SchemaId { get; }
+        [Key(3)] public string SchemaId { get; }
 
         /// <summary>Gets the flattened route kind.</summary>
-        public string RouteKind { get; }
+        [Key(4)] public string RouteKind { get; }
 
         /// <summary>Gets the flattened route description.</summary>
-        public string RouteDescription { get; }
+        [Key(5)] public string RouteDescription { get; }
 
         /// <summary>Creates transport-friendly fields from a state binding descriptor.</summary>
         public static CultMeshStateBindingRecord FromBinding(CultMeshStateBindingDescriptor? binding)
@@ -3300,9 +3304,11 @@ namespace GameCult.Mesh
     /// <summary>
     /// Transport-friendly fields for a typed operation binding descriptor.
     /// </summary>
+    [MessagePackObject]
     public sealed class CultMeshOperationBindingRecord
     {
         /// <summary>Creates an operation binding record.</summary>
+        [SerializationConstructor]
         public CultMeshOperationBindingRecord(
             string? operationId = null,
             string? label = null,
@@ -3318,19 +3324,19 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Gets the semantic CultMesh operation id.</summary>
-        public string OperationId { get; }
+        [Key(0)] public string OperationId { get; }
 
         /// <summary>Gets the human-facing command label.</summary>
-        public string Label { get; }
+        [Key(1)] public string Label { get; }
 
         /// <summary>Gets the optional request schema id for the operation.</summary>
-        public string SchemaId { get; }
+        [Key(2)] public string SchemaId { get; }
 
         /// <summary>Gets the flattened route kind.</summary>
-        public string RouteKind { get; }
+        [Key(3)] public string RouteKind { get; }
 
         /// <summary>Gets the flattened route description.</summary>
-        public string RouteDescription { get; }
+        [Key(4)] public string RouteDescription { get; }
 
         /// <summary>Creates transport-friendly fields from an operation binding descriptor.</summary>
         public static CultMeshOperationBindingRecord FromBinding(CultMeshOperationBindingDescriptor? binding)
