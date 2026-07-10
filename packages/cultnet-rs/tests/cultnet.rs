@@ -992,6 +992,8 @@ fn rudp_session_skips_control_packets_while_ordering_schema_payloads() -> Result
     let first = sender.send("schema", b"first".to_vec(), options.clone())?;
     let control = sender.create_ack();
     let second = sender.send("schema", b"second".to_vec(), options)?;
+    assert_eq!(control.sequence, 0);
+    assert_eq!(second.sequence, first.sequence + 1);
 
     assert_eq!(
         receiver

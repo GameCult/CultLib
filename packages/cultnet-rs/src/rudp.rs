@@ -359,7 +359,9 @@ impl CultNetRudpSession {
         if packet.packet_type == CultNetRudpPacketType::Ack
             || packet.packet_type == CultNetRudpPacketType::Pong
         {
-            self.remember_received(packet.sequence);
+            if packet.packet_type == CultNetRudpPacketType::Pong {
+                self.remember_received(packet.sequence);
+            }
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
@@ -437,14 +439,22 @@ impl CultNetRudpSession {
     }
 
     pub fn create_ack(&mut self) -> CultNetRudpPacket {
-        self.create_packet(
-            CultNetRudpPacketType::Ack,
-            "control",
-            Vec::new(),
-            false,
-            false,
-            false,
-        )
+        let (ack, ack_mask) = self.ack_state();
+        CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Ack,
+            connection_id: self.connection_id,
+            sequence: 0,
+            ack,
+            ack_mask,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        }
     }
 
     pub fn create_ping(&mut self, payload: Vec<u8>) -> CultNetRudpPacket {
