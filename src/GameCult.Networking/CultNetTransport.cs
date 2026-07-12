@@ -889,7 +889,7 @@ namespace GameCult.Networking
         private uint _nextSequence;
         private ushort _nextFragmentId = 1;
         private readonly int? _maxPendingReliablePackets;
-        private bool _connected;
+        private volatile bool _connected;
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
