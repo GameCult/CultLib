@@ -150,6 +150,24 @@ namespace GameCult.Mesh
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
+            var documents = await ReadManyAsync<TDocument>(endpointId, new[] { recordKey }, cancellationToken)
+                .ConfigureAwait(false);
+            return documents.FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
+        }
+
+        /// <summary>Reads typed records once in one request through the reusable document session.</summary>
+        public async Task<IReadOnlyList<TDocument>> ReadManyAsync<TDocument>(
+            string endpointId,
+            IReadOnlyList<string> recordKeys,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (recordKeys == null || recordKeys.Count == 0 || recordKeys.Any(string.IsNullOrWhiteSpace))
+                throw new ArgumentException("At least one non-empty record key is required.", nameof(recordKeys));
             var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
             var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
             using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
@@ -159,13 +177,10 @@ namespace GameCult.Mesh
                     networkRegistry,
                     cancellationToken)
                 .ConfigureAwait(false);
-            var documents = await snapshot.FetchDocumentsAsync<TDocument>(
-                    recordKeys: new[] { recordKey },
+            return await snapshot.FetchDocumentsAsync<TDocument>(
+                    recordKeys: recordKeys,
                     schemaIds: new[] { cacheRegistry.GetRequired<TDocument>().SchemaId })
                 .ConfigureAwait(false);
-            return documents.FirstOrDefault()
-                ?? throw new InvalidOperationException(
-                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
         }
 
         public void Dispose()
