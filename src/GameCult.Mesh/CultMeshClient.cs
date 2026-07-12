@@ -140,6 +140,34 @@ namespace GameCult.Mesh
             }
         }
 
+        /// <summary>Reads one typed record once through the reusable document session.</summary>
+        public async Task<TDocument> ReadAsync<TDocument>(
+            string endpointId,
+            string recordKey,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
+            var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
+            var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
+            using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
+                    _sessions,
+                    CultMeshEndpointId.Parse(endpointId),
+                    new CultMeshSnapshotRequestOptions(),
+                    networkRegistry,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var documents = await snapshot.FetchDocumentsAsync<TDocument>(
+                    recordKeys: new[] { recordKey },
+                    schemaIds: new[] { cacheRegistry.GetRequired<TDocument>().SchemaId })
+                .ConfigureAwait(false);
+            return documents.FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
