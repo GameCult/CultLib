@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -2819,6 +2820,39 @@ namespace GameCult.Networking.Tests
             Assert.That(timeline[1].ReasonCode, Is.EqualTo("timeout"));
             Assert.That(timeline[1].SourceId, Is.EqualTo("test-bootstrap"));
             Assert.That(timeline[1].LibraryVersion, Is.Not.Empty);
+        }
+
+        [Test]
+        public async Task CultMeshVerseDiscoveryClient_CompatibilityDiscoveryKeepsGoodConcurrentSource()
+        {
+            var clients = new ConcurrentQueue<ICultNetSchemaClient>();
+            clients.Enqueue(new NeverConnectedSchemaClient());
+            clients.Enqueue(new CapturingSchemaClient(message =>
+            {
+                var request = (CultMeshVerseCatalogRequestMessage)message;
+                return new CultMeshVerseCatalogResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    Verses = [new CultMeshVerseDescriptor(
+                        "aetheria", "Aetheria", CultMeshVerseAuthorityModel.OperatorCluster,
+                        new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+                        discoveryEndpoints: ["rudp://aetheria:3076"]).ToMessage()]
+                };
+            }));
+            var client = new CultMeshVerseDiscoveryClient(new CultMeshVerseDiscoveryClientOptions
+            {
+                CreateClient = () => clients.TryDequeue(out var next) ? next : throw new InvalidOperationException("Unexpected client."),
+                Clock = new ManualCultMeshClock(new DateTimeOffset(2026, 7, 12, 18, 0, 0, TimeSpan.Zero)),
+                ConnectTimeout = TimeSpan.FromMilliseconds(50)
+            });
+            using var catalog = new CultMeshVerseCatalog();
+
+            var count = await client.DiscoverAsync(
+                catalog,
+                new[] { "rudp://dead.example.test:4075", "rudp://good.example.test:4075" });
+
+            Assert.That(count, Is.EqualTo(1));
+            Assert.That(catalog.Verses.Single().VerseId, Is.EqualTo("aetheria"));
         }
 
         [Test]

@@ -295,6 +295,55 @@ retain an independent endpoint loop or catalog opinion.
 - A poisoned or unsigned observation cannot override an accepted signed
   candidate.
 
+### Phase 1 Body Map
+
+**Owner:** `CultMeshDiscoveryService` owns current candidate observations,
+freshness, source failures, positive/negative expiry, and shared in-flight
+lookup work for a stable identity plus constraints.
+
+**Inputs:** `ICultMeshLookupSource` observations, injected clock, optional
+`ICultMeshDiscoveryStore`, query identity/Verse constraints, and caller-local
+cancellation.
+
+**Outputs:** watchable `CultMeshDiscoveryState` projections with fresh,
+degraded, stale, or unavailable status; persisted
+`gamecult.mesh.discovery_state.v1` last-known-good documents; typed diagnostic
+events.
+
+**Derived state:** failed-source lists, retry-after time, candidate ordering,
+and legacy `CultMeshVerseCatalog` contents. The catalog is no longer a lookup
+writer.
+
+**Forbidden writers:** lookup sources cannot replace the candidate set, caller
+cancellation cannot cancel shared lookup work, and rejected observations cannot
+override accepted candidates.
+
+**Shared paths:** direct service callers and compatibility `DiscoverAsync`
+both use concurrent source lookup and the same freshness merge. Compatibility
+projects the service result into the old catalog only after resolution.
+
+**Cut line:** sequential fail-fast endpoint lookup and per-response catalog
+mutation have been removed from Verse discovery. Physical endpoint lookup
+remains available only as a compatibility source observation.
+
+**State transition:** restart loads the typed CultCache discovery document.
+Expired candidates remain inspectable as stale; unavailable results retain a
+bounded negative expiry before sources are queried again.
+
+**Compatibility inventory:** `AetheriaRuntimeVerseDiscovery` remains the only
+known caller of `DiscoverAsync(catalog, endpoints)`. It receives the service
+projection now and should migrate to watching `CultMeshDiscoveryState` during
+the Phase 2 Aetheria session migration.
+
+**Rollback:** revert the service, store document, and compatibility delegation
+as one unit. Do not run sequential catalog mutation alongside service-owned
+resolution.
+
+**Proof:** Mesh tests cover concurrent good/dead sources, shared in-flight work,
+caller-local cancellation, negative expiry, signed precedence, stale-on-error,
+public state watches, and CultCache restart reconstruction. Networking tests
+prove the compatibility method retains a good concurrent source.
+
 ## Phase 2: Long-Lived Sessions
 
 ### Cut first
