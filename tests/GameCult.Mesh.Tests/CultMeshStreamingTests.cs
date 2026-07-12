@@ -2675,6 +2675,26 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotHelpers_SurfaceBackgroundClientFailureWhileConnecting()
+    {
+        var options = new CultMeshSnapshotRequestOptions
+        {
+            ConnectTimeout = TimeSpan.FromSeconds(30),
+            CreateClient = () => new FailedBackgroundSchemaClient(
+                new FormatException("malformed handshake"),
+                connected: false)
+        };
+
+        Func<Task> act = async () => await CultMesh.FetchSnapshotAsync(
+            "rudp://127.0.0.1:3075",
+            options);
+
+        var failure = await act.Should().ThrowAsync<InvalidOperationException>();
+        failure.Which.InnerException.Should().BeOfType<FormatException>();
+        failure.Which.Message.Should().Contain("connecting");
+    }
+
+    [Test]
     public async Task SnapshotHelpers_DecodeSameSchemaAliasFromForeignSchemaId()
     {
         var key = new CultRecordKey("mesh-note:snapshot-alias-foreign-schema");
@@ -3838,15 +3858,18 @@ internal sealed class MeshSnapshotSchemaClient : ICultNetSchemaClient
 
 internal sealed class FailedBackgroundSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
 {
-    public FailedBackgroundSchemaClient(Exception error)
+    private readonly bool _connected;
+
+    public FailedBackgroundSchemaClient(Exception error, bool connected = true)
     {
+        _connected = connected;
         BackgroundFailure = Task.FromResult(error);
     }
 
     public bool Connected { get; private set; }
     public Task<Exception> BackgroundFailure { get; }
 
-    public void Connect(string host, int port) => Connected = true;
+    public void Connect(string host, int port) => Connected = _connected;
 
     public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
     {

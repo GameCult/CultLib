@@ -764,7 +764,11 @@ namespace GameCult.Mesh
 
             var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
             client.Connect(host, port);
-            await WaitForSnapshotClientConnectionAsync(client, endpoint, resolvedOptions.ConnectTimeout)
+            await WaitForSnapshotClientConnectionAsync(
+                    client,
+                    endpoint,
+                    resolvedOptions.ConnectTimeout,
+                    (client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                 .ConfigureAwait(false);
             client.SendCultNet(new CultNetSnapshotRequestMessage
             {
@@ -871,11 +875,19 @@ namespace GameCult.Mesh
         internal static async Task WaitForSnapshotClientConnectionAsync(
             ICultNetSchemaClient client,
             string endpoint,
-            TimeSpan timeout)
+            TimeSpan timeout,
+            Task<Exception>? backgroundFailure = null)
         {
             var deadline = DateTimeOffset.UtcNow + timeout;
             while (!client.Connected)
             {
+                if (backgroundFailure?.IsCompleted == true)
+                {
+                    var error = await backgroundFailure.ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        $"CultNet snapshot client failed while connecting to {endpoint}.",
+                        error);
+                }
                 if (DateTimeOffset.UtcNow >= deadline)
                     throw new TimeoutException($"Timed out connecting to CultNet snapshot endpoint {endpoint}.");
 
