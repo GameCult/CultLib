@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using GameCult.Caching;
 using GameCult.Networking;
+using R3;
 
 namespace GameCult.Mesh
 {
@@ -31,6 +34,8 @@ namespace GameCult.Mesh
     {
         private readonly CultMeshDiscoveryService _discovery;
         private readonly CultMeshSessionManager _sessions;
+        private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _documents = new(StringComparer.Ordinal);
+        private readonly ConcurrentBag<IDisposable> _documentResources = new();
         private bool _disposed;
 
         public CultMeshClient(CultMeshClientOptions options)
@@ -81,10 +86,39 @@ namespace GameCult.Mesh
             return _sessions.ConnectAsync(endpointId, protocol, cancellationToken);
         }
 
+        /// <summary>Opens one live typed document by stable provider identity and record key.</summary>
+        public async Task<CultMeshDocumentHandle<TDocument>> DocumentAsync<TDocument>(
+            string endpointId,
+            string recordKey,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
+            var key = endpointId.Trim() + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + recordKey.Trim();
+            var lazy = _documents.GetOrAdd(key, _ => new Lazy<Task<object>>(
+                async () => await OpenDocumentAsync<TDocument>(endpointId.Trim(), recordKey.Trim()).ConfigureAwait(false),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+            try
+            {
+                var binding = (RemoteDocumentBinding<TDocument>)await AwaitForCallerAsync(lazy.Value, cancellationToken)
+                    .ConfigureAwait(false);
+                return binding.Handle;
+            }
+            catch
+            {
+                _documents.TryRemove(key, out _);
+                throw;
+            }
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            foreach (var resource in _documentResources) resource.Dispose();
+            _documents.Clear();
             _sessions.Dispose();
             _discovery.Dispose();
         }
@@ -92,6 +126,102 @@ namespace GameCult.Mesh
         private void ThrowIfDisposed()
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultMeshClient));
+        }
+
+        private async Task<object> OpenDocumentAsync<TDocument>(string endpointId, string recordKey)
+            where TDocument : class
+        {
+            var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
+            var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey);
+            try
+            {
+                await binding.StartAsync().ConfigureAwait(false);
+                _documentResources.Add(binding);
+                return binding;
+            }
+            catch
+            {
+                binding.Dispose();
+                throw;
+            }
+        }
+
+        private static async Task<T> AwaitForCallerAsync<T>(Task<T> shared, CancellationToken cancellationToken)
+        {
+            if (!cancellationToken.CanBeCanceled) return await shared.ConfigureAwait(false);
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using (cancellationToken.Register(() => cancelled.TrySetResult(true)))
+            {
+                if (await Task.WhenAny(shared, cancelled.Task).ConfigureAwait(false) != shared)
+                    throw new OperationCanceledException(cancellationToken);
+            }
+            return await shared.ConfigureAwait(false);
+        }
+
+        private sealed class RemoteDocumentBinding<TDocument> : IDisposable where TDocument : class
+        {
+            private readonly CultMeshSession _session;
+            private readonly string _recordKey;
+            private readonly string _subscriptionId;
+            private readonly CultCache _cache;
+            private readonly CultNetDatabaseSubscriptionClient _subscription;
+            private readonly SemaphoreSlim _subscribeGate = new(1, 1);
+            private IDisposable? _stateWatch;
+            private bool _disposed;
+
+            public RemoteDocumentBinding(CultMeshSession session, string endpointId, string recordKey)
+            {
+                _session = session;
+                _recordKey = recordKey;
+                _subscriptionId = "cultmesh-document:" + endpointId + ":" + recordKey;
+                var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
+                var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
+                _cache = new CultCache(cacheRegistry);
+                _subscription = new CultNetDatabaseSubscriptionClient(session.OpenSchemaClient(), _cache, networkRegistry);
+                Handle = CultMesh.Document<TDocument>(
+                    _cache,
+                    new CultRecordKey(recordKey),
+                    CultMesh.Verse(endpointId, "cultmesh-client").Context,
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, endpointId));
+            }
+
+            public CultMeshDocumentHandle<TDocument> Handle { get; }
+
+            public async Task StartAsync()
+            {
+                await SubscribeAsync().ConfigureAwait(false);
+                _stateWatch = _session.WatchState()
+                    .Where(state => state.Status == CultMeshSessionStatus.Online)
+                    .Subscribe(state => { _ = SubscribeAsync(); });
+            }
+
+            private async Task SubscribeAsync()
+            {
+                await _subscribeGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (_disposed) return;
+                    await _subscription.SubscribeAsync(
+                        _subscriptionId,
+                        recordKeys: new[] { _recordKey },
+                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    _subscribeGate.Release();
+                }
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _stateWatch?.Dispose();
+                _subscription.Dispose();
+                _cache.Dispose();
+                _subscribeGate.Dispose();
+            }
         }
 
         private sealed class RendezvousLookupSource : ICultMeshLookupSource

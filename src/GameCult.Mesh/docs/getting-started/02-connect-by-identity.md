@@ -12,21 +12,28 @@ using var mesh = new CultMeshClient(new CultMeshClientOptions
     RendezvousEndpoints = new[] { "rudp://odin.gamecult.net:3076" }
 });
 
+var pilotSurface = await mesh.DocumentAsync<EveSurfaceDocument>(
+    "aetheria.daemon",
+    "eve:surface:aetheria.pilot",
+    cancellationToken);
+
+using var surfaceWatch = pilotSurface.Watch().Subscribe(Render);
+```
+
+Keep `mesh` for the application lifetime. The document handle is stable: when
+Odin advertises a new physical route after a partition, CultMesh migrates the
+session, restores the server-side subscription, refreshes the typed snapshot,
+and continues the same watch.
+
+Open a session directly only when implementing infrastructure that needs
+protocol-level state or diagnostics:
+
+```csharp
 var session = await mesh.ConnectAsync(
     "aetheria.daemon",
     CultMeshProtocols.Documents,
     cancellationToken);
 
-using var client = session.OpenSchemaClient();
-```
-
-Keep `mesh` for the application lifetime. `session` is the logical connection:
-when Odin advertises a new physical route after a partition, the same session
-migrates and retains its typed handler registrations.
-
-Watch connection state for presentation and diagnostics:
-
-```csharp
 using var stateWatch = session.WatchState().Subscribe(state =>
     Console.WriteLine($"{state.Status}: {state.Path?.Endpoint}"));
 ```
