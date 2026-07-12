@@ -105,7 +105,8 @@ namespace GameCult.Mesh
                 await CultMesh.WaitForSnapshotClientConnectionAsync(
                         _client,
                         _endpoint,
-                        _defaults.ConnectTimeout)
+                        _defaults.ConnectTimeout,
+                        (_client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                     .ConfigureAwait(false);
                 var options = CultMesh.CloneSnapshotRequestOptions(_defaults);
                 options.SchemaIds = schemaIds ?? options.SchemaIds;
@@ -130,7 +131,8 @@ namespace GameCult.Mesh
                         completion.Task,
                         _endpoint,
                         options,
-                        messageId)
+                        messageId,
+                        (_client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                     .ConfigureAwait(false);
             }
             finally
