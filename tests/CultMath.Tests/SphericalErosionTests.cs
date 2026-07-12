@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace CultMath.Tests;
 
 public sealed class SphericalErosionTests

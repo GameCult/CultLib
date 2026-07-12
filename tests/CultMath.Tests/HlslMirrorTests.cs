@@ -7,9 +7,20 @@ public sealed class HlslMirrorTests
     [Fact]
     public void HlslMirrorPublishesSphericalErosionKernel()
     {
-        var source = File.ReadAllText(FindHlslMirror());
+        var source = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "shaders", "CultMath.hlsl"));
         Assert.Contains("cultmath_spherical_erosion", source);
         Assert.Contains("CultMathSphericalErosionParameters", source);
+    }
+
+    [Fact]
+    public void HlslMirrorPublishesFaithfulAdvancedErosionKernel()
+    {
+        var mirror = Path.Combine(GetRepositoryRoot(), "shaders", "CultMath.hlsl");
+        var source = File.ReadAllText(mirror);
+        Assert.Contains("AdvancedErosionFilter.hlsl", source);
+        var advanced = File.ReadAllText(Path.Combine(Path.GetDirectoryName(mirror)!, "AdvancedErosionFilter.hlsl"));
+        Assert.Contains("cultmath_phacelle_noise", advanced);
+        Assert.Contains("cultmath_advanced_erosion_filter", advanced);
     }
 
     [Fact]

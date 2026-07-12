@@ -66,6 +66,11 @@ local `AetheriaMath` surface. The value-noise family follows public shader
 literature from Inigo Quilez's noise and mini-spline articles, expressed in
 CultMath names with tests instead of copied project-local helper drift.
 
+The advanced erosion filter is an MPL-2.0 adaptation of Rune Skovbo Johansen's
+published filter. Its faithful planar core is isolated in
+`AdvancedErosionFilter.cs` and `AdvancedErosionFilter.hlsl`; spherical mapping
+is a separate CultMath concern. See `THIRD-PARTY-NOTICES.md`.
+
 ## Build
 
 ```powershell

@@ -263,6 +263,8 @@ float cultmath_value_noise_texture_bicubic(Texture2D<float> noise_texture, Sampl
     return cultmath_catmullrom(row0, row1, row2, row3, local.y);
 }
 
+#include "AdvancedErosionFilter.hlsl"
+
 struct CultMathSphericalErosionParameters
 {
     float frequency; float amplitude; float lacunarity; float gain;
