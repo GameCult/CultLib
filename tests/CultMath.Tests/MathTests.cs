@@ -23,12 +23,119 @@ public sealed class MathTests
     [Fact]
     public void VectorConstructorsAcceptLowerDimensionVectors()
     {
+        Assert.Equal(new int2(1, 2), math.int2(1, 2));
         Assert.Equal(new float2(1.0f, 2.0f), math.float2(1.0f, 2.0f));
         Assert.Equal(new float3(1.0f, 1.0f, 1.0f), math.float3(1.0f));
         Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), math.float4(new float3(1.0f, 2.0f, 3.0f), 4.0f));
         Assert.Equal(new float3(1.0f, 2.0f, 3.0f), new float3(new float2(1.0f, 2.0f), 3.0f));
         Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), new float4(new float2(1.0f, 2.0f), 3.0f, 4.0f));
         Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), new float4(new float3(1.0f, 2.0f, 3.0f), 4.0f));
+    }
+
+    [Fact]
+    public void RectNormalizesBoundsAndContainsPoints()
+    {
+        var viewport = math.rect(10.0f, 20.0f, -5.0f, -2.0f);
+
+        Assert.Equal(new float2(-5.0f, -2.0f), viewport.min);
+        Assert.Equal(new float2(10.0f, 20.0f), viewport.max);
+        Assert.Equal(new float2(15.0f, 22.0f), viewport.size);
+        Assert.Equal(new float2(2.5f, 9.0f), viewport.center);
+        Assert.True(viewport.Contains(new float2(0.0f, 0.0f)));
+        Assert.False(viewport.Contains(new float2(11.0f, 0.0f)));
+    }
+
+    [Fact]
+    public void VectorsExposeCommonReadOnlySwizzles()
+    {
+        Assert.Equal(new float3(2.0f, 3.0f, 1.0f), new float3(1.0f, 2.0f, 3.0f).yzx);
+        Assert.Equal(new float3(3.0f, 2.0f, 1.0f), new float3(1.0f, 2.0f, 3.0f).zyx);
+        Assert.Equal(new float2(3.0f, 2.0f), new float3(1.0f, 2.0f, 3.0f).zy);
+        Assert.Equal(new float3(1.0f, 2.0f, 4.0f), new float4(1.0f, 2.0f, 3.0f, 4.0f).xyw);
+        Assert.Equal(new float3(2.0f, 3.0f, 1.0f), new float4(1.0f, 2.0f, 3.0f, 4.0f).yzx);
+        Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), new float4(1.0f, new float3(2.0f, 3.0f, 4.0f)));
+        Assert.Equal(new float4(1.0f, 2.0f, 3.0f, 4.0f), math.float4(1.0f, new float3(2.0f, 3.0f, 4.0f)));
+    }
+
+    [Fact]
+    public void VectorsSupportUnityStyleFieldAndSwizzleMutation()
+    {
+        var position = new float3(1.0f, 2.0f, 3.0f);
+        position.y = 5.0f;
+        position.xz = new float2(8.0f, 13.0f);
+
+        Assert.Equal(new float3(8.0f, 5.0f, 13.0f), position);
+
+        var bounds = new float4(1.0f, 2.0f, 3.0f, 4.0f);
+        bounds.xy = new float2(-1.0f, -2.0f);
+
+        Assert.Equal(new float4(-1.0f, -2.0f, 3.0f, 4.0f), bounds);
+    }
+
+    [Fact]
+    public void DoubleVectorsSupportDampedMath()
+    {
+        var value = new double3(1.0, 2.0, 3.0);
+        value.xy = new double2(5.0, 8.0);
+
+        Assert.Equal(new double3(5.0, 8.0, 3.0), value);
+        Assert.Equal(new double2(Math.Exp(-2.0), Math.Exp(-4.0)), math.exp(new double2(-2.0, -4.0)));
+        Assert.Equal(new double3(2.0, 4.0, 6.0), math.lerp(new double3(0.0, 0.0, 0.0), new double3(4.0, 8.0, 12.0), new double3(0.5, 0.5, 0.5)));
+    }
+
+    [Fact]
+    public void Int2SupportsGridArithmeticAndFloatPromotion()
+    {
+        var cell = new int2(2, 3);
+
+        Assert.Equal(new int2(3, 5), cell + new int2(1, 2));
+        Assert.Equal(new int2(4, 6), cell * new int2(2, 2));
+        Assert.Equal(3, cell[1]);
+
+        float2 promoted = cell;
+        Assert.Equal(new float2(2.0f, 3.0f), promoted);
+    }
+
+    [Fact]
+    public void Bool2SupportsHullGridStyleStorage()
+    {
+        bool2 conductivity = true;
+
+        conductivity.y = false;
+
+        Assert.True(conductivity.x);
+        Assert.False(conductivity[1]);
+        Assert.Equal(new bool2(false, true), math.bool2(false, true));
+    }
+
+    [Fact]
+    public void QuaternionLookRotationProducesUnitOrientation()
+    {
+        var rotation = quaternion.LookRotation(new float3(0.0f, 0.0f, 1.0f), new float3(0.0f, 1.0f, 0.0f));
+
+        Assert.Equal(quaternion.identity, rotation);
+        Assert.Equal(1.0f, math.length((float4)quaternion.LookRotation(new float3(1.0f, 0.0f, 0.0f), new float3(0.0f, 1.0f, 0.0f))), precision: 5);
+    }
+
+    [Fact]
+    public void RandomIsDeterministicAndUnityShaped()
+    {
+        var a = new Random(1234);
+        var b = new Random(1234);
+
+        Assert.Equal(a.NextUInt(), b.NextUInt());
+        Assert.Equal(a.NextFloat(), b.NextFloat());
+
+        var bounded = a.NextFloat(-2.0f, 4.0f);
+        Assert.True(bounded >= -2.0f && bounded < 4.0f);
+
+        var direction = a.NextFloat2Direction();
+        Assert.Equal(1.0f, math.length(direction), precision: 5);
+
+        var point = a.NextFloat3(new float3(-1.0f, -2.0f, -3.0f), new float3(1.0f, 2.0f, 3.0f));
+        Assert.True(point.x >= -1.0f && point.x < 1.0f);
+        Assert.True(point.y >= -2.0f && point.y < 2.0f);
+        Assert.True(point.z >= -3.0f && point.z < 3.0f);
     }
 
     [Fact]
@@ -55,12 +162,39 @@ public sealed class MathTests
         Assert.Equal(-1.0f, math.cos(math.PI), precision: 5);
         Assert.Equal(1.0f, math.tan(math.PI * 0.25f), precision: 5);
         Assert.Equal(math.HALF_PI, math.atan2(1.0f, 0.0f), precision: 5);
+        Assert.Equal(2, math.min(2, 5));
+        Assert.Equal(5, math.max(2, 5));
+        Assert.True(math.isinf(float.PositiveInfinity));
+    }
+
+    [Fact]
+    public void SignIsComponentWiseForSimulationVectors()
+    {
+        Assert.Equal(-1.0f, math.sign(-12.0f));
+        Assert.Equal(0.0f, math.sign(0.0f));
+        Assert.Equal(1.0f, math.sign(12.0f));
+        Assert.Equal(new float3(-1.0f, 0.0f, 1.0f), math.sign(new float3(-2.0f, 0.0f, 4.0f)));
+    }
+
+    [Fact]
+    public void RotateTurnsFloat2CounterClockwiseInRadians()
+    {
+        var rotated = math.rotate(new float2(1.0f, 0.0f), math.HALF_PI);
+
+        Assert.Equal(0.0f, rotated.x, precision: 5);
+        Assert.Equal(1.0f, rotated.y, precision: 5);
+
+        var rotatedDegrees = math.rotate_degrees(new float2(0.0f, 1.0f), 90.0f);
+        Assert.Equal(-1.0f, rotatedDegrees.x, precision: 5);
+        Assert.Equal(0.0f, rotatedDegrees.y, precision: 5);
     }
 
     [Fact]
     public void AetheriaPrimitivesRemainSmallAndDeterministic()
     {
         Assert.Equal(6.0f, math.csum(new float3(1.0f, 2.0f, 3.0f)));
+        Assert.Equal(0.25f, math.unlerp(10.0f, 30.0f, 15.0f));
+        Assert.Equal(new float2(0.25f, 0.75f), math.unlerp(new float2(10.0f, 10.0f), new float2(30.0f, 30.0f), new float2(15.0f, 25.0f)));
         Assert.Equal(MathF.Exp(-2.0f), math.decay(1.0f, 2.0f, 1.0f), precision: 5);
         Assert.Equal(1.0f - MathF.Exp(-2.0f), math.damp(0.0f, 1.0f, 2.0f, 1.0f), precision: 5);
 

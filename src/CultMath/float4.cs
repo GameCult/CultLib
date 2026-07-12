@@ -1,6 +1,8 @@
+using System;
+
 namespace CultMath;
 
-public readonly record struct float4(float x, float y, float z, float w)
+public record struct float4(float x, float y, float z, float w)
 {
     public static readonly float4 zero = new(0.0f, 0.0f, 0.0f, 0.0f);
     public static readonly float4 one = new(1.0f, 1.0f, 1.0f, 1.0f);
@@ -15,7 +17,22 @@ public readonly record struct float4(float x, float y, float z, float w)
     {
     }
 
-    public float2 xy => new(x, y);
+    public float4(float x, float3 yzw)
+        : this(x, yzw.x, yzw.y, yzw.z)
+    {
+    }
+
+    public float2 xy
+    {
+        get => new(x, y);
+        set
+        {
+            x = value.x;
+            y = value.y;
+        }
+    }
+    public float3 xyw => new(x, y, w);
+    public float3 yzx => new(y, z, x);
     public float3 xyz => new(x, y, z);
 
     public float this[int index] => index switch

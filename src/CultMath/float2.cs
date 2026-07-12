@@ -1,6 +1,8 @@
+using System;
+
 namespace CultMath;
 
-public readonly record struct float2(float x, float y)
+public record struct float2(float x, float y)
 {
     public static readonly float2 zero = new(0.0f, 0.0f);
     public static readonly float2 one = new(1.0f, 1.0f);

@@ -1,6 +1,8 @@
+using System;
+
 namespace CultMath;
 
-public readonly record struct float3(float x, float y, float z)
+public record struct float3(float x, float y, float z)
 {
     public static readonly float3 zero = new(0.0f, 0.0f, 0.0f);
     public static readonly float3 one = new(1.0f, 1.0f, 1.0f);
@@ -10,9 +12,48 @@ public readonly record struct float3(float x, float y, float z)
     {
     }
 
-    public float2 xy => new(x, y);
-    public float2 xz => new(x, z);
-    public float2 yz => new(y, z);
+    public float2 xy
+    {
+        get => new(x, y);
+        set
+        {
+            x = value.x;
+            y = value.y;
+        }
+    }
+
+    public float2 xz
+    {
+        get => new(x, z);
+        set
+        {
+            x = value.x;
+            z = value.y;
+        }
+    }
+
+    public float2 yz
+    {
+        get => new(y, z);
+        set
+        {
+            y = value.x;
+            z = value.y;
+        }
+    }
+
+    public float2 zy
+    {
+        get => new(z, y);
+        set
+        {
+            z = value.x;
+            y = value.y;
+        }
+    }
+
+    public float3 yzx => new(y, z, x);
+    public float3 zyx => new(z, y, x);
 
     public float this[int index] => index switch
     {

@@ -1,3 +1,4 @@
+using System;
 using System.Numerics;
 
 namespace CultMath;
@@ -39,10 +40,19 @@ public static class BatchMath
 
         var i = 0;
         var lanes = Vector<float>.Count;
+        var pxBuffer = new float[lanes];
+        var pyBuffer = new float[lanes];
+        var axBuffer = new float[lanes];
+        var ayBuffer = new float[lanes];
         for (; i <= positionX.Length - lanes; i += lanes)
         {
-            var px = new Vector<float>(positionX.Slice(i, lanes));
-            var py = new Vector<float>(positionY.Slice(i, lanes));
+            CopySpanToArray(positionX.Slice(i, lanes), pxBuffer);
+            CopySpanToArray(positionY.Slice(i, lanes), pyBuffer);
+            CopySpanToArray(accelerationX.Slice(i, lanes), axBuffer);
+            CopySpanToArray(accelerationY.Slice(i, lanes), ayBuffer);
+
+            var px = new Vector<float>(pxBuffer);
+            var py = new Vector<float>(pyBuffer);
             var dx = centerXVector - px;
             var dy = centerYVector - py;
             var distanceSquared = Vector.Max(dx * dx + dy * dy, minimumDistanceSquared);
@@ -53,8 +63,10 @@ public static class BatchMath
             var ax = Vector.ConditionalSelect(inRange, dx / distance * magnitude, zero);
             var ay = Vector.ConditionalSelect(inRange, dy / distance * magnitude, zero);
 
-            (new Vector<float>(accelerationX.Slice(i, lanes)) + ax).CopyTo(accelerationX.Slice(i, lanes));
-            (new Vector<float>(accelerationY.Slice(i, lanes)) + ay).CopyTo(accelerationY.Slice(i, lanes));
+            (new Vector<float>(axBuffer) + ax).CopyTo(axBuffer);
+            (new Vector<float>(ayBuffer) + ay).CopyTo(ayBuffer);
+            CopyArrayToSpan(axBuffer, accelerationX.Slice(i, lanes));
+            CopyArrayToSpan(ayBuffer, accelerationY.Slice(i, lanes));
         }
 
         for (; i < positionX.Length; i++)
@@ -72,6 +84,35 @@ public static class BatchMath
             var magnitude = strength * falloff;
             accelerationX[i] += dx / distance * magnitude;
             accelerationY[i] += dy / distance * magnitude;
+        }
+    }
+
+    public static void AddRadialFalloffAcceleration2D(
+        ReadOnlySpan<float2> positions,
+        float2 center,
+        float strength,
+        float radius,
+        Span<float2> acceleration)
+    {
+        ValidateEqualLengths(positions.Length, acceleration.Length);
+
+        if (radius <= 0.0f || strength == 0.0f || positions.Length == 0)
+        {
+            return;
+        }
+
+        for (var i = 0; i < positions.Length; i++)
+        {
+            var delta = center - positions[i];
+            var distanceSquared = MathF.Max(delta.x * delta.x + delta.y * delta.y, MinimumDistanceSquared);
+            var distance = MathF.Sqrt(distanceSquared);
+            if (distance > radius)
+            {
+                continue;
+            }
+
+            var falloff = MathF.Max(0.0f, 1.0f - distance / radius);
+            acceleration[i] += delta / distance * (strength * falloff);
         }
     }
 
@@ -102,25 +143,44 @@ public static class BatchMath
         var delta = new Vector<float>(deltaTime);
         var i = 0;
         var lanes = Vector<float>.Count;
+        var maskBuffer = new float[lanes];
+        var pxBuffer = new float[lanes];
+        var pyBuffer = new float[lanes];
+        var vxBuffer = new float[lanes];
+        var vyBuffer = new float[lanes];
+        var axBuffer = new float[lanes];
+        var ayBuffer = new float[lanes];
         for (; i <= positionX.Length - lanes; i += lanes)
         {
-            var mask = new Vector<float>(dynamicMask.Slice(i, lanes));
-            var vx = new Vector<float>(velocityX.Slice(i, lanes));
-            var vy = new Vector<float>(velocityY.Slice(i, lanes));
-            var px = new Vector<float>(positionX.Slice(i, lanes));
-            var py = new Vector<float>(positionY.Slice(i, lanes));
-            var ax = new Vector<float>(accelerationX.Slice(i, lanes));
-            var ay = new Vector<float>(accelerationY.Slice(i, lanes));
+            CopySpanToArray(dynamicMask.Slice(i, lanes), maskBuffer);
+            CopySpanToArray(velocityX.Slice(i, lanes), vxBuffer);
+            CopySpanToArray(velocityY.Slice(i, lanes), vyBuffer);
+            CopySpanToArray(positionX.Slice(i, lanes), pxBuffer);
+            CopySpanToArray(positionY.Slice(i, lanes), pyBuffer);
+            CopySpanToArray(accelerationX.Slice(i, lanes), axBuffer);
+            CopySpanToArray(accelerationY.Slice(i, lanes), ayBuffer);
+
+            var mask = new Vector<float>(maskBuffer);
+            var vx = new Vector<float>(vxBuffer);
+            var vy = new Vector<float>(vyBuffer);
+            var px = new Vector<float>(pxBuffer);
+            var py = new Vector<float>(pyBuffer);
+            var ax = new Vector<float>(axBuffer);
+            var ay = new Vector<float>(ayBuffer);
 
             vx += ax * delta * mask;
             vy += ay * delta * mask;
             px += vx * delta * mask;
             py += vy * delta * mask;
 
-            vx.CopyTo(velocityX.Slice(i, lanes));
-            vy.CopyTo(velocityY.Slice(i, lanes));
-            px.CopyTo(positionX.Slice(i, lanes));
-            py.CopyTo(positionY.Slice(i, lanes));
+            vx.CopyTo(vxBuffer);
+            vy.CopyTo(vyBuffer);
+            px.CopyTo(pxBuffer);
+            py.CopyTo(pyBuffer);
+            CopyArrayToSpan(vxBuffer, velocityX.Slice(i, lanes));
+            CopyArrayToSpan(vyBuffer, velocityY.Slice(i, lanes));
+            CopyArrayToSpan(pxBuffer, positionX.Slice(i, lanes));
+            CopyArrayToSpan(pyBuffer, positionY.Slice(i, lanes));
         }
 
         for (; i < positionX.Length; i++)
@@ -133,6 +193,28 @@ public static class BatchMath
         }
     }
 
+    public static void IntegrateSemiImplicitEuler2D(
+        float deltaTime,
+        ReadOnlySpan<float> dynamicMask,
+        Span<float2> position,
+        Span<float2> velocity,
+        ReadOnlySpan<float2> acceleration)
+    {
+        if (deltaTime <= 0.0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(deltaTime), "Delta time must be positive.");
+        }
+
+        ValidateEqualLengths(dynamicMask.Length, position.Length, velocity.Length, acceleration.Length);
+
+        for (var i = 0; i < position.Length; i++)
+        {
+            var mask = dynamicMask[i];
+            velocity[i] += acceleration[i] * deltaTime * mask;
+            position[i] += velocity[i] * deltaTime * mask;
+        }
+    }
+
     private static void ValidateEqualLengths(params int[] lengths)
     {
         var length = lengths[0];
@@ -142,6 +224,22 @@ public static class BatchMath
             {
                 throw new ArgumentException("CultMath batch spans must have equal length.");
             }
+        }
+    }
+
+    private static void CopySpanToArray(ReadOnlySpan<float> source, float[] destination)
+    {
+        for (var i = 0; i < source.Length; i++)
+        {
+            destination[i] = source[i];
+        }
+    }
+
+    private static void CopyArrayToSpan(float[] source, Span<float> destination)
+    {
+        for (var i = 0; i < destination.Length; i++)
+        {
+            destination[i] = source[i];
         }
     }
 }

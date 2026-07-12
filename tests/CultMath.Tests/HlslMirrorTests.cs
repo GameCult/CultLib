@@ -5,6 +5,14 @@ namespace CultMath.Tests;
 public sealed class HlslMirrorTests
 {
     [Fact]
+    public void HlslMirrorPublishesSphericalErosionKernel()
+    {
+        var source = File.ReadAllText(FindHlslMirror());
+        Assert.Contains("cultmath_spherical_erosion", source);
+        Assert.Contains("CultMathSphericalErosionParameters", source);
+    }
+
+    [Fact]
     public void HlslMirrorPublishesCultMathPrimitives()
     {
         var include = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "shaders", "CultMath.hlsl"));
@@ -23,6 +31,7 @@ public sealed class HlslMirrorTests
             "cultmath_distance",
             "cultmath_normalize",
             "cultmath_reflect",
+            "cultmath_rotate",
             "cultmath_csum",
             "cultmath_decay",
             "cultmath_damp",

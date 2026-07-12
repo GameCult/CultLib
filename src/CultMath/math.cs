@@ -1,3 +1,5 @@
+using System;
+
 namespace CultMath;
 
 public static class math
@@ -8,13 +10,20 @@ public static class math
 
     public static float2 float2(float x, float y) => new(x, y);
     public static float2 float2(float value) => new(value, value);
+    public static bool2 bool2(bool x, bool y) => new(x, y);
+    public static bool2 bool2(bool value) => new(value, value);
+    public static int2 int2(int x, int y) => new(x, y);
+    public static int2 int2(int value) => new(value, value);
     public static float3 float3(float x, float y, float z) => new(x, y, z);
     public static float3 float3(float2 xy, float z) => new(xy, z);
     public static float3 float3(float value) => new(value, value, value);
     public static float4 float4(float x, float y, float z, float w) => new(x, y, z, w);
     public static float4 float4(float2 xy, float z, float w) => new(xy, z, w);
     public static float4 float4(float3 xyz, float w) => new(xyz, w);
+    public static float4 float4(float x, float3 yzw) => new(x, yzw);
     public static float4 float4(float value) => new(value, value, value, value);
+    public static rect rect(float2 min, float2 max) => new(min, max);
+    public static rect rect(float minX, float minY, float maxX, float maxY) => new(minX, minY, maxX, maxY);
 
     public static float radians(float degrees) => degrees * (PI / 180.0f);
     public static float degrees(float radians) => radians * (180.0f / PI);
@@ -26,15 +35,25 @@ public static class math
     public static float atan(float value) => MathF.Atan(value);
     public static float atan2(float y, float x) => MathF.Atan2(y, x);
     public static float sqrt(float value) => MathF.Sqrt(value);
+    public static float pow(float value, float power) => MathF.Pow(value, power);
+    public static bool isinf(float value) => float.IsInfinity(value);
     public static float exp(float value) => MathF.Exp(value);
+    public static double exp(double value) => Math.Exp(value);
     public static float2 exp(float2 value) => new(exp(value.x), exp(value.y));
     public static float3 exp(float3 value) => new(exp(value.x), exp(value.y), exp(value.z));
     public static float4 exp(float4 value) => new(exp(value.x), exp(value.y), exp(value.z), exp(value.w));
+    public static double2 exp(double2 value) => new(exp(value.x), exp(value.y));
+    public static double3 exp(double3 value) => new(exp(value.x), exp(value.y), exp(value.z));
 
     public static float abs(float value) => MathF.Abs(value);
     public static float2 abs(float2 value) => new(abs(value.x), abs(value.y));
     public static float3 abs(float3 value) => new(abs(value.x), abs(value.y), abs(value.z));
     public static float4 abs(float4 value) => new(abs(value.x), abs(value.y), abs(value.z), abs(value.w));
+
+    public static float sign(float value) => MathF.Sign(value);
+    public static float2 sign(float2 value) => new(sign(value.x), sign(value.y));
+    public static float3 sign(float3 value) => new(sign(value.x), sign(value.y), sign(value.z));
+    public static float4 sign(float4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
 
     public static float floor(float value) => MathF.Floor(value);
     public static float2 floor(float2 value) => new(floor(value.x), floor(value.y));
@@ -52,11 +71,13 @@ public static class math
     public static float4 frac(float4 value) => value - floor(value);
 
     public static float min(float left, float right) => MathF.Min(left, right);
+    public static int min(int left, int right) => Math.Min(left, right);
     public static float2 min(float2 left, float2 right) => new(min(left.x, right.x), min(left.y, right.y));
     public static float3 min(float3 left, float3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
     public static float4 min(float4 left, float4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
 
     public static float max(float left, float right) => MathF.Max(left, right);
+    public static int max(int left, int right) => Math.Max(left, right);
     public static float2 max(float2 left, float2 right) => new(max(left.x, right.x), max(left.y, right.y));
     public static float3 max(float3 left, float3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
     public static float4 max(float4 left, float4 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z), max(left.w, right.w));
@@ -72,9 +93,20 @@ public static class math
     public static float4 saturate(float4 value) => clamp(value, 0.0f, 1.0f);
 
     public static float lerp(float start, float end, float amount) => start + (end - start) * amount;
+    public static double lerp(double start, double end, double amount) => start + (end - start) * amount;
     public static float2 lerp(float2 start, float2 end, float2 amount) => start + (end - start) * amount;
     public static float3 lerp(float3 start, float3 end, float3 amount) => start + (end - start) * amount;
     public static float4 lerp(float4 start, float4 end, float4 amount) => start + (end - start) * amount;
+    public static double2 lerp(double2 start, double2 end, double2 amount) => start + (end - start) * amount;
+    public static double3 lerp(double3 start, double3 end, double3 amount) => start + (end - start) * amount;
+
+    public static float unlerp(float start, float end, float value) => (value - start) / (end - start);
+    public static double unlerp(double start, double end, double value) => (value - start) / (end - start);
+    public static float2 unlerp(float2 start, float2 end, float2 value) => (value - start) / (end - start);
+    public static float3 unlerp(float3 start, float3 end, float3 value) => (value - start) / (end - start);
+    public static float4 unlerp(float4 start, float4 end, float4 value) => (value - start) / (end - start);
+    public static double2 unlerp(double2 start, double2 end, double2 value) => (value - start) / (end - start);
+    public static double3 unlerp(double3 start, double3 end, double3 value) => (value - start) / (end - start);
 
     public static float step(float edge, float value) => value < edge ? 0.0f : 1.0f;
     public static float2 step(float2 edge, float2 value) => new(step(edge.x, value.x), step(edge.y, value.y));
@@ -130,9 +162,29 @@ public static class math
     public static float2 normalize(float2 value) => value / MathF.Max(length(value), 1.0e-20f);
     public static float3 normalize(float3 value) => value / MathF.Max(length(value), 1.0e-20f);
     public static float4 normalize(float4 value) => value / MathF.Max(length(value), 1.0e-20f);
+    public static quaternion normalize(quaternion value)
+    {
+        var length = MathF.Sqrt(value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w);
+        if (length <= 1.0e-20f)
+        {
+            return quaternion.identity;
+        }
+
+        var invLength = 1.0f / length;
+        return new quaternion(value.x * invLength, value.y * invLength, value.z * invLength, value.w * invLength);
+    }
 
     public static float2 reflect(float2 incident, float2 normal) => incident - 2.0f * dot(normal, incident) * normal;
     public static float3 reflect(float3 incident, float3 normal) => incident - 2.0f * dot(normal, incident) * normal;
+
+    public static float2 rotate(float2 value, float radians)
+    {
+        var s = sin(radians);
+        var c = cos(radians);
+        return new float2(value.x * c - value.y * s, value.x * s + value.y * c);
+    }
+
+    public static float2 rotate_degrees(float2 value, float degrees) => rotate(value, radians(degrees));
 
     public static float csum(float2 value) => value.x + value.y;
     public static float csum(float3 value) => value.x + value.y + value.z;
