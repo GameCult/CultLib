@@ -9,13 +9,14 @@ transfer recovery.
 
 The migration preserves CultCache as the typed persistence substrate and
 CultNet as the transport substrate. It moves reliability policy out of callers
-and the broad `CultMesh` convenience facade into five explicit organs:
+and the broad `CultMesh` convenience facade into six explicit organs:
 
 1. discovery control plane
 2. connection and session manager
 3. authority resolver
 4. content transfer scheduler
 5. stream control plane
+6. negotiated body transport
 
 This is an ownership migration, not a new layer wrapped around the existing
 caller-driven machinery. Each phase cuts an obsolete decision path before its
@@ -143,6 +144,33 @@ latest-frame cache must not own stream identity or publisher liveness.
 
 **Demotion:** the current in-process stream catalog becomes a local projection
 and body adapter. It is not the distributed stream registry.
+
+### Negotiated body transport
+
+**Owner:** `CultMeshBodyTransportService` owns representation negotiation and
+the lifetime of transport-specific body access. It does not own body identity,
+publisher authority, content integrity, or application semantics.
+
+**Inputs:** a typed body descriptor, authorized producer lease, consumer
+capabilities, locality evidence, schema/layout support, transport adapters,
+clock, and access policy.
+
+**Outputs:** a read-only body lease by default, bound to one logical body
+identity, schema/layout version, producer epoch, sequence, and negotiated
+transport. Local peers may receive an OS-handle capability token; remote peers
+receive the same typed body through the network representation.
+
+**Derived state:** transport preference, local/remote eligibility, mapped
+region or file-handle lifetime, slot availability, and lease expiry.
+
+**Forbidden writers:** process IDs, virtual addresses, mapping names, OS
+handles, and transport endpoints cannot become logical identity. A successful
+mapping cannot authorize a producer, extend a lease, bless content, or permit a
+consumer to mutate the body.
+
+**Demotion:** shared-memory regions and file mappings are body adapters. They
+do not become a local message bus, alternate discovery plane, or source of
+authority.
 
 ## Shared Public Shape
 
@@ -435,7 +463,92 @@ transient outage, or hand-assemble snapshot options from physical topology.
   state.
 - The old renderer-owned downloader can no longer write the final cache entry.
 
-## Phase 5: Distributed Stream Control
+## Phase 5: Negotiated Zero-Copy Data Plane
+
+CultNet/CultMesh remains the control plane for identity, discovery, schemas,
+capabilities, leases, epochs, liveness, receipts, and body-transport
+negotiation. The existing network representation remains the remote path and
+the fallback whenever local negotiation, handle transfer, schema validation,
+or lease validation fails.
+
+### Cut first
+
+- Stop embedding process-local mapping names, process IDs, virtual addresses,
+  or native handles in logical body identity.
+- Stop local body adapters from interpreting transport access as producer
+  authority or content validity.
+- Do not create a general shared-memory message bus for reactive documents,
+  commands, advertisements, or receipts.
+
+### Body contract
+
+Define one typed shared-body descriptor containing:
+
+- logical body identity
+- schema identity and layout version
+- byte size and logical capacity
+- producer epoch and body sequence
+- access mode
+- synchronization method
+- lease expiry
+- transport kind
+- an opaque OS-handle capability token when negotiated locally
+
+The capability token is scoped, expiring transport material. It is never
+serialized as durable identity. The same descriptor semantics must bind a
+local shared-memory body and its remote network representation.
+
+### Build order
+
+1. Define the transport-neutral typed body descriptor, lease, adapter ports,
+   and validation rules.
+2. Negotiate shared-memory capability and exchange OS handles through an
+   authenticated platform adapter; retain network fallback.
+3. Map immutable CultMesh CDN artifacts as content-addressed, file-backed,
+   read-only bodies keyed by verified hash so processes share OS page cache.
+4. Map fixed-capacity, schema-versioned SoA frame regions using triple
+   buffering or an epoch/sequence protocol. Consumers receive read-only views,
+   detect stale epochs, and never receive raw pointers.
+5. Add local/remote equivalence, fallback, reconnect, crash, corruption, and
+   conformance tests.
+6. Profile copy volume, latency, memory pressure, page-cache reuse, frame
+   drops, and lease contention under real EveUnity/Aetheria workloads.
+7. Decide from measurements whether ordinary local control traffic merits a
+   separate shared-memory lane. Do not build that lane as part of this phase.
+
+### Required invariants
+
+- Only an explicitly authorized producer may publish or advance a body.
+- Consumers are read-only unless a distinct contract explicitly grants write
+  authority.
+- Producer or broker death invalidates leases without requiring cooperative
+  cleanup from the dead process.
+- A producer cannot overwrite a slot while any valid consumer lease protects
+  it.
+- Schema/layout, producer epoch, and sequence mismatches are rejected before
+  bytes are interpreted.
+- Reconnect creates a new validated lease and cannot reinterpret stale mapped
+  memory from an earlier producer epoch.
+- Content hash integrity remains distinct from publisher identity and
+  authority.
+- Negotiation failure is observable and falls back to the network body without
+  changing logical body identity.
+
+### Gate
+
+- Two local consumers map one verified CDN artifact without duplicate process
+  copies and observe identical content identity through the network fallback.
+- An EveUnity consumer reads successive SoA generations without torn frames,
+  raw pointers, or overwrite of a leased slot.
+- Producer crash, lease expiry, schema upgrade, epoch rollover, and reconnect
+  all reject stale mappings before interpretation.
+- A forged handle token, unauthorized producer, writable consumer request, or
+  valid hash from an unauthorized publisher cannot cross its respective
+  authority boundary.
+- Local and remote conformance packs expose the same typed body lifecycle and
+  semantic payload.
+
+## Phase 6: Distributed Stream Control
 
 ### Cut first
 
@@ -465,7 +578,7 @@ transient outage, or hand-assemble snapshot options from physical topology.
 - Local zero-copy and remote fallback paths expose the same stream identity and
   lifecycle.
 
-## Phase 6: Consumer Convergence and API Reduction
+## Phase 7: Consumer Convergence and API Reduction
 
 Migrate consumers in increasing order of operational risk:
 
@@ -501,6 +614,8 @@ cover:
 - typed failure reasons
 - authority decision evidence
 - content transfer progress and verified ranges
+- shared-body identity, schema/layout, epoch/sequence, access, lease, and
+  transport negotiation
 - stream descriptor, publisher epoch, subscription, and gap state
 
 These are typed CultNet/CultMesh documents. JSON is permitted only for schema
@@ -534,6 +649,8 @@ The migration is complete only when:
 - one owner supervises connection reuse, reconnect, failover, and path state
 - peer contact cannot confer authority
 - CDN consumers request verified content instead of implementing chunk loops
+- local CDN and SoA consumers negotiate zero-copy bodies without changing
+  logical identity, authority, or remote behavior
 - stream identity and liveness survive changes in body transport
 - old discovery, session, transfer, and stream decision paths cannot override
   the new owners
