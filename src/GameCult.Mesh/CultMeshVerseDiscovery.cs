@@ -203,7 +203,8 @@ namespace GameCult.Mesh
                 completion.TrySetException(new InvalidOperationException(error.Error)));
 
             client.Connect(host, port);
-            await WaitForConnectionAsync(client, endpoint).ConfigureAwait(false);
+            var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
+            await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
             client.SendCultNet(new CultMeshVerseCatalogRequestMessage
             {
                 MessageId = messageId,
@@ -211,7 +212,7 @@ namespace GameCult.Mesh
                 VerseIds = request?.VerseIds
             });
 
-            return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+            return await WaitForResponseAsync(completion.Task, endpoint, backgroundFailure).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -245,11 +246,21 @@ namespace GameCult.Mesh
                    ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 
-        private async Task WaitForConnectionAsync(ICultNetSchemaClient client, string endpoint)
+        private async Task WaitForConnectionAsync(
+            ICultNetSchemaClient client,
+            string endpoint,
+            Task<Exception>? backgroundFailure)
         {
             var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
             while (!client.Connected)
             {
+                if (backgroundFailure?.IsCompleted == true)
+                {
+                    var error = await backgroundFailure.ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        $"Verse discovery client failed while connecting to {endpoint}.",
+                        error);
+                }
                 if (DateTimeOffset.UtcNow >= deadline)
                 {
                     throw new TimeoutException($"Timed out connecting to Verse discovery endpoint {endpoint}.");
@@ -261,10 +272,20 @@ namespace GameCult.Mesh
 
         private async Task<CultMeshVerseCatalogResponseMessage> WaitForResponseAsync(
             Task<CultMeshVerseCatalogResponseMessage> responseTask,
-            string endpoint)
+            string endpoint,
+            Task<Exception>? backgroundFailure)
         {
             var timeoutTask = Task.Delay(_options.ResponseTimeout);
-            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            var completed = backgroundFailure == null
+                ? await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false)
+                : await Task.WhenAny(responseTask, timeoutTask, backgroundFailure).ConfigureAwait(false);
+            if (completed == backgroundFailure)
+            {
+                var error = await backgroundFailure.ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    $"Verse discovery client failed while waiting for a response from {endpoint}.",
+                    error);
+            }
             if (completed != responseTask)
             {
                 throw new TimeoutException($"Timed out waiting for Verse discovery response from {endpoint}.");
