@@ -45,16 +45,21 @@ namespace GameCult.Networking
         public Task<IReadOnlyList<object>> SubscribeAsync(
             string subscriptionId,
             IEnumerable<string>? recordKeys = null,
-            IEnumerable<string>? schemaIds = null)
+            IEnumerable<string>? schemaIds = null,
+            bool includeSnapshot = true)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
 
             var messageId = Guid.NewGuid().ToString("N");
-            var completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_initialSnapshots.TryAdd(messageId, completion))
-                throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
+            TaskCompletionSource<IReadOnlyList<object>>? completion = null;
+            if (includeSnapshot)
+            {
+                completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_initialSnapshots.TryAdd(messageId, completion))
+                    throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
+            }
 
             _client.SendCultNet(new CultNetDatabaseSubscribeMessage
             {
@@ -62,9 +67,9 @@ namespace GameCult.Networking
                 SubscriptionId = subscriptionId,
                 RecordKeys = recordKeys?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
                 SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
-                IncludeSnapshot = true
+                IncludeSnapshot = includeSnapshot
             });
-            return completion.Task;
+            return completion?.Task ?? Task.FromResult<IReadOnlyList<object>>(Array.Empty<object>());
         }
 
         /// <summary>Stops one live remote subscription.</summary>
