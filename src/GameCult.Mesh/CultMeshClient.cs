@@ -210,10 +210,10 @@ namespace GameCult.Mesh
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
             var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey);
+            _documentResources.Add(binding);
             try
             {
                 await binding.StartAsync().ConfigureAwait(false);
-                _documentResources.Add(binding);
                 return binding;
             }
             catch
@@ -228,10 +228,10 @@ namespace GameCult.Mesh
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
             var binding = new RemoteCollectionBinding<TDocument>(session, endpointId);
+            _documentResources.Add(binding);
             try
             {
                 await binding.StartAsync().ConfigureAwait(false);
-                _documentResources.Add(binding);
                 return binding;
             }
             catch
@@ -260,7 +260,7 @@ namespace GameCult.Mesh
             private readonly string _subscriptionId;
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
-            private readonly SemaphoreSlim _subscribeGate = new(1, 1);
+            private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private IDisposable? _stateWatch;
             private bool _disposed;
 
@@ -284,15 +284,15 @@ namespace GameCult.Mesh
 
             public async Task StartAsync()
             {
-                await SubscribeAsync().ConfigureAwait(false);
                 _stateWatch = _session.WatchState()
                     .Where(state => state.Status == CultMeshSessionStatus.Online)
                     .Subscribe(state => { _ = SubscribeAsync(); });
+                _ = SubscribeAsync();
+                await _ready.Task.ConfigureAwait(false);
             }
 
             private async Task SubscribeAsync()
             {
-                await _subscribeGate.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     if (_disposed) return;
@@ -301,10 +301,10 @@ namespace GameCult.Mesh
                         recordKeys: new[] { _recordKey },
                         schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
                         .ConfigureAwait(false);
+                    _ready.TrySetResult(true);
                 }
-                finally
+                catch (ObjectDisposedException) when (_disposed)
                 {
-                    _subscribeGate.Release();
                 }
             }
 
@@ -314,8 +314,8 @@ namespace GameCult.Mesh
                 _disposed = true;
                 _stateWatch?.Dispose();
                 _subscription.Dispose();
+                _ready.TrySetException(new ObjectDisposedException(GetType().FullName));
                 _cache.Dispose();
-                _subscribeGate.Dispose();
             }
         }
 
@@ -325,7 +325,7 @@ namespace GameCult.Mesh
             private readonly string _subscriptionId;
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
-            private readonly SemaphoreSlim _subscribeGate = new(1, 1);
+            private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private IDisposable? _stateWatch;
             private bool _disposed;
 
@@ -346,15 +346,15 @@ namespace GameCult.Mesh
 
             public async Task StartAsync()
             {
-                await SubscribeAsync().ConfigureAwait(false);
                 _stateWatch = _session.WatchState()
                     .Where(state => state.Status == CultMeshSessionStatus.Online)
                     .Subscribe(state => { _ = SubscribeAsync(); });
+                _ = SubscribeAsync();
+                await _ready.Task.ConfigureAwait(false);
             }
 
             private async Task SubscribeAsync()
             {
-                await _subscribeGate.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     if (_disposed) return;
@@ -362,10 +362,10 @@ namespace GameCult.Mesh
                         _subscriptionId,
                         schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
                         .ConfigureAwait(false);
+                    _ready.TrySetResult(true);
                 }
-                finally
+                catch (ObjectDisposedException) when (_disposed)
                 {
-                    _subscribeGate.Release();
                 }
             }
 
@@ -375,8 +375,8 @@ namespace GameCult.Mesh
                 _disposed = true;
                 _stateWatch?.Dispose();
                 _subscription.Dispose();
+                _ready.TrySetException(new ObjectDisposedException(GetType().FullName));
                 _cache.Dispose();
-                _subscribeGate.Dispose();
             }
         }
 

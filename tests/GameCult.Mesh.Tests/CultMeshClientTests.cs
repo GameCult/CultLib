@@ -91,6 +91,28 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task Document_InitialReadinessCanBeSatisfiedByReconnectReplay()
+    {
+        var connector = new DocumentConnector { SuppressFirstSnapshot = true };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        var opening = mesh.DocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
+        connector.Clients[0].Fail(new InvalidOperationException("path lost before initial snapshot"));
+
+        var document = await opening;
+
+        (await document.LatestAsync()).Text.Should().Be("pilot surface 2");
+        connector.Clients.Should().HaveCount(2);
+        connector.Clients[1].SubscribeCount.Should().Be(1);
+    }
+
+    [Test]
     public async Task Collection_ReplicatesAllDocumentsOfTypedSchema()
     {
         var connector = new DocumentConnector();
@@ -106,6 +128,48 @@ public sealed class CultMeshClientTests
         (await collection.LatestAsync()).Should().ContainSingle()
             .Which.Text.Should().Be("pilot surface 1");
         connector.SubscribeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task Collection_InitialReadinessCanBeSatisfiedByReconnectReplay()
+    {
+        var connector = new DocumentConnector { SuppressFirstSnapshot = true };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        var opening = mesh.CollectionAsync<ClientTestDocument>("aetheria");
+        await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
+        connector.Clients[0].Fail(new InvalidOperationException("path lost before initial collection snapshot"));
+
+        var collection = await opening;
+
+        (await collection.LatestAsync()).Should().ContainSingle()
+            .Which.Text.Should().Be("pilot surface 2");
+        connector.Clients.Should().HaveCount(2);
+        connector.Clients[1].SubscribeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task Dispose_TerminatesDocumentWaitingForInitialSnapshot()
+    {
+        var connector = new DocumentConnector { SuppressFirstSnapshot = true };
+        var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+        var opening = mesh.DocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
+
+        mesh.Dispose();
+
+        Func<Task> awaitOpening = async () => await opening;
+        await awaitOpening.Should().ThrowAsync<ObjectDisposedException>();
     }
 
     private sealed class RendezvousClient : ICultNetSchemaClient
@@ -167,6 +231,7 @@ public sealed class CultMeshClientTests
     private sealed class DocumentConnector : ICultMeshTransportConnector
     {
         public List<DocumentClient> Clients { get; } = new();
+        public bool SuppressFirstSnapshot { get; set; }
         public string ConnectorId => "document-test";
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
@@ -175,7 +240,9 @@ public sealed class CultMeshClientTests
             CultMeshProtocolId protocol,
             CancellationToken cancellationToken = default)
         {
-            var client = new DocumentClient("pilot surface " + (Clients.Count + 1));
+            var client = new DocumentClient(
+                "pilot surface " + (Clients.Count + 1),
+                respondToSubscribe: !SuppressFirstSnapshot || Clients.Count > 0);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
@@ -187,9 +254,11 @@ public sealed class CultMeshClientTests
         private readonly CultNetDocumentRegistry _documents;
         private readonly string _text;
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public DocumentClient(string text)
+        private readonly bool _respondToSubscribe;
+        public DocumentClient(string text, bool respondToSubscribe = true)
         {
             _text = text;
+            _respondToSubscribe = respondToSubscribe;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -201,6 +270,7 @@ public sealed class CultMeshClientTests
         {
             if (message is not CultNetDatabaseSubscribeMessage request) return;
             SubscribeCount++;
+            if (!_respondToSubscribe) return;
             var put = _documents.CreateRawDocumentPutMessage(
                 "test-put",
                 new CultRecordHandle<ClientTestDocument>(new CultRecordKey("surface:pilot")),

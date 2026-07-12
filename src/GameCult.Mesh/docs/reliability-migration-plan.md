@@ -410,6 +410,45 @@ transient outage, or hand-assemble snapshot options from physical topology.
   unsupported-path result.
 - The legacy request path cannot open a second competing session.
 
+### Phase 2 Body Map
+
+**Owner:** `CultMeshSessionManager` owns physical path selection, replacement,
+and reconnect. A live document or collection binding owns only its logical
+subscription intent and readiness promise.
+
+**Inputs:** stable endpoint and protocol identity, discovery candidates,
+connector results, session state transitions, typed schema and record filters,
+and client disposal.
+
+**Outputs:** one reusable logical session, subscription replay on each new
+online physical incarnation, cache-backed typed handles, and readiness after
+the first successful snapshot from any incarnation.
+
+**Derived state:** physical client identity, attempt count, cached snapshots,
+and online/reconnecting/offline projections. No individual request owns the
+logical handle.
+
+**Forbidden writers:** bindings and schema clients cannot choose endpoints,
+replace channels, reconnect, or declare session state. An abandoned initial
+subscribe request cannot block a replacement request from satisfying logical
+readiness.
+
+**Shared paths:** initial open and reconnect both use session-manager path
+resolution. Document and collection activation both replay the same binding
+intent when the logical session returns online.
+
+**Cut line:** the initial subscribe no longer runs before reconnect observation,
+and a per-binding semaphore no longer lets an unanswered physical request hold
+all later replay attempts. Bindings become client-owned resources before
+waiting for readiness, so disposal terminates pending opens.
+
+**Verification layer:** Mesh tests lose the first document and collection
+snapshot, fail the physical client, and prove the replacement snapshot opens
+the same logical handle exactly once. A disposal test proves a pending open
+cannot survive its owning client. The Aetheria/EveUnity witness proves provider
+discovery, live SoA state, commands, receipts, and assets through the migrated
+session path.
+
 ## Phase 3: Authority as a Mandatory Boundary
 
 ### Cut first
