@@ -69,6 +69,9 @@ namespace GameCult.Mesh
         private readonly string _endpoint;
         private readonly CultMeshSnapshotRequestOptions _defaults;
         private readonly ICultNetSchemaClient _client;
+        private readonly CultMeshSession? _sharedSession;
+        private readonly IDisposable? _responseSubscription;
+        private readonly IDisposable? _errorSubscription;
         private readonly CultNetDocumentRegistry _registry;
         private readonly SemaphoreSlim _requests = new(1, 1);
         private readonly object _completionLock = new();
@@ -91,6 +94,32 @@ namespace GameCult.Mesh
             _client.OnCultNet<CultNetErrorMessage>(OnError);
             var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
             _client.Connect(host, port);
+        }
+
+        private CultMeshSnapshotSession(
+            CultMeshSession session,
+            CultMeshSnapshotRequestOptions options,
+            CultNetDocumentRegistry? registry)
+        {
+            _sharedSession = session ?? throw new ArgumentNullException(nameof(session));
+            _endpoint = session.State.Path?.Endpoint ?? session.EndpointId.Value;
+            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _registry = registry ?? new CultNetDocumentRegistry();
+            _client = session.Channel;
+            _responseSubscription = session.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
+            _errorSubscription = session.OnCultNet<CultNetErrorMessage>(OnError);
+        }
+
+        public static async Task<CultMeshSnapshotSession> ConnectAsync(
+            CultMeshSessionManager sessions,
+            CultMeshEndpointId endpointId,
+            CultMeshSnapshotRequestOptions options,
+            CultNetDocumentRegistry? registry = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (sessions == null) throw new ArgumentNullException(nameof(sessions));
+            var session = await sessions.ConnectAsync(endpointId, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
+            return new CultMeshSnapshotSession(session, options ?? new CultMeshSnapshotRequestOptions(), registry);
         }
 
         /// <summary>Fetches one raw snapshot while retaining the underlying endpoint connection.</summary>
@@ -165,7 +194,9 @@ namespace GameCult.Mesh
             _disposed = true;
             lock (_completionLock)
                 _completion?.TrySetException(new ObjectDisposedException(nameof(CultMeshSnapshotSession)));
-            _client.Dispose();
+            _responseSubscription?.Dispose();
+            _errorSubscription?.Dispose();
+            if (_sharedSession == null) _client.Dispose();
             _requests.Dispose();
         }
 

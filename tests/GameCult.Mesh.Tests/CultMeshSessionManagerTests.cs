@@ -125,6 +125,27 @@ public sealed class CultMeshSessionManagerTests
             .Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.UnsupportedPath);
     }
 
+    [Test]
+    public async Task SnapshotSessionsBorrowOneManagedChannelAndDisposeRegistrationsIndependently()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        var client = new RespondingSchemaClient();
+        var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        using var first = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
+        using var second = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
+
+        (await first.FetchSnapshotAsync()).MessageId.Should().NotBeEmpty();
+        first.Dispose();
+        (await second.FetchSnapshotAsync()).MessageId.Should().NotBeEmpty();
+
+        connector.ConnectCount.Should().Be(1);
+        client.DisposeCount.Should().Be(0);
+        client.SentCount.Should().Be(2);
+    }
+
     private static CultMeshDiscoveryService Discovery(
         ManualSessionClock clock,
         Func<string[]> endpoints,
@@ -186,6 +207,33 @@ public sealed class CultMeshSessionManagerTests
         public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
         public void Fail(Exception error) => _failure.TrySetResult(error);
+    }
+
+    private sealed class RespondingSchemaClient : ICultNetSchemaClient
+    {
+        private readonly List<Action<CultNetSnapshotResponseRawMessage>> _handlers = new();
+        private int _disposeCount;
+        public bool Connected => true;
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+        public int SentCount { get; private set; }
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            SentCount++;
+            var request = (CultNetSnapshotRequestMessage)(object)message;
+            var response = new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = request.MessageId,
+                Documents = Array.Empty<CultNetRawDocumentRecord>()
+            };
+            foreach (var handler in _handlers.ToArray()) handler(response);
+        }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultNetSnapshotResponseRawMessage))
+                _handlers.Add(message => callback((T)(object)message));
+        }
+        public void Dispose() => Interlocked.Increment(ref _disposeCount);
     }
 
     private sealed class ManualSessionClock : ICultMeshClock

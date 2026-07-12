@@ -160,6 +160,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshSession : IDisposable
     {
         private readonly Subject<CultMeshSessionState> _states = new();
+        private readonly ConcurrentBag<IDisposable> _subscriptions = new();
         private bool _disposed;
         internal CultMeshSession(CultMeshEndpointId endpointId, CultMeshProtocolId protocol, ICultNetSchemaClient channel, CultMeshSessionState state)
         {
@@ -170,16 +171,34 @@ namespace GameCult.Mesh
         }
         public CultMeshEndpointId EndpointId { get; }
         public CultMeshProtocolId Protocol { get; }
-        public ICultNetSchemaClient Channel { get; }
+        internal ICultNetSchemaClient Channel { get; }
         public CultMeshSessionState State { get; private set; }
         public Observable<CultMeshSessionState> WatchState() => _states;
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage => Channel.SendCultNet(message);
+        public IDisposable OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (callback == null) throw new ArgumentNullException(nameof(callback));
+            var subscription = new SessionSubscription<T>(callback);
+            Channel.OnCultNet<T>(subscription.Invoke);
+            _subscriptions.Add(subscription);
+            return subscription;
+        }
         internal void Transition(CultMeshSessionState state) { State = state; _states.OnNext(state); }
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            foreach (var subscription in _subscriptions) subscription.Dispose();
             Channel.Dispose();
             _states.Dispose();
+        }
+
+        private sealed class SessionSubscription<T> : IDisposable where T : ICultNetSchemaMessage
+        {
+            private Action<T>? _callback;
+            public SessionSubscription(Action<T> callback) { _callback = callback; }
+            public void Invoke(T message) => Volatile.Read(ref _callback)?.Invoke(message);
+            public void Dispose() => Interlocked.Exchange(ref _callback, null);
         }
     }
 
