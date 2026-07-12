@@ -67,6 +67,8 @@ public record struct float3(float x, float y, float z)
     public static explicit operator System.Numerics.Vector3(float3 value) => new(value.x, value.y, value.z);
     public static explicit operator float3(System.Numerics.Vector3 value) => new(value.X, value.Y, value.Z);
 
+    public override readonly string ToString() => $"float3({x:R}, {y:R}, {z:R})";
+
     public static float3 operator +(float3 value) => value;
     public static float3 operator -(float3 value) => new(-value.x, -value.y, -value.z);
     public static float3 operator +(float3 left, float3 right) => new(left.x + right.x, left.y + right.y, left.z + right.z);
