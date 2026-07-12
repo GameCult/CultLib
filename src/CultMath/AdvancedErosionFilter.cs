@@ -34,6 +34,9 @@ public readonly record struct AdvancedErosionResult(float3 Delta, float Magnitud
 public static class AdvancedErosionFilter
 {
     public static AdvancedErosionResult Sample(float2 position, float3 baseHeightAndSlope, float fadeTarget, AdvancedErosionParameters p)
+        => Sample(position, baseHeightAndSlope, fadeTarget, p, new ErosionBandSelection(p.Octaves, 1.0f, 0.0f, 0.0f));
+
+    public static AdvancedErosionResult Sample(float2 position, float3 baseHeightAndSlope, float fadeTarget, AdvancedErosionParameters p, ErosionBandSelection band)
     {
         var strength = p.Strength * p.Scale;
         fadeTarget = math.clamp(fadeTarget, -1.0f, 1.0f);
@@ -51,7 +54,7 @@ public static class AdvancedErosionFilter
         var ridgeFade = fadeTarget;
         var gullySlope = math.lerp(slope, slope / slopeLength * p.AssumedSlope.x, p.AssumedSlope.y);
 
-        var octaves = math.min(math.max(p.Octaves, 0), 8);
+        var octaves = math.min(math.min(math.max(p.Octaves, 0), 8), math.max(band.ActiveOctaves, 0));
         for (var octave = 0; octave < octaves; octave++)
         {
             var phacelle = Phacelle(position * frequency, SafeNormalize(gullySlope), p.CellScale, 0.25f, p.Normalization);
@@ -61,16 +64,17 @@ public static class AdvancedErosionFilter
 
             var gullies = new float3(phacelle.x, phacelle.y * derivativeDirection.x, phacelle.y * derivativeDirection.y);
             var faded = math.lerp(new float3(fadeTarget, 0.0f, 0.0f), gullies * p.GullyWeight, combinedMask);
-            heightAndSlope += faded * strength;
-            magnitude += strength;
+            var octaveWeight = octave == octaves - 1 ? math.saturate(band.FinalOctaveWeight) : 1.0f;
+            heightAndSlope += faded * strength * octaveWeight;
+            magnitude += strength * octaveWeight;
             fadeTarget = faded.x;
 
             var octaveRounding = math.lerp(p.Rounding.y, p.Rounding.x, math.saturate(phacelle.x + 0.5f)) * roundingMultiplier;
             var newMask = EaseOut(SmoothStart(sloping * p.Onset.y, octaveRounding * p.Onset.y));
             combinedMask = PowInverse(combinedMask, p.Detail) * newMask;
 
-            ridgeFade = math.lerp(ridgeFade, gullies.x, ridgeMask);
-            ridgeMask *= EaseOut(sloping * p.Onset.w);
+            ridgeFade = math.lerp(ridgeFade, math.lerp(ridgeFade, gullies.x, ridgeMask), octaveWeight);
+            ridgeMask *= math.lerp(1.0f, EaseOut(sloping * p.Onset.w), octaveWeight);
             strength *= p.Gain;
             frequency *= p.Lacunarity;
             roundingMultiplier *= p.Rounding.w;

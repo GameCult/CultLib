@@ -19,6 +19,28 @@ struct CultMathAdvancedErosionResult
     float3 delta; float magnitude; float ridge_map; float fade_target;
 };
 
+struct CultMathErosionBandSelection
+{
+    int active_octaves; float final_octave_weight; float finest_included_wavelength; float unresolved_height_bound;
+};
+
+CultMathErosionBandSelection cultmath_select_erosion_bands(float base_wavelength, float sample_spacing, int maximum_octaves, float lacunarity, float base_amplitude, float gain, float transition_ratio)
+{
+    base_wavelength=max(base_wavelength,1.0e-6); sample_spacing=max(sample_spacing,0.0); lacunarity=max(lacunarity,1.01); transition_ratio=max(transition_ratio,1.01); maximum_octaves=min(max(maximum_octaves,0),16);
+    float nyquist=sample_spacing*2.0, wavelength=base_wavelength, final_weight=0.0, finest=0.0; int active=0;
+    [loop] for(int octave=0; octave<maximum_octaves; octave++)
+    {
+        float weight=nyquist<=0.0?1.0:smoothstep(nyquist,nyquist*transition_ratio,wavelength);
+        if(weight<=0.0) break; active++; final_weight=weight; finest=wavelength; wavelength/=lacunarity;
+    }
+    float omitted=0.0, amplitude=abs(base_amplitude);
+    [loop] for(int index=0; index<maximum_octaves; index++)
+    {
+        if(index>=active) omitted+=amplitude; else if(index==active-1) omitted+=amplitude*(1.0-final_weight); amplitude*=abs(gain);
+    }
+    CultMathErosionBandSelection result; result.active_octaves=active; result.final_octave_weight=active>0?final_weight:0.0; result.finest_included_wavelength=finest; result.unresolved_height_bound=omitted; return result;
+}
+
 float cultmath_erosion_hash_unit(int2 cell, uint salt)
 {
     uint value = (uint)cell.x * 0x8da6b343u ^ (uint)cell.y * 0xd8163841u ^ salt;
@@ -68,7 +90,7 @@ float2 cultmath_erosion_safe_normalize(float2 value)
     return abs(value_length) > 1.0e-10 ? value / value_length : value;
 }
 
-CultMathAdvancedErosionResult cultmath_advanced_erosion_filter(float2 position, float3 base_height_and_slope, float fade_target, CultMathAdvancedErosionParameters p)
+CultMathAdvancedErosionResult cultmath_advanced_erosion_filter_banded(float2 position, float3 base_height_and_slope, float fade_target, CultMathAdvancedErosionParameters p, CultMathErosionBandSelection band)
 {
     float strength = p.strength * p.scale;
     fade_target = clamp(fade_target, -1.0, 1.0);
@@ -85,7 +107,8 @@ CultMathAdvancedErosionResult cultmath_advanced_erosion_filter(float2 position, 
     float ridge_fade = fade_target;
     float2 gully_slope = lerp(slope, slope / slope_length * p.assumed_slope.x, p.assumed_slope.y);
 
-    [loop] for (int octave = 0; octave < min(max(p.octaves, 0), 8); octave++)
+    int octave_count=min(min(max(p.octaves,0),8),max(band.active_octaves,0));
+    [loop] for (int octave = 0; octave < octave_count; octave++)
     {
         float4 phacelle = cultmath_phacelle_noise(position * frequency, cultmath_erosion_safe_normalize(gully_slope), p.cell_scale, 0.25, p.normalization);
         float2 derivative_direction = phacelle.zw * -frequency;
@@ -93,14 +116,15 @@ CultMathAdvancedErosionResult cultmath_advanced_erosion_filter(float2 position, 
         gully_slope += sign(phacelle.y) * derivative_direction * strength * p.gully_weight;
         float3 gullies = float3(phacelle.x, phacelle.y * derivative_direction.x, phacelle.y * derivative_direction.y);
         float3 faded = lerp(float3(fade_target, 0.0, 0.0), gullies * p.gully_weight, combined_mask);
-        height_and_slope += faded * strength;
-        magnitude += strength;
+        float octave_weight=octave==octave_count-1?saturate(band.final_octave_weight):1.0;
+        height_and_slope += faded * strength * octave_weight;
+        magnitude += strength * octave_weight;
         fade_target = faded.x;
         float octave_rounding = lerp(p.rounding.y, p.rounding.x, saturate(phacelle.x + 0.5)) * rounding_multiplier;
         float new_mask = cultmath_erosion_ease_out(cultmath_erosion_smooth_start(sloping * p.onset.y, octave_rounding * p.onset.y));
         combined_mask = cultmath_erosion_pow_inverse(combined_mask, p.detail) * new_mask;
-        ridge_fade = lerp(ridge_fade, gullies.x, ridge_mask);
-        ridge_mask *= cultmath_erosion_ease_out(sloping * p.onset.w);
+        ridge_fade = lerp(ridge_fade, lerp(ridge_fade, gullies.x, ridge_mask), octave_weight);
+        ridge_mask *= lerp(1.0, cultmath_erosion_ease_out(sloping * p.onset.w), octave_weight);
         strength *= p.gain;
         frequency *= p.lacunarity;
         rounding_multiplier *= p.rounding.w;
@@ -112,6 +136,12 @@ CultMathAdvancedErosionResult cultmath_advanced_erosion_filter(float2 position, 
     result.ridge_map = ridge_fade * (1.0 - ridge_mask);
     result.fade_target = fade_target;
     return result;
+}
+
+CultMathAdvancedErosionResult cultmath_advanced_erosion_filter(float2 position, float3 base_height_and_slope, float fade_target, CultMathAdvancedErosionParameters p)
+{
+    CultMathErosionBandSelection band; band.active_octaves=p.octaves; band.final_octave_weight=1.0; band.finest_included_wavelength=0.0; band.unresolved_height_bound=0.0;
+    return cultmath_advanced_erosion_filter_banded(position, base_height_and_slope, fade_target, p, band);
 }
 
 #endif
