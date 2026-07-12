@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Networking;
 using NUnit.Framework;
+using R3;
 
 namespace GameCult.Mesh.Tests;
 
@@ -83,7 +84,7 @@ public sealed class CultMeshSessionManagerTests
     }
 
     [Test]
-    public async Task BackgroundFailureEvictsSessionAndEndpointRotationReconnects()
+    public async Task BackgroundFailureMigratesSameSessionAcrossEndpointRotation()
     {
         var clock = new ManualSessionClock();
         var route = "rudp://first:3076";
@@ -98,16 +99,26 @@ public sealed class CultMeshSessionManagerTests
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
         var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
         var first = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var states = new List<CultMeshSessionStatus>();
+        using var stateWatch = first.WatchState().Subscribe(state => states.Add(state.Status));
+        using var schemaLease = first.OpenSchemaClient();
+        var deliveries = 0;
+        schemaLease.OnCultNet<CultNetErrorMessage>(_ => deliveries++);
+        clients[0].Emit(new CultNetErrorMessage { Error = "before rotation" });
 
         route = "rudp://second:3076";
         clock.Advance(TimeSpan.FromSeconds(6));
         clients[0].Fail(new IOException("partition"));
-        await WaitUntilAsync(() => first.State.Status == CultMeshSessionStatus.Offline);
+        await WaitUntilAsync(() => first.State.Status == CultMeshSessionStatus.Online && connector.ConnectCount == 2);
         var second = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        clients[1].Emit(new CultNetErrorMessage { Error = "after rotation" });
 
-        second.Should().NotBeSameAs(first);
+        second.Should().BeSameAs(first);
         second.State.Path!.Endpoint.Should().Be("rudp://second:3076");
+        states.Should().ContainInOrder(CultMeshSessionStatus.Reconnecting, CultMeshSessionStatus.Online);
         connector.ConnectCount.Should().Be(2);
+        clients[0].DisposeCount.Should().Be(1);
+        deliveries.Should().Be(2);
     }
 
     [Test]
@@ -244,15 +255,21 @@ public sealed class CultMeshSessionManagerTests
     private sealed class FakeSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
     {
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly List<Action<CultNetErrorMessage>> _handlers = new();
         private int _disposeCount;
         public bool Connected => true;
         public Task<Exception> BackgroundFailure => _failure.Task;
         public int DisposeCount => Volatile.Read(ref _disposeCount);
         public void Connect(string host, int port) { }
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
-        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultNetErrorMessage))
+                _handlers.Add(message => callback((T)(object)message));
+        }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
         public void Fail(Exception error) => _failure.TrySetResult(error);
+        public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
     }
 
     private sealed class RespondingSchemaClient : ICultNetSchemaClient

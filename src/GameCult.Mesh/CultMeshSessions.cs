@@ -161,17 +161,18 @@ namespace GameCult.Mesh
     {
         private readonly Subject<CultMeshSessionState> _states = new();
         private readonly ConcurrentBag<IDisposable> _subscriptions = new();
+        private readonly ManagedSchemaChannel _channel;
         private bool _disposed;
         internal CultMeshSession(CultMeshEndpointId endpointId, CultMeshProtocolId protocol, ICultNetSchemaClient channel, CultMeshSessionState state)
         {
             EndpointId = endpointId;
             Protocol = protocol;
-            Channel = channel;
+            _channel = new ManagedSchemaChannel(channel);
             State = state;
         }
         public CultMeshEndpointId EndpointId { get; }
         public CultMeshProtocolId Protocol { get; }
-        internal ICultNetSchemaClient Channel { get; }
+        internal ICultNetSchemaClient Channel => _channel;
         public CultMeshSessionState State { get; private set; }
         public Observable<CultMeshSessionState> WatchState() => _states;
         public ICultNetSchemaClient OpenSchemaClient() => new SessionSchemaClient(this);
@@ -185,13 +186,88 @@ namespace GameCult.Mesh
             return subscription;
         }
         internal void Transition(CultMeshSessionState state) { State = state; _states.OnNext(state); }
+        internal void ReplacePhysicalChannel(ICultNetSchemaClient channel) => _channel.Replace(channel);
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             foreach (var subscription in _subscriptions) subscription.Dispose();
-            Channel.Dispose();
+            _channel.Dispose();
             _states.Dispose();
+        }
+
+        private sealed class ManagedSchemaChannel : ICultNetSchemaClient
+        {
+            private readonly object _gate = new();
+            private readonly List<IChannelRegistration> _registrations = new();
+            private ICultNetSchemaClient _physical;
+            private bool _disposed;
+
+            public ManagedSchemaChannel(ICultNetSchemaClient physical) =>
+                _physical = physical ?? throw new ArgumentNullException(nameof(physical));
+
+            public bool Connected { get { lock (_gate) return !_disposed && _physical.Connected; } }
+            public void Connect(string host, int port)
+            {
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    _physical.Connect(host, port);
+                }
+            }
+            public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+            {
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    _physical.SendCultNet(message);
+                }
+            }
+            public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
+                if (callback == null) throw new ArgumentNullException(nameof(callback));
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    var registration = new ChannelRegistration<T>(callback);
+                    registration.Attach(_physical);
+                    _registrations.Add(registration);
+                }
+            }
+            public void Replace(ICultNetSchemaClient physical)
+            {
+                if (physical == null) throw new ArgumentNullException(nameof(physical));
+                ICultNetSchemaClient previous;
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    previous = _physical;
+                    foreach (var registration in _registrations) registration.Attach(physical);
+                    _physical = physical;
+                }
+                previous.Dispose();
+            }
+            public void Dispose()
+            {
+                ICultNetSchemaClient physical;
+                lock (_gate)
+                {
+                    if (_disposed) return;
+                    _disposed = true;
+                    physical = _physical;
+                    _registrations.Clear();
+                }
+                physical.Dispose();
+            }
+            private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(ManagedSchemaChannel)); }
+
+            private interface IChannelRegistration { void Attach(ICultNetSchemaClient physical); }
+            private sealed class ChannelRegistration<T> : IChannelRegistration where T : ICultNetSchemaMessage
+            {
+                private readonly Action<T> _callback;
+                public ChannelRegistration(Action<T> callback) => _callback = callback;
+                public void Attach(ICultNetSchemaClient physical) => physical.OnCultNet(_callback);
+            }
         }
 
         private sealed class SessionSubscription<T> : IDisposable where T : ICultNetSchemaMessage
@@ -276,7 +352,7 @@ namespace GameCult.Mesh
                 try
                 {
                     var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
-                    if (session.State.Status == CultMeshSessionStatus.Online) return session;
+                    if (session.State.Status != CultMeshSessionStatus.Offline) return session;
                     _sessions.TryRemove(key, out _);
                 }
                 catch
@@ -288,6 +364,16 @@ namespace GameCult.Mesh
         }
 
         private async Task<CultMeshSession> ConnectOwnedAsync(string key, CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
+        {
+            var result = await ResolveConnectedPathAsync(endpointId, protocol).ConfigureAwait(false);
+            var session = new CultMeshSession(endpointId, protocol, result.Client,
+                new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate));
+            ObservePhysicalFailure(key, session, result);
+            Emit(endpointId, protocol, "online", result.Candidate.Endpoint);
+            return session;
+        }
+
+        private async Task<ConnectedPath> ResolveConnectedPathAsync(CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
         {
             var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
             var candidates = discovery.Candidates.SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
@@ -310,32 +396,67 @@ namespace GameCult.Mesh
                     var result = await completed.ConfigureAwait(false);
                     foreach (var loser in attempts)
                         _ = loser.ContinueWith(task => { if (task.Status == TaskStatus.RanToCompletion) task.Result.Client.Dispose(); }, TaskScheduler.Default);
-                    var session = new CultMeshSession(endpointId, protocol, result.Client,
-                        new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate));
-                    if (result.Client is ICultNetSchemaClientHealth health)
-                    {
-                        _ = health.BackgroundFailure.ContinueWith(task =>
-                        {
-                            var error = task.Status == TaskStatus.RanToCompletion ? task.Result : task.Exception;
-                            session.Transition(new CultMeshSessionState(
-                                CultMeshSessionStatus.Offline,
-                                _options.Clock.UtcNow,
-                                result.Candidate,
-                                new CultMeshSessionFailure(
-                                    CultMeshSessionFailureReason.Transport,
-                                    error?.Message ?? "Transport background loop stopped.",
-                                    result.Candidate.Endpoint)));
-                            _sessions.TryRemove(key, out _);
-                        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                    }
-                    Emit(endpointId, protocol, "online", result.Candidate.Endpoint);
-                    return session;
+                    return result;
                 }
                 catch (Exception error) { failures.Add(error); }
             }
             var last = failures.LastOrDefault();
             throw Failure(last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
                 $"No transport path connected for '{endpointId}' and protocol '{protocol}'.", last);
+        }
+
+        private void ObservePhysicalFailure(string key, CultMeshSession session, ConnectedPath path)
+        {
+            if (path.Client is not ICultNetSchemaClientHealth health) return;
+            _ = health.BackgroundFailure.ContinueWith(
+                task => ReconnectOwnedAsync(key, session, path, task),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).Unwrap();
+        }
+
+        private async Task ReconnectOwnedAsync(
+            string key,
+            CultMeshSession session,
+            ConnectedPath failedPath,
+            Task<Exception> failureTask)
+        {
+            if (_disposed || session.State.Status == CultMeshSessionStatus.Offline) return;
+            var error = failureTask.Status == TaskStatus.RanToCompletion ? failureTask.Result : failureTask.Exception;
+            var failure = new CultMeshSessionFailure(
+                CultMeshSessionFailureReason.Transport,
+                error?.Message ?? "Transport background loop stopped.",
+                failedPath.Candidate.Endpoint);
+            session.Transition(new CultMeshSessionState(
+                CultMeshSessionStatus.Reconnecting,
+                _options.Clock.UtcNow,
+                failedPath.Candidate,
+                failure));
+            Emit(session.EndpointId, session.Protocol, "reconnecting", failedPath.Candidate.Endpoint);
+            try
+            {
+                var replacement = await ResolveConnectedPathAsync(session.EndpointId, session.Protocol).ConfigureAwait(false);
+                session.ReplacePhysicalChannel(replacement.Client);
+                session.Transition(new CultMeshSessionState(
+                    CultMeshSessionStatus.Online,
+                    _options.Clock.UtcNow,
+                    replacement.Candidate));
+                ObservePhysicalFailure(key, session, replacement);
+                Emit(session.EndpointId, session.Protocol, "online", replacement.Candidate.Endpoint);
+            }
+            catch (Exception reconnectError)
+            {
+                session.Transition(new CultMeshSessionState(
+                    CultMeshSessionStatus.Offline,
+                    _options.Clock.UtcNow,
+                    failedPath.Candidate,
+                    new CultMeshSessionFailure(
+                        reconnectError is CultMeshSessionException typed ? typed.Failure.Reason : CultMeshSessionFailureReason.Transport,
+                        reconnectError.Message,
+                        failedPath.Candidate.Endpoint)));
+                _sessions.TryRemove(key, out _);
+                Emit(session.EndpointId, session.Protocol, "offline", failedPath.Candidate.Endpoint);
+            }
         }
 
         private async Task<ConnectedPath> ConnectCandidateAsync(CultMeshTransportCandidate candidate, CultMeshProtocolId protocol)
