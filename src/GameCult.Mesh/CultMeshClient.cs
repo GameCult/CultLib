@@ -173,7 +173,12 @@ namespace GameCult.Mesh
             using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
                     _sessions,
                     CultMeshEndpointId.Parse(endpointId),
-                    new CultMeshSnapshotRequestOptions(),
+                    new CultMeshSnapshotRequestOptions
+                    {
+                        ConnectTimeout = TimeSpan.FromSeconds(5),
+                        ResponseTimeout = TimeSpan.FromSeconds(10),
+                        MessageIdPrefix = "cultmesh-client-read"
+                    },
                     networkRegistry,
                     cancellationToken)
                 .ConfigureAwait(false);
