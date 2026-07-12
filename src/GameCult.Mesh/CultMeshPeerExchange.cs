@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Networking;
 using R3;
@@ -343,6 +344,12 @@ namespace GameCult.Mesh
         /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>Gets or sets the shared CultMesh session owner.</summary>
+        public CultMeshSessionManager? Sessions { get; set; }
+
+        /// <summary>Gets or sets the clock used by managed response deadlines.</summary>
+        public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
     }
 
     /// <summary>
@@ -399,6 +406,36 @@ namespace GameCult.Mesh
             });
 
             return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+        }
+
+        /// <summary>Fetches peer cards through the shared session owner.</summary>
+        public async Task<CultMeshPeerExchangeResponseMessage> FetchAsync(
+            CultMeshEndpointId endpointId,
+            CultMeshPeerExchangeRequestMessage request,
+            CancellationToken cancellationToken = default)
+        {
+            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.VerseId)) throw new ArgumentException("Peer exchange requires a verseId.", nameof(request));
+            var sessions = _options.Sessions ?? throw new InvalidOperationException("Managed peer exchange requires a CultMeshSessionManager.");
+            var session = await sessions.ConnectAsync(endpointId, CultMeshProtocols.PeerExchange, cancellationToken).ConfigureAwait(false);
+            var messageId = Guid.NewGuid().ToString("N");
+            var completion = new TaskCompletionSource<CultMeshPeerExchangeResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var responseSubscription = session.OnCultNet<CultMeshPeerExchangeResponseMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal)) completion.TrySetResult(response);
+            });
+            using var errorSubscription = session.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+            session.SendCultNet(new CultMeshPeerExchangeRequestMessage
+            {
+                MessageId = messageId,
+                VerseId = request.VerseId,
+                Roles = request.Roles,
+                KnownPeerIds = request.KnownPeerIds,
+                Limit = request.Limit
+            });
+            return await WaitForManagedResponseAsync(completion.Task, endpointId, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -463,6 +500,21 @@ namespace GameCult.Mesh
                 throw new TimeoutException($"Timed out waiting for peer exchange response from {endpoint}.");
             }
 
+            return await responseTask.ConfigureAwait(false);
+        }
+
+        private async Task<CultMeshPeerExchangeResponseMessage> WaitForManagedResponseAsync(
+            Task<CultMeshPeerExchangeResponseMessage> responseTask,
+            CultMeshEndpointId endpointId,
+            CancellationToken cancellationToken)
+        {
+            var timeout = _options.Clock.DelayAsync(_options.ResponseTimeout, cancellationToken);
+            var completed = await Task.WhenAny(responseTask, timeout).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TimeoutException($"Timed out waiting for peer exchange response from {endpointId}.");
+            }
             return await responseTask.ConfigureAwait(false);
         }
     }

@@ -146,6 +146,26 @@ public sealed class CultMeshSessionManagerTests
         client.SentCount.Should().Be(2);
     }
 
+    [Test]
+    public async Task PeerExchangeBorrowsManagedProtocolSessionAcrossRequests()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        var client = new PeerExchangeSchemaClient();
+        var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        var exchange = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions { Sessions = manager, Clock = clock });
+        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+
+        var first = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
+        var second = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
+
+        first.Peers.Single().PeerId.Should().Be("peer-a");
+        second.Peers.Single().PeerId.Should().Be("peer-a");
+        connector.ConnectCount.Should().Be(1);
+        client.SentCount.Should().Be(2);
+    }
+
     private static CultMeshDiscoveryService Discovery(
         ManualSessionClock clock,
         Func<string[]> endpoints,
@@ -234,6 +254,34 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+    }
+
+    private sealed class PeerExchangeSchemaClient : ICultNetSchemaClient
+    {
+        private readonly List<Action<CultMeshPeerExchangeResponseMessage>> _handlers = new();
+        public bool Connected => true;
+        public int SentCount { get; private set; }
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            SentCount++;
+            var request = (CultMeshPeerExchangeRequestMessage)(object)message;
+            var response = new CultMeshPeerExchangeResponseMessage
+            {
+                MessageId = request.MessageId,
+                Peers = new[]
+                {
+                    new CultMeshPeerCard("peer-a", request.VerseId, new[] { "rudp://peer-a:3076" }).ToMessage()
+                }
+            };
+            foreach (var handler in _handlers.ToArray()) handler(response);
+        }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultMeshPeerExchangeResponseMessage))
+                _handlers.Add(message => callback((T)(object)message));
+        }
+        public void Dispose() { }
     }
 
     private sealed class ManualSessionClock : ICultMeshClock
