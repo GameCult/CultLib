@@ -15,7 +15,10 @@ Rune Skovbo Johansen's **Advanced Terrain Erosion Filter**:
 The CultMath files retain the MPL notice and separate the faithful planar
 filter from CultMath's spherical adaptation. Modifications include C#/HLSL
 type lowering, explicit bounded octave counts, finite zero-rounding behavior,
-and CultMath naming.
+and CultMath naming. CultMath replaces the reference floating hash with a
+shared integer avalanche hash so C# and GPU evaluation select identical cell
+pivots across devices; this changes the stochastic pattern, not the filter
+mechanics.
 
 The technique builds on earlier work credited by the upstream author to Fewes
 and Clay John. The hash form follows the public shader math of Inigo Quilez.

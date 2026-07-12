@@ -19,11 +19,16 @@ struct CultMathAdvancedErosionResult
     float3 delta; float magnitude; float ridge_map; float fade_target;
 };
 
+float cultmath_erosion_hash_unit(int2 cell, uint salt)
+{
+    uint value = (uint)cell.x * 0x8da6b343u ^ (uint)cell.y * 0xd8163841u ^ salt;
+    value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15; value *= 0x846ca68bu; value ^= value >> 16;
+    return (value & 0x00ffffffu) * (1.0 / 16777216.0);
+}
 float2 cultmath_erosion_hash2(float2 input)
 {
-    float2 k = float2(0.3183099, 0.3678794);
-    float2 x = input * k + k.yx;
-    return -1.0 + 2.0 * frac(16.0 * k * frac(x.x * x.y * (x.x + x.y)));
+    int2 cell = (int2)input;
+    return float2(cultmath_erosion_hash_unit(cell, 0x68bc21ebu), cultmath_erosion_hash_unit(cell, 0x02e5be93u)) * 2.0 - 1.0;
 }
 
 float4 cultmath_phacelle_noise(float2 position, float2 normal_direction, float frequency, float offset_cycles, float normalization)

@@ -109,10 +109,16 @@ public static class AdvancedErosionFilter
 
     private static float2 Hash2(float2 input)
     {
-        var k = new float2(0.3183099f, 0.3678794f);
-        var x = input * k + new float2(k.y, k.x);
-        var scalar = math.frac(x.x * x.y * (x.x + x.y));
-        return -float2.one + 2.0f * math.frac(16.0f * k * scalar);
+        var x = (int)input.x;
+        var y = (int)input.y;
+        return new float2(HashUnit(x, y, 0x68bc21ebu), HashUnit(x, y, 0x02e5be93u)) * 2.0f - float2.one;
+    }
+
+    private static float HashUnit(int x, int y, uint salt)
+    {
+        var value = unchecked((uint)x * 0x8da6b343u ^ (uint)y * 0xd8163841u ^ salt);
+        value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15; value *= 0x846ca68bu; value ^= value >> 16;
+        return (value & 0x00ffffffu) * (1.0f / 16777216.0f);
     }
 
     private static float2 SafeNormalize(float2 value)
