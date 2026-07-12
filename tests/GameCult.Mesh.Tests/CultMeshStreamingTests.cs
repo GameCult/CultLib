@@ -2655,6 +2655,26 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task SnapshotHelpers_SurfaceBackgroundClientFailureBeforeTimeout()
+    {
+        var options = new CultMeshSnapshotRequestOptions
+        {
+            ResponseTimeout = TimeSpan.FromSeconds(30),
+            RecordKeys = new[] { "eve:surface:test" },
+            CreateClient = () => new FailedBackgroundSchemaClient(
+                new FormatException("malformed fragment"))
+        };
+
+        Func<Task> act = async () => await CultMesh.FetchSnapshotAsync(
+            "rudp://127.0.0.1:3075",
+            options);
+
+        var failure = await act.Should().ThrowAsync<InvalidOperationException>();
+        failure.Which.InnerException.Should().BeOfType<FormatException>();
+        failure.Which.Message.Should().Contain("127.0.0.1:3075");
+    }
+
+    [Test]
     public async Task SnapshotHelpers_DecodeSameSchemaAliasFromForeignSchemaId()
     {
         var key = new CultRecordKey("mesh-note:snapshot-alias-foreign-schema");
@@ -3809,6 +3829,31 @@ internal sealed class MeshSnapshotSchemaClient : ICultNetSchemaClient
         {
             _errorHandlers.Add(message => callback((T)(object)message));
         }
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class FailedBackgroundSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+{
+    public FailedBackgroundSchemaClient(Exception error)
+    {
+        BackgroundFailure = Task.FromResult(error);
+    }
+
+    public bool Connected { get; private set; }
+    public Task<Exception> BackgroundFailure { get; }
+
+    public void Connect(string host, int port) => Connected = true;
+
+    public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+    {
+    }
+
+    public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+    {
     }
 
     public void Dispose()

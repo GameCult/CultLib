@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace GameCult.Networking
 {
@@ -35,6 +36,17 @@ namespace GameCult.Networking
         /// </summary>
         void OnCultNet<T>(Action<T> callback)
             where T : ICultNetSchemaMessage;
+    }
+
+    /// <summary>
+    /// Exposes terminal failure of a schema client's background transport work.
+    /// </summary>
+    public interface ICultNetSchemaClientHealth
+    {
+        /// <summary>
+        /// Completes if the client's background transport loop terminates unexpectedly.
+        /// </summary>
+        Task<Exception> BackgroundFailure { get; }
     }
 
     /// <summary>
@@ -91,7 +103,7 @@ namespace GameCult.Networking
     /// <summary>
     /// RUDP-backed implementation of the CultNet schema client port.
     /// </summary>
-    public sealed class RudpCultNetSchemaClient : ICultNetSchemaClient
+    public sealed class RudpCultNetSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
     {
         private readonly string _runtimeId;
         private readonly uint _connectionId;
@@ -100,6 +112,8 @@ namespace GameCult.Networking
         private readonly long _resendDelayMs;
         private readonly ConcurrentDictionary<Type, List<Delegate>> _handlers = new();
         private readonly object _handlerLock = new();
+        private readonly TaskCompletionSource<Exception> _backgroundFailure = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         private CultNetRudpSocketTransportConnection? _transport;
         private Thread? _pumpThread;
         private volatile bool _disposed;
@@ -124,6 +138,9 @@ namespace GameCult.Networking
 
         /// <inheritdoc />
         public bool Connected => _transport?.Connected == true;
+
+        /// <inheritdoc />
+        public Task<Exception> BackgroundFailure => _backgroundFailure.Task;
 
         /// <inheritdoc />
         public void Connect(string host, int port)
@@ -188,35 +205,36 @@ namespace GameCult.Networking
 
         private void Pump()
         {
-            while (!_disposed)
+            try
             {
-                var transport = _transport;
-                if (transport == null)
+                while (!_disposed)
                 {
-                    return;
-                }
+                    var transport = _transport;
+                    if (transport == null)
+                    {
+                        return;
+                    }
 
-                ICultNetSchemaMessage? message;
-                try
-                {
-                    message = transport.ReceiveSchemaMessageOnce();
+                    var message = transport.ReceiveSchemaMessageOnce();
                     transport.PollResends();
-                }
-                catch (ObjectDisposedException) when (_disposed)
-                {
-                    return;
-                }
-                catch (SocketException) when (_disposed)
-                {
-                    return;
-                }
 
-                if (message != null)
-                {
-                    Dispatch(message);
-                }
+                    if (message != null)
+                    {
+                        Dispatch(message);
+                    }
 
-                Thread.Sleep(1);
+                    Thread.Sleep(1);
+                }
+            }
+            catch (ObjectDisposedException) when (_disposed)
+            {
+            }
+            catch (SocketException) when (_disposed)
+            {
+            }
+            catch (Exception error)
+            {
+                _backgroundFailure.TrySetResult(error);
             }
         }
 

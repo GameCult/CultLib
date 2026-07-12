@@ -779,7 +779,8 @@ namespace GameCult.Mesh
                     completion.Task,
                     endpoint,
                     resolvedOptions,
-                    messageId)
+                    messageId,
+                    (client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                 .ConfigureAwait(false);
         }
 
@@ -886,10 +887,20 @@ namespace GameCult.Mesh
             Task<CultNetSnapshotResponseRawMessage> responseTask,
             string endpoint,
             CultMeshSnapshotRequestOptions options,
-            string messageId)
+            string messageId,
+            Task<Exception>? backgroundFailure = null)
         {
             var timeoutTask = Task.Delay(options.ResponseTimeout);
-            var completed = await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false);
+            var completed = backgroundFailure == null
+                ? await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false)
+                : await Task.WhenAny(responseTask, timeoutTask, backgroundFailure).ConfigureAwait(false);
+            if (completed == backgroundFailure)
+            {
+                var error = await backgroundFailure.ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    $"CultNet snapshot client failed while waiting for response '{messageId}' from {endpoint}.",
+                    error);
+            }
             if (completed != responseTask)
             {
                 throw new TimeoutException(
