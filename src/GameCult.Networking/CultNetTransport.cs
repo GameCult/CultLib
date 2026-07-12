@@ -1508,6 +1508,8 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetRudpSocketTransportConnection : IDisposable
     {
+        private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
+        private const int WireBurstPackets = 1;
         private readonly Socket _socket;
         private readonly CultNetRudpSession _session;
         private readonly CultNetRudpSocketMode _mode;
@@ -1657,10 +1659,7 @@ namespace GameCult.Networking
         /// </summary>
         public void Send(string channelId, byte[] payload)
         {
-            foreach (var packet in _session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes))
-            {
-                SendPacket(packet);
-            }
+            SendPackets(_session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
             _stats.FramesSent++;
         }
 
@@ -1929,9 +1928,16 @@ namespace GameCult.Networking
         /// </summary>
         public void PollResends()
         {
-            foreach (var packet in _session.DueResends(NowMs()))
+            SendPackets(_session.DueResends(NowMs()));
+        }
+
+        private void SendPackets(IReadOnlyList<CultNetRudpPacket> packets)
+        {
+            for (var index = 0; index < packets.Count; index++)
             {
-                SendPacket(packet);
+                SendPacket(packets[index]);
+                if ((index + 1) % WireBurstPackets == 0)
+                    Thread.Sleep(1);
             }
         }
 
@@ -2072,6 +2078,8 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetRudpSocketTransportServer : IDisposable
     {
+        private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
+        private const int WireBurstPackets = 1;
         private readonly Socket _socket;
         private readonly uint _connectionId;
         private readonly uint _initialSequence;
@@ -2092,6 +2100,10 @@ namespace GameCult.Networking
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (string.IsNullOrWhiteSpace(options.RuntimeId)) throw new ArgumentException("Runtime id is required.", nameof(options));
             _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
+            if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
+                _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
+            if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
+                _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
             _connectionId = options.ConnectionId;
             _initialSequence = options.InitialSequence;
             _resendDelayMs = options.ResendDelayMs;
@@ -2135,10 +2147,7 @@ namespace GameCult.Networking
         public void Send(CultNetRudpSocketServerPeer peer, string channelId, byte[] payload)
         {
             if (peer == null) throw new ArgumentNullException(nameof(peer));
-            foreach (var packet in peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes))
-            {
-                SendPacket(peer.RemoteEndPoint, packet);
-            }
+            SendPackets(peer, peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
             _stats.FramesSent++;
         }
 
@@ -2287,10 +2296,17 @@ namespace GameCult.Networking
         {
             foreach (var peer in _peers.Values.ToArray())
             {
-                foreach (var packet in peer.Session.DueResends(NowMs()))
-                {
-                    SendPacket(peer.RemoteEndPoint, packet);
-                }
+                SendPackets(peer, peer.Session.DueResends(NowMs()));
+            }
+        }
+
+        private void SendPackets(CultNetRudpSocketServerPeer peer, IReadOnlyList<CultNetRudpPacket> packets)
+        {
+            for (var index = 0; index < packets.Count; index++)
+            {
+                SendPacket(peer.RemoteEndPoint, packets[index]);
+                if ((index + 1) % WireBurstPackets == 0)
+                    Thread.Sleep(1);
             }
         }
 

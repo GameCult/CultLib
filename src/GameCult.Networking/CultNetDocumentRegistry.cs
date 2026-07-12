@@ -270,7 +270,7 @@ namespace GameCult.Networking
             var storedAt = ResolveStoredAt(options);
 
             var documents = new List<CultNetRawDocumentRecord>();
-            foreach (var document in cache.AllEntries)
+            void AddDocument(object document, string key)
             {
                 var descriptor = _documents.GetRequired(document.GetType());
                 var binding = GetByDocumentType(document.GetType()) ??
@@ -282,27 +282,11 @@ namespace GameCult.Networking
 
                 if (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, binding, requestedSchemaIds))
                 {
-                    continue;
+                    return;
                 }
-
-                var handleMethod = typeof(CultCache)
-                    .GetMethod(nameof(CultCache.TryGetHandle))!
-                    .MakeGenericMethod(document.GetType());
-                var handleObject = handleMethod.Invoke(cache, new[] { document });
-                if (handleObject == null)
-                {
-                    continue;
-                }
-
-                var keyProperty = handleObject.GetType().GetProperty("Value");
-                var handleValue = keyProperty?.GetValue(handleObject) ?? handleObject;
-                var recordKeyProperty = handleValue.GetType().GetProperty("Key");
-                var recordKey = recordKeyProperty?.GetValue(handleValue);
-                var valueProperty = recordKey?.GetType().GetProperty("Value");
-                var key = (string?)(valueProperty?.GetValue(recordKey)) ?? string.Empty;
                 if (requestedRecordKeys != null && !requestedRecordKeys.Contains(key))
                 {
-                    continue;
+                    return;
                 }
 
                 documents.Add(new CultNetRawDocumentRecord
@@ -317,6 +301,36 @@ namespace GameCult.Networking
                     SourceRole = options?.SourceRole,
                     Tags = options?.Tags
                 });
+            }
+
+            if (requestedRecordKeys != null)
+            {
+                foreach (var key in requestedRecordKeys)
+                {
+                    var document = cache.Get(new CultRecordKey(key));
+                    if (document != null)
+                        AddDocument(document, key);
+                }
+            }
+            else
+            {
+                foreach (var document in cache.AllEntries)
+                {
+                    var handleMethod = typeof(CultCache)
+                        .GetMethod(nameof(CultCache.TryGetHandle))!
+                        .MakeGenericMethod(document.GetType());
+                    var handleObject = handleMethod.Invoke(cache, new[] { document });
+                    if (handleObject == null)
+                        continue;
+
+                    var keyProperty = handleObject.GetType().GetProperty("Value");
+                    var handleValue = keyProperty?.GetValue(handleObject) ?? handleObject;
+                    var recordKeyProperty = handleValue.GetType().GetProperty("Key");
+                    var recordKey = recordKeyProperty?.GetValue(handleValue);
+                    var valueProperty = recordKey?.GetType().GetProperty("Value");
+                    var key = (string?)(valueProperty?.GetValue(recordKey)) ?? string.Empty;
+                    AddDocument(document, key);
+                }
             }
 
             return new CultNetSnapshotResponseRawMessage

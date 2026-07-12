@@ -1024,6 +1024,7 @@ namespace GameCult.Networking.Tests
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
             Assert.That(client.Stats.FramesSent, Is.EqualTo(1));
             Assert.That(server.Stats.FramesReceived, Is.EqualTo(1));
+
         }
 
         [Test]
@@ -1258,6 +1259,74 @@ namespace GameCult.Networking.Tests
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-host-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.host"));
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+        }
+
+        [Test]
+        public async Task RudpCultNetSchemaServer_DeliversLargeSnapshotResponse()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-large-snapshot-host",
+                Socket = BindUdpSocket(),
+                MaxFragmentBytes = 1024,
+                MaxPendingReliablePackets = 1024
+            });
+            var responseCompletion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.OnCultNet<CultNetSnapshotRequestMessage>((request, peer) => peer.SendCultNet(
+                new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = request.MessageId,
+                    Documents =
+                    [
+                        new CultNetRawDocumentRecord
+                        {
+                            SchemaId = "test.large.snapshot.v1",
+                            RecordKey = "test:large:snapshot",
+                            PayloadEncoding = "messagepack",
+                            Payload = Enumerable.Range(0, 128 * 1024)
+                                .Select(index => (byte)(index % 251)).ToArray()
+                        }
+                    ]
+                }));
+
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!cancellation.IsCancellationRequested)
+                    {
+                        _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                        Thread.Sleep(1);
+                    }
+                }
+                catch (Exception error) { serverFailure.TrySetResult(error); }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp(
+                runtimeId: "csharp-rudp-large-snapshot-client",
+                maxFragmentBytes: 1024);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(response => responseCompletion.TrySetResult(response));
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetSnapshotRequestMessage
+            {
+                MessageId = "large-snapshot",
+                SchemaIds = ["test.large.snapshot.v1"],
+                RecordKeys = ["test:large:snapshot"]
+            });
+
+            var completed = await Task.WhenAny(responseCompletion.Task, serverFailure.Task, Task.Delay(5000));
+            if (completed == serverFailure.Task) throw await serverFailure.Task;
+            if (completed != responseCompletion.Task)
+                Assert.Fail($"Large snapshot timed out; server sent {server.Stats.BytesSent} bytes, received {server.Stats.BytesReceived} bytes, transports {server.Profile.Transports.Count()}.");
+            var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromMilliseconds(1));
+            cancellation.Cancel();
+            Assert.That(response.Documents, Has.Length.EqualTo(1));
+            Assert.That(response.Documents[0].Payload, Has.Length.EqualTo(128 * 1024));
         }
 
         [Test]

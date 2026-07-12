@@ -216,7 +216,7 @@ namespace GameCult.Networking
                     Dispatch(message);
                 }
 
-                Thread.Sleep(5);
+                Thread.Sleep(1);
             }
         }
 
