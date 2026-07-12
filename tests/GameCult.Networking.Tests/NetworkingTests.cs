@@ -1308,6 +1308,61 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_StreamsRecordChangesOverRudp()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("database-subscription-client");
+            var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var changed = new TaskCompletionSource<CultNetDatabaseChangeRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+            client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changed.TrySetResult(message));
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            const string recordKey = "tests:subscription:note";
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-note",
+                SubscriptionId = "note",
+                RecordKeys = [recordKey],
+                IncludeSnapshot = true
+            });
+            await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+
+            await database.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "live"
+            });
+            var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(update.SubscriptionId, Is.EqualTo("note"));
+            Assert.That(update.ChangeKind, Is.EqualTo("added"));
+            Assert.That(update.Document, Is.Not.Null);
+            Assert.That(update.Document!.RecordKey, Is.EqualTo(recordKey));
+        }
+
+        [Test]
         public async Task RudpCultNetSchemaServer_DeliversLargeSnapshotResponse()
         {
             using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
