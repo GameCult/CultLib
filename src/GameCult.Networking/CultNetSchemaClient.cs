@@ -153,7 +153,9 @@ namespace GameCult.Networking
                 ? parsed
                 : Dns.GetHostAddresses(host)[0];
             var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+            socket.Bind(new IPEndPoint(
+                IPAddress.IsLoopback(remoteAddress) ? IPAddress.Loopback : IPAddress.Any,
+                0));
             socket.ReceiveTimeout = 20;
             _transport = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
             {
