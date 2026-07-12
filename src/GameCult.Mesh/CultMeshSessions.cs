@@ -174,6 +174,7 @@ namespace GameCult.Mesh
         internal ICultNetSchemaClient Channel { get; }
         public CultMeshSessionState State { get; private set; }
         public Observable<CultMeshSessionState> WatchState() => _states;
+        public ICultNetSchemaClient OpenSchemaClient() => new SessionSchemaClient(this);
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage => Channel.SendCultNet(message);
         public IDisposable OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
         {
@@ -199,6 +200,36 @@ namespace GameCult.Mesh
             public SessionSubscription(Action<T> callback) { _callback = callback; }
             public void Invoke(T message) => Volatile.Read(ref _callback)?.Invoke(message);
             public void Dispose() => Interlocked.Exchange(ref _callback, null);
+        }
+
+        private sealed class SessionSchemaClient : ICultNetSchemaClient
+        {
+            private readonly CultMeshSession _session;
+            private readonly ConcurrentBag<IDisposable> _registrations = new();
+            private bool _disposed;
+            public SessionSchemaClient(CultMeshSession session) { _session = session; }
+            public bool Connected => !_disposed && _session.State.Status == CultMeshSessionStatus.Online;
+            public void Connect(string host, int port)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(SessionSchemaClient));
+                if (!Connected) throw new InvalidOperationException("The managed CultMesh session is not online.");
+            }
+            public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(SessionSchemaClient));
+                _session.SendCultNet(message);
+            }
+            public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(SessionSchemaClient));
+                _registrations.Add(_session.OnCultNet(callback));
+            }
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                foreach (var registration in _registrations) registration.Dispose();
+            }
         }
     }
 
