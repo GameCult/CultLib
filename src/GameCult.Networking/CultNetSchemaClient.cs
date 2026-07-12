@@ -199,8 +199,33 @@ namespace GameCult.Networking
         /// <inheritdoc />
         public void Dispose()
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var transport = _transport;
+            if (transport?.Connected == true)
+            {
+                try
+                {
+                    transport.Disconnect(Encoding.UTF8.GetBytes("schema-client-disposed"));
+                }
+                catch (SocketException)
+                {
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+
             _disposed = true;
-            _transport?.Dispose();
+            transport?.Dispose();
+            var pumpThread = _pumpThread;
+            if (pumpThread != null && pumpThread != Thread.CurrentThread)
+            {
+                pumpThread.Join(TimeSpan.FromMilliseconds(250));
+            }
         }
 
         private void Pump()

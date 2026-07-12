@@ -1262,6 +1262,52 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task RudpCultNetSchemaServer_AcceptsSequentialShortLivedClients()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-sequential-host",
+                Socket = BindUdpSocket(),
+                MaxFragmentBytes = 1024
+            });
+            server.OnCultNet<CultNetSchemaCatalogRequestMessage>((request, peer) =>
+                peer.SendCultNet(new CultNetSchemaCatalogResponseMessage
+                {
+                    MessageId = request.MessageId,
+                    Schemas = Array.Empty<CultNetSchemaDescriptor>()
+                }));
+
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            async Task FetchOnce(string messageId)
+            {
+                using var client = CultNetSchemaClients.CreateRudp(runtimeId: $"client-{messageId}");
+                var completion = new TaskCompletionSource<CultNetSchemaCatalogResponseMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                client.OnCultNet<CultNetSchemaCatalogResponseMessage>(response => completion.TrySetResult(response));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+                client.SendCultNet(new CultNetSchemaCatalogRequestMessage { MessageId = messageId });
+                var response = await AwaitWithTimeout(completion.Task, TimeSpan.FromSeconds(2));
+                Assert.That(response.MessageId, Is.EqualTo(messageId));
+            }
+
+            await FetchOnce("first");
+            await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
+            await FetchOnce("second");
+            cancellation.Cancel();
+        }
+
+        [Test]
         public async Task RudpCultNetSchemaServer_DeliversLargeSnapshotResponse()
         {
             using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions

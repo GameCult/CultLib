@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -136,6 +137,11 @@ namespace GameCult.Networking
         /// Gets a snapshot of the current transfer counters.
         /// </summary>
         public CultNetTransportStats Stats => _transport.Stats;
+
+        /// <summary>
+        /// Gets the currently tracked RUDP peers.
+        /// </summary>
+        public IReadOnlyCollection<CultNetRudpSocketServerPeer> Peers => _transport.Peers;
 
         /// <summary>
         /// Registers a schema-v0 handler.
