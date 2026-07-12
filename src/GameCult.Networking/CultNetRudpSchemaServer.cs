@@ -224,7 +224,6 @@ namespace GameCult.Networking
         public async Task<bool> PollOnceAsync()
         {
             var delivered = _transport.ReceiveOnce();
-            _transport.PollResends();
             if (delivered == null || !string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
             {
                 return false;

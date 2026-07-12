@@ -157,6 +157,11 @@ namespace GameCult.Networking
                 IPAddress.IsLoopback(remoteAddress) ? IPAddress.Loopback : IPAddress.Any,
                 0));
             socket.ReceiveTimeout = 20;
+            if (string.Equals(Environment.GetEnvironmentVariable("CULTNET_TRACE_RUDP"), "1", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine(
+                    $"CultNet RUDP client bind local={socket.LocalEndPoint} remote={remoteAddress}:{port} runtime={_runtimeId}");
+            }
             _transport = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
             {
                 RuntimeId = _runtimeId,

@@ -1528,6 +1528,8 @@ namespace GameCult.Networking
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (string.IsNullOrWhiteSpace(options.RuntimeId)) throw new ArgumentException("Runtime id is required.", nameof(options));
             _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
+            if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
+                _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
             _mode = options.Mode;
             _remoteEndPoint = options.RemoteEndPoint;
             _maxFragmentBytes = options.MaxFragmentBytes;
@@ -1881,6 +1883,7 @@ namespace GameCult.Networking
             var wire = new byte[received];
             Array.Copy(buffer, wire, received);
             var packet = CultNetRudpPacketCodec.Decode(wire);
+            TracePacket("rx", packet, received, remote);
             if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
             {
                 SendPacket(_session.AcceptConnect(packet, NowMs()));
@@ -1928,6 +1931,8 @@ namespace GameCult.Networking
         /// </summary>
         public void PollResends()
         {
+            if (_socket.Poll(0, SelectMode.SelectRead))
+                return;
             SendPackets(_session.DueResends(NowMs()));
         }
 
@@ -1963,6 +1968,18 @@ namespace GameCult.Networking
             var wire = CultNetRudpPacketCodec.Encode(packet);
             var sent = _socket.SendTo(wire, _remoteEndPoint);
             _stats.BytesSent += sent;
+            TracePacket("tx", packet, sent, _remoteEndPoint);
+        }
+
+        private static void TracePacket(string direction, CultNetRudpPacket packet, int bytes, EndPoint? endpoint)
+        {
+            if (!string.Equals(Environment.GetEnvironmentVariable("CULTNET_TRACE_RUDP"), "1", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Console.Error.WriteLine(
+                $"CultNet RUDP {direction} type={packet.PacketType} seq={packet.Sequence} ack={packet.Ack} bytes={bytes} endpoint={endpoint}");
         }
 
         private static CultNetRudpSendOptions ChannelSendOptions(string channelId)
@@ -2100,8 +2117,6 @@ namespace GameCult.Networking
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (string.IsNullOrWhiteSpace(options.RuntimeId)) throw new ArgumentException("Runtime id is required.", nameof(options));
             _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
-            if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
-                _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
             if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
                 _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
             _connectionId = options.ConnectionId;
@@ -2294,6 +2309,8 @@ namespace GameCult.Networking
         /// </summary>
         public void PollResends()
         {
+            if (_socket.Poll(0, SelectMode.SelectRead))
+                return;
             foreach (var peer in _peers.Values.ToArray())
             {
                 SendPackets(peer, peer.Session.DueResends(NowMs()));
