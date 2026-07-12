@@ -202,6 +202,36 @@ failure.
   counters.
 - Diagnostics have bounded cost and can be disabled or sampled on hot paths.
 
+### Phase 0 Body Map
+
+**Owner:** reliability organs own their clocks and emit typed observations;
+`CultMeshDiagnosticBuffer` owns only a bounded inspection projection.
+
+**Inputs:** injected `ICultMeshClock`, organ state transitions, endpoint and
+source identity, reason code, and served schema/library version.
+
+**Outputs:** ordered `CultMeshDiagnosticEvent` observations. The deterministic
+test network emits scheduled packet deliveries under loss, duplication,
+reordering, latency, partition, endpoint rotation, corruption, and restart.
+
+**Derived state:** diagnostic sequence and the bounded recent-event window.
+Neither confers reachability, authority, or retry policy.
+
+**Forbidden writers:** diagnostic sinks and fault harnesses cannot choose a
+route, mutate discovery candidates, authorize a peer, or repair a session.
+
+**Shared paths:** the existing Verse discovery client now uses the injected
+clock for connection and response deadlines and emits the same typed timeline
+for success, timeout, and transport failure.
+
+**Cut line:** wall-clock reads and unobservable timeout delays have been removed
+from Verse discovery. Caller-owned catalog mutation and endpoint sequencing
+remain compatibility authority until Phase 1 replaces and demotes them.
+
+**Verification layer:** tests observe the emitted discovery timeline and served
+version, while the deterministic network harness proves exact replay of every
+required hostile-network action.
+
 ## Phase Closure Contract
 
 Every implementation phase must close with all of the following:

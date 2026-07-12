@@ -2790,6 +2790,38 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultMeshVerseDiscoveryClient_ReportsDeterministicConnectionFailureTimeline()
+        {
+            var clock = new ManualCultMeshClock(new DateTimeOffset(2026, 7, 12, 18, 0, 0, TimeSpan.Zero));
+            var diagnostics = new CultMeshDiagnosticBuffer();
+            var client = new CultMeshVerseDiscoveryClient(new CultMeshVerseDiscoveryClientOptions
+            {
+                CreateClient = () => new NeverConnectedSchemaClient(),
+                Clock = clock,
+                Diagnostics = diagnostics,
+                SourceId = "test-bootstrap",
+                ConnectTimeout = TimeSpan.FromMilliseconds(50)
+            });
+
+            var error = Assert.ThrowsAsync<TimeoutException>(() =>
+                client.FetchAsync("rudp://unavailable.example.test:4075"));
+            Assert.That(error!.Message, Does.Contain("unavailable.example.test"));
+
+            var timeline = diagnostics.Snapshot();
+            Assert.That(timeline.Select(item => item.Kind), Is.EqualTo(new[]
+            {
+                CultMeshDiagnosticKind.ConnectionAttempt,
+                CultMeshDiagnosticKind.CandidateRejected
+            }));
+            Assert.That(timeline[0].ObservedAtUtc, Is.EqualTo(new DateTimeOffset(2026, 7, 12, 18, 0, 0, TimeSpan.Zero)));
+            Assert.That(timeline[1].ObservedAtUtc, Is.EqualTo(new DateTimeOffset(2026, 7, 12, 18, 0, 0, 50, TimeSpan.Zero)));
+            Assert.That(timeline[1].State, Is.EqualTo("unavailable"));
+            Assert.That(timeline[1].ReasonCode, Is.EqualTo("timeout"));
+            Assert.That(timeline[1].SourceId, Is.EqualTo("test-bootstrap"));
+            Assert.That(timeline[1].LibraryVersion, Is.Not.Empty);
+        }
+
+        [Test]
         public async Task CultMeshPeerExchangeClient_Uses_SchemaClientPort()
         {
             var fake = new CapturingSchemaClient(message =>
@@ -4909,6 +4941,45 @@ namespace GameCult.Networking.Tests
 
             public void Dispose()
             {
+            }
+        }
+
+        private sealed class NeverConnectedSchemaClient : ICultNetSchemaClient
+        {
+            public bool Connected => false;
+
+            public void Connect(string host, int port)
+            {
+            }
+
+            public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+            {
+                throw new InvalidOperationException("A disconnected client cannot send.");
+            }
+
+            public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
+            }
+
+            public void Dispose()
+            {
+            }
+        }
+
+        private sealed class ManualCultMeshClock : ICultMeshClock
+        {
+            public ManualCultMeshClock(DateTimeOffset utcNow)
+            {
+                UtcNow = utcNow;
+            }
+
+            public DateTimeOffset UtcNow { get; private set; }
+
+            public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                UtcNow += delay;
+                return Task.CompletedTask;
             }
         }
 

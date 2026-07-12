@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Networking;
 
@@ -161,6 +162,15 @@ namespace GameCult.Mesh
         /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>Gets or sets the clock that owns discovery deadlines.</summary>
+        public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
+
+        /// <summary>Gets or sets the bounded operational diagnostic sink.</summary>
+        public ICultMeshDiagnosticSink Diagnostics { get; set; } = CultMeshNullDiagnosticSink.Instance;
+
+        /// <summary>Gets or sets the identity of this bootstrap lookup source.</summary>
+        public string SourceId { get; set; } = "configured-bootstrap";
     }
 
     /// <summary>
@@ -169,6 +179,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshVerseDiscoveryClient
     {
         private readonly CultMeshVerseDiscoveryClientOptions _options;
+        private long _diagnosticSequence;
 
         /// <summary>
         /// Creates a Verse discovery client.
@@ -202,17 +213,38 @@ namespace GameCult.Mesh
             client.OnCultNet<CultNetErrorMessage>(error =>
                 completion.TrySetException(new InvalidOperationException(error.Error)));
 
-            client.Connect(host, port);
-            var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
-            await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
-            client.SendCultNet(new CultMeshVerseCatalogRequestMessage
+            Emit(CultMeshDiagnosticKind.ConnectionAttempt, messageId, endpoint, "connecting");
+            try
             {
-                MessageId = messageId,
-                TransportVersion = request?.TransportVersion,
-                VerseIds = request?.VerseIds
-            });
+                client.Connect(host, port);
+                var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
+                await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
+                client.SendCultNet(new CultMeshVerseCatalogRequestMessage
+                {
+                    MessageId = messageId,
+                    TransportVersion = request?.TransportVersion,
+                    VerseIds = request?.VerseIds
+                });
 
-            return await WaitForResponseAsync(completion.Task, endpoint, backgroundFailure).ConfigureAwait(false);
+                var response = await WaitForResponseAsync(completion.Task, endpoint, backgroundFailure).ConfigureAwait(false);
+                Emit(
+                    CultMeshDiagnosticKind.DiscoveryObservation,
+                    messageId,
+                    endpoint,
+                    "fresh",
+                    schemaVersion: response.SchemaVersion);
+                return response;
+            }
+            catch (Exception error) when (!(error is OperationCanceledException))
+            {
+                Emit(
+                    CultMeshDiagnosticKind.CandidateRejected,
+                    messageId,
+                    endpoint,
+                    "unavailable",
+                    ReasonCode(error));
+                throw;
+            }
         }
 
         /// <summary>
@@ -251,7 +283,7 @@ namespace GameCult.Mesh
             string endpoint,
             Task<Exception>? backgroundFailure)
         {
-            var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
+            var deadline = _options.Clock.UtcNow + _options.ConnectTimeout;
             while (!client.Connected)
             {
                 if (backgroundFailure?.IsCompleted == true)
@@ -261,12 +293,12 @@ namespace GameCult.Mesh
                         $"Verse discovery client failed while connecting to {endpoint}.",
                         error);
                 }
-                if (DateTimeOffset.UtcNow >= deadline)
+                if (_options.Clock.UtcNow >= deadline)
                 {
                     throw new TimeoutException($"Timed out connecting to Verse discovery endpoint {endpoint}.");
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+                await _options.Clock.DelayAsync(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
             }
         }
 
@@ -275,7 +307,7 @@ namespace GameCult.Mesh
             string endpoint,
             Task<Exception>? backgroundFailure)
         {
-            var timeoutTask = Task.Delay(_options.ResponseTimeout);
+            var timeoutTask = _options.Clock.DelayAsync(_options.ResponseTimeout);
             var completed = backgroundFailure == null
                 ? await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false)
                 : await Task.WhenAny(responseTask, timeoutTask, backgroundFailure).ConfigureAwait(false);
@@ -292,6 +324,35 @@ namespace GameCult.Mesh
             }
 
             return await responseTask.ConfigureAwait(false);
+        }
+
+        private void Emit(
+            CultMeshDiagnosticKind kind,
+            string operationId,
+            string endpoint,
+            string state,
+            string reasonCode = "",
+            string schemaVersion = "")
+        {
+            _options.Diagnostics.Emit(new CultMeshDiagnosticEvent(
+                Interlocked.Increment(ref _diagnosticSequence),
+                _options.Clock.UtcNow,
+                CultMeshReliabilityOrgan.Discovery,
+                kind,
+                operationId,
+                endpoint,
+                state,
+                reasonCode,
+                _options.SourceId,
+                endpoint,
+                schemaVersion));
+        }
+
+        private static string ReasonCode(Exception error)
+        {
+            if (error is TimeoutException) return "timeout";
+            if (error is InvalidOperationException) return "transport_failure";
+            return "lookup_failure";
         }
     }
 }
