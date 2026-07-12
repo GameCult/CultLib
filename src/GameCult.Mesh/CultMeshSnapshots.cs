@@ -122,6 +122,19 @@ namespace GameCult.Mesh
             return new CultMeshSnapshotSession(session, options ?? new CultMeshSnapshotRequestOptions(), registry);
         }
 
+        public static async Task<CultMeshSnapshotSession> ConnectAsync(
+            CultMeshSessionManager sessions,
+            CultMeshEndpointId endpointId,
+            CultMeshProtocolId protocol,
+            CultMeshSnapshotRequestOptions options,
+            CultNetDocumentRegistry? registry = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (sessions == null) throw new ArgumentNullException(nameof(sessions));
+            var session = await sessions.ConnectAsync(endpointId, protocol, cancellationToken).ConfigureAwait(false);
+            return new CultMeshSnapshotSession(session, options ?? new CultMeshSnapshotRequestOptions(), registry);
+        }
+
         /// <summary>Fetches one raw snapshot while retaining the underlying endpoint connection.</summary>
         public async Task<CultNetSnapshotResponseRawMessage> FetchSnapshotAsync(
             IReadOnlyList<string>? schemaIds = null,
