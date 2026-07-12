@@ -90,6 +90,24 @@ public sealed class CultMeshClientTests
         connector.Clients[1].SubscribeCount.Should().Be(1);
     }
 
+    [Test]
+    public async Task Collection_ReplicatesAllDocumentsOfTypedSchema()
+    {
+        var connector = new DocumentConnector();
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        var collection = await mesh.CollectionAsync<ClientTestDocument>("aetheria");
+
+        (await collection.LatestAsync()).Should().ContainSingle()
+            .Which.Text.Should().Be("pilot surface 1");
+        connector.SubscribeCount.Should().Be(1);
+    }
+
     private sealed class RendezvousClient : ICultNetSchemaClient
     {
         private readonly List<Action<CultMeshVerseCatalogResponseMessage>> _handlers = new();

@@ -35,6 +35,7 @@ namespace GameCult.Mesh
         private readonly CultMeshDiscoveryService _discovery;
         private readonly CultMeshSessionManager _sessions;
         private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _documents = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _collections = new(StringComparer.Ordinal);
         private readonly ConcurrentBag<IDisposable> _documentResources = new();
         private bool _disposed;
 
@@ -113,12 +114,39 @@ namespace GameCult.Mesh
             }
         }
 
+        /// <summary>Opens a live collection of one typed schema by stable provider identity.</summary>
+        public async Task<CultMeshCollectionHandle<TDocument>> CollectionAsync<TDocument>(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            var identity = endpointId.Trim();
+            var key = identity + "\u001f" + typeof(TDocument).AssemblyQualifiedName;
+            var lazy = _collections.GetOrAdd(key, _ => new Lazy<Task<object>>(
+                async () => await OpenCollectionAsync<TDocument>(identity).ConfigureAwait(false),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+            try
+            {
+                var binding = (RemoteCollectionBinding<TDocument>)await AwaitForCallerAsync(lazy.Value, cancellationToken)
+                    .ConfigureAwait(false);
+                return binding.Handle;
+            }
+            catch
+            {
+                _collections.TryRemove(key, out _);
+                throw;
+            }
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             foreach (var resource in _documentResources) resource.Dispose();
             _documents.Clear();
+            _collections.Clear();
             _sessions.Dispose();
             _discovery.Dispose();
         }
@@ -133,6 +161,24 @@ namespace GameCult.Mesh
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
             var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey);
+            try
+            {
+                await binding.StartAsync().ConfigureAwait(false);
+                _documentResources.Add(binding);
+                return binding;
+            }
+            catch
+            {
+                binding.Dispose();
+                throw;
+            }
+        }
+
+        private async Task<object> OpenCollectionAsync<TDocument>(string endpointId)
+            where TDocument : class
+        {
+            var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
+            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId);
             try
             {
                 await binding.StartAsync().ConfigureAwait(false);
@@ -204,6 +250,67 @@ namespace GameCult.Mesh
                     await _subscription.SubscribeAsync(
                         _subscriptionId,
                         recordKeys: new[] { _recordKey },
+                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    _subscribeGate.Release();
+                }
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _stateWatch?.Dispose();
+                _subscription.Dispose();
+                _cache.Dispose();
+                _subscribeGate.Dispose();
+            }
+        }
+
+        private sealed class RemoteCollectionBinding<TDocument> : IDisposable where TDocument : class
+        {
+            private readonly CultMeshSession _session;
+            private readonly string _subscriptionId;
+            private readonly CultCache _cache;
+            private readonly CultNetDatabaseSubscriptionClient _subscription;
+            private readonly SemaphoreSlim _subscribeGate = new(1, 1);
+            private IDisposable? _stateWatch;
+            private bool _disposed;
+
+            public RemoteCollectionBinding(CultMeshSession session, string endpointId)
+            {
+                _session = session;
+                _subscriptionId = "cultmesh-collection:" + endpointId + ":" + typeof(TDocument).FullName;
+                var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
+                var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
+                _cache = new CultCache(cacheRegistry);
+                _subscription = new CultNetDatabaseSubscriptionClient(session.OpenSchemaClient(), _cache, networkRegistry);
+                Handle = CultMesh.Collection<TDocument>(
+                    _cache,
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, endpointId));
+            }
+
+            public CultMeshCollectionHandle<TDocument> Handle { get; }
+
+            public async Task StartAsync()
+            {
+                await SubscribeAsync().ConfigureAwait(false);
+                _stateWatch = _session.WatchState()
+                    .Where(state => state.Status == CultMeshSessionStatus.Online)
+                    .Subscribe(state => { _ = SubscribeAsync(); });
+            }
+
+            private async Task SubscribeAsync()
+            {
+                await _subscribeGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (_disposed) return;
+                    await _subscription.SubscribeAsync(
+                        _subscriptionId,
                         schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
                         .ConfigureAwait(false);
                 }
