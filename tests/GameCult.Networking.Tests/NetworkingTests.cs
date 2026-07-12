@@ -3115,6 +3115,12 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void CultMeshRudpClient_DefaultBindAllowsRemoteRoutes()
+        {
+            Assert.That(new CultMeshRudpSocketOptions().BindHost, Is.EqualTo("0.0.0.0"));
+        }
+
+        [Test]
         public void CultMeshRudpFacade_CreatesAuthorizedClientFromPeerEndpoint()
         {
             var connectionId = 0x10203045u;
