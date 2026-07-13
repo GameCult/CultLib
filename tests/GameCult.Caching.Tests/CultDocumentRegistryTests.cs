@@ -1,7 +1,8 @@
 using System;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
-using System.Linq;
+using System.Threading.Tasks;
 using NUnit.Framework;
 
 namespace GameCult.Caching.Tests;
@@ -88,11 +89,26 @@ public sealed class CultDocumentRegistryTests
         Assert.That(
             () => registry.GetRequired(secondType),
             Throws.TypeOf<InvalidOperationException>()
-                .With.Message.Contains("schema name and version 'tests.registry.layout_collision' version 'v1'")
+                .With.Message.Contains("schema name 'tests.registry.layout_collision' version 'v1'")
                 .And.Message.Contains(firstType.FullName)
                 .And.Message.Contains(secondType.FullName));
         Assert.That(registry.GetRequiredBySchemaId(first.SchemaId), Is.SameAs(first));
         Assert.That(registry.AllDescriptors.Any(descriptor => descriptor.DocumentType == secondType), Is.False);
+    }
+
+    [Test]
+    public void ConcurrentRefreshAndReadsObserveCompleteRegistrySnapshots()
+    {
+        var registry = new CultDocumentRegistry();
+        var type = CreateDocumentType("refresh_visible", "tests.registry.refresh_visible", "v1");
+        var descriptor = registry.GetRequired(type);
+
+        Parallel.For(0, 20, _ =>
+        {
+            registry.Refresh();
+            Assert.That(registry.GetRequired(type).SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(registry.GetRequiredBySchemaId(descriptor.SchemaId).SchemaId, Is.EqualTo(descriptor.SchemaId));
+        });
     }
 
     private static Type CreateDocumentType(
