@@ -3315,9 +3315,16 @@ namespace GameCult.Mesh
         private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)
             where TDocument : class
         {
-            return cache.Get<TDocument>(key)
-                   ?? throw new KeyNotFoundException(
-                       $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
+            var document = cache.Get<TDocument>(key);
+            if (document != null)
+                return document;
+
+            var untyped = cache.Get(key);
+            if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
+                return ConvertUntypedDocument<TDocument>(untyped);
+
+            throw new KeyNotFoundException(
+                $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
         }
 
         private static async Task<TDocument> ReadRequiredAsync<TDocument>(
