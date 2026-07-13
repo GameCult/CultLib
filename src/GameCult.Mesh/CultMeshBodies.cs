@@ -73,8 +73,8 @@ namespace GameCult.Mesh
                 throw new InvalidOperationException("CultMesh body layout version mismatch.");
             if (descriptor.ProducerEpoch != request.ProducerEpoch)
                 throw new InvalidOperationException("CultMesh body producer epoch mismatch.");
-            if (descriptor.ByteSize < 0 || descriptor.Capacity < 0 || descriptor.ByteSize > descriptor.Capacity)
-                throw new InvalidOperationException("CultMesh body size exceeds its declared capacity.");
+            if (descriptor.ByteSize < 0 || descriptor.Capacity < 0)
+                throw new InvalidOperationException("CultMesh body size and logical capacity must be non-negative.");
             if (descriptor.Sequence < 0)
                 throw new InvalidOperationException("CultMesh body sequence must be non-negative.");
             if (descriptor.LeaseExpiresAtUnixMs <= request.NowUtc.ToUnixTimeMilliseconds())
