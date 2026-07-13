@@ -77,6 +77,14 @@ namespace GameCult.Networking
                         RecordKeys = request.RecordKeys
                     }));
             }
+            else
+            {
+                peer.SendCultNet(new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = request.MessageId,
+                    Documents = Array.Empty<CultNetRawDocumentRecord>()
+                });
+            }
             return Task.CompletedTask;
         }
 

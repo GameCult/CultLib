@@ -115,17 +115,25 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Opens a live collection of one typed schema by stable provider identity.</summary>
+        public Task<CultMeshCollectionHandle<TDocument>> CollectionAsync<TDocument>(
+            string endpointId,
+            CancellationToken cancellationToken)
+            where TDocument : class =>
+            CollectionAsync<TDocument>(endpointId, includeInitialSnapshot: true, cancellationToken);
+
+        /// <summary>Opens a live collection and optionally skips replaying its initial snapshot.</summary>
         public async Task<CultMeshCollectionHandle<TDocument>> CollectionAsync<TDocument>(
             string endpointId,
+            bool includeInitialSnapshot = true,
             CancellationToken cancellationToken = default)
             where TDocument : class
         {
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
             var identity = endpointId.Trim();
-            var key = identity + "\u001f" + typeof(TDocument).AssemblyQualifiedName;
+            var key = identity + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + includeInitialSnapshot;
             var lazy = _collections.GetOrAdd(key, _ => new Lazy<Task<object>>(
-                async () => await OpenCollectionAsync<TDocument>(identity).ConfigureAwait(false),
+                async () => await OpenCollectionAsync<TDocument>(identity, includeInitialSnapshot).ConfigureAwait(false),
                 LazyThreadSafetyMode.ExecutionAndPublication));
             try
             {
@@ -157,11 +165,43 @@ namespace GameCult.Mesh
                     $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
         }
 
+        /// <summary>Reads one typed record once with an explicit response deadline.</summary>
+        public async Task<TDocument> ReadAsync<TDocument>(
+            string endpointId,
+            string recordKey,
+            TimeSpan responseTimeout,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            var documents = await ReadManyCoreAsync<TDocument>(
+                    endpointId,
+                    new[] { recordKey },
+                    responseTimeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return documents.FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
+        }
+
         /// <summary>Reads typed records once in one request through the reusable document session.</summary>
         public async Task<IReadOnlyList<TDocument>> ReadManyAsync<TDocument>(
             string endpointId,
             IReadOnlyList<string> recordKeys,
             CancellationToken cancellationToken = default)
+            where TDocument : class
+            => await ReadManyCoreAsync<TDocument>(
+                    endpointId,
+                    recordKeys,
+                    TimeSpan.FromSeconds(10),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        private async Task<IReadOnlyList<TDocument>> ReadManyCoreAsync<TDocument>(
+            string endpointId,
+            IReadOnlyList<string> recordKeys,
+            TimeSpan responseTimeout,
+            CancellationToken cancellationToken)
             where TDocument : class
         {
             ThrowIfDisposed();
@@ -177,7 +217,7 @@ namespace GameCult.Mesh
                     new CultMeshSnapshotRequestOptions
                     {
                         ConnectTimeout = TimeSpan.FromSeconds(5),
-                        ResponseTimeout = TimeSpan.FromSeconds(10),
+                        ResponseTimeout = responseTimeout,
                         MessageIdPrefix = "cultmesh-client-read"
                     },
                     networkRegistry,
@@ -223,11 +263,11 @@ namespace GameCult.Mesh
             }
         }
 
-        private async Task<object> OpenCollectionAsync<TDocument>(string endpointId)
+        private async Task<object> OpenCollectionAsync<TDocument>(string endpointId, bool includeInitialSnapshot)
             where TDocument : class
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
-            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId);
+            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId, includeInitialSnapshot);
             _documentResources.Add(binding);
             try
             {
@@ -261,6 +301,8 @@ namespace GameCult.Mesh
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly object _subscribeLock = new();
+            private Task? _subscribeTask;
             private IDisposable? _stateWatch;
             private bool _disposed;
 
@@ -286,9 +328,18 @@ namespace GameCult.Mesh
             {
                 _stateWatch = _session.WatchState()
                     .Where(state => state.Status == CultMeshSessionStatus.Online)
-                    .Subscribe(state => { _ = SubscribeAsync(); });
-                _ = SubscribeAsync();
+                    .Subscribe(state => { _ = EnsureSubscribedAsync(); });
+                _ = EnsureSubscribedAsync();
                 await _ready.Task.ConfigureAwait(false);
+            }
+
+            private Task EnsureSubscribedAsync()
+            {
+                lock (_subscribeLock)
+                {
+                    if (_subscribeTask is { IsCompleted: false }) return _subscribeTask;
+                    return _subscribeTask = SubscribeAsync();
+                }
             }
 
             private async Task SubscribeAsync()
@@ -325,14 +376,18 @@ namespace GameCult.Mesh
             private readonly string _subscriptionId;
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
+            private readonly bool _includeInitialSnapshot;
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly object _subscribeLock = new();
+            private Task? _subscribeTask;
             private IDisposable? _stateWatch;
             private bool _disposed;
 
-            public RemoteCollectionBinding(CultMeshSession session, string endpointId)
+            public RemoteCollectionBinding(CultMeshSession session, string endpointId, bool includeInitialSnapshot)
             {
                 _session = session;
                 _subscriptionId = "cultmesh-collection:" + endpointId + ":" + typeof(TDocument).FullName;
+                _includeInitialSnapshot = includeInitialSnapshot;
                 var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
                 var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
                 _cache = new CultCache(cacheRegistry);
@@ -348,9 +403,18 @@ namespace GameCult.Mesh
             {
                 _stateWatch = _session.WatchState()
                     .Where(state => state.Status == CultMeshSessionStatus.Online)
-                    .Subscribe(state => { _ = SubscribeAsync(); });
-                _ = SubscribeAsync();
+                    .Subscribe(state => { _ = EnsureSubscribedAsync(); });
+                _ = EnsureSubscribedAsync();
                 await _ready.Task.ConfigureAwait(false);
+            }
+
+            private Task EnsureSubscribedAsync()
+            {
+                lock (_subscribeLock)
+                {
+                    if (_subscribeTask is { IsCompleted: false }) return _subscribeTask;
+                    return _subscribeTask = SubscribeAsync();
+                }
             }
 
             private async Task SubscribeAsync()
@@ -360,7 +424,8 @@ namespace GameCult.Mesh
                     if (_disposed) return;
                     await _subscription.SubscribeAsync(
                         _subscriptionId,
-                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
+                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId },
+                        includeSnapshot: _includeInitialSnapshot)
                         .ConfigureAwait(false);
                     _ready.TrySetResult(true);
                 }

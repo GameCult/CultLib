@@ -53,13 +53,9 @@ namespace GameCult.Networking
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
 
             var messageId = Guid.NewGuid().ToString("N");
-            TaskCompletionSource<IReadOnlyList<object>>? completion = null;
-            if (includeSnapshot)
-            {
-                completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
-                if (!_initialSnapshots.TryAdd(messageId, completion))
-                    throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
-            }
+            var completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_initialSnapshots.TryAdd(messageId, completion))
+                throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
 
             _client.SendCultNet(new CultNetDatabaseSubscribeMessage
             {
@@ -69,7 +65,7 @@ namespace GameCult.Networking
                 SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
                 IncludeSnapshot = includeSnapshot
             });
-            return completion?.Task ?? Task.FromResult<IReadOnlyList<object>>(Array.Empty<object>());
+            return completion.Task;
         }
 
         /// <summary>Stops one live remote subscription.</summary>
