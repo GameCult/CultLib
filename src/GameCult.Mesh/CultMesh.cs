@@ -2978,6 +2978,7 @@ namespace GameCult.Mesh
         /// <summary>
         /// Creates a CultNet RUDP client transport from the first peer authorized for a Verse role.
         /// </summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public static CultNetRudpSocketTransportConnection CreateRudpClientForAuthorizedPeer(
             string runtimeId,
             uint connectionId,
@@ -2991,7 +2992,27 @@ namespace GameCult.Mesh
         {
             if (peers == null) throw new ArgumentNullException(nameof(peers));
             if (leases == null) throw new ArgumentNullException(nameof(leases));
-            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new CultMeshFixedAuthorityClock(at.Value) : null);
+            return CreateRudpClientForAuthorizedPeer(runtimeId, connectionId, peers, resolver, 0, verseId, role, shardId, null, options);
+        }
+
+        /// <summary>Creates a RUDP client from the first contact accepted by the authority resolver.</summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityResolver authority,
+            long authorityEpoch,
+            string verseId,
+            string role,
+            string? shardId = null,
+            string? resourceScope = null,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (authority == null) throw new ArgumentNullException(nameof(authority));
+            var peer = peers.FirstAuthorized(verseId, role, authority, authorityEpoch, shardId, resourceScope);
             if (peer == null)
             {
                 throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
@@ -3054,6 +3075,7 @@ namespace GameCult.Mesh
         /// <summary>
         /// Creates and handshakes a CultNet RUDP client transport from the first peer authorized for a Verse role.
         /// </summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public static CultNetRudpSocketTransportConnection ConnectRudpClientForAuthorizedPeer(
             string runtimeId,
             uint connectionId,
@@ -3067,13 +3089,41 @@ namespace GameCult.Mesh
         {
             if (peers == null) throw new ArgumentNullException(nameof(peers));
             if (leases == null) throw new ArgumentNullException(nameof(leases));
-            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new CultMeshFixedAuthorityClock(at.Value) : null);
+            return ConnectRudpClientForAuthorizedPeer(runtimeId, connectionId, peers, resolver, 0, verseId, role, shardId, null, options);
+        }
+
+        /// <summary>Creates and handshakes a RUDP client from the first contact accepted by the authority resolver.</summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityResolver authority,
+            long authorityEpoch,
+            string verseId,
+            string role,
+            string? shardId = null,
+            string? resourceScope = null,
+            CultMeshRudpClientOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (authority == null) throw new ArgumentNullException(nameof(authority));
+            var peer = peers.FirstAuthorized(verseId, role, authority, authorityEpoch, shardId, resourceScope);
             if (peer == null)
             {
                 throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
             }
 
             return ConnectRudpClientForPeer(runtimeId, connectionId, peer, options);
+        }
+
+        private sealed class CultMeshFixedAuthorityClock : ICultMeshClock
+        {
+            public CultMeshFixedAuthorityClock(DateTimeOffset utcNow) => UtcNow = utcNow;
+            public DateTimeOffset UtcNow { get; }
+            public System.Threading.Tasks.Task DelayAsync(TimeSpan delay, System.Threading.CancellationToken cancellationToken = default) =>
+                System.Threading.Tasks.Task.CompletedTask;
         }
 
         /// <summary>

@@ -104,6 +104,45 @@ must never confer authority.
 **Demotion:** an advertised peer card is only contact evidence. It is never an
 authorization result.
 
+#### Phase 3 body map
+
+**Owner:** `CultMeshAuthorityResolver` is the only component that decides
+whether a peer may act. Decisions are evaluated on demand and are never cached
+as grants.
+
+**Inputs:** `CultMeshAuthorityRequest`, an `ICultMeshAuthorityLeaseSource`, an
+`ICultMeshAuthoritySignatureVerifier`, an
+`ICultMeshAuthorityRevocationSource`, the current authority epoch, and an
+injected `ICultMeshClock`.
+
+**Outputs:** `CultMeshAuthorityDecision`, carrying either the accepted lease
+evidence identifiers or one typed denial reason. Authority diagnostics carry
+lease, peer, and issuer identifiers but never signature material.
+
+**Derived state:** peer selection is a projection over contact candidates and
+fresh resolver decisions. The lease catalog is only a mutable evidence source;
+the peer catalog is only a contact source.
+
+**Forbidden writers:** lease replacement, peer-card publication, successful
+transport connection, cached presence, and wall-clock defaults cannot grant or
+restore authority. Revocation and epoch policy remain outside both catalogs.
+
+**Shared paths:** gameplay sessions expose their resolver; peer selection and
+both privileged RUDP creation paths call that resolver. Compatibility overloads
+delegate to the same resolver with deny-by-default signature policy.
+
+**Cut line:** `CultMeshAuthorityLease.Covers`,
+`CultMeshAuthorityLeaseCatalog.IsAuthorized`, and catalog-owned
+`FindAuthorized`/`FirstAuthorized` no longer contain authorization logic.
+Version-zero or unsigned leases are not reinterpreted as trusted epoch-zero
+leases. Callers must supply a version-one lease, explicit epoch, signature
+verifier, and revocation source.
+
+**Compatibility inventory:** the old lease/catalog peer-selection and RUDP
+overloads remain source-compatible for migration, but cannot authorize because
+they have no signature-verification authority. They delegate to a
+deny-by-default resolver and should be replaced by resolver-taking overloads.
+
 ### Content transfer scheduler
 
 **Owner:** `CultMeshContentTransferService`.

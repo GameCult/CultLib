@@ -192,6 +192,7 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Finds peers that advertise a Verse role and are authorized by the supplied lease catalog.</summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public IReadOnlyList<CultMeshPeerCard> FindAuthorized(
             string verseId,
             string role,
@@ -199,16 +200,32 @@ namespace GameCult.Mesh
             string? shardId = null,
             DateTimeOffset? at = null)
         {
+            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new PeerCatalogFixedClock(at.Value) : null);
+            return FindAuthorized(verseId, role, resolver, 0, shardId);
+        }
+
+        /// <summary>Finds contact candidates accepted by the authority resolver.</summary>
+        public IReadOnlyList<CultMeshPeerCard> FindAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityResolver resolver,
+            long authorityEpoch,
+            string? shardId = null,
+            string? resourceScope = null)
+        {
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(verseId)) throw new ArgumentException("Value must be non-empty.", nameof(verseId));
             if (string.IsNullOrWhiteSpace(role)) throw new ArgumentException("Value must be non-empty.", nameof(role));
-            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            if (resolver == null) throw new ArgumentNullException(nameof(resolver));
             return Find(verseId, role)
-                .Where(peer => leases.IsAuthorized(peer, role, shardId, at))
+                .Where(peer => resolver.Resolve(new CultMeshAuthorityRequest(peer, role, shardId, authorityEpoch, resourceScope)).IsAuthorized)
                 .ToArray();
         }
 
         /// <summary>Returns the first peer that advertises a Verse role and is authorized by the supplied lease catalog.</summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public CultMeshPeerCard? FirstAuthorized(
             string verseId,
             string role,
@@ -217,6 +234,18 @@ namespace GameCult.Mesh
             DateTimeOffset? at = null)
         {
             return FindAuthorized(verseId, role, leases, shardId, at).FirstOrDefault();
+        }
+
+        /// <summary>Returns the first contact candidate accepted by the authority resolver.</summary>
+        public CultMeshPeerCard? FirstAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityResolver resolver,
+            long authorityEpoch,
+            string? shardId = null,
+            string? resourceScope = null)
+        {
+            return FindAuthorized(verseId, role, resolver, authorityEpoch, shardId, resourceScope).FirstOrDefault();
         }
 
         /// <inheritdoc />
@@ -238,6 +267,13 @@ namespace GameCult.Mesh
             {
                 throw new ObjectDisposedException(nameof(CultMeshPeerCatalog));
             }
+        }
+
+        private sealed class PeerCatalogFixedClock : ICultMeshClock
+        {
+            public PeerCatalogFixedClock(DateTimeOffset utcNow) => UtcNow = utcNow;
+            public DateTimeOffset UtcNow { get; }
+            public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default) => Task.CompletedTask;
         }
     }
 
