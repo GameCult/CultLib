@@ -283,6 +283,95 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_Precommits_Catalog_And_Remains_Dirty_When_Record_Write_Fails()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var key = new CultRecordKey("record:catalog-precommit");
+                await cache.UpsertAsync(new NamedTestEntry { Name = "old", Value = "durable" }, new CultRecordHandle<NamedTestEntry>(key));
+                store.PushAll();
+
+                var recordPath = Directory.GetFiles(recordsPath, "*.msgpack").Single();
+                var durableSchema = CultDocumentMessagePackSerialization
+                    .DeserializePersistedRecord(File.ReadAllBytes(recordPath))
+                    .SchemaId;
+                var alternateDescriptor = CultDocumentRegistry.Shared.GetRequired<AlternateNamedTestEntry>();
+                store.Push(new CultStoredDocument(
+                    key,
+                    DateTimeOffset.UtcNow.ToString("O"),
+                    alternateDescriptor,
+                    new AlternateNamedTestEntry { Name = "new" }));
+
+                using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    Assert.That(() => store.PushAll(), Throws.Exception);
+                }
+
+                var precommit = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
+                var alternateSchema = alternateDescriptor.SchemaId;
+                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(durableSchema));
+                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(alternateSchema));
+                Assert.That(store.IsDirty, Is.True);
+                Assert.That(CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordPath)).SchemaId, Is.EqualTo(durableSchema));
+
+                store.PushAll();
+
+                var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
+                Assert.That(compacted.SchemaCatalog.Select(entry => entry.SchemaId), Is.EqualTo(new[] { alternateSchema }));
+                Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_Remains_Dirty_When_Deletion_Fails()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var handle = await cache.AddAsync(new NamedTestEntry { Name = "delete", Value = "durable" });
+                store.PushAll();
+                var recordPath = Directory.GetFiles(recordsPath, "*.msgpack").Single();
+                Assert.That(cache.Remove(handle.Key), Is.True);
+
+                using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    Assert.That(() => store.PushAll(), Throws.Exception);
+                }
+
+                Assert.That(File.Exists(recordPath), Is.True);
+                Assert.That(store.IsDirty, Is.True);
+
+                store.PushAll();
+
+                Assert.That(File.Exists(recordPath), Is.False);
+                Assert.That(store.IsDirty, Is.False);
+                var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
+                Assert.That(compacted.SchemaCatalog, Is.Empty);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
         public async Task CultCache_RuntimeType_Upsert_Snapshot_And_Remove_Work_For_Editor_Tooling()
         {
             var cache = new CultCache();

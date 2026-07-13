@@ -42,7 +42,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PullAll()
     {
-        if (!_manifestFile.Exists && !_recordDirectory.Exists)
+        if (!File.Exists(_manifestFile.FullName) && !_recordDirectory.Exists)
         {
             SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
             IsDirty = false;
@@ -53,7 +53,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         foreach (var record in manifest.Records)
         {
-            var catalog = ResolveCatalogForRecord(record, manifest.SchemaCatalog);
+            var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
             reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
             var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
             Entries[stored.Key.Value] = stored;
@@ -66,7 +66,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             foreach (var recordFile in _recordDirectory.EnumerateFiles("*.msgpack").OrderBy(file => file.Name, StringComparer.Ordinal))
             {
                 var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordFile.FullName));
-                var catalog = ResolveCatalogForRecord(record, manifest.SchemaCatalog);
+                var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
                 reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
                 var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
                 Entries[stored.Key.Value] = stored;
@@ -108,14 +108,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Directory.CreateDirectory(_manifestFile.DirectoryName!);
         Directory.CreateDirectory(_recordDirectory.FullName);
 
-        foreach (var key in _deletedKeys.Keys)
-        {
-            var path = RecordPath(key);
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
+        var targetCatalog = BuildTargetCatalog();
+        var durableCatalog = ReadManifest().SchemaCatalog;
+        var precommitCatalog = durableCatalog
+            .Concat(targetCatalog)
+            .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
+            .Select(group => group.Last())
+            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+            .ToArray();
+
+        WriteManifest(precommitCatalog);
 
         foreach (var key in _dirtyKeys.Keys.OrderBy(value => value, StringComparer.Ordinal))
         {
@@ -129,27 +131,50 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             WriteFileAtomically(RecordPath(key), CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
         }
 
-        var manifest = new CultPersistedStoreSnapshot
+        foreach (var key in _deletedKeys.Keys.OrderBy(value => value, StringComparer.Ordinal))
         {
-            FormatVersion = "cultcache.store.v1.directory",
-            SchemaCatalog = Entries.Values
-                .Select(entry => entry.Descriptor.ToCatalogEntry())
-                .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
-                .Select(group => group.First())
-                .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
-                .ToArray(),
-            Records = Array.Empty<CultPersistedRecord>()
-        };
-        WriteFileAtomically(_manifestFile.FullName, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+            var path = RecordPath(key);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+
+        if (!CatalogsEqual(precommitCatalog, targetCatalog))
+        {
+            WriteManifest(targetCatalog);
+        }
 
         _dirtyKeys.Clear();
         _deletedKeys.Clear();
         MarkFlushSucceeded();
     }
 
+    private CultSchemaCatalogEntry[] BuildTargetCatalog() => Entries.Values
+        .Select(entry => entry.Descriptor.ToCatalogEntry())
+        .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
+        .Select(group => group.First())
+        .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+        .ToArray();
+
+    private static bool CatalogsEqual(CultSchemaCatalogEntry[] left, CultSchemaCatalogEntry[] right) =>
+        CultDocumentMessagePackSerialization.SerializeSchemaCatalog(left)
+            .SequenceEqual(CultDocumentMessagePackSerialization.SerializeSchemaCatalog(right));
+
+    private void WriteManifest(CultSchemaCatalogEntry[] catalog)
+    {
+        var manifest = new CultPersistedStoreSnapshot
+        {
+            FormatVersion = "cultcache.store.v1.directory",
+            SchemaCatalog = catalog,
+            Records = Array.Empty<CultPersistedRecord>()
+        };
+        WriteFileAtomically(_manifestFile.FullName, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+    }
+
     private CultPersistedStoreSnapshot ReadManifest()
     {
-        if (_manifestFile.Exists)
+        if (File.Exists(_manifestFile.FullName))
         {
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifestFile.FullName));
             if (snapshot.SchemaCatalog.Length > 0 || snapshot.Records.Length == 0)
@@ -158,7 +183,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             }
         }
 
-        if (_manifestFile.Exists)
+        if (File.Exists(_manifestFile.FullName))
         {
             return CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifestFile.FullName));
         }
@@ -171,7 +196,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         };
     }
 
-    private IReadOnlyCollection<CultSchemaCatalogEntry> ResolveCatalogForRecord(
+    // Explicit compatibility path for records written before catalog precommit existed.
+    private IReadOnlyCollection<CultSchemaCatalogEntry> ResolveLegacyUncataloguedRecordCatalog(
         CultPersistedRecord record,
         IReadOnlyCollection<CultSchemaCatalogEntry> manifestCatalog)
     {
