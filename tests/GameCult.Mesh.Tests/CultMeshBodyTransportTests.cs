@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using FluentAssertions;
 using NUnit.Framework;
+using System.IO.MemoryMappedFiles;
 
 namespace GameCult.Mesh.Tests;
 
@@ -145,6 +146,29 @@ public sealed class CultMeshBodyTransportTests
             _ => false);
         Action open = () => service.OpenReadOnly(local, network, Request(local, now), out _);
         open.Should().Throw<UnauthorizedAccessException>();
+    }
+
+    [Test]
+    [Platform("Win")]
+    public void SharedMemoryAdapter_OpensOpaqueCapabilityReadOnly()
+    {
+        var token = "CultMesh.Body.Test." + Guid.NewGuid().ToString("N");
+        using var mapping = MemoryMappedFile.CreateNew(token, 8, MemoryMappedFileAccess.ReadWrite);
+        using (var writer = mapping.CreateViewAccessor(0, 8, MemoryMappedFileAccess.Write)) writer.Write(0, 99L);
+        var now = DateTimeOffset.UtcNow;
+        var descriptor = new CultMeshBodyDescriptor
+        {
+            BodyId = "body", SchemaId = "schema", LayoutVersion = 1,
+            ByteSize = 8, Capacity = 8, ProducerEpoch = 4, Sequence = 2,
+            LeaseExpiresAtUnixMs = now.AddMinutes(1).ToUnixTimeMilliseconds(),
+            TransportKind = CultMeshBodyTransportKind.SharedMemory,
+            CapabilityToken = token
+        };
+
+        using var lease = new CultMeshSharedMemoryBodyAdapter().OpenReadOnly(descriptor, Request(descriptor, now));
+
+        lease.ReadInt64(0).Should().Be(99);
+        lease.TransportKind.Should().Be(CultMeshBodyTransportKind.SharedMemory);
     }
 
     private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()

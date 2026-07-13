@@ -276,6 +276,38 @@ namespace GameCult.Mesh
         }
     }
 
+    public sealed class CultMeshSharedMemoryBodyAdapter : ICultMeshBodyTransportAdapter
+    {
+        public CultMeshBodyTransportKind TransportKind => CultMeshBodyTransportKind.SharedMemory;
+        public bool CanOpen(CultMeshBodyDescriptor descriptor) =>
+            descriptor != null && descriptor.TransportKind == TransportKind;
+
+        public ICultMeshBodyReadLease OpenReadOnly(
+            CultMeshBodyDescriptor descriptor,
+            CultMeshBodyValidationRequest request)
+        {
+            CultMeshBodyDescriptorValidator.Validate(descriptor, request);
+            MemoryMappedFile mapping;
+            try
+            {
+                mapping = MemoryMappedFile.OpenExisting(descriptor.CapabilityToken, MemoryMappedFileRights.Read);
+            }
+            catch (FileNotFoundException error)
+            {
+                throw new InvalidDataException("CultMesh shared-memory capability is unavailable or revoked.", error);
+            }
+            try
+            {
+                return new CultMeshMappedBodyLease(descriptor, mapping);
+            }
+            catch
+            {
+                mapping.Dispose();
+                throw;
+            }
+        }
+    }
+
     public sealed class CultMeshMappedBodyLease : ICultMeshBodyReadLease
     {
         private readonly MemoryMappedFile _mapping;
@@ -283,14 +315,19 @@ namespace GameCult.Mesh
         private bool _disposed;
 
         internal CultMeshMappedBodyLease(CultMeshBodyDescriptor descriptor, string path)
+            : this(descriptor, MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read))
+        {
+        }
+
+        internal CultMeshMappedBodyLease(CultMeshBodyDescriptor descriptor, MemoryMappedFile mapping)
         {
             Descriptor = descriptor;
-            _mapping = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+            _mapping = mapping;
             _view = _mapping.CreateViewAccessor(0, descriptor.ByteSize, MemoryMappedFileAccess.Read);
         }
 
         public CultMeshBodyDescriptor Descriptor { get; }
-        public CultMeshBodyTransportKind TransportKind => CultMeshBodyTransportKind.SharedFileMapping;
+        public CultMeshBodyTransportKind TransportKind => Descriptor.TransportKind;
         public byte ReadByte(long offset) { ValidateRange(offset, 1); return _view.ReadByte(offset); }
         public int ReadInt32(long offset) { ValidateRange(offset, sizeof(int)); return _view.ReadInt32(offset); }
         public long ReadInt64(long offset) { ValidateRange(offset, sizeof(long)); return _view.ReadInt64(offset); }
