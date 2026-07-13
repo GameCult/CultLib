@@ -3440,7 +3440,7 @@ public sealed class CultMeshStreamingTests
     public void SharedMemoryRingPublishesWritableSlotsWithoutInternalCopies()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 2, slotByteLength: 16);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 16);
 
         ring.TryAcquireWriteSlot(out var write).Should().BeTrue();
         ReadOnlySpan<byte> seed = stackalloc byte[] { 1, 2, 3, 4 };
@@ -3467,7 +3467,7 @@ public sealed class CultMeshStreamingTests
     public void SharedMemoryRingDoesNotOverwriteSlotsHeldByReaders()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 1, slotByteLength: 8);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 8);
 
         ring.TryAcquireWriteSlot(out var firstWrite).Should().BeTrue();
         firstWrite.Span[0] = 11;
@@ -3475,26 +3475,36 @@ public sealed class CultMeshStreamingTests
 
         ring.TryAcquireLatestRead(out var read).Should().BeTrue();
 
+        ring.TryAcquireWriteSlot(out var secondWrite).Should().BeTrue();
+        ring.CommitWriteSlot(secondWrite, timestampNs: 2, byteLength: 1);
+        ring.TryAcquireWriteSlot(out var thirdWrite).Should().BeTrue();
+        ring.CommitWriteSlot(thirdWrite, timestampNs: 3, byteLength: 1);
+        ring.TryAcquireLatestRead(out var thirdRead).Should().BeTrue();
+        ring.TryAcquireWriteSlot(out var overwriteSecond).Should().BeTrue();
+        ring.CommitWriteSlot(overwriteSecond, timestampNs: 4, byteLength: 1);
+        ring.TryAcquireLatestRead(out var secondRead).Should().BeTrue();
         ring.TryAcquireWriteSlot(out _).Should().BeFalse();
         ring.Stats().BlockedWrites.Should().Be(1);
 
         read.Dispose();
+        thirdRead.Dispose();
+        secondRead.Dispose();
 
-        ring.TryAcquireWriteSlot(out var secondWrite).Should().BeTrue();
-        secondWrite.Span[0] = 12;
-        ring.CommitWriteSlot(secondWrite, timestampNs: 2, byteLength: 1);
+        ring.TryAcquireWriteSlot(out var fifthWrite).Should().BeTrue();
+        fifthWrite.Span[0] = 12;
+        ring.CommitWriteSlot(fifthWrite, timestampNs: 5, byteLength: 1);
 
         var stats = ring.Stats();
-        stats.PublishedFrames.Should().Be(2);
-        stats.DroppedFrames.Should().Be(1);
-        stats.LatestSequence.Should().Be(1);
+        stats.PublishedFrames.Should().Be(5);
+        stats.DroppedFrames.Should().Be(2);
+        stats.LatestSequence.Should().Be(4);
     }
 
     [Test]
     public void CopyPublishMarksFallbackCopiesExplicitly()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 2, slotByteLength: 8);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 8);
 
         ring.TryPublishCopy(stackalloc byte[] { 5, 6, 7 }, timestampNs: 10, durationNs: 2, out var handle)
             .Should()

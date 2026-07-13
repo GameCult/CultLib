@@ -676,6 +676,40 @@ local shared-memory body and its remote network representation.
 7. Decide from measurements whether ordinary local control traffic merits a
    separate shared-memory lane. Do not build that lane as part of this phase.
 
+### Frame-region authority
+
+**Owner:** `CultMeshFrameRegion` is the sole owner of one fixed-capacity,
+schema/layout-versioned, producer-epoch-bound triple buffer. It owns slot
+storage, write reservations, reader protection, publication metadata, latest
+generation selection, sequence advancement, and contention statistics.
+
+**Inputs:** logical body identity, schema identity, layout version, logical
+capacity, producer epoch, slot byte length, frame bytes, and commit metadata.
+The bounded producer contract permits at most one outstanding write reservation
+for the region, so sequence assignment and slot reservation cannot diverge.
+
+**Outputs:** bounded write leases, immutable generation descriptors, read-only
+consumer leases, and owner-derived statistics. Publication installs bytes and
+metadata as one locked commit and advances sequence exactly once.
+
+**Derived state:** `CultMeshSharedMemoryFrameRing` handles and statistics are
+compatibility projections of region generations. Capability tokens remain
+transport material and do not participate in frame identity or generation
+validation.
+
+**Forbidden writers:** the compatibility ring has no slot buffers, cursors,
+reader counts, latest-slot state, frame-handle catalog, sequence counter, or
+independent commit path.
+
+**Shared paths:** direct SoA writes, compatibility zero-copy writes, and
+compatibility copy publication all reserve and commit through
+`CultMeshFrameRegion`. Direct and compatibility reads acquire the same owner
+lease and release the same reader count.
+
+**Cut line:** the former ring-owned arrays and counters are removed. A frame
+region always has exactly three slots; construction with another slot count is
+rejected rather than creating a second buffering model.
+
 ### Required invariants
 
 - Only an explicitly authorized producer may publish or advance a body.

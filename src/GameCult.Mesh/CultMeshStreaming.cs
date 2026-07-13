@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -264,43 +263,43 @@ namespace GameCult.Mesh
 
     public readonly struct CultMeshFrameWriteLease
     {
-        internal CultMeshFrameWriteLease(int slotIndex, ulong sequence, Memory<byte> memory)
+        private readonly CultMeshFrameRegionWriteLease _lease;
+
+        internal CultMeshFrameWriteLease(CultMeshFrameRegionWriteLease lease)
         {
-            SlotIndex = slotIndex;
-            Sequence = sequence;
-            Memory = memory;
+            _lease = lease;
         }
 
-        public int SlotIndex { get; }
-        public ulong Sequence { get; }
-        public Memory<byte> Memory { get; }
+        public int SlotIndex => _lease.SlotIndex;
+        public ulong Sequence => checked((ulong)_lease.Sequence);
+        public Memory<byte> Memory => _lease.Memory;
         public Span<byte> Span => Memory.Span;
+
+        internal CultMeshFrameRegionWriteLease RegionLease => _lease;
     }
 
     public readonly struct CultMeshFrameReadLease : IDisposable
     {
-        private readonly CultMeshSharedMemoryFrameRing? _owner;
+        private readonly CultMeshFrameRegionReadLease? _lease;
 
         internal CultMeshFrameReadLease(
-            CultMeshSharedMemoryFrameRing owner,
-            int slotIndex,
+            CultMeshFrameRegionReadLease lease,
             CultMeshStreamFrameHandle handle,
-            ReadOnlyMemory<byte> memory)
+            int slotIndex)
         {
-            _owner = owner;
+            _lease = lease;
             SlotIndex = slotIndex;
             Handle = handle;
-            Memory = memory;
         }
 
         public int SlotIndex { get; }
         public CultMeshStreamFrameHandle Handle { get; }
-        public ReadOnlyMemory<byte> Memory { get; }
+        public ReadOnlyMemory<byte> Memory => _lease?.Memory ?? ReadOnlyMemory<byte>.Empty;
         public ReadOnlySpan<byte> Span => Memory.Span;
 
         public void Dispose()
         {
-            _owner?.ReleaseRead(SlotIndex);
+            _lease?.Dispose();
         }
     }
 
@@ -338,59 +337,33 @@ namespace GameCult.Mesh
 
     public sealed class CultMeshSharedMemoryFrameRing : IDisposable
     {
-        private readonly byte[] _storage;
-        private readonly int[] _readerCounts;
-        private readonly CultMeshStreamFrameHandle?[] _handles;
-        private int _writeCursor;
-        private int _latestSlot = -1;
-        private int _disposed;
-        private ulong _nextSequence;
-        private ulong _publishedFrames;
-        private ulong _droppedFrames;
-        private ulong _blockedWrites;
-        private ulong _unavoidableCopyCount;
+        private readonly CultMeshFrameRegion _region;
 
         public CultMeshSharedMemoryFrameRing(string streamId, int slotCount, int slotByteLength)
         {
             StreamId = RequireNonEmpty(streamId, nameof(streamId));
-            if (slotCount <= 0) throw new ArgumentOutOfRangeException(nameof(slotCount));
-            if (slotByteLength <= 0) throw new ArgumentOutOfRangeException(nameof(slotByteLength));
-            SlotByteLength = slotByteLength;
-            _storage = ArrayPool<byte>.Shared.Rent(checked(slotCount * slotByteLength));
-            _readerCounts = new int[slotCount];
-            _handles = new CultMeshStreamFrameHandle?[slotCount];
+            if (slotCount != CultMeshFrameRegion.SlotCount)
+                throw new ArgumentOutOfRangeException(nameof(slotCount), "CultMesh frame regions use exactly three slots.");
+            _region = new CultMeshFrameRegion(
+                streamId,
+                $"{streamId}.frame",
+                layoutVersion: 1,
+                capacity: slotByteLength,
+                producerEpoch: 0,
+                slotByteLength);
         }
 
         public string StreamId { get; }
-        public int SlotCount => _handles.Length;
-        public int SlotByteLength { get; }
+        public int SlotCount => CultMeshFrameRegion.SlotCount;
+        public int SlotByteLength => _region.SlotByteLength;
 
         public bool TryAcquireWriteSlot(out CultMeshFrameWriteLease lease)
         {
-            ThrowIfDisposed();
-
-            for (var attempt = 0; attempt < SlotCount; attempt++)
+            if (_region.TryAcquireWrite(out var regionLease))
             {
-                var slotIndex = (_writeCursor + attempt) % SlotCount;
-                if (Volatile.Read(ref _readerCounts[slotIndex]) != 0)
-                {
-                    continue;
-                }
-
-                if (_handles[slotIndex] != null)
-                {
-                    _droppedFrames++;
-                }
-
-                _writeCursor = (slotIndex + 1) % SlotCount;
-                lease = new CultMeshFrameWriteLease(
-                    slotIndex,
-                    _nextSequence,
-                    new Memory<byte>(_storage, slotIndex * SlotByteLength, SlotByteLength));
+                lease = new CultMeshFrameWriteLease(regionLease);
                 return true;
             }
-
-            _blockedWrites++;
             lease = default;
             return false;
         }
@@ -403,29 +376,9 @@ namespace GameCult.Mesh
             int unavoidableCopyCount = 0,
             IReadOnlyDictionary<string, string>? metadata = null)
         {
-            ThrowIfDisposed();
-            RequireSlot(lease.SlotIndex);
-            if (byteLength < 0 || byteLength > SlotByteLength)
-            {
-                throw new ArgumentOutOfRangeException(nameof(byteLength));
-            }
-
-            _unavoidableCopyCount += (ulong)Math.Max(0, unavoidableCopyCount);
-            var handle = new CultMeshStreamFrameHandle(
-                StreamId,
-                lease.Sequence,
-                timestampNs,
-                CultMeshStreamBodyTransport.SharedMemory,
-                durationNs,
-                byteLength,
-                resourceKey: $"{StreamId}:slot:{lease.SlotIndex}",
-                unavoidableCopyCount: unavoidableCopyCount,
-                metadata: metadata);
-            _handles[lease.SlotIndex] = handle;
-            _latestSlot = lease.SlotIndex;
-            _nextSequence = lease.Sequence + 1;
-            _publishedFrames++;
-            return handle;
+            var generation = _region.Commit(
+                lease.RegionLease, byteLength, timestampNs, durationNs, unavoidableCopyCount, metadata);
+            return ToHandle(generation);
         }
 
         public bool TryPublishCopy(
@@ -434,7 +387,6 @@ namespace GameCult.Mesh
             long durationNs,
             out CultMeshStreamFrameHandle handle)
         {
-            ThrowIfDisposed();
             if (bytes.Length > SlotByteLength)
             {
                 throw new ArgumentOutOfRangeException(nameof(bytes));
@@ -453,79 +405,51 @@ namespace GameCult.Mesh
 
         public bool TryAcquireLatestRead(out CultMeshFrameReadLease lease)
         {
-            ThrowIfDisposed();
-            var slotIndex = Volatile.Read(ref _latestSlot);
-            if (slotIndex < 0)
+            var request = new CultMeshBodyValidationRequest
+            {
+                BodyId = _region.BodyId,
+                SchemaId = _region.SchemaId,
+                LayoutVersion = _region.LayoutVersion,
+                ProducerEpoch = _region.ProducerEpoch,
+                Capacity = _region.Capacity,
+                AccessMode = CultMeshBodyAccessMode.ReadOnly
+            };
+            if (!_region.TryAcquireLatestRead(request, out var regionLease))
             {
                 lease = default;
                 return false;
             }
-
-            var handle = _handles[slotIndex];
-            if (handle == null)
-            {
-                lease = default;
-                return false;
-            }
-
-            Interlocked.Increment(ref _readerCounts[slotIndex]);
-            lease = new CultMeshFrameReadLease(
-                this,
-                slotIndex,
-                handle,
-                new ReadOnlyMemory<byte>(_storage, slotIndex * SlotByteLength, handle.ByteLength));
+            var generation = regionLease.Generation;
+            lease = new CultMeshFrameReadLease(regionLease, ToHandle(generation), generation.SlotIndex);
             return true;
         }
 
         public CultMeshSharedMemoryFrameRingStats Stats()
         {
-            ThrowIfDisposed();
-            var latest = _latestSlot < 0 ? 0 : _handles[_latestSlot]?.Sequence ?? 0;
+            var stats = _region.Stats();
             return new CultMeshSharedMemoryFrameRingStats(
                 StreamId,
                 SlotCount,
                 SlotByteLength,
-                _publishedFrames,
-                _droppedFrames,
-                _blockedWrites,
-                latest,
-                _unavoidableCopyCount);
+                stats.PublishedFrames,
+                stats.DroppedFrames,
+                stats.BlockedWrites,
+                checked((ulong)stats.LatestSequence),
+                stats.UnavoidableCopyCount);
         }
 
-        internal void ReleaseRead(int slotIndex)
-        {
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                return;
-            }
+        public void Dispose() => _region.Dispose();
 
-            RequireSlot(slotIndex);
-            Interlocked.Decrement(ref _readerCounts[slotIndex]);
-        }
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                ArrayPool<byte>.Shared.Return(_storage);
-            }
-        }
-
-        private void ThrowIfDisposed()
-        {
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                throw new ObjectDisposedException(nameof(CultMeshSharedMemoryFrameRing));
-            }
-        }
-
-        private void RequireSlot(int slotIndex)
-        {
-            if (slotIndex < 0 || slotIndex >= SlotCount)
-            {
-                throw new ArgumentOutOfRangeException(nameof(slotIndex));
-            }
-        }
+        private CultMeshStreamFrameHandle ToHandle(CultMeshFrameGeneration generation) => new(
+            StreamId,
+            checked((ulong)generation.Descriptor.Sequence),
+            generation.TimestampNs,
+            CultMeshStreamBodyTransport.SharedMemory,
+            generation.DurationNs,
+            checked((int)generation.Descriptor.ByteSize),
+            resourceKey: $"{StreamId}:slot:{generation.SlotIndex}",
+            unavoidableCopyCount: generation.UnavoidableCopyCount,
+            metadata: generation.Metadata);
     }
 
     public sealed class CultMeshStreamCatalog

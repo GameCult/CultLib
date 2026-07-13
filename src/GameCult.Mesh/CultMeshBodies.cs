@@ -54,6 +54,8 @@ namespace GameCult.Mesh
         public string SchemaId { get; set; } = string.Empty;
         public int LayoutVersion { get; set; }
         public long ProducerEpoch { get; set; }
+        public long? Sequence { get; set; }
+        public int? Capacity { get; set; }
         public CultMeshBodyAccessMode AccessMode { get; set; } = CultMeshBodyAccessMode.ReadOnly;
         public DateTimeOffset NowUtc { get; set; } = DateTimeOffset.UtcNow;
     }
@@ -74,6 +76,10 @@ namespace GameCult.Mesh
                 throw new InvalidOperationException("CultMesh body layout version mismatch.");
             if (descriptor.ProducerEpoch != request.ProducerEpoch)
                 throw new InvalidOperationException("CultMesh body producer epoch mismatch.");
+            if (request.Sequence.HasValue && descriptor.Sequence != request.Sequence.Value)
+                throw new InvalidOperationException("CultMesh body sequence mismatch.");
+            if (request.Capacity.HasValue && descriptor.Capacity != request.Capacity.Value)
+                throw new InvalidOperationException("CultMesh body capacity mismatch.");
             if (descriptor.ByteSize < 0 || descriptor.Capacity < 0)
                 throw new InvalidOperationException("CultMesh body size and logical capacity must be non-negative.");
             if (descriptor.Sequence < 0)
@@ -83,9 +89,6 @@ namespace GameCult.Mesh
             if (request.AccessMode != CultMeshBodyAccessMode.ReadOnly ||
                 descriptor.AccessMode != CultMeshBodyAccessMode.ReadOnly)
                 throw new UnauthorizedAccessException("CultMesh body consumers are read-only by default.");
-            if (descriptor.TransportKind != CultMeshBodyTransportKind.Network &&
-                string.IsNullOrWhiteSpace(descriptor.CapabilityToken))
-                throw new InvalidOperationException("Local CultMesh body descriptor has no capability token.");
         }
     }
 
@@ -268,6 +271,8 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptorValidator.Validate(descriptor, request);
             if (descriptor.TransportKind != CultMeshBodyTransportKind.SharedFileMapping)
                 throw new NotSupportedException($"CultMesh body transport '{descriptor.TransportKind}' is not a file mapping.");
+            if (string.IsNullOrWhiteSpace(descriptor.CapabilityToken))
+                throw new InvalidOperationException("Mapped CultMesh body descriptor has no transport capability token.");
             var path = _verifiedBodies != null
                 ? _verifiedBodies.Resolve(descriptor.CapabilityToken, request.NowUtc)
                 : ResolvePublisherPath(descriptor.CapabilityToken);
@@ -369,6 +374,8 @@ namespace GameCult.Mesh
             CultMeshBodyValidationRequest request)
         {
             CultMeshBodyDescriptorValidator.Validate(descriptor, request);
+            if (string.IsNullOrWhiteSpace(descriptor.CapabilityToken))
+                throw new InvalidOperationException("Shared-memory CultMesh body descriptor has no transport capability token.");
             MemoryMappedFile mapping;
             try
             {
