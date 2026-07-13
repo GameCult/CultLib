@@ -244,7 +244,26 @@ namespace GameCult.Mesh
         [Key(10)] public CultMeshBodyDescriptor PreferredLocal { get; set; } = new();
         [Key(11)] public CultMeshBodyDescriptor NetworkFallback { get; set; } = new();
 
-        public static CultRecordKey CreateRecordKey(string bodyId)
+        public static CultRecordKey CreateRecordKey(string bodyId, long producerEpoch, long sequence)
+        {
+            if (string.IsNullOrWhiteSpace(bodyId))
+                throw new ArgumentException("Logical body identity is required.", nameof(bodyId));
+            if (producerEpoch < 0) throw new ArgumentOutOfRangeException(nameof(producerEpoch));
+            if (sequence < 0) throw new ArgumentOutOfRangeException(nameof(sequence));
+            using var stream = new MemoryStream();
+            using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
+            {
+                writer.Write(bodyId);
+                writer.Write(producerEpoch);
+                writer.Write(sequence);
+            }
+            using var sha256 = SHA256.Create();
+            var generationId = string.Concat(sha256.ComputeHash(stream.ToArray())
+                .Select(value => value.ToString("x2", CultureInfo.InvariantCulture)));
+            return new CultRecordKey("mesh:body-generation:" + generationId);
+        }
+
+        public static CultRecordKey CreateLatestRecordKey(string bodyId)
         {
             if (string.IsNullOrWhiteSpace(bodyId))
                 throw new ArgumentException("Logical body identity is required.", nameof(bodyId));
@@ -252,35 +271,52 @@ namespace GameCult.Mesh
         }
 
         [IgnoreMember]
-        public CultRecordKey RecordKey => CreateRecordKey(BodyId);
+        public CultRecordKey RecordKey => CreateRecordKey(BodyId, ProducerEpoch, Sequence);
     }
 
     public sealed class CultMeshBodyPublicationHandle
     {
-        public CultMeshBodyPublicationHandle(string bodyId)
+        public CultMeshBodyPublicationHandle(string bodyId, long producerEpoch, long sequence)
         {
             BodyId = string.IsNullOrWhiteSpace(bodyId)
                 ? throw new ArgumentException("Logical body identity is required.", nameof(bodyId))
                 : bodyId;
-            RecordKey = CultMeshBodyPublicationDocument.CreateRecordKey(bodyId);
+            ProducerEpoch = producerEpoch >= 0
+                ? producerEpoch
+                : throw new ArgumentOutOfRangeException(nameof(producerEpoch));
+            Sequence = sequence >= 0
+                ? sequence
+                : throw new ArgumentOutOfRangeException(nameof(sequence));
+            RecordKey = CultMeshBodyPublicationDocument.CreateRecordKey(bodyId, producerEpoch, sequence);
         }
 
         public string BodyId { get; }
+        public long ProducerEpoch { get; }
+        public long Sequence { get; }
         public CultRecordKey RecordKey { get; }
 
         public void Validate(CultMeshBodyPublicationDocument publication) =>
-            CultMeshBodyPublicationValidator.Validate(publication, BodyId);
+            CultMeshBodyPublicationValidator.Validate(publication, BodyId, ProducerEpoch, Sequence, RecordKey);
     }
 
     public static class CultMeshBodyPublicationValidator
     {
-        public static void Validate(CultMeshBodyPublicationDocument publication, string? expectedBodyId = null)
+        public static void Validate(
+            CultMeshBodyPublicationDocument publication,
+            string? expectedBodyId = null,
+            long? expectedProducerEpoch = null,
+            long? expectedSequence = null,
+            CultRecordKey? expectedRecordKey = null)
         {
             if (publication == null) throw new ArgumentNullException(nameof(publication));
             if (string.IsNullOrWhiteSpace(publication.BodyId))
                 throw new InvalidOperationException("CultMesh body publication has no logical body identity.");
             if (expectedBodyId != null && !string.Equals(publication.BodyId, expectedBodyId, StringComparison.Ordinal))
                 throw new InvalidOperationException("CultMesh body publication handle identity mismatch.");
+            if (expectedProducerEpoch.HasValue && publication.ProducerEpoch != expectedProducerEpoch.Value)
+                throw new InvalidOperationException("CultMesh body publication handle producer epoch mismatch.");
+            if (expectedSequence.HasValue && publication.Sequence != expectedSequence.Value)
+                throw new InvalidOperationException("CultMesh body publication handle sequence mismatch.");
             if (string.IsNullOrWhiteSpace(publication.ProducerId))
                 throw new InvalidOperationException("CultMesh body publication has no producer identity.");
             if (string.IsNullOrWhiteSpace(publication.SchemaId))
@@ -288,6 +324,8 @@ namespace GameCult.Mesh
             if (publication.LayoutVersion < 0 || publication.ByteSize < 0 || publication.Capacity < 0 ||
                 publication.ProducerEpoch < 0 || publication.Sequence < 0)
                 throw new InvalidOperationException("CultMesh body publication generation values must be non-negative.");
+            if (expectedRecordKey.HasValue && !publication.RecordKey.Equals(expectedRecordKey.Value))
+                throw new InvalidOperationException("CultMesh body publication record key disagrees with its generation envelope.");
             ValidateDescriptor(publication, publication.PreferredLocal, "preferred local");
             ValidateDescriptor(publication, publication.NetworkFallback, "network fallback");
             if (publication.PreferredLocal.TransportKind == CultMeshBodyTransportKind.Network)

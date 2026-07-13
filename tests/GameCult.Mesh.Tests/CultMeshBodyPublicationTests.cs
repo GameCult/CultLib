@@ -23,12 +23,12 @@ public sealed class CultMeshBodyPublicationTests
     }
 
     [Test]
-    public void TypedDocument_RoundTripsAndRegistersWithLogicalBodyKey()
+    public void TypedDocument_RoundTripsAndRegistersWithGenerationKey()
     {
         var now = DateTimeOffset.UtcNow;
         var publication = Publication(new byte[] { 1, 2, 3, 4 }, now);
         var path = Path.Combine(_root, "publication.cc");
-        var handle = new CultMeshBodyPublicationHandle(publication.BodyId);
+        var handle = Handle(publication);
 
         CultMesh.WriteSingleFileDocument(path, handle.RecordKey, publication);
         var restored = CultMesh.ReadSingleFileDocument<CultMeshBodyPublicationDocument>(path, handle.RecordKey);
@@ -37,7 +37,48 @@ public sealed class CultMeshBodyPublicationTests
         handle.Validate(restored);
         restored.Should().BeEquivalentTo(publication);
         registry.GetByDocumentType(typeof(CultMeshBodyPublicationDocument)).Should().NotBeNull();
-        handle.RecordKey.Should().Be(CultMeshBodyPublicationDocument.CreateRecordKey(publication.BodyId));
+        handle.RecordKey.Should().Be(CultMeshBodyPublicationDocument.CreateRecordKey(
+            publication.BodyId, publication.ProducerEpoch, publication.Sequence));
+        handle.RecordKey.Should().NotBe(CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId));
+    }
+
+    [Test]
+    public async System.Threading.Tasks.Task GenerationRecords_PreserveNWhenNPlusOneIsPublished()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = Publication(new byte[] { 1, 2, 3, 4 }, now);
+        var second = Publication(new byte[] { 5, 6, 7, 8 }, now);
+        second.Sequence++;
+        second.PreferredLocal.Sequence++;
+        second.NetworkFallback.Sequence++;
+        var cache = new CultCache();
+
+        await cache.UpsertAsync(first, new CultRecordHandle<CultMeshBodyPublicationDocument>(first.RecordKey));
+        await cache.UpsertAsync(second, new CultRecordHandle<CultMeshBodyPublicationDocument>(second.RecordKey));
+
+        var restoredFirst = cache.Get<CultMeshBodyPublicationDocument>(first.RecordKey);
+        restoredFirst.Should().NotBeNull();
+        Handle(first).Validate(restoredFirst!);
+        restoredFirst!.Sequence.Should().Be(42);
+        cache.Get<CultMeshBodyPublicationDocument>(second.RecordKey)!.Sequence.Should().Be(43);
+    }
+
+    [Test]
+    public void GenerationHandle_RejectsLatestOrDifferentGenerationEnvelope()
+    {
+        var publication = Publication(new byte[4], DateTimeOffset.UtcNow);
+        var staleLatestKey = CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId);
+        var next = Publication(new byte[4], DateTimeOffset.UtcNow);
+        next.Sequence++;
+        next.PreferredLocal.Sequence++;
+        next.NetworkFallback.Sequence++;
+
+        Action staleLatest = () => CultMeshBodyPublicationValidator.Validate(
+            publication, publication.BodyId, publication.ProducerEpoch, publication.Sequence, staleLatestKey);
+        Action substituted = () => Handle(publication).Validate(next);
+
+        staleLatest.Should().Throw<InvalidOperationException>().WithMessage("*record key*");
+        substituted.Should().Throw<InvalidOperationException>().WithMessage("*sequence*");
     }
 
     [Test]
@@ -159,6 +200,9 @@ public sealed class CultMeshBodyPublicationTests
                 new CultMeshNetworkBodyAdapter(_ => { fetched?.Invoke(); return bytes; })
             },
             authorize));
+
+    private static CultMeshBodyPublicationHandle Handle(CultMeshBodyPublicationDocument publication) =>
+        new(publication.BodyId, publication.ProducerEpoch, publication.Sequence);
 
     private static CultMeshBodyValidationRequest Request(
         CultMeshBodyPublicationDocument publication,
