@@ -587,7 +587,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshRudpSocketOptions
     {
         /// <summary>Gets or sets the local bind host.</summary>
-        public string BindHost { get; set; } = "127.0.0.1";
+        public string BindHost { get; set; } = "0.0.0.0";
         /// <summary>Gets or sets the local bind port.</summary>
         public int BindPort { get; set; }
         /// <summary>Gets or sets a caller-owned bound socket.</summary>
