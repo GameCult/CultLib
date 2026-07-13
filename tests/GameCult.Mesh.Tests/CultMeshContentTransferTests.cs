@@ -230,7 +230,8 @@ public sealed class CultMeshContentTransferTests
         AccessMode = CultMeshBodyAccessMode.ReadOnly,
         Synchronization = CultMeshBodySynchronization.ImmutableSequence,
         LeaseExpiresAtUnixMs = now.AddMinutes(2).ToUnixTimeMilliseconds(),
-        TransportKind = CultMeshBodyTransportKind.Network
+        TransportKind = CultMeshBodyTransportKind.Network,
+        SemanticHash = artifact.Manifest.ContentHash
     };
 
     private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()
@@ -239,6 +240,8 @@ public sealed class CultMeshContentTransferTests
         SchemaId = descriptor.SchemaId,
         LayoutVersion = descriptor.LayoutVersion,
         ProducerEpoch = descriptor.ProducerEpoch,
+        Sequence = descriptor.Sequence,
+        Capacity = descriptor.Capacity,
         AccessMode = CultMeshBodyAccessMode.ReadOnly,
         NowUtc = now
     };

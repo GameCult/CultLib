@@ -105,7 +105,8 @@ public sealed class CultMeshBodyTransportTests
             AccessMode = CultMeshBodyAccessMode.ReadOnly,
             Synchronization = local.Synchronization,
             LeaseExpiresAtUnixMs = local.LeaseExpiresAtUnixMs,
-            TransportKind = CultMeshBodyTransportKind.Network
+            TransportKind = CultMeshBodyTransportKind.Network,
+            SemanticHash = local.SemanticHash
         };
         var service = new CultMeshBodyTransportService(
             new ICultMeshBodyTransportAdapter[]
@@ -115,12 +116,102 @@ public sealed class CultMeshBodyTransportTests
             },
             _ => true);
 
-        using var lease = service.OpenReadOnly(local, network, Request(local, now), out var localFailure);
+        var result = service.NegotiateReadOnly(local, network, Request(local, now));
+        using var lease = result.Lease;
 
-        localFailure.Should().BeOfType<InvalidDataException>();
+        result.PreferredFailure.Should().BeOfType<InvalidDataException>();
+        result.UsedFallback.Should().BeTrue();
+        result.PreferredTransport.Should().Be(CultMeshBodyTransportKind.SharedFileMapping);
+        result.SelectedTransport.Should().Be(CultMeshBodyTransportKind.Network);
         lease.TransportKind.Should().Be(CultMeshBodyTransportKind.Network);
         lease.Descriptor.BodyId.Should().Be(local.BodyId);
         lease.ReadSingle(0).Should().Be(42.25f);
+    }
+
+    [Test]
+    public void LocalAndNetworkRepresentationsExposeTheSameLogicalContractAndSemanticBytes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 1, 3, 5, 7, 9, 11 };
+        var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
+            .Publish("body", "schema.v2", 2, 64, 5, 12, bytes, now);
+        var network = NetworkRepresentation(local);
+        var request = Request(local, now);
+
+        using var localLease = new CultMeshMappedBodyAdapter(_root).OpenReadOnly(local, request);
+        using var networkLease = new CultMeshNetworkBodyAdapter(_ => bytes).OpenReadOnly(network, request);
+
+        networkLease.Descriptor.Should().BeEquivalentTo(localLease.Descriptor, options => options
+            .Excluding(value => value.TransportKind)
+            .Excluding(value => value.CapabilityToken));
+        ReadAll(localLease).Should().Equal(bytes);
+        ReadAll(networkLease).Should().Equal(bytes);
+    }
+
+    [Test]
+    public void MissingPreferredAdapterProducesObservableFallbackReason()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 4, 8, 15, 16, 23, 42 };
+        var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
+            .Publish("body", "schema", 1, bytes.Length, 3, 8, bytes, now);
+        var network = NetworkRepresentation(local);
+        var service = new CultMeshBodyTransportService(
+            new ICultMeshBodyTransportAdapter[] { new CultMeshNetworkBodyAdapter(_ => bytes) },
+            _ => true);
+
+        var result = service.NegotiateReadOnly(local, network, Request(local, now));
+        using var lease = result.Lease;
+
+        result.UsedFallback.Should().BeTrue();
+        result.PreferredFailure.Should().BeOfType<NotSupportedException>();
+        result.PreferredFailure!.Message.Should().Contain("adapter is available");
+        lease.TransportKind.Should().Be(CultMeshBodyTransportKind.Network);
+    }
+
+    [TestCase("schema")]
+    [TestCase("epoch")]
+    [TestCase("sequence")]
+    public void NegotiationRejectsStaleLogicalGenerationBeforeFetchingNetworkBytes(string staleField)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 2, 4, 6, 8 };
+        var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
+            .Publish("body", "schema", 1, 4, 3, 8, bytes, now);
+        var network = NetworkRepresentation(local);
+        var request = Request(local, now);
+        if (staleField == "schema") request.SchemaId = "stale";
+        if (staleField == "epoch") request.ProducerEpoch--;
+        if (staleField == "sequence") request.Sequence--;
+        var fetched = false;
+        var service = new CultMeshBodyTransportService(
+            new ICultMeshBodyTransportAdapter[]
+            {
+                new CultMeshMappedBodyAdapter(_root),
+                new CultMeshNetworkBodyAdapter(_ => { fetched = true; return bytes; })
+            },
+            _ => true);
+
+        Action open = () => service.NegotiateReadOnly(local, network, request);
+
+        open.Should().Throw<InvalidOperationException>();
+        fetched.Should().BeFalse();
+    }
+
+    [Test]
+    public void NetworkRepresentationRejectsCorruptBytesBeforeCreatingAReadableLease()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 10, 20, 30, 40 };
+        var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
+            .Publish("body", "schema", 1, 4, 3, 8, bytes, now);
+        var network = NetworkRepresentation(local);
+        var corrupt = new byte[] { 10, 20, 30, 41 };
+
+        Action open = () => new CultMeshNetworkBodyAdapter(_ => corrupt)
+            .OpenReadOnly(network, Request(network, now));
+
+        open.Should().Throw<InvalidDataException>().WithMessage("*semantic digest*");
     }
 
     [Test]
@@ -135,7 +226,8 @@ public sealed class CultMeshBodyTransportTests
             BodyId = local.BodyId, SchemaId = local.SchemaId, LayoutVersion = 1,
             ByteSize = 4, Capacity = 4, ProducerEpoch = 3, Sequence = 8,
             LeaseExpiresAtUnixMs = local.LeaseExpiresAtUnixMs,
-            TransportKind = CultMeshBodyTransportKind.Network
+            TransportKind = CultMeshBodyTransportKind.Network,
+            SemanticHash = local.SemanticHash
         };
         var service = new CultMeshBodyTransportService(
             new ICultMeshBodyTransportAdapter[]
@@ -177,7 +269,32 @@ public sealed class CultMeshBodyTransportTests
         SchemaId = descriptor.SchemaId,
         LayoutVersion = descriptor.LayoutVersion,
         ProducerEpoch = descriptor.ProducerEpoch,
+        Sequence = descriptor.Sequence,
+        Capacity = descriptor.Capacity,
         AccessMode = CultMeshBodyAccessMode.ReadOnly,
         NowUtc = now
     };
+
+    private static CultMeshBodyDescriptor NetworkRepresentation(CultMeshBodyDescriptor descriptor) => new()
+    {
+        BodyId = descriptor.BodyId,
+        SchemaId = descriptor.SchemaId,
+        LayoutVersion = descriptor.LayoutVersion,
+        ByteSize = descriptor.ByteSize,
+        Capacity = descriptor.Capacity,
+        ProducerEpoch = descriptor.ProducerEpoch,
+        Sequence = descriptor.Sequence,
+        AccessMode = descriptor.AccessMode,
+        Synchronization = descriptor.Synchronization,
+        LeaseExpiresAtUnixMs = descriptor.LeaseExpiresAtUnixMs,
+        TransportKind = CultMeshBodyTransportKind.Network,
+        SemanticHash = descriptor.SemanticHash
+    };
+
+    private static byte[] ReadAll(ICultMeshBodyReadLease lease)
+    {
+        var bytes = new byte[lease.Descriptor.ByteSize];
+        lease.CopyTo(0, bytes, 0, bytes.Length);
+        return bytes;
+    }
 }

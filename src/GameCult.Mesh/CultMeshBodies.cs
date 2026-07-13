@@ -46,6 +46,7 @@ namespace GameCult.Mesh
         [Key(9)] public long LeaseExpiresAtUnixMs { get; set; }
         [Key(10)] public CultMeshBodyTransportKind TransportKind { get; set; } = CultMeshBodyTransportKind.Network;
         [Key(11)] public string CapabilityToken { get; set; } = string.Empty;
+        [Key(12)] public string SemanticHash { get; set; } = string.Empty;
     }
 
     public sealed class CultMeshBodyValidationRequest
@@ -62,6 +63,17 @@ namespace GameCult.Mesh
 
     public static class CultMeshBodyDescriptorValidator
     {
+        public static string ComputeSemanticHash(ReadOnlySpan<byte> body)
+        {
+            using var sha256 = SHA256.Create();
+            Span<byte> digest = stackalloc byte[32];
+            if (!sha256.TryComputeHash(body, digest, out var written) || written != digest.Length)
+                throw new CryptographicException("Unable to compute the CultMesh body semantic digest.");
+            return BitConverter.ToString(digest.ToArray())
+                .Replace("-", string.Empty)
+                .ToLowerInvariant();
+        }
+
         public static void Validate(CultMeshBodyDescriptor descriptor, CultMeshBodyValidationRequest request)
         {
             if (descriptor == null) throw new ArgumentNullException(nameof(descriptor));
@@ -90,6 +102,25 @@ namespace GameCult.Mesh
                 descriptor.AccessMode != CultMeshBodyAccessMode.ReadOnly)
                 throw new UnauthorizedAccessException("CultMesh body consumers are read-only by default.");
         }
+    }
+
+    public sealed class CultMeshBodyNegotiationResult
+    {
+        internal CultMeshBodyNegotiationResult(
+            ICultMeshBodyReadLease lease,
+            CultMeshBodyTransportKind preferredTransport,
+            Exception? preferredFailure)
+        {
+            Lease = lease;
+            PreferredTransport = preferredTransport;
+            PreferredFailure = preferredFailure;
+        }
+
+        public ICultMeshBodyReadLease Lease { get; }
+        public CultMeshBodyTransportKind PreferredTransport { get; }
+        public CultMeshBodyTransportKind SelectedTransport => Lease.TransportKind;
+        public Exception? PreferredFailure { get; }
+        public bool UsedFallback => SelectedTransport != PreferredTransport;
     }
 
     public interface ICultMeshBodyReadLease : IDisposable
@@ -133,27 +164,44 @@ namespace GameCult.Mesh
             CultMeshBodyValidationRequest request,
             out Exception? localFailure)
         {
+            var result = NegotiateReadOnly(preferred, networkFallback, request);
+            localFailure = result.PreferredFailure;
+            return result.Lease;
+        }
+
+        public CultMeshBodyNegotiationResult NegotiateReadOnly(
+            CultMeshBodyDescriptor preferred,
+            CultMeshBodyDescriptor networkFallback,
+            CultMeshBodyValidationRequest request)
+        {
             if (preferred == null) throw new ArgumentNullException(nameof(preferred));
             if (networkFallback == null) throw new ArgumentNullException(nameof(networkFallback));
             if (!SameLogicalGeneration(preferred, networkFallback))
                 throw new InvalidOperationException("CultMesh local and network representations describe different logical body generations.");
+            CultMeshBodyDescriptorValidator.Validate(preferred, request);
+            CultMeshBodyDescriptorValidator.Validate(networkFallback, request);
             if (!_authorizeProducer(preferred))
                 throw new UnauthorizedAccessException("CultMesh body producer is not authorized for this logical body.");
 
-            localFailure = null;
+            Exception? preferredFailure = null;
             try
             {
-                if (_adapters.TryGetValue(preferred.TransportKind, out var local) && local.CanOpen(preferred))
-                    return local.OpenReadOnly(preferred, request);
+                if (!_adapters.TryGetValue(preferred.TransportKind, out var local))
+                    throw new NotSupportedException($"No CultMesh {preferred.TransportKind} body adapter is available.");
+                if (!local.CanOpen(preferred))
+                    throw new NotSupportedException($"The CultMesh {preferred.TransportKind} body adapter declined the preferred descriptor.");
+                var lease = local.OpenReadOnly(preferred, request);
+                return new CultMeshBodyNegotiationResult(lease, preferred.TransportKind, null);
             }
             catch (Exception error) when (!(error is UnauthorizedAccessException))
             {
-                localFailure = error;
+                preferredFailure = error;
             }
 
             if (!_adapters.TryGetValue(CultMeshBodyTransportKind.Network, out var network) || !network.CanOpen(networkFallback))
                 throw new NotSupportedException("No CultMesh network body fallback is available.");
-            return network.OpenReadOnly(networkFallback, request);
+            var fallback = network.OpenReadOnly(networkFallback, request);
+            return new CultMeshBodyNegotiationResult(fallback, preferred.TransportKind, preferredFailure);
         }
 
         private static bool SameLogicalGeneration(CultMeshBodyDescriptor left, CultMeshBodyDescriptor right) =>
@@ -163,7 +211,10 @@ namespace GameCult.Mesh
             left.ProducerEpoch == right.ProducerEpoch &&
             left.Sequence == right.Sequence &&
             left.ByteSize == right.ByteSize &&
-            left.Capacity == right.Capacity;
+            left.Capacity == right.Capacity &&
+            left.AccessMode == right.AccessMode &&
+            left.Synchronization == right.Synchronization &&
+            string.Equals(left.SemanticHash, right.SemanticHash, StringComparison.Ordinal);
     }
 
     public sealed class CultMeshMappedBodyPublisher
@@ -217,7 +268,8 @@ namespace GameCult.Mesh
                 Synchronization = CultMeshBodySynchronization.ImmutableSequence,
                 LeaseExpiresAtUnixMs = nowUtc.Add(_leaseDuration).ToUnixTimeMilliseconds(),
                 TransportKind = CultMeshBodyTransportKind.SharedFileMapping,
-                CapabilityToken = token
+                CapabilityToken = token,
+                SemanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(body)
             };
         }
 
@@ -339,7 +391,8 @@ namespace GameCult.Mesh
                 Synchronization = networkDescriptor.Synchronization,
                 LeaseExpiresAtUnixMs = expiresAtUnixMs,
                 TransportKind = CultMeshBodyTransportKind.SharedFileMapping,
-                CapabilityToken = token
+                CapabilityToken = token,
+                SemanticHash = networkDescriptor.SemanticHash
             };
         }
 
@@ -464,6 +517,11 @@ namespace GameCult.Mesh
             var bytes = _fetch(descriptor) ?? throw new InvalidDataException("CultMesh network body returned no bytes.");
             if (bytes.LongLength != descriptor.ByteSize)
                 throw new InvalidDataException("CultMesh network body size does not match its descriptor.");
+            if (string.IsNullOrWhiteSpace(descriptor.SemanticHash))
+                throw new InvalidDataException("CultMesh network body descriptor has no semantic digest.");
+            var actualHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(bytes);
+            if (!string.Equals(actualHash, descriptor.SemanticHash, StringComparison.Ordinal))
+                throw new InvalidDataException("CultMesh network body semantic digest does not match its descriptor.");
             return new CultMeshBufferedBodyLease(descriptor, bytes);
         }
     }

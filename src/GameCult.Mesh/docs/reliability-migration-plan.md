@@ -728,6 +728,60 @@ rejected rather than creating a second buffering model.
 - Negotiation failure is observable and falls back to the network body without
   changing logical body identity.
 
+### Phase 5 local/remote conformance slice
+
+**Owner:** `CultMeshBodyTransportService` owns representation selection for one
+validated logical generation. Each transport adapter owns only acquisition and
+pre-interpretation validation of its representation. Producer authorization is
+an independent input to negotiation; a valid digest never grants authority.
+
+**Inputs:** equivalent local and network descriptors, the consumer's expected
+body identity/schema/layout/capacity/epoch/sequence, an authorized-producer
+decision, registered transport adapters, and network bytes carrying the
+descriptor-bound semantic digest.
+
+**Outputs:** one read-only lease for the selected representation plus a typed
+negotiation result that records the selected transport and any rejected local
+attempt. Local and network leases expose the same logical descriptor fields and
+semantic bytes.
+
+**Derived state:** local preference, adapter availability, and fallback reason
+are negotiation state only. Capability tokens and network fetch details remain
+transport material and cannot alter logical body identity.
+
+**Invariants:** both descriptors must agree on body identity, schema, layout,
+byte size, capacity, producer epoch, sequence, synchronization, access mode,
+and semantic digest before either representation is opened. Lease expiry is
+representation lifetime, validated independently for each descriptor; it is
+not logical generation identity because a local broker may issue a shorter
+capability lease than the network representation.
+Expected schema, layout, capacity, epoch, and sequence are validated before a
+network fetch. Fetched network bytes are digest-verified before a lease is
+created or any typed read is possible. Digest integrity does not authorize the
+publisher.
+
+**Forbidden writers:** adapters, fallback handling, capability material,
+network payloads, and integrity checks cannot rewrite logical identity or grant
+producer authority. A failed local adapter cannot repair, mutate, or reinterpret
+the network descriptor.
+
+**Shared paths:** successful local open and network fallback use the same
+logical-generation equivalence check and consumer validation request. Direct
+network consumption uses the same pre-interpretation descriptor and digest
+validation as fallback consumption.
+
+**Cut line:** replace exception-only fallback reporting with a typed negotiation
+result while retaining the existing overload as a delegating compatibility
+surface. Add only descriptor-bound semantic integrity; do not add a shared-memory
+control bus, content-authority inference, reconnect policy, or profiling hooks.
+
+**Verification layer:** conformance tests compare descriptor semantics and full
+bytes across file mapping, shared memory where supported, direct network, and
+network fallback. Negative tests prove stale schema/epoch/sequence are rejected
+before fetch, corrupt network bytes never produce a lease, local failure is
+reported, fallback preserves identity, and authorization is evaluated separately
+from content integrity.
+
 ### Gate
 
 - Two local consumers map one verified CDN artifact without duplicate process

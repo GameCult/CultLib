@@ -240,7 +240,9 @@ namespace GameCult.Mesh
                     AccessMode = CultMeshBodyAccessMode.ReadOnly,
                     Synchronization = CultMeshBodySynchronization.TripleBuffer,
                     LeaseExpiresAtUnixMs = long.MaxValue,
-                    TransportKind = CultMeshBodyTransportKind.SharedMemory
+                    TransportKind = CultMeshBodyTransportKind.SharedMemory,
+                    SemanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(
+                        lease.Span[..byteLength])
                 };
                 var generation = new CultMeshFrameGeneration(
                     lease.SlotIndex, descriptor, timestampNs, durationNs, unavoidableCopyCount, metadata);
