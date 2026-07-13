@@ -163,6 +163,7 @@ namespace GameCult.Mesh
         private readonly Subject<CultMeshSessionState> _states = new();
         private readonly ConcurrentBag<IDisposable> _subscriptions = new();
         private readonly ManagedSchemaChannel _channel;
+        private long _physicalGeneration;
         private bool _disposed;
         internal CultMeshSession(CultMeshEndpointId endpointId, CultMeshProtocolId protocol, ICultNetSchemaClient channel, CultMeshSessionState state)
         {
@@ -175,6 +176,7 @@ namespace GameCult.Mesh
         public CultMeshProtocolId Protocol { get; }
         internal ICultNetSchemaClient Channel => _channel;
         public CultMeshSessionState State { get; private set; }
+        internal long PhysicalGeneration => Interlocked.Read(ref _physicalGeneration);
         public Observable<CultMeshSessionState> WatchState() => _states;
         public ICultNetSchemaClient OpenSchemaClient() => new SessionSchemaClient(this);
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage => Channel.SendCultNet(message);
@@ -187,7 +189,11 @@ namespace GameCult.Mesh
             return subscription;
         }
         internal void Transition(CultMeshSessionState state) { State = state; _states.OnNext(state); }
-        internal void ReplacePhysicalChannel(ICultNetSchemaClient channel) => _channel.Replace(channel);
+        internal void ReplacePhysicalChannel(ICultNetSchemaClient channel)
+        {
+            _channel.Replace(channel);
+            Interlocked.Increment(ref _physicalGeneration);
+        }
         public void Dispose()
         {
             if (_disposed) return;

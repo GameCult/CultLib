@@ -303,6 +303,7 @@ namespace GameCult.Mesh
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly object _subscribeLock = new();
             private Task? _subscribeTask;
+            private long _subscribedGeneration = -1;
             private IDisposable? _stateWatch;
             private bool _disposed;
 
@@ -337,7 +338,9 @@ namespace GameCult.Mesh
             {
                 lock (_subscribeLock)
                 {
-                    if (_subscribeTask is { IsCompleted: false }) return _subscribeTask;
+                    var generation = _session.PhysicalGeneration;
+                    if (_subscribedGeneration == generation && _subscribeTask != null) return _subscribeTask;
+                    _subscribedGeneration = generation;
                     return _subscribeTask = SubscribeAsync();
                 }
             }
@@ -380,6 +383,7 @@ namespace GameCult.Mesh
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly object _subscribeLock = new();
             private Task? _subscribeTask;
+            private long _subscribedGeneration = -1;
             private IDisposable? _stateWatch;
             private bool _disposed;
 
@@ -412,7 +416,9 @@ namespace GameCult.Mesh
             {
                 lock (_subscribeLock)
                 {
-                    if (_subscribeTask is { IsCompleted: false }) return _subscribeTask;
+                    var generation = _session.PhysicalGeneration;
+                    if (_subscribedGeneration == generation && _subscribeTask != null) return _subscribeTask;
+                    _subscribedGeneration = generation;
                     return _subscribeTask = SubscribeAsync();
                 }
             }

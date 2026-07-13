@@ -424,9 +424,12 @@ and client disposal.
 online physical incarnation, cache-backed typed handles, and readiness after
 the first successful snapshot from any incarnation.
 
-**Derived state:** physical client identity, attempt count, cached snapshots,
-and online/reconnecting/offline projections. No individual request owns the
-logical handle.
+**Derived state:** physical client identity and generation, attempt count,
+cached snapshots, and online/reconnecting/offline projections. The session
+increments the generation only after replacing its physical channel. A binding
+may coalesce duplicate subscription attempts within that generation, but a
+pending request from an older generation cannot suppress replay. No individual
+request owns the logical handle.
 
 **Forbidden writers:** bindings and schema clients cannot choose endpoints,
 replace channels, reconnect, or declare session state. An abandoned initial
@@ -435,7 +438,7 @@ readiness.
 
 **Shared paths:** initial open and reconnect both use session-manager path
 resolution. Document and collection activation both replay the same binding
-intent when the logical session returns online.
+intent once per physical generation when the logical session returns online.
 
 **Cut line:** the initial subscribe no longer runs before reconnect observation,
 and a per-binding semaphore no longer lets an unanswered physical request hold
