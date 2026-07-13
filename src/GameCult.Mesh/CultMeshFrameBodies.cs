@@ -1,11 +1,219 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.MemoryMappedFiles;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 
 #nullable enable
 
 namespace GameCult.Mesh
 {
+    // Owner: this publisher owns mapping lifetime, logical generation, and slot commit.
+    // Consumers own only read leases; mappings, capabilities, and slot selection remain CultMesh state.
+    public sealed class CultMeshFrameBodyPublisher : IDisposable
+    {
+        private const string CapabilityPrefix = "frame-v1-";
+        private const int HeaderSize = 128;
+        private const int SequenceOffset = 8;
+        private const int ReaderCountOffset = 32;
+        private const int ContractHashOffset = 64;
+        private readonly object _gate = new();
+        private readonly MemoryMappedFile _mapping;
+        private readonly MemoryMappedViewAccessor _control;
+        private readonly Mutex _mutex;
+        private readonly TimeSpan _leaseDuration;
+        private readonly string _token;
+        private int _cursor;
+        private long _nextSequence;
+        private bool _disposed;
+
+        public CultMeshFrameBodyPublisher(
+            string bodyId,
+            string schemaId,
+            int layoutVersion,
+            int capacity,
+            long producerEpoch,
+            int slotByteLength,
+            TimeSpan? leaseDuration = null)
+        {
+            BodyId = Require(bodyId, nameof(bodyId));
+            SchemaId = Require(schemaId, nameof(schemaId));
+            if (layoutVersion < 0) throw new ArgumentOutOfRangeException(nameof(layoutVersion));
+            if (capacity < 0) throw new ArgumentOutOfRangeException(nameof(capacity));
+            if (producerEpoch < 0) throw new ArgumentOutOfRangeException(nameof(producerEpoch));
+            if (slotByteLength <= 0) throw new ArgumentOutOfRangeException(nameof(slotByteLength));
+            LayoutVersion = layoutVersion;
+            Capacity = capacity;
+            ProducerEpoch = producerEpoch;
+            SlotByteLength = slotByteLength;
+            _leaseDuration = leaseDuration ?? TimeSpan.FromSeconds(5);
+            if (_leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
+            _token = CapabilityPrefix + RandomToken();
+            _mapping = MemoryMappedFile.CreateNew(MappingName(_token), checked(HeaderSize + CultMeshFrameRegion.SlotCount * slotByteLength));
+            _control = _mapping.CreateViewAccessor(0, HeaderSize, MemoryMappedFileAccess.ReadWrite);
+            _control.Write(0, slotByteLength);
+            _control.Write(4, CultMeshFrameRegion.SlotCount);
+            var contractHash = Encoding.ASCII.GetBytes(ContractHash(BodyId, SchemaId, LayoutVersion, Capacity, ProducerEpoch, SlotByteLength));
+            _control.WriteArray(ContractHashOffset, contractHash, 0, contractHash.Length);
+            _mutex = new Mutex(false, MutexName(_token));
+        }
+
+        public string BodyId { get; }
+        public string SchemaId { get; }
+        public int LayoutVersion { get; }
+        public int Capacity { get; }
+        public long ProducerEpoch { get; }
+        public int SlotByteLength { get; }
+
+        public bool TryPublish(ReadOnlySpan<byte> body, DateTimeOffset nowUtc, out CultMeshBodyDescriptor descriptor)
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (body.Length > SlotByteLength) throw new ArgumentOutOfRangeException(nameof(body));
+                var publishedBytes = body.ToArray();
+                CultMeshBodyDescriptor? published = null;
+                WithMutex(() =>
+                {
+                    for (var attempt = 0; attempt < CultMeshFrameRegion.SlotCount; attempt++)
+                    {
+                        var slot = (_cursor + attempt) % CultMeshFrameRegion.SlotCount;
+                        if (_control.ReadInt32(ReaderCountOffset + slot * sizeof(int)) != 0) continue;
+                        using (var view = _mapping.CreateViewAccessor(SlotOffset(slot, SlotByteLength), SlotByteLength, MemoryMappedFileAccess.Write))
+                            view.WriteArray(0, publishedBytes, 0, publishedBytes.Length);
+                        _control.Write(SequenceOffset + slot * sizeof(long), _nextSequence);
+                        _cursor = (slot + 1) % CultMeshFrameRegion.SlotCount;
+                        published = Descriptor(slot, publishedBytes, nowUtc);
+                        _nextSequence++;
+                        return;
+                    }
+                });
+                descriptor = published!;
+                return published != null;
+            }
+        }
+
+        private CultMeshBodyDescriptor Descriptor(int slot, ReadOnlySpan<byte> body, DateTimeOffset nowUtc) => new()
+        {
+            BodyId = BodyId, SchemaId = SchemaId, LayoutVersion = LayoutVersion, ByteSize = body.Length,
+            Capacity = Capacity, ProducerEpoch = ProducerEpoch, Sequence = _nextSequence,
+            AccessMode = CultMeshBodyAccessMode.ReadOnly, Synchronization = CultMeshBodySynchronization.TripleBuffer,
+            LeaseExpiresAtUnixMs = nowUtc.Add(_leaseDuration).ToUnixTimeMilliseconds(),
+            TransportKind = CultMeshBodyTransportKind.SharedMemory,
+            CapabilityToken = _token + "." + slot,
+            SemanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(body)
+        };
+
+        internal static bool IsFrameCapability(string capability) => capability.StartsWith(CapabilityPrefix, StringComparison.Ordinal);
+
+        internal static ICultMeshBodyReadLease OpenReadOnly(CultMeshBodyDescriptor descriptor)
+        {
+            ParseCapability(descriptor.CapabilityToken, out var token, out var slot);
+            MemoryMappedFile mapping;
+            Mutex mutex;
+            try
+            {
+                mapping = MemoryMappedFile.OpenExisting(MappingName(token), MemoryMappedFileRights.ReadWrite);
+                mutex = Mutex.OpenExisting(MutexName(token));
+            }
+            catch (Exception error) when (error is FileNotFoundException || error is WaitHandleCannotBeOpenedException)
+            {
+                throw new InvalidDataException("CultMesh frame capability is unavailable or revoked.", error);
+            }
+            try
+            {
+                int slotByteLength = 0;
+                WithMutex(mutex, () =>
+                {
+                    using var control = mapping.CreateViewAccessor(0, HeaderSize, MemoryMappedFileAccess.ReadWrite);
+                    slotByteLength = control.ReadInt32(0);
+                    if (slot < 0 || slot >= control.ReadInt32(4) || descriptor.ByteSize > slotByteLength)
+                        throw new InvalidDataException("CultMesh frame capability does not match its mapping layout.");
+                    var contractHash = new byte[64];
+                    control.ReadArray(ContractHashOffset, contractHash, 0, contractHash.Length);
+                    var expectedContract = ContractHash(
+                        descriptor.BodyId, descriptor.SchemaId, descriptor.LayoutVersion,
+                        descriptor.Capacity, descriptor.ProducerEpoch, slotByteLength);
+                    if (!string.Equals(Encoding.ASCII.GetString(contractHash), expectedContract, StringComparison.Ordinal) ||
+                        control.ReadInt64(SequenceOffset + slot * sizeof(long)) != descriptor.Sequence)
+                        throw new InvalidOperationException("CultMesh frame generation is stale or belongs to a different body contract.");
+                    var offset = ReaderCountOffset + slot * sizeof(int);
+                    control.Write(offset, checked(control.ReadInt32(offset) + 1));
+                });
+                return new CultMeshMappedBodyLease(
+                    descriptor, mapping, SlotOffset(slot, slotByteLength),
+                    () => ReleaseReader(token, slot));
+            }
+            catch
+            {
+                mapping.Dispose();
+                mutex.Dispose();
+                throw;
+            }
+            finally { mutex.Dispose(); }
+        }
+
+        private static void ReleaseReader(string token, int slot)
+        {
+            try
+            {
+                using var mapping = MemoryMappedFile.OpenExisting(MappingName(token), MemoryMappedFileRights.ReadWrite);
+                using var mutex = Mutex.OpenExisting(MutexName(token));
+                WithMutex(mutex, () =>
+                {
+                    using var control = mapping.CreateViewAccessor(0, HeaderSize, MemoryMappedFileAccess.ReadWrite);
+                    var offset = ReaderCountOffset + slot * sizeof(int);
+                    var readers = control.ReadInt32(offset);
+                    if (readers > 0) control.Write(offset, readers - 1);
+                });
+            }
+            catch (Exception error) when (error is FileNotFoundException || error is WaitHandleCannotBeOpenedException) { }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _control.Dispose();
+                _mapping.Dispose();
+                _mutex.Dispose();
+            }
+        }
+
+        private void WithMutex(Action action) => WithMutex(_mutex, action);
+        private static void WithMutex(Mutex mutex, Action action)
+        {
+            mutex.WaitOne();
+            try { action(); }
+            finally { mutex.ReleaseMutex(); }
+        }
+        private static long SlotOffset(int slot, int slotByteLength) => HeaderSize + (long)slot * slotByteLength;
+        private static string MappingName(string token) => "cultmesh-map-" + token;
+        private static string MutexName(string token) => "cultmesh-lock-" + token;
+        private static void ParseCapability(string capability, out string token, out int slot)
+        {
+            var separator = capability.LastIndexOf('.');
+            if (separator <= CapabilityPrefix.Length || !int.TryParse(capability.Substring(separator + 1), out slot))
+                throw new UnauthorizedAccessException("Invalid CultMesh frame capability.");
+            token = capability.Substring(0, separator);
+        }
+        private static string RandomToken()
+        {
+            var bytes = new byte[24];
+            using (var random = RandomNumberGenerator.Create()) random.GetBytes(bytes);
+            return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
+        }
+        private static string ContractHash(string bodyId, string schemaId, int layoutVersion, int capacity, long epoch, int slotByteLength) =>
+            CultMeshBodyDescriptorValidator.ComputeSemanticHash(
+                Encoding.UTF8.GetBytes($"{bodyId}\n{schemaId}\n{layoutVersion}\n{capacity}\n{epoch}\n{slotByteLength}"));
+        private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(CultMeshFrameBodyPublisher)); }
+        private static string Require(string value, string name) => string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("Value is required.", name) : value;
+    }
+
     public sealed class CultMeshFrameGeneration
     {
         internal CultMeshFrameGeneration(

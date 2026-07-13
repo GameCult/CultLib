@@ -429,6 +429,8 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptorValidator.Validate(descriptor, request);
             if (string.IsNullOrWhiteSpace(descriptor.CapabilityToken))
                 throw new InvalidOperationException("Shared-memory CultMesh body descriptor has no transport capability token.");
+            if (CultMeshFrameBodyPublisher.IsFrameCapability(descriptor.CapabilityToken))
+                return CultMeshFrameBodyPublisher.OpenReadOnly(descriptor);
             MemoryMappedFile mapping;
             try
             {
@@ -461,12 +463,19 @@ namespace GameCult.Mesh
         {
         }
 
-        internal CultMeshMappedBodyLease(CultMeshBodyDescriptor descriptor, MemoryMappedFile mapping)
+        internal CultMeshMappedBodyLease(
+            CultMeshBodyDescriptor descriptor,
+            MemoryMappedFile mapping,
+            long offset = 0,
+            Action? release = null)
         {
             Descriptor = descriptor;
             _mapping = mapping;
-            _view = _mapping.CreateViewAccessor(0, descriptor.ByteSize, MemoryMappedFileAccess.Read);
+            _release = release;
+            _view = _mapping.CreateViewAccessor(offset, descriptor.ByteSize, MemoryMappedFileAccess.Read);
         }
+
+        private readonly Action? _release;
 
         public CultMeshBodyDescriptor Descriptor { get; }
         public CultMeshBodyTransportKind TransportKind => Descriptor.TransportKind;
@@ -488,6 +497,7 @@ namespace GameCult.Mesh
             _disposed = true;
             _view.Dispose();
             _mapping.Dispose();
+            _release?.Invoke();
         }
 
         private void ValidateRange(long offset, long length)

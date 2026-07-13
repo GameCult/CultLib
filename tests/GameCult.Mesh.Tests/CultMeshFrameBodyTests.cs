@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -11,6 +12,69 @@ namespace GameCult.Mesh.Tests;
 [TestFixture]
 public sealed class CultMeshFrameBodyTests
 {
+    [Test]
+    public void CrossProcessPublisherOpensReadOnlyBytesAndProtectsLeasedSlot()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1, 2, 3 }, DateTimeOffset.UtcNow, out var first).Should().BeTrue();
+        var adapter = new CultMeshSharedMemoryBodyAdapter();
+        using var lease = adapter.OpenReadOnly(first, Request(first));
+        var bytes = new byte[3];
+        lease.CopyTo(0, bytes, 0, bytes.Length).Should().Be(3);
+        bytes.Should().Equal(1, 2, 3);
+
+        publisher.TryPublish(new byte[] { 4 }, DateTimeOffset.UtcNow, out var second).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 5 }, DateTimeOffset.UtcNow, out var third).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 6 }, DateTimeOffset.UtcNow, out var fourth).Should().BeTrue();
+        fourth.CapabilityToken.Should().NotBe(first.CapabilityToken);
+        lease.ReadByte(0).Should().Be(1);
+    }
+
+    [TestCase("wrong", 2, 9)]
+    [TestCase("tests.frame.v2", 1, 9)]
+    [TestCase("tests.frame.v2", 2, 8)]
+    public void CrossProcessOpenRejectsStaleSchemaLayoutOrEpoch(string schema, int layout, long epoch)
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 42 }, DateTimeOffset.UtcNow, out var descriptor).Should().BeTrue();
+        var request = Request(descriptor);
+        request.SchemaId = schema;
+        request.LayoutVersion = layout;
+        request.ProducerEpoch = epoch;
+
+        Action open = () => new CultMeshSharedMemoryBodyAdapter().OpenReadOnly(descriptor, request);
+        open.Should().Throw<InvalidOperationException>();
+    }
+
+    [Test]
+    public void ReusedSlotRejectsItsStaleGenerationDescriptor()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1 }, DateTimeOffset.UtcNow, out var stale).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 2 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 3 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 4 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+
+        Action open = () => new CultMeshSharedMemoryBodyAdapter().OpenReadOnly(stale, Request(stale));
+        open.Should().Throw<InvalidOperationException>().WithMessage("*stale*");
+    }
+
+    [Test]
+    public void CleanupRevokesNewOpensAndDisposedLeaseIsInvalid()
+    {
+        var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 42 }, DateTimeOffset.UtcNow, out var descriptor).Should().BeTrue();
+        var adapter = new CultMeshSharedMemoryBodyAdapter();
+        var lease = adapter.OpenReadOnly(descriptor, Request(descriptor));
+        lease.Dispose();
+        Action readDisposed = () => lease.ReadByte(0);
+        readDisposed.Should().Throw<ObjectDisposedException>();
+
+        publisher.Dispose();
+        Action reopen = () => adapter.OpenReadOnly(descriptor, Request(descriptor));
+        reopen.Should().Throw<InvalidDataException>();
+    }
+
     [Test]
     public void PublishesOneAtomicSchemaVersionedGenerationPerCommit()
     {
@@ -177,6 +241,20 @@ public sealed class CultMeshFrameBodyTests
 
     private static CultMeshFrameRegion Region() =>
         new("body", "tests.frame.v2", layoutVersion: 2, capacity: 64, producerEpoch: 9, slotByteLength: 64);
+
+    private static CultMeshFrameBodyPublisher Publisher() =>
+        new("body", "tests.frame.v2", layoutVersion: 2, capacity: 64, producerEpoch: 9, slotByteLength: 64);
+
+    private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor) => new()
+    {
+        BodyId = descriptor.BodyId,
+        SchemaId = descriptor.SchemaId,
+        LayoutVersion = descriptor.LayoutVersion,
+        ProducerEpoch = descriptor.ProducerEpoch,
+        Capacity = descriptor.Capacity,
+        Sequence = descriptor.Sequence,
+        AccessMode = CultMeshBodyAccessMode.ReadOnly
+    };
 
     private static CultMeshBodyValidationRequest Request(long? sequence = null) => new()
     {
