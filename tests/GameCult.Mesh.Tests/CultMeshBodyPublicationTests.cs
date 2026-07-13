@@ -1,0 +1,193 @@
+using System;
+using System.IO;
+using FluentAssertions;
+using GameCult.Caching;
+using NUnit.Framework;
+
+#nullable enable
+
+namespace GameCult.Mesh.Tests;
+
+public sealed class CultMeshBodyPublicationTests
+{
+    private string _root = null!;
+
+    [SetUp]
+    public void SetUp() =>
+        _root = Path.Combine(Path.GetTempPath(), "cultmesh-body-publications", Guid.NewGuid().ToString("N"));
+
+    [TearDown]
+    public void TearDown()
+    {
+        if (Directory.Exists(_root)) Directory.Delete(_root, true);
+    }
+
+    [Test]
+    public void TypedDocument_RoundTripsAndRegistersWithLogicalBodyKey()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var publication = Publication(new byte[] { 1, 2, 3, 4 }, now);
+        var path = Path.Combine(_root, "publication.cc");
+        var handle = new CultMeshBodyPublicationHandle(publication.BodyId);
+
+        CultMesh.WriteSingleFileDocument(path, handle.RecordKey, publication);
+        var restored = CultMesh.ReadSingleFileDocument<CultMeshBodyPublicationDocument>(path, handle.RecordKey);
+        var registry = CultMesh.CreateBodyPublicationDocumentRegistry();
+
+        handle.Validate(restored);
+        restored.Should().BeEquivalentTo(publication);
+        registry.GetByDocumentType(typeof(CultMeshBodyPublicationDocument)).Should().NotBeNull();
+        handle.RecordKey.Should().Be(CultMeshBodyPublicationDocument.CreateRecordKey(publication.BodyId));
+    }
+
+    [Test]
+    public void Resolver_UsesPreferredLocalRepresentation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = BitConverter.GetBytes(12.5f);
+        var publication = Publication(bytes, now);
+        var resolver = Resolver(bytes, (producer, _) => producer == "aetheria");
+
+        using var lease = resolver.ResolveReadOnly(publication, Request(publication, now));
+
+        lease.TransportKind.Should().Be(CultMeshBodyTransportKind.SharedFileMapping);
+        lease.ReadSingle(0).Should().Be(12.5f);
+    }
+
+    [Test]
+    public void Resolver_FallsBackToEquivalentNetworkRepresentation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 4, 8, 15, 16 };
+        var publication = Publication(bytes, now);
+        new CultMeshMappedBodyPublisher(_root).Revoke(publication.PreferredLocal);
+
+        var result = Resolver(bytes, (_, _) => true).NegotiateReadOnly(publication, Request(publication, now));
+        using var lease = result.Lease;
+
+        result.UsedFallback.Should().BeTrue();
+        lease.TransportKind.Should().Be(CultMeshBodyTransportKind.Network);
+    }
+
+    [TestCase("body")]
+    [TestCase("schema")]
+    [TestCase("capacity")]
+    [TestCase("epoch")]
+    [TestCase("sequence")]
+    [TestCase("liveness")]
+    public void Resolver_RejectsDescriptorThatDisagreesWithEnvelope(string field)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var publication = Publication(new byte[4], now);
+        var descriptor = publication.NetworkFallback;
+        if (field == "body") descriptor.BodyId += ":wrong";
+        if (field == "schema") descriptor.SchemaId += ".wrong";
+        if (field == "capacity") descriptor.Capacity++;
+        if (field == "epoch") descriptor.ProducerEpoch++;
+        if (field == "sequence") descriptor.Sequence++;
+        if (field == "liveness") descriptor.LeaseExpiresAtUnixMs++;
+
+        Action resolve = () => Resolver(new byte[4], (_, _) => true)
+            .ResolveReadOnly(publication, Request(publication, now));
+
+        resolve.Should().Throw<InvalidOperationException>().WithMessage("*envelope*");
+    }
+
+    [Test]
+    public void Resolver_RejectsUnauthorizedProducerBeforeOpeningTransport()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var publication = Publication(new byte[4], now);
+        var fetched = false;
+        var resolver = Resolver(new byte[4], (producer, _) =>
+        {
+            producer.Should().Be("aetheria");
+            return false;
+        }, () => fetched = true);
+
+        Action resolve = () => resolver.ResolveReadOnly(publication, Request(publication, now));
+
+        resolve.Should().Throw<UnauthorizedAccessException>();
+        fetched.Should().BeFalse();
+    }
+
+    [Test]
+    public void Resolver_RejectsExpiredPublicationAndStaleRequestedGeneration()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var publication = Publication(new byte[4], now);
+        var resolver = Resolver(new byte[4], (_, _) => true);
+
+        Action expired = () => resolver.ResolveReadOnly(publication, Request(publication, now.AddMinutes(2)));
+        expired.Should().Throw<InvalidOperationException>().WithMessage("*live*");
+
+        var stale = Request(publication, now);
+        stale.ProducerEpoch--;
+        Action wrongGeneration = () => resolver.ResolveReadOnly(publication, stale);
+        wrongGeneration.Should().Throw<InvalidOperationException>().WithMessage("*epoch*");
+    }
+
+    private CultMeshBodyPublicationDocument Publication(byte[] bytes, DateTimeOffset now)
+    {
+        var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
+            .Publish("aetheria:entities", "eve.entity_soa.v1", 2, 128, 7, 42, bytes, now);
+        return new CultMeshBodyPublicationDocument
+        {
+            BodyId = local.BodyId,
+            ProducerId = "aetheria",
+            SchemaId = local.SchemaId,
+            LayoutVersion = local.LayoutVersion,
+            ByteSize = local.ByteSize,
+            Capacity = local.Capacity,
+            ProducerEpoch = local.ProducerEpoch,
+            Sequence = local.Sequence,
+            Synchronization = local.Synchronization,
+            LivenessExpiresAtUnixMs = local.LeaseExpiresAtUnixMs,
+            PreferredLocal = local,
+            NetworkFallback = Network(local)
+        };
+    }
+
+    private CultMeshBodyPublicationResolver Resolver(
+        byte[] bytes,
+        Func<string, CultMeshBodyDescriptor, bool> authorize,
+        Action? fetched = null) =>
+        new(new CultMeshBodyTransportService(
+            new ICultMeshBodyTransportAdapter[]
+            {
+                new CultMeshMappedBodyAdapter(_root),
+                new CultMeshNetworkBodyAdapter(_ => { fetched?.Invoke(); return bytes; })
+            },
+            authorize));
+
+    private static CultMeshBodyValidationRequest Request(
+        CultMeshBodyPublicationDocument publication,
+        DateTimeOffset now) => new()
+    {
+        BodyId = publication.BodyId,
+        SchemaId = publication.SchemaId,
+        LayoutVersion = publication.LayoutVersion,
+        ProducerEpoch = publication.ProducerEpoch,
+        Sequence = publication.Sequence,
+        Capacity = publication.Capacity,
+        AccessMode = CultMeshBodyAccessMode.ReadOnly,
+        NowUtc = now
+    };
+
+    private static CultMeshBodyDescriptor Network(CultMeshBodyDescriptor local) => new()
+    {
+        BodyId = local.BodyId,
+        SchemaId = local.SchemaId,
+        LayoutVersion = local.LayoutVersion,
+        ByteSize = local.ByteSize,
+        Capacity = local.Capacity,
+        ProducerEpoch = local.ProducerEpoch,
+        Sequence = local.Sequence,
+        AccessMode = local.AccessMode,
+        Synchronization = local.Synchronization,
+        LeaseExpiresAtUnixMs = local.LeaseExpiresAtUnixMs,
+        TransportKind = CultMeshBodyTransportKind.Network,
+        CapabilityToken = "cultnet:body:aetheria:entities:7:42",
+        SemanticHash = local.SemanticHash
+    };
+}

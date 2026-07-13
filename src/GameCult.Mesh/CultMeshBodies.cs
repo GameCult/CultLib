@@ -148,6 +148,7 @@ namespace GameCult.Mesh
     {
         private readonly IReadOnlyDictionary<CultMeshBodyTransportKind, ICultMeshBodyTransportAdapter> _adapters;
         private readonly Func<CultMeshBodyDescriptor, bool> _authorizeProducer;
+        private readonly Func<string, CultMeshBodyDescriptor, bool>? _authorizeNamedProducer;
 
         public CultMeshBodyTransportService(
             IEnumerable<ICultMeshBodyTransportAdapter> adapters,
@@ -156,6 +157,16 @@ namespace GameCult.Mesh
             _adapters = (adapters ?? throw new ArgumentNullException(nameof(adapters)))
                 .ToDictionary(adapter => adapter.TransportKind);
             _authorizeProducer = authorizeProducer ?? throw new ArgumentNullException(nameof(authorizeProducer));
+        }
+
+        public CultMeshBodyTransportService(
+            IEnumerable<ICultMeshBodyTransportAdapter> adapters,
+            Func<string, CultMeshBodyDescriptor, bool> authorizeProducer)
+        {
+            _adapters = (adapters ?? throw new ArgumentNullException(nameof(adapters)))
+                .ToDictionary(adapter => adapter.TransportKind);
+            _authorizeProducer = _ => true;
+            _authorizeNamedProducer = authorizeProducer ?? throw new ArgumentNullException(nameof(authorizeProducer));
         }
 
         public ICultMeshBodyReadLease OpenReadOnly(
@@ -174,13 +185,25 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptor networkFallback,
             CultMeshBodyValidationRequest request)
         {
+            return NegotiateReadOnly(null, preferred, networkFallback, request);
+        }
+
+        internal CultMeshBodyNegotiationResult NegotiateReadOnly(
+            string? producerId,
+            CultMeshBodyDescriptor preferred,
+            CultMeshBodyDescriptor networkFallback,
+            CultMeshBodyValidationRequest request)
+        {
             if (preferred == null) throw new ArgumentNullException(nameof(preferred));
             if (networkFallback == null) throw new ArgumentNullException(nameof(networkFallback));
             if (!SameLogicalGeneration(preferred, networkFallback))
                 throw new InvalidOperationException("CultMesh local and network representations describe different logical body generations.");
             CultMeshBodyDescriptorValidator.Validate(preferred, request);
             CultMeshBodyDescriptorValidator.Validate(networkFallback, request);
-            if (!_authorizeProducer(preferred))
+            var authorized = _authorizeNamedProducer == null
+                ? _authorizeProducer(preferred)
+                : !string.IsNullOrWhiteSpace(producerId) && _authorizeNamedProducer(producerId!, preferred);
+            if (!authorized)
                 throw new UnauthorizedAccessException("CultMesh body producer is not authorized for this logical body.");
 
             Exception? preferredFailure = null;
