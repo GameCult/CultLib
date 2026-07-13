@@ -30,6 +30,12 @@ shader semantics.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
+- `PlanetaryField`, a scale-aware CPU/HLSL spherical field contract with
+  deterministic identity, cube-sphere topology, residual pages, LOD residency,
+  ray/path/region queries, coarse patches, and projected map-tile baking. See
+  `docs/planetary.md`.
+- `CultMath.Unity`, an engine-facing assembly containing only Unity mesh and
+  page-upload adapters for the canonical planetary contracts.
 
 ## Native Core
 

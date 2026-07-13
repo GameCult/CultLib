@@ -19,6 +19,8 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="..\..\shaders\CultMath.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\shaders\AdvancedErosionFilter.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\AdvancedErosionFilter.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\shaders\Planetary.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\Planetary.hlsl" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

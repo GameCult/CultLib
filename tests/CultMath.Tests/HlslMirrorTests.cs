@@ -65,6 +65,22 @@ public sealed class HlslMirrorTests
         Assert.Contains("max(length(value), CULTMATH_NORMALIZE_EPSILON)", include);
     }
 
+    [Fact]
+    public void HlslMirrorPublishesPlanetaryTopologyAndField()
+    {
+        var root = GetRepositoryRoot();
+        var include = File.ReadAllText(Path.Combine(root, "shaders", "CultMath.hlsl"));
+        var planetary = File.ReadAllText(Path.Combine(root, "shaders", "Planetary.hlsl"));
+        Assert.Contains("Planetary.hlsl", include);
+        Assert.Contains("cultmath_planetary_face_direction", planetary);
+        Assert.Contains("cultmath_planetary_face_coordinate", planetary);
+        Assert.Contains("cultmath_planetary_page_local", planetary);
+        Assert.Contains("cultmath_planetary_field_sample", planetary);
+        Assert.Contains("cultmath_planetary_equirectangular_forward", planetary);
+        Assert.Contains("cultmath_planetary_equal_earth_forward", planetary);
+        Assert.Contains("CultMathPlanetarySurfaceSample", planetary);
+    }
+
     private static string GetRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

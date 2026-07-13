@@ -264,6 +264,7 @@ float cultmath_value_noise_texture_bicubic(Texture2D<float> noise_texture, Sampl
 }
 
 #include "AdvancedErosionFilter.hlsl"
+#include "Planetary.hlsl"
 
 struct CultMathSphericalErosionParameters
 {

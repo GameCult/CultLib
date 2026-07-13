@@ -19,6 +19,12 @@ Rust hot kernels, C# host code, and HLSL shader code.
 - Keep the surface boring and exact. Noise primitives are allowed when they are
   source-grounded, shader-shaped, and shared by more than one project. Matrices,
   quaternions, and packing helpers still need an owner before they enter.
+- Planetary geometry is a scale-aware field query, not a renderer asset. CPU
+  simulation is the reference consumer; pages, patches, and maps are derived
+  lowerings carrying field identity and unresolved error.
+- Application base fields and gameplay meaning enter through narrow inputs.
+  CultMath does not own biomes, resources, traversability, render materials, or
+  committed game consequences.
 
 ## Non-Goals
 
