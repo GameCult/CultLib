@@ -4088,11 +4088,25 @@ export interface CultMeshRudpDocumentPut {
   };
 }
 
+export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDocumentDefinition = AnyCultCacheDocumentDefinition> {
+  binding: CultNetDocumentBinding<TDefinition>;
+  recordKey: string;
+  value: CultCacheDocumentValue<TDefinition>;
+  messageId?: string;
+  sourceRuntimeId?: string;
+  sourceAgentId?: string;
+  sourceRole?: string;
+  tags?: string[];
+}
+
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
   getCache?: () => Promise<CultCache> | CultCache;
   onError?: (error: Error) => void;
-  onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) => void | Promise<void>;
+  onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) =>
+    | CultMeshRudpDocumentReceipt
+    | void
+    | Promise<CultMeshRudpDocumentReceipt | void>;
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
 }
@@ -4110,6 +4124,10 @@ export interface CultMeshRudpDocumentPublishOptions extends CultMeshRudpPeerOpti
   sourceRole?: string;
   tags?: string[];
   flushTimeoutMs?: number;
+}
+
+export interface CultMeshRudpDocumentReceiptOptions extends CultMeshRudpDocumentPublishOptions {
+  receiptTimeoutMs?: number;
 }
 
 export interface CultMeshRudpEndpoint {
@@ -5638,7 +5656,18 @@ export class CultMesh {
           return;
         case "cultnet.document_put_raw.v0":
           if (options.onDocumentPutRaw) {
-            await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
+            const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
+            if (receipt) {
+              sendSchemaMessage(record, options.documents.createRawDocumentPutMessage(
+                receipt.binding, receipt.messageId ?? message.messageId, receipt.recordKey, receipt.value,
+                {
+                  sourceRuntimeId: receipt.sourceRuntimeId ?? runtimeId,
+                  sourceAgentId: receipt.sourceAgentId,
+                  sourceRole: receipt.sourceRole ?? "provider",
+                  tags: receipt.tags ?? ["receipt"],
+                },
+              ));
+            }
           }
           return;
         default:
@@ -5751,6 +5780,36 @@ export class CultMesh {
     } finally {
       peer.close();
     }
+  }
+
+  public static async publishRudpDocumentAndWaitForReceipt<TDefinition extends AnyCultCacheDocumentDefinition, TReceiptDefinition extends AnyCultCacheDocumentDefinition>(
+    runtimeId: string, connectionId: number, endpoint: string | CultMeshRudpEndpoint,
+    binding: CultNetDocumentBinding<TDefinition>, recordKey: string, value: CultCacheDocumentValue<TDefinition>,
+    receiptBinding: CultNetDocumentBinding<TReceiptDefinition>, options: CultMeshRudpDocumentReceiptOptions = {},
+  ): Promise<CultCacheDocumentValue<TReceiptDefinition>> {
+    requireNonEmpty(runtimeId, "runtimeId");
+    requireNonEmpty(recordKey, "recordKey");
+    const messageId = options.messageId ?? `${runtimeId}:${binding.definition.type}:${recordKey}`;
+    const peer = await CultMesh.createRudpPeer(runtimeId, connectionId, endpoint, options);
+    try {
+      const receipt = new Promise<CultCacheDocumentValue<TReceiptDefinition>>((resolve, reject) => {
+        const timeout = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for RUDP application receipt for ${recordKey}.`)); }, options.receiptTimeoutMs ?? 5_000);
+        const onMessage = (message: CultNetMessage): void => {
+          if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
+          try {
+            const decoded = decode(new Uint8Array(message.document.payload));
+            cleanup();
+            resolve(receiptBinding.definition.schema.parse(decoded) as CultCacheDocumentValue<TReceiptDefinition>);
+          } catch (error) { cleanup(); reject(error); }
+        };
+        const cleanup = (): void => { clearTimeout(timeout); peer.off("message", onMessage); };
+        peer.on("message", onMessage);
+      });
+      peer.send(new CultNetDocumentRegistry([binding]).createRawDocumentPutMessage(binding, messageId, recordKey, value, {
+        sourceRuntimeId: options.sourceRuntimeId ?? runtimeId, sourceAgentId: options.sourceAgentId, sourceRole: options.sourceRole, tags: options.tags,
+      }));
+      return await receipt;
+    } finally { peer.close(); }
   }
 
   public static async createRudpServer(
