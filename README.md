@@ -86,6 +86,20 @@ cargo test --manifest-path native/cultmath-core/Cargo.toml
 cargo build --release --manifest-path native/cultmath-core/Cargo.toml
 ```
 
+## Unity compiler
+
+CultMath uses C# 10 record structs and file-scoped namespaces. Unity projects
+must select the compiler's latest language mode with an `Assets/csc.rsp` file:
+
+```text
+-langversion:latest
+```
+
+The package's Unity smoke project verifies this contract against Unity 6. The
+setting is already present in current GameCult Unity clients; it belongs to the
+consumer project because Unity only reads compiler response files from its
+`Assets` root.
+
 ## Shader Tooling
 
 CultMath keeps portable DXC outside git under `.tools/`:

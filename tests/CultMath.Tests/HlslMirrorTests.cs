@@ -78,6 +78,8 @@ public sealed class HlslMirrorTests
         Assert.Contains("cultmath_planetary_field_sample", planetary);
         Assert.Contains("cultmath_planetary_equirectangular_forward", planetary);
         Assert.Contains("cultmath_planetary_equal_earth_forward", planetary);
+        Assert.Contains("cultmath_planetary_projection_forward", planetary);
+        Assert.Contains("cultmath_planetary_projection_inverse", planetary);
         Assert.Contains("CultMathPlanetarySurfaceSample", planetary);
     }
 

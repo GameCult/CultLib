@@ -52,4 +52,12 @@ public sealed class PlanetaryTopologyTests
         Assert.NotEqual(edge, border);
         Assert.Equal(1, math.length(border), 5);
     }
+
+    [Fact]
+    public void NormalizedCubeBaselineSharesFaceEdges()
+    {
+        var a = PlanetaryTopology.NormalizedCubeDirection(new(PlanetaryCubeFace.PositiveZ, 1, -0.4));
+        var b = PlanetaryTopology.NormalizedCubeDirection(new(PlanetaryCubeFace.PositiveX, -1, -0.4));
+        Assert.InRange(math.distance(a, b), 0, 1.0e-6f);
+    }
 }

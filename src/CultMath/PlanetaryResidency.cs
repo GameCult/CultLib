@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace CultMath;
 
 public readonly record struct PlanetaryLodParameters(
@@ -71,9 +75,9 @@ public readonly record struct PlanetaryResidencySnapshot(
 /// <summary>Owns presentation residency only. It never owns field content.</summary>
 public sealed class PlanetaryResidualResidency
 {
-    private readonly Dictionary<ulong, PlanetaryTileAddress> residents = [];
-    private readonly Dictionary<ulong, float> arrivals = [];
-    private readonly Dictionary<ulong, (float Time, float StartingBlend)> departures = [];
+    private readonly Dictionary<ulong, PlanetaryTileAddress> residents = new();
+    private readonly Dictionary<ulong, float> arrivals = new();
+    private readonly Dictionary<ulong, (float Time, float StartingBlend)> departures = new();
     private float lastTime = float.NegativeInfinity;
 
     public void Reset()

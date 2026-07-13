@@ -1,3 +1,5 @@
+using System;
+
 namespace CultMath;
 
 public readonly record struct PlanetaryQueryScale(float FootprintMeters, float MaximumUnresolvedHeight)

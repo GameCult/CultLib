@@ -1,3 +1,5 @@
+using System;
+
 namespace CultMath;
 
 public readonly record struct PlanetaryPageLayout(PlanetaryTileAddress Tile, int InteriorSize, int BorderSize)

@@ -1,3 +1,6 @@
+using System;
+using System.Linq;
+
 namespace CultMath;
 
 public readonly record struct PlanetaryPatchVertex(float2 LocalCoordinate, float3 UnitDirection);

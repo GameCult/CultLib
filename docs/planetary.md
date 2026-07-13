@@ -80,11 +80,17 @@ coarse meshes from the canonical topology. HLSL calls
 Renderers still own cameras, clip space, depth, materials, buffers, dispatch,
 and draw submission.
 
+`PlanetaryGpuPageBuilder` owns the renderer-neutral page input and metadata
+payload. Host adapters may convert its `float4` values to native vector types,
+but do not recalculate directions, spacing, addressing, or transition state.
+
 The optional `CultMath.Unity` assembly converts a canonical face patch into a
-Unity `Mesh` and converts a residency snapshot into Unity-native page input and
-metadata payloads. It owns no field parameters, page selection, or simulation
-state. Unity render code remains responsible for allocating/binding graphics
-buffers and dispatching application-specific base-field entry points.
+Unity `Mesh` and converts the shared GPU payload into Unity-native structs. It
+owns no field parameters, page selection, or simulation state. The package's
+Planetary Field Viewer sample renders the shared HLSL field and reports matching
+CPU queries. Unity render code remains responsible for allocating/binding
+graphics buffers and dispatching application-specific base-field entry points.
+The host Unity project must set `-langversion:latest` in `Assets/csc.rsp`.
 
 ## Maps
 
@@ -103,6 +109,12 @@ projection and canonical field query. `PlanetaryMapTileKey` includes field,
 projection, layer, layout, and query-scale identity. Palettes, contours, labels,
 and strategic overlays do not enter CultMath.
 
+`PlanetaryMapTileEncoding` writes the resulting evidence as a versioned
+little-endian `CMPT` binary asset. `web/planetary-tile.ts` decodes that exact
+format into browser-native values without defining another terrain generator.
+Typed CultMesh documents should carry the tile key and asset reference; the
+binary payload is derived CDN/cache data, not committed game state.
+
 ## Numeric contract
 
 Integer hashes and published field versions are exact. Basic arithmetic follows
@@ -111,7 +123,8 @@ CultMath's matched C#/HLSL semantics. Hardware transcendental functions such as
 Every filtered terrain query carries an unresolved-height bound so consumers can
 reject insufficient fidelity explicitly.
 
-Current D3D12 parity evidence covers the advanced erosion kernel and the QSC
-forward/inverse topology. The remaining production page and patch shaders use
-the common functions and retain their seam, residual, summary, and radial-hit
-integration probes in Fensalir.
+Current D3D12 parity evidence covers the advanced erosion kernel, QSC topology,
+and forward/inverse transforms for every supported map projection, including
+center and scale parameters. Production page and patch shaders use the common
+functions and retain their seam, residual, summary, and radial-hit integration
+probes in Fensalir.

@@ -1,3 +1,5 @@
+using System;
+
 namespace CultMath;
 
 public readonly record struct PlanetaryRadialBounds(float MinimumDisplacement, float MaximumDisplacement)

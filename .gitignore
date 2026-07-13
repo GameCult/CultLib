@@ -4,4 +4,5 @@ obj/
 **/obj/
 target/
 **/target/
+/native/cultmath-core/target.meta
 .tools/

@@ -1,3 +1,5 @@
+using System;
+
 namespace CultMath;
 
 public enum PlanetaryCubeFace
@@ -104,6 +106,14 @@ public static class PlanetaryTopology
         return math.normalize(cube);
     }
 
+    public static float3 NormalizedCubeDirection(PlanetaryFaceCoordinate coordinate)
+    {
+        coordinate.Validate(allowOutsideFace: true);
+        var u = (float)coordinate.U;
+        var v = (float)coordinate.V;
+        return math.normalize(CubeVector(coordinate.Face, u, v));
+    }
+
     public static PlanetaryFaceCoordinate FaceCoordinate(float3 direction)
     {
         ValidateDirection(direction);
@@ -155,6 +165,17 @@ public static class PlanetaryTopology
         face,
         MathF.Atan(cubeU) / QuarterPi,
         MathF.Atan(cubeV) / QuarterPi);
+
+    private static float3 CubeVector(PlanetaryCubeFace face, float u, float v) => face switch
+    {
+        PlanetaryCubeFace.PositiveX => new float3(1, v, -u),
+        PlanetaryCubeFace.NegativeX => new float3(-1, v, u),
+        PlanetaryCubeFace.PositiveY => new float3(u, 1, -v),
+        PlanetaryCubeFace.NegativeY => new float3(u, -1, v),
+        PlanetaryCubeFace.PositiveZ => new float3(u, v, 1),
+        PlanetaryCubeFace.NegativeZ => new float3(-u, v, -1),
+        _ => throw new ArgumentOutOfRangeException(nameof(face)),
+    };
 
     internal static void ValidateDirection(float3 direction)
     {

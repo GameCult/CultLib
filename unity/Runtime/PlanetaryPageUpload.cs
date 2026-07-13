@@ -36,12 +36,28 @@ public readonly struct PlanetaryPageMetadataGpu
     public readonly Vector4 State;
 }
 
-public readonly record struct PlanetaryPageUpload(
-    PlanetaryPageInputGpu[] Inputs,
-    PlanetaryPageMetadataGpu[] Metadata,
-    int OutputSampleCount,
-    ulong ContentVersion,
-    ulong PresentationVersion);
+public readonly struct PlanetaryPageUpload
+{
+    public PlanetaryPageUpload(
+        PlanetaryPageInputGpu[] inputs,
+        PlanetaryPageMetadataGpu[] metadata,
+        int outputSampleCount,
+        ulong contentVersion,
+        ulong presentationVersion)
+    {
+        Inputs = inputs;
+        Metadata = metadata;
+        OutputSampleCount = outputSampleCount;
+        ContentVersion = contentVersion;
+        PresentationVersion = presentationVersion;
+    }
+
+    public PlanetaryPageInputGpu[] Inputs { get; }
+    public PlanetaryPageMetadataGpu[] Metadata { get; }
+    public int OutputSampleCount { get; }
+    public ulong ContentVersion { get; }
+    public ulong PresentationVersion { get; }
+}
 
 public static class PlanetaryPageUploadBuilder
 {
@@ -57,25 +73,23 @@ public static class PlanetaryPageUploadBuilder
         foreach (var (resident, pageIndex) in snapshot.Tiles.Select((resident, index) => (resident, index)))
         {
             var layout = new PlanetaryPageLayout(resident.Tile, interiorSize, borderSize).Validate();
-            var spacing = PlanetaryPageSampling.NominalAngularTexelSize(layout) * radius;
-            var parentSpacing = resident.Tile.Level == 0
-                ? 0
-                : PlanetaryPageSampling.NominalAngularTexelSize(new(resident.Tile.Parent(), interiorSize, borderSize)) * radius;
+            var content = PlanetaryGpuPageBuilder.BuildContent(layout, radius);
             var outputOffset = inputs.Count;
-            for (var y = 0; y < layout.StorageSize; y++)
-            for (var x = 0; x < layout.StorageSize; x++)
+            foreach (var input in content.Inputs)
             {
-                var direction = PlanetaryPageSampling.Direction(layout, x, y);
                 inputs.Add(new(
-                    new Vector4(direction.x, direction.y, direction.z, radius),
-                    new Vector4(spacing, parentSpacing, 0, 0)));
+                    ToUnity(input.DirectionRadius),
+                    ToUnity(input.Sampling)));
             }
+            var commonMetadata = PlanetaryGpuPageBuilder.Metadata(content, outputOffset, resident.Blend);
             metadata[pageIndex] = new(
-                new Vector4((int)resident.Tile.Face, resident.Tile.Level, resident.Tile.X, resident.Tile.Y),
-                new Vector4(outputOffset, layout.StorageSize, layout.InteriorSize, layout.BorderSize),
-                Vector4.zero,
-                new Vector4(1, resident.Blend, PlanetaryPageSampling.NominalAngularTexelSize(layout), spacing));
+                ToUnity(commonMetadata.Address),
+                ToUnity(commonMetadata.Layout),
+                ToUnity(commonMetadata.Bounds),
+                ToUnity(commonMetadata.State));
         }
         return new(inputs.ToArray(), metadata, inputs.Count, snapshot.ContentVersion, snapshot.PresentationVersion);
     }
+
+    private static Vector4 ToUnity(float4 value) => new(value.x, value.y, value.z, value.w);
 }

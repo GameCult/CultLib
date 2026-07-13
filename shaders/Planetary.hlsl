@@ -120,6 +120,138 @@ float3 cultmath_planetary_equal_earth_inverse(float2 coordinate)
     return cultmath_normalize(float3(cos_latitude * cos(longitude), cos_latitude * sin(longitude), sin(latitude)));
 }
 
+float cultmath_planetary_wrap_longitude(float longitude)
+{
+    longitude = fmod(longitude, CULTMATH_TAU);
+    if (longitude > CULTMATH_PI) longitude -= CULTMATH_TAU;
+    if (longitude < -CULTMATH_PI) longitude += CULTMATH_TAU;
+    return longitude;
+}
+
+float3 cultmath_planetary_lon_lat_direction(float longitude, float latitude)
+{
+    float cos_latitude = cos(latitude);
+    return cultmath_normalize(float3(cos_latitude * cos(longitude), cos_latitude * sin(longitude), sin(latitude)));
+}
+
+float cultmath_planetary_asinh(float value) { return log(value + sqrt(value * value + 1.0)); }
+float cultmath_planetary_sinh(float value) { return 0.5 * (exp(value) - exp(-value)); }
+
+bool cultmath_planetary_azimuthal_forward(float3 direction, float2 center_lon_lat, int kind, out float2 coordinate)
+{
+    direction = cultmath_normalize(direction);
+    float longitude = cultmath_planetary_wrap_longitude(atan2(direction.y, direction.x) - center_lon_lat.x);
+    float latitude = asin(clamp(direction.z, -1.0, 1.0));
+    float sin0 = sin(center_lon_lat.y), cos0 = cos(center_lon_lat.y);
+    float sin_latitude = sin(latitude), cos_latitude = cos(latitude), cos_longitude = cos(longitude);
+    float cos_c = clamp(sin0 * sin_latitude + cos0 * cos_latitude * cos_longitude, -1.0, 1.0);
+    float2 raw = float2(cos_latitude * sin(longitude), cos0 * sin_latitude - sin0 * cos_latitude * cos_longitude);
+    float factor = 1.0;
+    if (kind == 3)
+    {
+        if (cos_c < 0.0) { coordinate = 0.0; return false; }
+    }
+    else if (kind == 4)
+    {
+        float c = acos(cos_c); factor = (c < 1.0e-6 ? 1.0 : c / sin(c)) / CULTMATH_PI;
+    }
+    else if (kind == 5) factor = sqrt(2.0 / max(1.0 + cos_c, 1.0e-20)) * 0.5;
+    else
+    {
+        if (cos_c <= 0.0) { coordinate = 0.0; return false; }
+        factor = 1.0 / cos_c;
+    }
+    coordinate = raw * factor;
+    return true;
+}
+
+bool cultmath_planetary_azimuthal_inverse(float2 coordinate, float2 center_lon_lat, int kind, out float3 direction)
+{
+    float rho = length(coordinate);
+    float c;
+    if (kind == 3) { if (rho > 1.0) { direction = 0.0; return false; } c = asin(clamp(rho, 0.0, 1.0)); }
+    else if (kind == 4) { if (rho > 1.0) { direction = 0.0; return false; } c = rho * CULTMATH_PI; }
+    else if (kind == 5) { if (rho > 1.0) { direction = 0.0; return false; } c = 2.0 * asin(clamp(rho, 0.0, 1.0)); }
+    else c = atan(rho);
+    if (rho < 1.0e-6) { direction = cultmath_planetary_lon_lat_direction(center_lon_lat.x, center_lon_lat.y); return true; }
+    float sin_c = sin(c), cos_c = cos(c), sin0 = sin(center_lon_lat.y), cos0 = cos(center_lon_lat.y);
+    float latitude = asin(clamp(cos_c * sin0 + coordinate.y * sin_c * cos0 / rho, -1.0, 1.0));
+    float delta_longitude = atan2(coordinate.x * sin_c, rho * cos0 * cos_c - coordinate.y * sin0 * sin_c);
+    direction = cultmath_planetary_lon_lat_direction(cultmath_planetary_wrap_longitude(delta_longitude + center_lon_lat.x), latitude);
+    return true;
+}
+
+bool cultmath_planetary_cube_atlas_forward(float3 direction, out float2 coordinate)
+{
+    int face;
+    float2 face_coordinate = cultmath_planetary_face_coordinate(direction, face);
+    int column = face % 3;
+    int row = face / 3;
+    coordinate = float2(-1.0 + (column + (face_coordinate.x + 1.0) * 0.5) * (2.0 / 3.0), 1.0 - (row + (face_coordinate.y + 1.0) * 0.5));
+    return true;
+}
+
+bool cultmath_planetary_cube_atlas_inverse(float2 coordinate, out float3 direction)
+{
+    if (any(coordinate < -1.0) || any(coordinate > 1.0)) { direction = 0.0; return false; }
+    int column = min((int)((coordinate.x + 1.0) * 1.5), 2);
+    int row = min((int)(1.0 - coordinate.y), 1);
+    float u = ((coordinate.x + 1.0) * 1.5 - column) * 2.0 - 1.0;
+    float v = ((1.0 - coordinate.y) - row) * 2.0 - 1.0;
+    direction = cultmath_planetary_face_direction(row * 3 + column, float2(u, v));
+    return true;
+}
+
+bool cultmath_planetary_projection_forward(float3 direction, int kind, float3 center_lon_lat_scale, out float2 coordinate)
+{
+    float scale = max(center_lon_lat_scale.z, 1.0e-20);
+    if (kind == 6)
+    {
+        bool valid = cultmath_planetary_cube_atlas_forward(direction, coordinate);
+        coordinate /= scale; return valid;
+    }
+    if (kind >= 3)
+    {
+        bool valid = cultmath_planetary_azimuthal_forward(direction, center_lon_lat_scale.xy, kind, coordinate);
+        coordinate /= scale; return valid;
+    }
+    direction = cultmath_normalize(direction);
+    float longitude = cultmath_planetary_wrap_longitude(atan2(direction.y, direction.x) - center_lon_lat_scale.x);
+    float latitude = asin(clamp(direction.z, -1.0, 1.0));
+    if (kind == 0) coordinate = float2(longitude / CULTMATH_PI, latitude / CULTMATH_HALF_PI);
+    else if (kind == 1)
+    {
+        const float maximum_latitude = 1.4844222297453324;
+        if (abs(latitude) > maximum_latitude) { coordinate = 0.0; return false; }
+        coordinate = float2(longitude / CULTMATH_PI, cultmath_planetary_asinh(tan(latitude)) / CULTMATH_PI);
+    }
+    else
+    {
+        float3 centered = cultmath_planetary_lon_lat_direction(longitude, latitude);
+        coordinate = cultmath_planetary_equal_earth_forward(centered);
+    }
+    coordinate /= scale;
+    return true;
+}
+
+bool cultmath_planetary_projection_inverse(float2 coordinate, int kind, float3 center_lon_lat_scale, out float3 direction)
+{
+    coordinate *= max(center_lon_lat_scale.z, 1.0e-20);
+    if (kind == 6) return cultmath_planetary_cube_atlas_inverse(coordinate, direction);
+    if (kind >= 3) return cultmath_planetary_azimuthal_inverse(coordinate, center_lon_lat_scale.xy, kind, direction);
+    if (any(abs(coordinate) > 1.0)) { direction = 0.0; return false; }
+    float longitude, latitude;
+    if (kind == 0) { longitude = coordinate.x * CULTMATH_PI; latitude = coordinate.y * CULTMATH_HALF_PI; }
+    else if (kind == 1) { longitude = coordinate.x * CULTMATH_PI; latitude = atan(cultmath_planetary_sinh(coordinate.y * CULTMATH_PI)); }
+    else
+    {
+        float3 centered = cultmath_planetary_equal_earth_inverse(coordinate);
+        longitude = atan2(centered.y, centered.x); latitude = asin(clamp(centered.z, -1.0, 1.0));
+    }
+    direction = cultmath_planetary_lon_lat_direction(cultmath_planetary_wrap_longitude(longitude + center_lon_lat_scale.x), latitude);
+    return true;
+}
+
 struct CultMathPlanetaryFieldDefinition
 {
     float radius;
