@@ -15,3 +15,9 @@ a clean .NET consumer using only `PackageReference Include="GameCult.Mesh"`.
 The Unity distribution remains `org.gamecult.cultlib`, built by
 `scripts/build-unity-package.ps1`, because Unity consumes the managed assembly
 closure through UPM rather than NuGet restore.
+
+Install the Unity package from the immutable release tag:
+
+```text
+https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.8
+```
