@@ -566,6 +566,35 @@ provider corruption and failover, forged checkpoint rejection, final-hash
 failure, atomic visibility, and concurrent request coalescing. Existing CDN
 tests cover the compatibility reader.
 
+### Phase 5 verified CDN mapped-body slice
+
+**Owner:** `CultMeshContentTransferService` remains the sole writer and promoter
+of completed CDN bodies. `CultMeshVerifiedBodyMappingBroker` owns only ephemeral,
+opaque capability-to-file grants for those completed bodies. Body negotiation
+and producer authorization remain owned by `CultMeshBodyTransportService`.
+
+**Inputs:** the atomically committed `<sha256>.body` path returned by transfer,
+the equivalent network body descriptor, and a bounded lease.
+
+**Outputs:** a read-only file-mapping descriptor for the same logical generation.
+Multiple consumers map the same completed cache file and therefore share the OS
+page cache; no process-sized byte array or republished body file is created.
+
+**Derived state:** opaque capability tokens and their expiry. Tokens are neither
+content hashes nor paths and do not confer producer authority or content trust.
+
+**Forbidden writers:** the mapping broker and adapter cannot create, promote,
+rename, repair, or map partial/checkpoint files. `CultMeshMappedBodyPublisher`
+is not used for verified CDN content.
+
+**Shared paths:** local and network descriptors preserve body identity,
+schema/layout, capacity, producer epoch, sequence, and byte size. Local open
+failure is observed by body negotiation and falls back to that network
+representation.
+
+**Cut line:** there is no second CDN publication path. Mapping is granted only
+after the transfer owner returns its verified final file.
+
 ### Cut first
 
 - Delete the first consumer-owned CDN chunk loop and partial-file convention.

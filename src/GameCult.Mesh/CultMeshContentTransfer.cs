@@ -76,18 +76,47 @@ namespace GameCult.Mesh
         private readonly CultCache _stateCache;
         private readonly ICultMeshContentProvider[] _providers;
         private readonly string _cacheDirectory;
+        private readonly CultMeshVerifiedBodyMappingBroker? _mappedBodies;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _contentLocks = new(StringComparer.Ordinal);
 
         public CultMeshContentTransferService(
             CultCache stateCache,
             IEnumerable<ICultMeshContentProvider> providers,
-            CultMeshContentTransferOptions options)
+            CultMeshContentTransferOptions options,
+            CultMeshVerifiedBodyMappingBroker? mappedBodies = null)
         {
             _stateCache = stateCache ?? throw new ArgumentNullException(nameof(stateCache));
             _providers = providers?.ToArray() ?? throw new ArgumentNullException(nameof(providers));
             if (_providers.Length == 0) throw new ArgumentException("At least one content provider is required.", nameof(providers));
             if (_providers.Any(provider => provider == null)) throw new ArgumentException("Content providers cannot contain null entries.", nameof(providers));
             _cacheDirectory = (options ?? throw new ArgumentNullException(nameof(options))).CacheDirectory;
+            _mappedBodies = mappedBodies;
+        }
+
+        public async Task<CultMeshBodyDescriptor> FetchMappedBodyAsync(
+            CultMeshCdnArtifactManifest manifest,
+            CultMeshBodyDescriptor networkDescriptor,
+            DateTimeOffset nowUtc,
+            TimeSpan leaseDuration,
+            CancellationToken cancellationToken = default)
+        {
+            if (_mappedBodies == null)
+                throw new InvalidOperationException("Verified body mapping is not configured for this transfer service.");
+            if (networkDescriptor == null) throw new ArgumentNullException(nameof(networkDescriptor));
+            if (networkDescriptor.TransportKind != CultMeshBodyTransportKind.Network)
+                throw new ArgumentException("The fallback descriptor must use the network body transport.", nameof(networkDescriptor));
+            if (leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
+            CultMeshCdn.ValidateManifest(manifest);
+            if (networkDescriptor.ByteSize != manifest.SizeBytes)
+                throw new InvalidDataException("CDN manifest size does not match its network body descriptor.");
+
+            var path = await FetchAsync(manifest, cancellationToken).ConfigureAwait(false);
+            var contentHash = CultMeshCdn.NormalizeHash(manifest.ContentHash, nameof(manifest.ContentHash));
+            var requestedExpiry = nowUtc.Add(leaseDuration);
+            var networkExpiry = DateTimeOffset.FromUnixTimeMilliseconds(networkDescriptor.LeaseExpiresAtUnixMs);
+            var expiry = requestedExpiry <= networkExpiry ? requestedExpiry : networkExpiry;
+            if (expiry <= nowUtc) throw new InvalidOperationException("Network body lease has expired.");
+            return _mappedBodies.GrantVerified(contentHash, path, networkDescriptor, expiry);
         }
 
         public async Task<string> FetchAsync(

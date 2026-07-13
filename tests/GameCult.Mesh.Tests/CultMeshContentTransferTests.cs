@@ -141,6 +141,59 @@ public sealed class CultMeshContentTransferTests
         provider.Requests.Values.Sum().Should().Be(artifact.Chunks.Count);
     }
 
+    [Test]
+    public async Task FetchMappedBodyAsync_MapsOnlyCommittedBodyForMultipleConsumersAndFallsBackToNetwork()
+    {
+        var artifact = Artifact("mapped", 4);
+        using var cache = Cache();
+        var broker = new CultMeshVerifiedBodyMappingBroker(_directory);
+        var service = new CultMeshContentTransferService(
+            cache,
+            new[] { new FakeProvider("source", artifact.Chunks) },
+            new CultMeshContentTransferOptions(_directory),
+            broker);
+        var now = DateTimeOffset.UtcNow;
+        var network = NetworkDescriptor(artifact, now);
+
+        var first = await service.FetchMappedBodyAsync(artifact.Manifest, network, now, TimeSpan.FromMinutes(1));
+        var second = await service.FetchMappedBodyAsync(artifact.Manifest, network, now, TimeSpan.FromMinutes(1));
+
+        first.Should().BeEquivalentTo(second, options => options.Excluding(value => value.CapabilityToken));
+        first.CapabilityToken.Should().NotBe(artifact.Manifest.ContentHash);
+        first.CapabilityToken.Should().NotContain(Path.DirectorySeparatorChar.ToString());
+        first.CapabilityToken.Should().NotContain(Path.AltDirectorySeparatorChar.ToString());
+        Directory.GetFiles(_directory, "*.body").Should().ContainSingle()
+            .Which.Should().Be(Path.Combine(_directory, artifact.Manifest.ContentHash + ".body"));
+        Directory.GetFiles(_directory, "*.partial").Should().BeEmpty();
+
+        var adapter = new CultMeshMappedBodyAdapter(broker);
+        using (var firstLease = adapter.OpenReadOnly(first, Request(first, now)))
+        using (var secondLease = adapter.OpenReadOnly(second, Request(second, now)))
+        {
+            var firstBytes = new byte[first.ByteSize];
+            var secondBytes = new byte[second.ByteSize];
+            firstLease.CopyTo(0, firstBytes, 0, firstBytes.Length);
+            secondLease.CopyTo(0, secondBytes, 0, secondBytes.Length);
+            firstBytes.Should().Equal(Payload());
+            secondBytes.Should().Equal(Payload());
+        }
+
+        File.Delete(Path.Combine(_directory, artifact.Manifest.ContentHash + ".body"));
+        var transport = new CultMeshBodyTransportService(
+            new ICultMeshBodyTransportAdapter[]
+            {
+                adapter,
+                new CultMeshNetworkBodyAdapter(_ => Payload())
+            },
+            _ => true);
+
+        using var fallback = transport.OpenReadOnly(first, network, Request(first, now), out var localFailure);
+
+        localFailure.Should().BeOfType<InvalidDataException>();
+        fallback.TransportKind.Should().Be(CultMeshBodyTransportKind.Network);
+        fallback.Descriptor.BodyId.Should().Be(first.BodyId);
+    }
+
     private CultMeshContentTransferService Service(CultCache cache, params ICultMeshContentProvider[] providers) =>
         new(cache, providers, new CultMeshContentTransferOptions(_directory));
 
@@ -164,6 +217,31 @@ public sealed class CultMeshContentTransferTests
 
     private static CultRecordKey StateKey(CultMeshCdnArtifactManifest manifest) =>
         new("mesh:content-transfer:" + manifest.ContentHash);
+
+    private static CultMeshBodyDescriptor NetworkDescriptor(CultMeshCdnArtifact artifact, DateTimeOffset now) => new()
+    {
+        BodyId = artifact.Manifest.ArtifactId,
+        SchemaId = "gamecult.mesh.cdn-artifact.v1",
+        LayoutVersion = 1,
+        ByteSize = artifact.Manifest.SizeBytes,
+        Capacity = checked((int)artifact.Manifest.SizeBytes),
+        ProducerEpoch = 4,
+        Sequence = 7,
+        AccessMode = CultMeshBodyAccessMode.ReadOnly,
+        Synchronization = CultMeshBodySynchronization.ImmutableSequence,
+        LeaseExpiresAtUnixMs = now.AddMinutes(2).ToUnixTimeMilliseconds(),
+        TransportKind = CultMeshBodyTransportKind.Network
+    };
+
+    private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()
+    {
+        BodyId = descriptor.BodyId,
+        SchemaId = descriptor.SchemaId,
+        LayoutVersion = descriptor.LayoutVersion,
+        ProducerEpoch = descriptor.ProducerEpoch,
+        AccessMode = CultMeshBodyAccessMode.ReadOnly,
+        NowUtc = now
+    };
 
     private static CultMeshCdnArtifactChunk Clone(CultMeshCdnArtifactChunk chunk) => new()
     {

@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using MessagePack;
 
@@ -244,12 +245,16 @@ namespace GameCult.Mesh
 
     public sealed class CultMeshMappedBodyAdapter : ICultMeshBodyTransportAdapter
     {
-        private readonly string _rootPath;
+        private readonly string? _rootPath;
+        private readonly CultMeshVerifiedBodyMappingBroker? _verifiedBodies;
 
         public CultMeshMappedBodyAdapter(string rootPath) =>
             _rootPath = Path.GetFullPath(string.IsNullOrWhiteSpace(rootPath)
                 ? throw new ArgumentException("Mapped body root is required.", nameof(rootPath))
                 : rootPath);
+
+        public CultMeshMappedBodyAdapter(CultMeshVerifiedBodyMappingBroker verifiedBodies) =>
+            _verifiedBodies = verifiedBodies ?? throw new ArgumentNullException(nameof(verifiedBodies));
 
         public CultMeshBodyTransportKind TransportKind => CultMeshBodyTransportKind.SharedFileMapping;
 
@@ -263,16 +268,93 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptorValidator.Validate(descriptor, request);
             if (descriptor.TransportKind != CultMeshBodyTransportKind.SharedFileMapping)
                 throw new NotSupportedException($"CultMesh body transport '{descriptor.TransportKind}' is not a file mapping.");
-            var token = descriptor.CapabilityToken;
-            if (token.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || token.Contains(".."))
-                throw new UnauthorizedAccessException("Invalid CultMesh body capability token.");
-            var path = Path.GetFullPath(Path.Combine(_rootPath, token + ".body"));
-            if (!path.StartsWith(_rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new UnauthorizedAccessException("CultMesh body token escaped the broker root.");
+            var path = _verifiedBodies != null
+                ? _verifiedBodies.Resolve(descriptor.CapabilityToken, request.NowUtc)
+                : ResolvePublisherPath(descriptor.CapabilityToken);
             var info = new FileInfo(path);
             if (!info.Exists || info.Length != descriptor.ByteSize)
                 throw new InvalidDataException("Mapped CultMesh body size does not match its descriptor.");
             return new CultMeshMappedBodyLease(descriptor, path);
+        }
+
+        private string ResolvePublisherPath(string token)
+        {
+            if (token.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || token.Contains(".."))
+                throw new UnauthorizedAccessException("Invalid CultMesh body capability token.");
+            var path = Path.GetFullPath(Path.Combine(_rootPath!, token + ".body"));
+            if (!path.StartsWith(_rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("CultMesh body token escaped the broker root.");
+            return path;
+        }
+    }
+
+    public sealed class CultMeshVerifiedBodyMappingBroker
+    {
+        private sealed class Grant
+        {
+            public string Path { get; set; } = string.Empty;
+            public long ExpiresAtUnixMs { get; set; }
+        }
+
+        private readonly string _cacheDirectory;
+        private readonly ConcurrentDictionary<string, Grant> _grants = new(StringComparer.Ordinal);
+
+        public CultMeshVerifiedBodyMappingBroker(string cacheDirectory) =>
+            _cacheDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(cacheDirectory)
+                ? throw new ArgumentException("Verified body cache directory is required.", nameof(cacheDirectory))
+                : cacheDirectory);
+
+        internal CultMeshBodyDescriptor GrantVerified(
+            string contentHash,
+            string verifiedPath,
+            CultMeshBodyDescriptor networkDescriptor,
+            DateTimeOffset expiresAtUtc)
+        {
+            if (networkDescriptor == null) throw new ArgumentNullException(nameof(networkDescriptor));
+            var expectedPath = Path.Combine(_cacheDirectory, contentHash + ".body");
+            if (!string.Equals(Path.GetFullPath(verifiedPath), expectedPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Only the transfer-owned verified body may be mapped.");
+            var info = new FileInfo(expectedPath);
+            if (!info.Exists || info.Length != networkDescriptor.ByteSize)
+                throw new InvalidDataException("Verified CultMesh body size does not match its network descriptor.");
+
+            var token = CreateCapabilityToken();
+            var expiresAtUnixMs = expiresAtUtc.ToUnixTimeMilliseconds();
+            _grants[token] = new Grant { Path = expectedPath, ExpiresAtUnixMs = expiresAtUnixMs };
+            return new CultMeshBodyDescriptor
+            {
+                BodyId = networkDescriptor.BodyId,
+                SchemaId = networkDescriptor.SchemaId,
+                LayoutVersion = networkDescriptor.LayoutVersion,
+                ByteSize = networkDescriptor.ByteSize,
+                Capacity = networkDescriptor.Capacity,
+                ProducerEpoch = networkDescriptor.ProducerEpoch,
+                Sequence = networkDescriptor.Sequence,
+                AccessMode = CultMeshBodyAccessMode.ReadOnly,
+                Synchronization = networkDescriptor.Synchronization,
+                LeaseExpiresAtUnixMs = expiresAtUnixMs,
+                TransportKind = CultMeshBodyTransportKind.SharedFileMapping,
+                CapabilityToken = token
+            };
+        }
+
+        internal string Resolve(string token, DateTimeOffset nowUtc)
+        {
+            if (!_grants.TryGetValue(token, out var grant))
+                throw new UnauthorizedAccessException("Unknown verified body capability token.");
+            if (grant.ExpiresAtUnixMs <= nowUtc.ToUnixTimeMilliseconds())
+            {
+                _grants.TryRemove(token, out _);
+                throw new InvalidOperationException("Verified body capability has expired.");
+            }
+            return grant.Path;
+        }
+
+        private static string CreateCapabilityToken()
+        {
+            var bytes = new byte[32];
+            using (var random = RandomNumberGenerator.Create()) random.GetBytes(bytes);
+            return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
         }
     }
 
