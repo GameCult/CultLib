@@ -20,9 +20,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --pretty false",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/cult-cache.test.js"
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "prepack": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
+    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/cult-cache.test.js"
   },
   "keywords": [
     "messagepack",
@@ -34,6 +35,18 @@
   ],
   "author": "metacratic",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GameCult/CultLib.git",
+    "directory": "packages/cultcache-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/GameCult/CultLib/issues"
+  },
+  "homepage": "https://github.com/GameCult/CultLib/tree/main/packages/cultcache-ts#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
     "zod": "^3.25.76"

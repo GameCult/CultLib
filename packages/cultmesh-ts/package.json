@@ -4,13 +4,21 @@
   "description": "CultMesh local typed state and mesh catalog primitives for TypeScript runtimes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --pretty false",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "prepack": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
+    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
   },
   "keywords": [
     "cultmesh",
@@ -21,10 +29,22 @@
   ],
   "author": "metacratic",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GameCult/CultLib.git",
+    "directory": "packages/cultmesh-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/GameCult/CultLib/issues"
+  },
+  "homepage": "https://github.com/GameCult/CultLib/tree/main/packages/cultmesh-ts#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
-    "cultcache-ts": "file:../cultcache-ts",
-    "cultnet-ts": "file:../cultnet-ts"
+    "cultcache-ts": "^0.13.5",
+    "cultnet-ts": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

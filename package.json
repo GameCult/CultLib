@@ -7,7 +7,8 @@
     "packages/cultmesh-ts"
   ],
   "scripts": {
-    "build:ts": "npm --workspaces run build",
-    "test:ts": "npm --workspaces run test"
+    "build:ts": "node scripts/run-typescript-workspaces.mjs build",
+    "test:ts": "node scripts/run-typescript-workspaces.mjs test",
+    "test:pack:ts": "node scripts/test-typescript-package-closure.mjs"
   }
 }
