@@ -2852,6 +2852,45 @@ namespace GameCult.Mesh
             return new CultMeshRudpEndpoint(host, uri.Port, $"rudp://{uriHost}:{uri.Port}");
         }
 
+        /// <summary>Resolves a CultMesh URI or RUDP endpoint into a concrete RUDP endpoint.</summary>
+        public static CultMeshRudpEndpoint ResolveRudpEndpoint(string endpointOrUri)
+        {
+            if (string.IsNullOrWhiteSpace(endpointOrUri))
+                throw new ArgumentException("Value must be non-empty.", nameof(endpointOrUri));
+            if (!Uri.TryCreate(endpointOrUri, UriKind.Absolute, out var uri))
+                return ParseRudpEndpoint(NormalizeBareRudpEndpoint(endpointOrUri));
+            if (string.Equals(uri.Scheme, "rudp", StringComparison.OrdinalIgnoreCase))
+                return ParseRudpEndpoint(endpointOrUri);
+            if (!string.Equals(uri.Scheme, "cultmesh", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("RUDP endpoint must use the cultmesh:// or rudp:// scheme.", nameof(endpointOrUri));
+            if (string.IsNullOrWhiteSpace(uri.Host))
+                throw new ArgumentException("CultMesh URI must include an authority.", nameof(endpointOrUri));
+
+            var authorityKey = MakeCultMeshAuthorityEnvironmentKey(uri.Host);
+            var endpoint = Environment.GetEnvironmentVariable($"CULTMESH_URI_{authorityKey}_RUDP") ??
+                Environment.GetEnvironmentVariable($"{authorityKey}_CULTMESH_RUDP_ENDPOINT");
+            if (string.IsNullOrWhiteSpace(endpoint))
+                throw new InvalidOperationException(
+                    $"CultMesh URI '{endpointOrUri}' is unresolved. Set CULTMESH_URI_{authorityKey}_RUDP to a rudp:// endpoint.");
+            return ParseRudpEndpoint(endpoint);
+        }
+
+        private static string NormalizeBareRudpEndpoint(string endpoint)
+        {
+            var trimmed = endpoint.Trim();
+            return trimmed.Contains("://", StringComparison.Ordinal) ? trimmed : $"rudp://{trimmed}";
+        }
+
+        private static string MakeCultMeshAuthorityEnvironmentKey(string authority)
+        {
+            var chars = authority.Select(static value =>
+                ((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9'))
+                    ? char.ToUpperInvariant(value)
+                    : '_');
+            var key = string.Concat(chars).Trim('_');
+            return string.IsNullOrWhiteSpace(key) ? "ODIN" : key;
+        }
+
         /// <summary>
         /// Creates a CultNet RUDP server transport with CultMesh-branded defaults.
         /// </summary>
@@ -2914,7 +2953,7 @@ namespace GameCult.Mesh
             string endpoint,
             CultMeshRudpSocketOptions? options = null)
         {
-            return CreateRudpClient(runtimeId, connectionId, ParseRudpEndpoint(endpoint), options);
+            return CreateRudpClient(runtimeId, connectionId, ResolveRudpEndpoint(endpoint), options);
         }
 
         /// <summary>
