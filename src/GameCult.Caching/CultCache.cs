@@ -407,8 +407,9 @@ namespace GameCult.Caching
         private readonly ConcurrentDictionary<Type, CultDocumentDescriptor> _byType = new();
         private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaId =
             new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaName =
+        private readonly ConcurrentDictionary<string, CultDocumentDescriptor[]> _bySchemaName =
             new(StringComparer.Ordinal);
+        private readonly object _registrationGate = new();
 
         /// <summary>
         /// Gets the shared process-wide document registry.
@@ -547,9 +548,17 @@ namespace GameCult.Caching
                 }
             }
 
-            if (_bySchemaName.TryGetValue(persisted.SchemaName, out var local))
+            if (_bySchemaName.TryGetValue(persisted.SchemaName, out var localVersions))
             {
-                return BuildCompatibleResolutionResult(persisted, local);
+                if (localVersions.Length == 1)
+                {
+                    return BuildCompatibleResolutionResult(persisted, localVersions[0]);
+                }
+
+                throw new InvalidOperationException(
+                    $"CultCache schema name '{persisted.SchemaName}' is ambiguous across local versions " +
+                    $"[{string.Join(", ", localVersions.Select(candidate => candidate.SchemaVersion).OrderBy(version => version, StringComparer.Ordinal))}]. " +
+                    "Persisted schema compatibility must identify an explicit schema id.");
             }
 
             throw new InvalidOperationException(
@@ -558,10 +567,64 @@ namespace GameCult.Caching
 
         private void RegisterDescriptor(CultDocumentDescriptor descriptor)
         {
-            _byType[descriptor.DocumentType] = descriptor;
-            _bySchemaId[descriptor.SchemaId] = descriptor;
-            _bySchemaName[descriptor.SchemaName] = descriptor;
+            lock (_registrationGate)
+            {
+                if (_byType.ContainsKey(descriptor.DocumentType))
+                    return;
+
+                _bySchemaName.TryGetValue(descriptor.SchemaName, out var schemaNameVersions);
+                var schemaVersionOwner = schemaNameVersions?.FirstOrDefault(candidate =>
+                    string.Equals(candidate.SchemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal));
+                if (schemaVersionOwner != null)
+                {
+                    if (IsExactWireAlias(schemaVersionOwner, descriptor))
+                    {
+                        _byType[descriptor.DocumentType] = descriptor;
+                        return;
+                    }
+
+                    throw DuplicateSchemaRegistration(
+                        "schema name and version",
+                        $"{descriptor.SchemaName}' version '{descriptor.SchemaVersion}",
+                        schemaVersionOwner.DocumentType,
+                        descriptor.DocumentType);
+                }
+
+                if (_bySchemaId.TryGetValue(descriptor.SchemaId, out var schemaIdOwner))
+                {
+                    throw DuplicateSchemaRegistration(
+                        "schema id",
+                        descriptor.SchemaId,
+                        schemaIdOwner.DocumentType,
+                        descriptor.DocumentType);
+                }
+
+                _byType[descriptor.DocumentType] = descriptor;
+                _bySchemaId[descriptor.SchemaId] = descriptor;
+                _bySchemaName[descriptor.SchemaName] = schemaNameVersions == null
+                    ? [descriptor]
+                    : [.. schemaNameVersions, descriptor];
+            }
         }
+
+        private static bool IsExactWireAlias(
+            CultDocumentDescriptor canonical,
+            CultDocumentDescriptor candidate) =>
+            string.Equals(canonical.SchemaName, candidate.SchemaName, StringComparison.Ordinal) &&
+            string.Equals(canonical.SchemaVersion, candidate.SchemaVersion, StringComparison.Ordinal) &&
+            string.Equals(canonical.SchemaId, candidate.SchemaId, StringComparison.Ordinal) &&
+            string.Equals(canonical.ContentHash, candidate.ContentHash, StringComparison.Ordinal) &&
+            string.Equals(canonical.CanonicalSchemaJson, candidate.CanonicalSchemaJson, StringComparison.Ordinal);
+
+        private static InvalidOperationException DuplicateSchemaRegistration(
+            string identityKind,
+            string identity,
+            Type existingType,
+            Type claimedType) =>
+            new(
+                $"CultCache {identityKind} '{identity}' is already registered to CLR type " +
+                $"'{existingType.FullName}' and cannot also be claimed by '{claimedType.FullName}'. " +
+                "Schema compatibility must be declared through explicit persisted-schema alias metadata.");
 
         private static CultDocumentDescriptor? TryBuildGeneratedDescriptor(Type type)
         {
