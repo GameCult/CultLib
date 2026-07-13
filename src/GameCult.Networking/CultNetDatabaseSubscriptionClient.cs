@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 
@@ -46,7 +47,8 @@ namespace GameCult.Networking
             string subscriptionId,
             IEnumerable<string>? recordKeys = null,
             IEnumerable<string>? schemaIds = null,
-            bool includeSnapshot = true)
+            bool includeSnapshot = true,
+            CancellationToken cancellationToken = default)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
@@ -57,14 +59,38 @@ namespace GameCult.Networking
             if (!_initialSnapshots.TryAdd(messageId, completion))
                 throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
 
-            _client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            CancellationTokenRegistration cancellation = default;
+            if (cancellationToken.CanBeCanceled)
             {
-                MessageId = messageId,
-                SubscriptionId = subscriptionId,
-                RecordKeys = recordKeys?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
-                SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
-                IncludeSnapshot = includeSnapshot
-            });
+                cancellation = cancellationToken.Register(() =>
+                {
+                    if (_initialSnapshots.TryRemove(messageId, out var pending))
+                        pending.TrySetCanceled(cancellationToken);
+                });
+                _ = completion.Task.ContinueWith(
+                    _ => cancellation.Dispose(),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            try
+            {
+                _client.SendCultNet(new CultNetDatabaseSubscribeMessage
+                {
+                    MessageId = messageId,
+                    SubscriptionId = subscriptionId,
+                    RecordKeys = recordKeys?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                    SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                    IncludeSnapshot = includeSnapshot
+                });
+            }
+            catch
+            {
+                if (_initialSnapshots.TryRemove(messageId, out var pending))
+                    pending.TrySetException(new InvalidOperationException("CultNet subscription request could not be sent."));
+                throw;
+            }
             return completion.Task;
         }
 

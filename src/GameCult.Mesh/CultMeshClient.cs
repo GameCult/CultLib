@@ -24,6 +24,9 @@ namespace GameCult.Mesh
 
         /// <summary>Gets or sets optional transport connectors. The CultNet schema connector is used by default.</summary>
         public IReadOnlyList<ICultMeshTransportConnector>? Connectors { get; set; }
+
+        /// <summary>Gets or sets the deadline before an unanswered subscription intent is replayed.</summary>
+        public TimeSpan SubscriptionResponseTimeout { get; set; } = TimeSpan.FromSeconds(2);
     }
 
     /// <summary>
@@ -34,6 +37,7 @@ namespace GameCult.Mesh
     {
         private readonly CultMeshDiscoveryService _discovery;
         private readonly CultMeshSessionManager _sessions;
+        private readonly TimeSpan _subscriptionResponseTimeout;
         private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _documents = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _collections = new(StringComparer.Ordinal);
         private readonly ConcurrentBag<IDisposable> _documentResources = new();
@@ -42,6 +46,8 @@ namespace GameCult.Mesh
         public CultMeshClient(CultMeshClientOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
+            if (options.SubscriptionResponseTimeout <= TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(options.SubscriptionResponseTimeout));
             var endpoints = options.RendezvousEndpoints
                 .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint))
                 .Distinct(StringComparer.Ordinal)
@@ -65,6 +71,7 @@ namespace GameCult.Mesh
                     new CultMeshSchemaTransportConnector(clock: options.Sessions.Clock)
                 },
                 options.Sessions);
+            _subscriptionResponseTimeout = options.SubscriptionResponseTimeout;
         }
 
         /// <summary>Connects to a stable endpoint identity using one application protocol.</summary>
@@ -249,7 +256,7 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
-            var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey);
+            var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey, _subscriptionResponseTimeout);
             _documentResources.Add(binding);
             try
             {
@@ -267,7 +274,7 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
-            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId, includeInitialSnapshot);
+            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId, includeInitialSnapshot, _subscriptionResponseTimeout);
             _documentResources.Add(binding);
             try
             {
@@ -300,6 +307,8 @@ namespace GameCult.Mesh
             private readonly string _subscriptionId;
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
+            private readonly TimeSpan _responseTimeout;
+            private readonly CancellationTokenSource _lifetime = new();
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly object _subscribeLock = new();
             private Task? _subscribeTask;
@@ -307,9 +316,14 @@ namespace GameCult.Mesh
             private IDisposable? _stateWatch;
             private bool _disposed;
 
-            public RemoteDocumentBinding(CultMeshSession session, string endpointId, string recordKey)
+            public RemoteDocumentBinding(
+                CultMeshSession session,
+                string endpointId,
+                string recordKey,
+                TimeSpan responseTimeout)
             {
                 _session = session;
+                _responseTimeout = responseTimeout;
                 _recordKey = recordKey;
                 _subscriptionId = "cultmesh-document:" + endpointId + ":" + recordKey;
                 var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
@@ -349,13 +363,28 @@ namespace GameCult.Mesh
             {
                 try
                 {
-                    if (_disposed) return;
-                    await _subscription.SubscribeAsync(
-                        _subscriptionId,
-                        recordKeys: new[] { _recordKey },
-                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId })
-                        .ConfigureAwait(false);
-                    _ready.TrySetResult(true);
+                    while (!_disposed)
+                    {
+                        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+                        deadline.CancelAfter(_responseTimeout);
+                        try
+                        {
+                            await _subscription.SubscribeAsync(
+                                    _subscriptionId,
+                                    recordKeys: new[] { _recordKey },
+                                    schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId },
+                                    cancellationToken: deadline.Token)
+                                .ConfigureAwait(false);
+                            _ready.TrySetResult(true);
+                            return;
+                        }
+                        catch (OperationCanceledException) when (!_lifetime.IsCancellationRequested)
+                        {
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+                {
                 }
                 catch (ObjectDisposedException) when (_disposed)
                 {
@@ -366,10 +395,12 @@ namespace GameCult.Mesh
             {
                 if (_disposed) return;
                 _disposed = true;
+                _lifetime.Cancel();
                 _stateWatch?.Dispose();
                 _subscription.Dispose();
                 _ready.TrySetException(new ObjectDisposedException(GetType().FullName));
                 _cache.Dispose();
+                _lifetime.Dispose();
             }
         }
 
@@ -379,6 +410,8 @@ namespace GameCult.Mesh
             private readonly string _subscriptionId;
             private readonly CultCache _cache;
             private readonly CultNetDatabaseSubscriptionClient _subscription;
+            private readonly TimeSpan _responseTimeout;
+            private readonly CancellationTokenSource _lifetime = new();
             private readonly bool _includeInitialSnapshot;
             private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly object _subscribeLock = new();
@@ -387,9 +420,14 @@ namespace GameCult.Mesh
             private IDisposable? _stateWatch;
             private bool _disposed;
 
-            public RemoteCollectionBinding(CultMeshSession session, string endpointId, bool includeInitialSnapshot)
+            public RemoteCollectionBinding(
+                CultMeshSession session,
+                string endpointId,
+                bool includeInitialSnapshot,
+                TimeSpan responseTimeout)
             {
                 _session = session;
+                _responseTimeout = responseTimeout;
                 _subscriptionId = "cultmesh-collection:" + endpointId + ":" + typeof(TDocument).FullName;
                 _includeInitialSnapshot = includeInitialSnapshot;
                 var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
@@ -427,13 +465,28 @@ namespace GameCult.Mesh
             {
                 try
                 {
-                    if (_disposed) return;
-                    await _subscription.SubscribeAsync(
-                        _subscriptionId,
-                        schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId },
-                        includeSnapshot: _includeInitialSnapshot)
-                        .ConfigureAwait(false);
-                    _ready.TrySetResult(true);
+                    while (!_disposed)
+                    {
+                        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+                        deadline.CancelAfter(_responseTimeout);
+                        try
+                        {
+                            await _subscription.SubscribeAsync(
+                                    _subscriptionId,
+                                    schemaIds: new[] { CultDocumentRegistry.Shared.GetRequired<TDocument>().SchemaId },
+                                    includeSnapshot: _includeInitialSnapshot,
+                                    cancellationToken: deadline.Token)
+                                .ConfigureAwait(false);
+                            _ready.TrySetResult(true);
+                            return;
+                        }
+                        catch (OperationCanceledException) when (!_lifetime.IsCancellationRequested)
+                        {
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+                {
                 }
                 catch (ObjectDisposedException) when (_disposed)
                 {
@@ -444,10 +497,12 @@ namespace GameCult.Mesh
             {
                 if (_disposed) return;
                 _disposed = true;
+                _lifetime.Cancel();
                 _stateWatch?.Dispose();
                 _subscription.Dispose();
                 _ready.TrySetException(new ObjectDisposedException(GetType().FullName));
                 _cache.Dispose();
+                _lifetime.Dispose();
             }
         }
 

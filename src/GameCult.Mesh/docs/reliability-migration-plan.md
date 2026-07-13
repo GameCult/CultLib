@@ -429,7 +429,10 @@ cached snapshots, and online/reconnecting/offline projections. The session
 increments the generation only after replacing its physical channel. A binding
 may coalesce duplicate subscription attempts within that generation, but a
 pending request from an older generation cannot suppress replay. No individual
-request owns the logical handle.
+request owns the logical handle. Within one healthy generation, an unanswered
+subscribe request expires on the client policy deadline and the binding
+replays the same idempotent subscription intent; the caller does not own this
+retry loop.
 
 **Forbidden writers:** bindings and schema clients cannot choose endpoints,
 replace channels, reconnect, or declare session state. An abandoned initial
@@ -448,7 +451,9 @@ waiting for readiness, so disposal terminates pending opens.
 **Verification layer:** Mesh tests lose the first document and collection
 snapshot, fail the physical client, and prove the replacement snapshot opens
 the same logical handle exactly once. A disposal test proves a pending open
-cannot survive its owning client. The Aetheria/EveUnity witness proves provider
+cannot survive its owning client. Another test drops a subscription response
+without dropping the physical path and proves the same binding becomes ready
+after bounded replay. The Aetheria/EveUnity witness proves provider
 discovery, live SoA state, commands, receipts, and assets through the migrated
 session path.
 

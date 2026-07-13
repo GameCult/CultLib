@@ -84,6 +84,7 @@ public sealed class CultMeshClientTests
 
         connector.Clients[0].Fail(new InvalidOperationException("path lost"));
         await WaitUntilAsync(() => connector.Clients.Count == 2 && connector.Clients[1].SubscribeCount == 1);
+        await WaitForTextAsync(document, "pilot surface 2");
 
         (await document.LatestAsync()).Text.Should().Be("pilot surface 2");
         connector.Clients[0].SubscribeCount.Should().Be(1);
@@ -110,6 +111,25 @@ public sealed class CultMeshClientTests
         (await document.LatestAsync()).Text.Should().Be("pilot surface 2");
         connector.Clients.Should().HaveCount(2);
         connector.Clients[1].SubscribeCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task Document_ReplaysUnansweredIntentOnSamePhysicalSession()
+    {
+        var connector = new DocumentConnector { SuppressFirstSubscriptionSnapshot = true };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector },
+            SubscriptionResponseTimeout = TimeSpan.FromMilliseconds(20)
+        });
+
+        var document = await mesh.DocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+
+        (await document.LatestAsync()).Text.Should().Be("pilot surface 1");
+        connector.Clients.Should().ContainSingle();
+        connector.Clients[0].SubscribeCount.Should().Be(2);
     }
 
     [Test]
@@ -232,6 +252,7 @@ public sealed class CultMeshClientTests
     {
         public List<DocumentClient> Clients { get; } = new();
         public bool SuppressFirstSnapshot { get; set; }
+        public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public string ConnectorId => "document-test";
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
@@ -242,7 +263,9 @@ public sealed class CultMeshClientTests
         {
             var client = new DocumentClient(
                 "pilot surface " + (Clients.Count + 1),
-                respondToSubscribe: !SuppressFirstSnapshot || Clients.Count > 0);
+                snapshotsToSuppress: SuppressFirstSnapshot && Clients.Count == 0
+                    ? int.MaxValue
+                    : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
@@ -254,11 +277,11 @@ public sealed class CultMeshClientTests
         private readonly CultNetDocumentRegistry _documents;
         private readonly string _text;
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly bool _respondToSubscribe;
-        public DocumentClient(string text, bool respondToSubscribe = true)
+        private int _snapshotsToSuppress;
+        public DocumentClient(string text, int snapshotsToSuppress = 0)
         {
             _text = text;
-            _respondToSubscribe = respondToSubscribe;
+            _snapshotsToSuppress = snapshotsToSuppress;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -270,7 +293,11 @@ public sealed class CultMeshClientTests
         {
             if (message is not CultNetDatabaseSubscribeMessage request) return;
             SubscribeCount++;
-            if (!_respondToSubscribe) return;
+            if (_snapshotsToSuppress > 0)
+            {
+                _snapshotsToSuppress--;
+                return;
+            }
             var put = _documents.CreateRawDocumentPutMessage(
                 "test-put",
                 new CultRecordHandle<ClientTestDocument>(new CultRecordKey("surface:pilot")),
@@ -296,6 +323,19 @@ public sealed class CultMeshClientTests
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
         while (!condition() && DateTime.UtcNow < deadline) await Task.Delay(1);
         condition().Should().BeTrue();
+    }
+
+    private static async Task WaitForTextAsync(
+        CultMeshDocumentHandle<ClientTestDocument> document,
+        string expected)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (string.Equals((await document.LatestAsync()).Text, expected, StringComparison.Ordinal)) return;
+            await Task.Delay(1);
+        }
+        (await document.LatestAsync()).Text.Should().Be(expected);
     }
 
     [CultDocument("tests.cultmesh_client_document", "tests.cultmesh_client_document.v1")]
