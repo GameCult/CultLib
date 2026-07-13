@@ -34,6 +34,13 @@ const noteAliasDocument = defineDocumentType({
   name: "noteId",
 });
 
+const noteReceiptDocument = defineDocumentType({
+  type: "cultmesh.note_receipt",
+  schemaId: "cultmesh.note_receipt.v0",
+  schema: z.object({ commandId: z.string(), state: z.literal("applied"), body: z.string() }),
+  name: "commandId",
+});
+
 const foreignNoteDocument = defineDocumentType({
   type: "runtime.generated.cultmesh.note",
   schemaId: "runtime.generated.cultmesh.note.ui.42",
@@ -2636,6 +2643,29 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
   } finally {
     server.close();
   }
+});
+
+test("CultMesh TS returns a correlated provider receipt after a RUDP document mutation", async () => {
+  const connectionId = 0x10203050;
+  const commandBinding = defineCultNetDocumentBinding({ definition: noteDocument });
+  const receiptBinding = defineCultNetDocumentBinding({ definition: noteReceiptDocument });
+  const server = CultMesh.createRudpDocumentServer("cultmesh-ts-receipt-server", connectionId, {
+    documents: new CultNetDocumentRegistry([commandBinding, receiptBinding]), bindHost: "127.0.0.1", bindPort: 0,
+    resendDelayMs: 25, resendPollMs: 5,
+    onDocumentPutRaw: async (document) => ({
+      binding: receiptBinding, recordKey: document.recordKey,
+      value: { commandId: document.recordKey, state: "applied", body: (document.payload as { body: string }).body },
+    }),
+  });
+  try {
+    await server.start();
+    const receipt = await CultMesh.publishRudpDocumentAndWaitForReceipt(
+      "cultmesh-ts-receipt-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`,
+      commandBinding, "command:note", { noteId: "command:note", body: "provider applied this" }, receiptBinding,
+      { messageId: "command:note", receiptTimeoutMs: 1_000, resendPollMs: 5 },
+    );
+    assert.deepEqual(receipt, { commandId: "command:note", state: "applied", body: "provider applied this" });
+  } finally { server.close(); }
 });
 
 test("CultMesh TS reads remote RUDP snapshots through document handles", async () => {
