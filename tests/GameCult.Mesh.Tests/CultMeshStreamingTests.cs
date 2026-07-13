@@ -449,6 +449,48 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public void OperationInvocationRecord_ReadsLegacyStringAndWritesStructuredRecord()
+    {
+        var legacyPayload = MessagePackSerializer.Serialize(
+            "aetheria.entity.pilot.move",
+            CultDocumentMessagePackSerialization.Options);
+        var restored = MessagePackSerializer.Deserialize<CultMeshOperationInvocationRecord>(
+            legacyPayload,
+            CultDocumentMessagePackSerialization.Options);
+        var currentPayload = MessagePackSerializer.Serialize(
+            restored,
+            CultDocumentMessagePackSerialization.Options);
+        var reader = new MessagePackReader(currentPayload);
+
+        restored.OperationId.Should().Be("aetheria.entity.pilot.move");
+        restored.SchemaId.Should().BeEmpty();
+        restored.RouteKind.Should().BeEmpty();
+        restored.IdempotencyKey.Should().BeEmpty();
+        reader.ReadArrayHeader().Should().Be(5);
+        reader.ReadString().Should().Be("aetheria.entity.pilot.move");
+    }
+
+    [Test]
+    public void RouteRecord_ReadsLegacyStringAndWritesStructuredRecord()
+    {
+        var legacyPayload = MessagePackSerializer.Serialize(
+            "SharedMemory",
+            CultDocumentMessagePackSerialization.Options);
+        var restored = MessagePackSerializer.Deserialize<CultMeshRouteRecord>(
+            legacyPayload,
+            CultDocumentMessagePackSerialization.Options);
+        var currentPayload = MessagePackSerializer.Serialize(
+            restored,
+            CultDocumentMessagePackSerialization.Options);
+        var reader = new MessagePackReader(currentPayload);
+
+        restored.Kind.Should().Be("SharedMemory");
+        restored.Description.Should().BeEmpty();
+        reader.ReadArrayHeader().Should().Be(2);
+        reader.ReadString().Should().Be("SharedMemory");
+    }
+
+    [Test]
     public void RouteRecord_FlattensAndParsesCrossRuntimeRouteKinds()
     {
         var record = CultMesh.RouteRecord(new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located slab"));

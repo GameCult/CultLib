@@ -58,6 +58,7 @@ namespace GameCult.Mesh
     /// Flat, transport-friendly fields for a CultMesh route hint.
     /// </summary>
     [MessagePackObject]
+    [MessagePackFormatter(typeof(CultMeshRouteRecordFormatter))]
     public sealed class CultMeshRouteRecord
     {
         /// <summary>Creates flat route fields.</summary>
@@ -3439,6 +3440,7 @@ namespace GameCult.Mesh
     /// Flat, transport-friendly fields for a concrete CultMesh operation invocation.
     /// </summary>
     [MessagePackObject]
+    [MessagePackFormatter(typeof(CultMeshOperationInvocationRecordFormatter))]
     public sealed class CultMeshOperationInvocationRecord
     {
         /// <summary>Creates flat operation invocation fields.</summary>
