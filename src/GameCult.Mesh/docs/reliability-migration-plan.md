@@ -521,6 +521,51 @@ session path.
 
 ## Phase 4: Verified Content Transfer
 
+### Phase 4 first-slice body map
+
+**Owner:** `CultMeshContentTransferService` owns verified partial state and the
+only promotion path into the completed content cache. Work is serialized and
+shared by normalized content hash; provider identity is never part of content
+identity or the destination name.
+
+**Inputs:** a validated CDN manifest, ordered `ICultMeshContentProvider`
+observations, a typed CultCache checkpoint store, a canonical cache directory,
+and caller cancellation.
+
+**Outputs:** a complete read-only-by-convention body path named by SHA-256, or
+a failure with no completed body. `gamecult.mesh.content_transfer_state.v1`
+records verified chunk indexes keyed by content hash.
+
+**Derived state:** missing chunks, provider failover order, deterministic
+partial-file path, manifest fingerprint, and completed cache path. A provider
+success is evidence only for the returned chunk; it does not confer publisher
+authority.
+
+**Forbidden writers:** callers, renderers, providers, manifests, and the legacy
+async CDN reader cannot publish a final body or mark a range verified. CultCache
+checkpoint claims are rehashed against the partial body before reuse.
+
+**Shared paths:** direct transfers and the legacy distributed-database reader
+both pass through the same chunk verification, full-hash verification, and
+atomic promotion primitive. Concurrent requests for one hash share the same
+per-content transfer lock and verified work.
+
+**Cut line:** the legacy distributed reader no longer owns a sequential chunk
+loop or whole-artifact allocation. The first slice intentionally leaves
+adaptive parallelism, quotas, pinning, signer policy, arbitrary streaming
+destinations, and cleanup scheduling to later Phase 4 work.
+
+**State transition:** each verified chunk flushes a typed checkpoint. Restart
+rehydrates that record, rehashes every claimed range, and fetches corrupt or
+unclaimed chunks again. Completion verifies the entire partial file, atomically
+promotes it, and removes the checkpoint. Cancellation leaves only re-verifiable
+partial state.
+
+**Verification layer:** focused tests cover durable cancellation/restart,
+provider corruption and failover, forged checkpoint rejection, final-hash
+failure, atomic visibility, and concurrent request coalescing. Existing CDN
+tests cover the compatibility reader.
+
 ### Cut first
 
 - Delete the first consumer-owned CDN chunk loop and partial-file convention.

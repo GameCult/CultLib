@@ -364,6 +364,10 @@ namespace GameCult.Mesh
             if (manifest == null) throw new ArgumentNullException(nameof(manifest));
 
             ValidateManifestShape(manifest);
+            if (manifest.SizeBytes > int.MaxValue)
+            {
+                throw new InvalidDataException("CDN artifact is too large to materialize into one byte array.");
+            }
             var output = new byte[checked((int)manifest.SizeBytes)];
             foreach (var reference in manifest.Chunks.OrderBy(chunk => chunk.Offset))
             {
@@ -395,26 +399,21 @@ namespace GameCult.Mesh
             if (database == null) throw new ArgumentNullException(nameof(database));
             if (manifest == null) throw new ArgumentNullException(nameof(manifest));
 
-            ValidateManifestShape(manifest);
-            var output = new byte[checked((int)manifest.SizeBytes)];
-            foreach (var reference in manifest.Chunks.OrderBy(chunk => chunk.Offset))
+            var directory = Path.Combine(Path.GetTempPath(), "cultmesh-content", Guid.NewGuid().ToString("N"));
+            try
             {
-                var recordKey = string.IsNullOrWhiteSpace(reference.RecordKey)
-                    ? CultMeshCdnArtifactChunk.CreateRecordKey(reference.ChunkHash)
-                    : new CultRecordKey(reference.RecordKey);
-                var chunk = await database.GetAsync<CultMeshCdnArtifactChunk>(recordKey).ConfigureAwait(false)
-                    ?? throw new FileNotFoundException("CDN artifact chunk is missing from the database.", recordKey.Value);
-                ValidateChunk(reference, chunk);
-                Buffer.BlockCopy(chunk.Payload, 0, output, checked((int)reference.Offset), reference.SizeBytes);
+                using var state = new CultCache();
+                var service = new CultMeshContentTransferService(
+                    state,
+                    new[] { new CultMeshDatabaseContentProvider("legacy-database", database) },
+                    new CultMeshContentTransferOptions(directory));
+                var path = await service.FetchAsync(manifest).ConfigureAwait(false);
+                return await File.ReadAllBytesAsync(path).ConfigureAwait(false);
             }
-
-            var actualHash = HashBytes(output);
-            if (!string.Equals(NormalizeHash(manifest.ContentHash, nameof(manifest.ContentHash)), actualHash, StringComparison.Ordinal))
+            finally
             {
-                throw new InvalidDataException("CDN artifact content hash does not match its manifest.");
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
             }
-
-            return output;
         }
 
         /// <summary>
@@ -492,16 +491,16 @@ namespace GameCult.Mesh
             }
         }
 
+        internal static void ValidateManifest(CultMeshCdnArtifactManifest manifest)
+        {
+            ValidateManifestShape(manifest);
+        }
+
         private static void ValidateManifestShape(CultMeshCdnArtifactManifest manifest)
         {
             if (manifest.SizeBytes < 0)
             {
                 throw new InvalidDataException("CDN artifact manifest has a negative size.");
-            }
-
-            if (manifest.SizeBytes > int.MaxValue)
-            {
-                throw new InvalidDataException("CDN artifact is too large to materialize into one byte array.");
             }
 
             var expectedOffset = 0L;
@@ -524,6 +523,11 @@ namespace GameCult.Mesh
             {
                 throw new InvalidDataException("CDN artifact chunk sizes do not sum to the manifest size.");
             }
+        }
+
+        internal static void ValidateChunkPayload(CultMeshCdnChunkRef reference, CultMeshCdnArtifactChunk chunk)
+        {
+            ValidateChunk(reference, chunk);
         }
 
         private static void ValidateChunk(CultMeshCdnChunkRef reference, CultMeshCdnArtifactChunk chunk)
