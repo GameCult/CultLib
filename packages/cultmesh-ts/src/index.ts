@@ -25,6 +25,8 @@ import {
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
   type CultNetMessage,
+  type CultNetOperationRequestMessage,
+  type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
@@ -33,6 +35,9 @@ import {
 } from "cultnet-ts";
 
 export * from "./provider-session";
+export * from "./provider-session-wire";
+export * from "./provider-rudp-transport";
+export * from "./provider-session-broker";
 
 export interface CultMeshVec2 {
   readonly x: number;
@@ -4095,8 +4100,19 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   getCache?: () => Promise<CultCache> | CultCache;
   onError?: (error: Error) => void;
   onDocumentPutRaw?: (document: CultMeshRudpDocumentPut) => void | Promise<void>;
+  onOperationRequest?: (
+    request: CultNetOperationRequestMessage,
+    session: CultMeshRudpServerSession,
+  ) => CultNetOperationResponseMessage | Promise<CultNetOperationResponseMessage>;
+  onSessionClosed?: (session: CultMeshRudpServerSession) => void | Promise<void>;
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
+}
+
+export interface CultMeshRudpServerSession {
+  readonly sessionId: string;
+  readonly remote: { address: string; family: string; port: number };
+  send(message: CultNetMessage): void;
 }
 
 export interface CultMeshRudpDocumentServer {
@@ -5542,9 +5558,12 @@ export class CultMesh {
     const bind = { host, port };
     const socket = options.socket ?? createSocket(host.includes(":") ? "udp6" : "udp4");
     const sessions = new Map<string, {
+      sessionId: string;
       remote: { address: string; family: string; port: number };
       session: CultNetRudpSession;
+      work: Promise<void>;
     }>();
+    let sessionSequence = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
@@ -5567,7 +5586,9 @@ export class CultMesh {
         let record = sessions.get(key);
 
         if (packet.packetType === "connect") {
+          if (record) notifySessionClosed(record);
           record = {
+            sessionId: `${runtimeId}:${++sessionSequence}`,
             remote: { address: remote.address, family: remote.family, port: remote.port },
             session: new CultNetRudpSession({
               connectionId,
@@ -5575,6 +5596,7 @@ export class CultMesh {
               resendDelayMs: options.resendDelayMs,
               maxPendingReliablePackets: options.maxPendingReliablePackets,
             }),
+            work: Promise.resolve(),
           };
           sessions.set(key, record);
           socket.send(encodeRudpPacket(record.session.acceptConnect(packet, nowMs)), remote.port, remote.address);
@@ -5593,12 +5615,13 @@ export class CultMesh {
           if (frame.channelId !== "schema") {
             continue;
           }
-          handleDocumentServerFrame(record, frame.payload).catch((error) => {
-            reportError(error);
-          });
+          record.work = record.work
+            .then(() => handleDocumentServerFrame(record, frame.payload))
+            .catch(reportError);
         }
         if (result.disconnected) {
           sessions.delete(key);
+          notifySessionClosed(record);
           return;
         }
         if (packet.packetType === "accept" || result.delivered.length > 0) {
@@ -5611,7 +5634,7 @@ export class CultMesh {
     socket.on("error", reportError);
 
     async function handleDocumentServerFrame(
-      record: { remote: { address: string; family: string; port: number }; session: CultNetRudpSession },
+      record: { sessionId: string; remote: { address: string; family: string; port: number }; session: CultNetRudpSession },
       payload: Uint8Array,
     ): Promise<void> {
       const message = parseCultNetMessage(decode(payload), wireContract);
@@ -5643,12 +5666,43 @@ export class CultMesh {
             await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
           }
           return;
+        case "cultnet.operation_request.v0":
+          if (!options.onOperationRequest) {
+            sendSchemaMessage(record, {
+              schemaVersion: "cultnet.error.v0",
+              error: "CultMesh RUDP document server has no operation handler.",
+            });
+            return;
+          }
+          sendSchemaMessage(record, await options.onOperationRequest(message, publicSession(record)));
+          return;
         default:
           sendSchemaMessage(record, {
             schemaVersion: "cultnet.error.v0",
             error: `Unsupported CultMesh RUDP document request ${message.schemaVersion}.`,
           });
       }
+    }
+
+    function publicSession(record: {
+      sessionId: string;
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+    }): CultMeshRudpServerSession {
+      return {
+        sessionId: record.sessionId,
+        remote: { ...record.remote },
+        send: message => sendSchemaMessage(record, message),
+      };
+    }
+
+    function notifySessionClosed(record: {
+      sessionId: string;
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+    }): void {
+      if (!options.onSessionClosed) return;
+      void Promise.resolve(options.onSessionClosed(publicSession(record))).catch(reportError);
     }
 
     function sendSchemaMessage(
@@ -5684,6 +5738,7 @@ export class CultMesh {
           for (const [key, record] of sessions) {
             if (record.session.checkTimeout(nowMs, sessionTimeoutMs)) {
               sessions.delete(key);
+              notifySessionClosed(record);
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
@@ -5698,6 +5753,7 @@ export class CultMesh {
           clearInterval(resendTimer);
           resendTimer = undefined;
         }
+        for (const record of sessions.values()) notifySessionClosed(record);
         sessions.clear();
         socket.close();
       },
