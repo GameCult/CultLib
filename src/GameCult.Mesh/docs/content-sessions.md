@@ -15,10 +15,9 @@ The consumer creates a provider over its existing identity-first session
 manager, then gives that provider to the transfer owner:
 
 ```csharp
-var provider = new CultMeshSessionContentProvider(
+var provider = mesh.ContentProvider(
     "aetheria.daemon",
-    sessions,
-    CultMeshEndpointId.Parse("service:aetheria.daemon"));
+    "service:aetheria.daemon");
 
 var transfer = new CultMeshContentTransferService(
     transferStateCache,

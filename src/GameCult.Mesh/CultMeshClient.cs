@@ -94,6 +94,20 @@ namespace GameCult.Mesh
             return _sessions.ConnectAsync(endpointId, protocol, cancellationToken);
         }
 
+        /// <summary>Creates a verified-transfer provider over this client's reusable content session owner.</summary>
+        public CultMeshSessionContentProvider ContentProvider(
+            string providerId,
+            string endpointId,
+            CultMeshSessionContentProviderOptions? options = null)
+        {
+            ThrowIfDisposed();
+            return new CultMeshSessionContentProvider(
+                providerId,
+                _sessions,
+                CultMeshEndpointId.Parse(endpointId),
+                options);
+        }
+
         /// <summary>Opens one live typed document by stable provider identity and record key.</summary>
         public async Task<CultMeshDocumentHandle<TDocument>> DocumentAsync<TDocument>(
             string endpointId,
