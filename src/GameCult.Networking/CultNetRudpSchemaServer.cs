@@ -8,6 +8,23 @@ using System.Threading.Tasks;
 namespace GameCult.Networking
 {
     /// <summary>
+    /// Result of a bounded non-blocking RUDP schema-server drain.
+    /// </summary>
+    public readonly struct RudpCultNetSchemaPollResult
+    {
+        public RudpCultNetSchemaPollResult(int transportItemsConsumed, int messagesDispatched)
+        {
+            TransportItemsConsumed = transportItemsConsumed;
+            MessagesDispatched = messagesDispatched;
+        }
+
+        /// <summary>Gets transport work consumed, including ACK and connection control packets.</summary>
+        public int TransportItemsConsumed { get; }
+        /// <summary>Gets application schema messages dispatched.</summary>
+        public int MessagesDispatched { get; }
+    }
+
+    /// <summary>
     /// Options for hosting schema-v0 messages over the native CultNet RUDP listener.
     /// </summary>
     public sealed class RudpCultNetSchemaServerOptions
@@ -223,11 +240,36 @@ namespace GameCult.Networking
         /// </summary>
         public async Task<bool> PollOnceAsync()
         {
-            var delivered = _transport.ReceiveOnce();
-            if (delivered == null || !string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
+            if (!_transport.TryReceiveOnce(out var delivered) || delivered == null)
             {
                 return false;
             }
+
+            return await DispatchAsync(delivered).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Drains up to <paramref name="maxTransportItems"/> immediately available transport work items.
+        /// Control packets count as progress so callers only idle when the transport is actually empty.
+        /// </summary>
+        public async Task<RudpCultNetSchemaPollResult> PollAvailableAsync(int maxTransportItems)
+        {
+            if (maxTransportItems <= 0) throw new ArgumentOutOfRangeException(nameof(maxTransportItems));
+            var consumed = 0;
+            var dispatched = 0;
+            while (consumed < maxTransportItems && _transport.TryReceiveOnce(out var delivered))
+            {
+                consumed++;
+                if (delivered != null && await DispatchAsync(delivered).ConfigureAwait(false))
+                    dispatched++;
+            }
+            return new RudpCultNetSchemaPollResult(consumed, dispatched);
+        }
+
+        private async Task<bool> DispatchAsync(CultNetRudpSocketServerFrame delivered)
+        {
+            if (!string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
+                return false;
 
             var message = CultNetSchemaMessageSerialization.Deserialize(delivered.Frame.Payload);
             if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)

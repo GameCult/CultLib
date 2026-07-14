@@ -41,3 +41,15 @@ network descriptor without changing logical identity.
 The content protocol uses one bounded response per manifest chunk. A snapshot
 response containing `gamecult.mesh.cdn_artifact_chunk.v1` payload records is a
 legacy transport path and must not be used for bulk delivery.
+
+The transfer owner may keep a bounded window of requests in flight per content
+hash (four by default, never more than 32). Candidate chunks can arrive out of
+order, but only the transfer owner writes them, and it flushes and checkpoints
+them in manifest-offset order. If one request fails, the owner observes the
+rest of that window before returning; fetched-but-uncommitted bytes never become
+trusted resume state. Concurrent artifacts have independent windows.
+
+RUDP schema hosts should drain immediately available transport work with
+`PollAvailableAsync`. Its result distinguishes transport items consumed from
+application messages dispatched, so ACK and connection traffic counts as
+progress without impersonating a message or triggering an idle delay.

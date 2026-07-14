@@ -1203,6 +1203,7 @@ namespace GameCult.Networking.Tests
                 MaxFragmentBytes = 1024
             });
             var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlProgressObserved = 0;
             server.OnCultNet<CultNetSchemaCatalogRequestMessage>((request, peer) =>
             {
                 peer.SendCultNet(new CultNetSchemaCatalogResponseMessage
@@ -1228,8 +1229,11 @@ namespace GameCult.Networking.Tests
                 {
                     while (!serverDone.Task.IsCompleted)
                     {
-                        _ = server.PollOnceAsync().GetAwaiter().GetResult();
-                        Thread.Sleep(5);
+                        var poll = server.PollAvailableAsync(64).GetAwaiter().GetResult();
+                        if (poll.TransportItemsConsumed > poll.MessagesDispatched)
+                            Interlocked.Exchange(ref controlProgressObserved, 1);
+                        if (poll.TransportItemsConsumed == 0)
+                            Thread.Sleep(5);
                     }
                 }
                 catch (Exception error)
@@ -1260,6 +1264,19 @@ namespace GameCult.Networking.Tests
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-host-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.host"));
             Assert.That(server.Profile.Transports[0].Protocol, Is.EqualTo("rudp"));
+            Assert.That(Volatile.Read(ref controlProgressObserved), Is.EqualTo(1),
+                "connection and ACK traffic must count as transport progress without impersonating an application message");
+        }
+
+        [Test]
+        public void RudpCultNetSchemaServer_RejectsNonPositiveDrainBound()
+        {
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                Socket = BindUdpSocket()
+            });
+
+            Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => server.PollAvailableAsync(0));
         }
 
         [Test]

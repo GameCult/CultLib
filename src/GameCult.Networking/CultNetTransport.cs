@@ -2197,10 +2197,23 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpSocketServerFrame? ReceiveOnce()
         {
+            TryReceiveOnce(out var delivered);
+            return delivered;
+        }
+
+        /// <summary>
+        /// Consumes one available transport work item and reports whether transport progress was made,
+        /// independently of whether that work item completed an application frame.
+        /// </summary>
+        public bool TryReceiveOnce(out CultNetRudpSocketServerFrame? delivered)
+        {
             if (_deliveredFrames.Count > 0)
             {
-                return _deliveredFrames.Dequeue();
+                delivered = _deliveredFrames.Dequeue();
+                return true;
             }
+
+            delivered = null;
 
             var buffer = new byte[65535];
             EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
@@ -2209,7 +2222,7 @@ namespace GameCult.Networking
             {
                 if (!_socket.Poll(0, SelectMode.SelectRead))
                 {
-                    return null;
+                    return false;
                 }
 
                 received = _socket.ReceiveFrom(buffer, ref remote);
@@ -2218,14 +2231,14 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.WouldBlock ||
                 error.SocketErrorCode == SocketError.TimedOut)
             {
-                return null;
+                return false;
             }
             catch (SocketException error) when (
                 error.SocketErrorCode == SocketError.ConnectionReset ||
                 error.SocketErrorCode == SocketError.ConnectionAborted ||
                 error.SocketErrorCode == SocketError.Shutdown)
             {
-                return null;
+                return false;
             }
 
             _stats.BytesReceived += received;
@@ -2239,12 +2252,12 @@ namespace GameCult.Networking
             }
             catch (InvalidOperationException)
             {
-                return null;
+                return true;
             }
 
             if (packet.ConnectionId != _connectionId)
             {
-                return null;
+                return true;
             }
 
             var peerKey = RemoteKey(remote);
@@ -2261,12 +2274,12 @@ namespace GameCult.Networking
                     }));
                 _peers[peerKey] = peer;
                 SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
-                return null;
+                return true;
             }
 
             if (!_peers.TryGetValue(peerKey, out var existingPeer))
             {
-                return null;
+                return true;
             }
 
             var result = existingPeer.Session.Receive(packet, NowMs());
@@ -2278,7 +2291,7 @@ namespace GameCult.Networking
             {
                 existingPeer.DisconnectReason = result.DisconnectReason;
                 _peers.Remove(peerKey);
-                return null;
+                return true;
             }
 
             foreach (var frame in result.Delivered)
@@ -2295,13 +2308,13 @@ namespace GameCult.Networking
                 _stats.FramesReceived++;
             }
 
-            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
             if (packet.PacketType == CultNetRudpPacketType.Data || delivered != null)
             {
                 SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.CreateAck());
             }
 
-            return delivered;
+            return true;
         }
 
         /// <summary>

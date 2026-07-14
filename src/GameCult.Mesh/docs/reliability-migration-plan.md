@@ -551,9 +551,10 @@ atomic promotion primitive. Concurrent requests for one hash share the same
 per-content transfer lock and verified work.
 
 **Cut line:** the legacy distributed reader no longer owns a sequential chunk
-loop or whole-artifact allocation. The first slice intentionally leaves
-adaptive parallelism, quotas, pinning, signer policy, arbitrary streaming
-destinations, and cleanup scheduling to later Phase 4 work.
+loop or whole-artifact allocation. The transfer owner now opens a bounded
+per-content request window while preserving one ordered writer/checkpointer.
+Adaptive scheduling, quotas, pinning, signer policy, arbitrary streaming
+destinations, and cleanup scheduling remain later Phase 4 work.
 
 **State transition:** each verified chunk flushes a typed checkpoint. Restart
 rehydrates that record, rehashes every claimed range, and fetches corrupt or
@@ -563,8 +564,10 @@ partial state.
 
 **Verification layer:** focused tests cover durable cancellation/restart,
 provider corruption and failover, forged checkpoint rejection, final-hash
-failure, atomic visibility, and concurrent request coalescing. Existing CDN
-tests cover the compatibility reader.
+failure, atomic visibility, concurrent request coalescing, bounded concurrent
+fetch, ordered checkpointing under out-of-order completion, and observation of
+the whole request window after an early failure. Existing CDN tests cover the
+compatibility reader.
 
 ### Phase 4 managed content-session slice
 
@@ -600,8 +603,10 @@ descriptors; the managed content protocol carries bounded payload responses.
 **Verification layer:** Mesh tests transfer a multi-chunk body through one
 managed session, assert zero snapshot requests, assert warm committed reuse
 without another network request, and round-trip both wire messages through the
-schema dispatcher. The released EveUnity/Aetheria cold witness remains the real
-RUDP consumer proof required to close the slice.
+schema dispatcher. RUDP schema-host tests distinguish control-packet progress
+from dispatched messages and drain bounded available work without idle sleeps.
+The released EveUnity/Aetheria cold witness remains the real consumer proof
+required to close the slice.
 
 ### Phase 5 verified CDN mapped-body slice
 

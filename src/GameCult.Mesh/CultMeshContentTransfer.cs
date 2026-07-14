@@ -61,6 +61,9 @@ namespace GameCult.Mesh
 
     public sealed class CultMeshContentTransferOptions
     {
+        public const int DefaultMaxConcurrentChunkRequests = 4;
+        public const int MaximumConcurrentChunkRequests = 32;
+
         public CultMeshContentTransferOptions(string cacheDirectory)
         {
             CacheDirectory = string.IsNullOrWhiteSpace(cacheDirectory)
@@ -69,6 +72,12 @@ namespace GameCult.Mesh
         }
 
         public string CacheDirectory { get; }
+
+        /// <summary>
+        /// Gets or sets the bounded number of chunk requests that may be in flight per
+        /// content hash while the transfer owner writes and checkpoints in manifest order.
+        /// </summary>
+        public int MaxConcurrentChunkRequests { get; set; } = DefaultMaxConcurrentChunkRequests;
     }
 
     public sealed class CultMeshContentTransferService
@@ -76,6 +85,7 @@ namespace GameCult.Mesh
         private readonly CultCache _stateCache;
         private readonly ICultMeshContentProvider[] _providers;
         private readonly string _cacheDirectory;
+        private readonly int _maxConcurrentChunkRequests;
         private readonly CultMeshVerifiedBodyMappingBroker? _mappedBodies;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _contentLocks = new(StringComparer.Ordinal);
 
@@ -89,7 +99,13 @@ namespace GameCult.Mesh
             _providers = providers?.ToArray() ?? throw new ArgumentNullException(nameof(providers));
             if (_providers.Length == 0) throw new ArgumentException("At least one content provider is required.", nameof(providers));
             if (_providers.Any(provider => provider == null)) throw new ArgumentException("Content providers cannot contain null entries.", nameof(providers));
-            _cacheDirectory = (options ?? throw new ArgumentNullException(nameof(options))).CacheDirectory;
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            if (options.MaxConcurrentChunkRequests <= 0 ||
+                options.MaxConcurrentChunkRequests > CultMeshContentTransferOptions.MaximumConcurrentChunkRequests)
+                throw new ArgumentOutOfRangeException(nameof(options),
+                    $"Concurrent chunk request bound must be between 1 and {CultMeshContentTransferOptions.MaximumConcurrentChunkRequests}.");
+            _cacheDirectory = options.CacheDirectory;
+            _maxConcurrentChunkRequests = options.MaxConcurrentChunkRequests;
             _mappedBodies = mappedBodies;
         }
 
@@ -168,15 +184,36 @@ namespace GameCult.Mesh
                     .OrderBy(item => item.Chunk.Offset)
                     .ToArray();
 
-                foreach (var item in ordered.Where(item => !verified.Contains(item.Index)))
+                var remaining = ordered.Where(item => !verified.Contains(item.Index)).ToArray();
+                for (var windowStart = 0; windowStart < remaining.Length; windowStart += _maxConcurrentChunkRequests)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var chunk = await FetchVerifiedChunkAsync(item.Chunk, cancellationToken).ConfigureAwait(false);
-                    stream.Position = item.Chunk.Offset;
-                    await stream.WriteAsync(chunk.Payload, 0, chunk.Payload.Length, cancellationToken).ConfigureAwait(false);
-                    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                    verified.Add(item.Index);
-                    await SaveStateAsync(contentHash, fingerprint, manifest.SizeBytes, verified, stateKey).ConfigureAwait(false);
+                    var window = remaining
+                        .Skip(windowStart)
+                        .Take(_maxConcurrentChunkRequests)
+                        .Select(item => (Item: item, Fetch: FetchVerifiedChunkAsync(item.Chunk, cancellationToken)))
+                        .ToArray();
+                    try
+                    {
+                        foreach (var pending in window)
+                        {
+                            var chunk = await pending.Fetch.ConfigureAwait(false);
+                            stream.Position = pending.Item.Chunk.Offset;
+                            await stream.WriteAsync(chunk.Payload, 0, chunk.Payload.Length, cancellationToken).ConfigureAwait(false);
+                            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                            verified.Add(pending.Item.Index);
+                            await SaveStateAsync(contentHash, fingerprint, manifest.SizeBytes, verified, stateKey).ConfigureAwait(false);
+                        }
+                    }
+                    catch
+                    {
+                        foreach (var pending in window)
+                        {
+                            try { await pending.Fetch.ConfigureAwait(false); }
+                            catch { }
+                        }
+                        throw;
+                    }
                 }
             }
 

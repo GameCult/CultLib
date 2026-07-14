@@ -142,6 +142,79 @@ public sealed class CultMeshContentTransferTests
     }
 
     [Test]
+    public async Task FetchAsync_PipelinesRequestsWithinConfiguredBoundAndCommitsInManifestOrder()
+    {
+        var artifact = Artifact("pipelined", 2);
+        using var cache = Cache();
+        var provider = new FakeProvider("source", artifact.Chunks)
+        {
+            DelayMilliseconds = 40,
+            BlockedChunkHash = artifact.Chunks[0].ChunkHash
+        };
+        var service = new CultMeshContentTransferService(
+            cache,
+            new[] { provider },
+            new CultMeshContentTransferOptions(_directory) { MaxConcurrentChunkRequests = 3 });
+
+        var fetch = service.FetchAsync(artifact.Manifest);
+        try
+        {
+            await provider.BlockedChunkRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => provider.Requests.Values.Sum() >= 3 && provider.ActiveRequests == 1);
+
+            var pendingState = cache.Get<CultMeshContentTransferStateDocument>(StateKey(artifact.Manifest));
+            (pendingState?.VerifiedChunkIndexes ?? Array.Empty<int>()).Should().BeEmpty(
+                "later chunks may finish fetching but cannot be checkpointed ahead of the first manifest chunk");
+        }
+        finally
+        {
+            provider.ReleaseBlockedChunk();
+        }
+        var path = await fetch;
+
+        File.ReadAllBytes(path).Should().Equal(Payload());
+        provider.MaxConcurrentRequests.Should().Be(3);
+        provider.Requests.Values.Sum().Should().Be(artifact.Chunks.Count);
+        cache.Get<CultMeshContentTransferStateDocument>(StateKey(artifact.Manifest)).Should().BeNull();
+    }
+
+    [Test]
+    public void Constructor_RejectsNonPositiveConcurrentChunkBound()
+    {
+        using var cache = Cache();
+        var options = new CultMeshContentTransferOptions(_directory) { MaxConcurrentChunkRequests = 0 };
+
+        FluentActions.Invoking(() => new CultMeshContentTransferService(
+                cache,
+                new[] { new FakeProvider("source", Array.Empty<CultMeshCdnArtifactChunk>()) },
+                options))
+            .Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Test]
+    public async Task FetchAsync_ObservesRemainingWindowTasksWhenEarlierFetchFails()
+    {
+        var artifact = Artifact("failed-window", 2);
+        using var cache = Cache();
+        var provider = new FakeProvider("source", artifact.Chunks)
+        {
+            DelayMilliseconds = 80,
+            FailedChunkHash = artifact.Chunks[0].ChunkHash
+        };
+        var service = new CultMeshContentTransferService(
+            cache,
+            new[] { provider },
+            new CultMeshContentTransferOptions(_directory) { MaxConcurrentChunkRequests = 3 });
+
+        await FluentActions.Awaiting(() => service.FetchAsync(artifact.Manifest))
+            .Should().ThrowAsync<InvalidDataException>();
+
+        provider.ActiveRequests.Should().Be(0, "the failed window must observe every task before returning");
+        cache.Get<CultMeshContentTransferStateDocument>(StateKey(artifact.Manifest)).Should().BeNull();
+        File.Exists(Path.Combine(_directory, artifact.Manifest.ContentHash + ".body")).Should().BeFalse();
+    }
+
+    [Test]
     public async Task FetchMappedBodyAsync_MapsOnlyCommittedBodyForMultipleConsumersAndFallsBackToNetwork()
     {
         var artifact = Artifact("mapped", 4);
@@ -267,6 +340,9 @@ public sealed class CultMeshContentTransferTests
     {
         private readonly Dictionary<string, CultMeshCdnArtifactChunk> _chunks;
         private int _requestCount;
+        private int _activeRequests;
+        private int _maxConcurrentRequests;
+        private readonly TaskCompletionSource<bool> _releaseBlockedChunk = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public FakeProvider(string providerId, IEnumerable<CultMeshCdnArtifactChunk> chunks)
         {
@@ -278,16 +354,50 @@ public sealed class CultMeshContentTransferTests
         public ConcurrentDictionary<string, int> Requests { get; } = new(StringComparer.Ordinal);
         public int BlockFromRequest { get; set; } = int.MaxValue;
         public int DelayMilliseconds { get; set; }
+        public string? BlockedChunkHash { get; set; }
+        public string? FailedChunkHash { get; set; }
+        public TaskCompletionSource<bool> BlockedChunkRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int ActiveRequests => Volatile.Read(ref _activeRequests);
+        public int MaxConcurrentRequests => Volatile.Read(ref _maxConcurrentRequests);
+
+        public void ReleaseBlockedChunk() => _releaseBlockedChunk.TrySetResult(true);
 
         public async Task<CultMeshCdnArtifactChunk?> GetChunkAsync(CultMeshCdnChunkRef chunk, CancellationToken cancellationToken = default)
         {
             Requests.AddOrUpdate(chunk.ChunkHash, 1, (_, count) => count + 1);
             var request = Interlocked.Increment(ref _requestCount);
-            if (request >= BlockFromRequest)
-                await Task.Delay(Timeout.Infinite, cancellationToken);
-            if (DelayMilliseconds > 0)
-                await Task.Delay(DelayMilliseconds, cancellationToken);
-            return _chunks.TryGetValue(chunk.ChunkHash, out var value) ? Clone(value) : null;
+            var active = Interlocked.Increment(ref _activeRequests);
+            UpdateMaximum(ref _maxConcurrentRequests, active);
+            try
+            {
+                if (request >= BlockFromRequest)
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                if (string.Equals(chunk.ChunkHash, FailedChunkHash, StringComparison.Ordinal))
+                    throw new InvalidDataException("Synthetic chunk failure.");
+                if (string.Equals(chunk.ChunkHash, BlockedChunkHash, StringComparison.Ordinal))
+                {
+                    BlockedChunkRequested.TrySetResult(true);
+                    await _releaseBlockedChunk.Task.WaitAsync(cancellationToken);
+                }
+                if (DelayMilliseconds > 0)
+                    await Task.Delay(DelayMilliseconds, cancellationToken);
+                return _chunks.TryGetValue(chunk.ChunkHash, out var value) ? Clone(value) : null;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeRequests);
+            }
+        }
+
+        private static void UpdateMaximum(ref int maximum, int candidate)
+        {
+            var observed = Volatile.Read(ref maximum);
+            while (candidate > observed)
+            {
+                var previous = Interlocked.CompareExchange(ref maximum, candidate, observed);
+                if (previous == observed) return;
+                observed = previous;
+            }
         }
     }
 }
