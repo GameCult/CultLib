@@ -143,6 +143,14 @@ namespace GameCult.Networking
         /// CultMesh peer exchange response contract identifier.
         /// </summary>
         public const string PeerExchangeResponse = "cultmesh.peer_exchange_response.v0";
+        /// <summary>
+        /// CultMesh content chunk request contract identifier.
+        /// </summary>
+        public const string ContentChunkRequest = "cultmesh.content_chunk_request.v1";
+        /// <summary>
+        /// CultMesh content chunk response contract identifier.
+        /// </summary>
+        public const string ContentChunkResponse = "cultmesh.content_chunk_response.v1";
     }
 
     /// <summary>
@@ -1301,6 +1309,46 @@ namespace GameCult.Networking
         /// Gets or sets peer cards.
         /// </summary>
         [Key("peers")] public CultMeshPeerCardMessage[] Peers { get; set; } = Array.Empty<CultMeshPeerCardMessage>();
+    }
+
+    /// <summary>
+    /// Requests one bounded content-addressed chunk over a managed CultMesh content session.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshContentChunkRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema identity.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ContentChunkRequest;
+        /// <summary>Gets or sets the request correlation identity.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the canonical SHA-256 chunk identity.</summary>
+        [Key("chunkHash")] public string ChunkHash { get; set; } = string.Empty;
+        /// <summary>Gets or sets the optional canonical CultCache record key.</summary>
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
+        /// <summary>Gets or sets the manifest-bound expected payload size.</summary>
+        [Key("expectedSizeBytes")] public int ExpectedSizeBytes { get; set; }
+    }
+
+    /// <summary>
+    /// Returns one bounded content-addressed chunk without publishing it as snapshot state.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshContentChunkResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema identity.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ContentChunkResponse;
+        /// <summary>Gets or sets the matching request correlation identity.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets whether a validated chunk is present.</summary>
+        [Key("found")] public bool Found { get; set; }
+        /// <summary>Gets or sets the canonical SHA-256 chunk identity.</summary>
+        [Key("chunkHash")] public string ChunkHash { get; set; } = string.Empty;
+        /// <summary>Gets or sets the payload byte count.</summary>
+        [Key("sizeBytes")] public int SizeBytes { get; set; }
+        /// <summary>Gets or sets the bounded content payload.</summary>
+        [Key("payload")] public byte[] Payload { get; set; } = Array.Empty<byte>();
+        /// <summary>Gets or sets a typed-boundary failure description when the chunk is unavailable.</summary>
+        [Key("error")] public string Error { get; set; } = string.Empty;
     }
 
     /// <summary>

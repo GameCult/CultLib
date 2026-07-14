@@ -566,6 +566,43 @@ provider corruption and failover, forged checkpoint rejection, final-hash
 failure, atomic visibility, and concurrent request coalescing. Existing CDN
 tests cover the compatibility reader.
 
+### Phase 4 managed content-session slice
+
+**Owner:** `CultMeshContentTransferService` still owns verification, resumable
+state, provider failover, and atomic promotion. `CultMeshSessionContentProvider`
+owns only one bounded request/response projection over a reusable
+`cultmesh.content.v1` session; `CultMeshContentServer` owns only serving
+canonical content-addressed chunks from provider storage.
+
+**Inputs:** stable provider endpoint identity, the shared session manager, a
+validated manifest chunk reference, provider CultCache content, response
+deadline, and caller cancellation.
+
+**Outputs:** one manifest-bound chunk response to the transfer service. The
+session manager retains connection/reconnect/path authority, and the transfer
+service decides whether the response becomes verified partial state.
+
+**Derived state:** request correlation identities and content-session physical
+channels. Neither is content identity, authority evidence, or cache truth.
+
+**Forbidden writers:** snapshot servers cannot embed artifact payloads in raw
+document responses; the session provider cannot write partial/final files,
+mark ranges verified, choose a replacement endpoint, or authorize a producer.
+
+**Shared paths:** every cold network chunk enters the same incremental and
+final verification path used by database and test providers. Concurrent chunks
+borrow the same logical content session.
+
+**Cut line:** bulk CDN bytes no longer require
+`CultNetSnapshotResponseRawMessage` records. Snapshots retain manifests and
+descriptors; the managed content protocol carries bounded payload responses.
+
+**Verification layer:** Mesh tests transfer a multi-chunk body through one
+managed session, assert zero snapshot requests, assert warm committed reuse
+without another network request, and round-trip both wire messages through the
+schema dispatcher. The released EveUnity/Aetheria cold witness remains the real
+RUDP consumer proof required to close the slice.
+
 ### Phase 5 verified CDN mapped-body slice
 
 **Owner:** `CultMeshContentTransferService` remains the sole writer and promoter
