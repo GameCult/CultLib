@@ -1,6 +1,7 @@
 param(
   [string] $Configuration = "Release",
-  [string] $OutputDirectory = "artifacts\unity\org.gamecult.cultlib"
+  [string] $OutputDirectory = "artifacts\unity\org.gamecult.cultlib",
+  [switch] $UpdateTemplate
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +77,19 @@ foreach ($assemblyName in $expectedAssemblies) {
   if (Test-Path -LiteralPath $pdb) {
     Copy-Item -LiteralPath $pdb -Destination $pluginRoot
   }
+}
+
+if ($UpdateTemplate) {
+  $templatePluginRoot = Join-Path $templateRoot "Runtime\Plugins"
+  foreach ($assemblyName in $expectedAssemblies) {
+    Copy-Item -LiteralPath (Join-Path $pluginRoot $assemblyName) -Destination $templatePluginRoot -Force
+    $pdbName = [System.IO.Path]::ChangeExtension($assemblyName, ".pdb")
+    $pdb = Join-Path $pluginRoot $pdbName
+    if (Test-Path -LiteralPath $pdb) {
+      Copy-Item -LiteralPath $pdb -Destination $templatePluginRoot -Force
+    }
+  }
+  Write-Host "Updated tracked Unity package assemblies: $templatePluginRoot"
 }
 
 $manifest = Get-Content -LiteralPath (Join-Path $outputRoot "package.json") -Raw | ConvertFrom-Json
