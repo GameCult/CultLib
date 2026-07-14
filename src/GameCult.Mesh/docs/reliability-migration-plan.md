@@ -605,8 +605,13 @@ managed session, assert zero snapshot requests, assert warm committed reuse
 without another network request, and round-trip both wire messages through the
 schema dispatcher. RUDP schema-host tests distinguish control-packet progress
 from dispatched messages and drain bounded available work without idle sleeps.
-The released EveUnity/Aetheria cold witness remains the real consumer proof
-required to close the slice.
+The released EveUnity/Aetheria cold run now promotes the 13,006,384-byte bundle
+to its exact SHA-256 `.body` under the unchanged 300-second deadline with no
+partial left behind. The combined cold gameplay witness remains open because
+the authoritative witness world can lose its targeting candidates while the
+cold body transfers; the same released client passes gameplay and camera
+contracts on the promoted warm body. Content-session delivery is proven, while
+the product readiness/lifecycle proof remains separate and incomplete.
 
 ### Phase 5 verified CDN mapped-body slice
 
