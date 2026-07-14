@@ -9,6 +9,7 @@ Follow the chapters in order:
 1. [Persist typed application state](01-persist-typed-state.md)
 2. [Connect a client by stable identity](02-connect-by-identity.md)
 3. [Publish one Eve surface to multiple runtimes](03-publish-an-eve-surface.md)
+4. [Keep a TypeScript provider alive](04-keep-a-typescript-provider-alive.md)
 
 The intended application shape is small:
 
@@ -33,4 +34,3 @@ native projection. CultMesh owns discovery and connection continuity.
   pull request.
 - A setup step that depends on repository internals is an API defect, not
   acceptable tutorial folklore.
-

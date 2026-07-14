@@ -32,6 +32,8 @@ import {
   type CultNetWireContract,
 } from "cultnet-ts";
 
+export * from "./provider-session";
+
 export interface CultMeshVec2 {
   readonly x: number;
   readonly y: number;

@@ -64,6 +64,7 @@ const mesh = require("cultmesh-ts");
 assert.equal(typeof cache.defineDocumentType, "function");
 assert.equal(typeof net.CultNetPeer, "function");
 assert.equal(typeof mesh.CultMesh, "function");
+assert.equal(typeof mesh.CultMeshProviderSession, "function");
 assert.deepEqual(mesh.CultMesh.vec2(3, 4), { x: 3, y: 4 });
 `);
   execFileSync(process.execPath, ["runtime-smoke.cjs"], { cwd: consumerRoot, stdio: "inherit" });
@@ -71,14 +72,31 @@ assert.deepEqual(mesh.CultMesh.vec2(3, 4), { x: 3, y: 4 });
   writeFileSync(join(consumerRoot, "types-smoke.ts"), `
 import { defineDocumentType } from "cultcache-ts";
 import { CultNetPeer } from "cultnet-ts";
-import { CultMesh, type CultMeshVec2 } from "cultmesh-ts";
+import {
+  CultMesh,
+  CultMeshProviderSession,
+  type CultMeshProviderIdentity,
+  type CultMeshProviderTransport,
+  type CultMeshVec2,
+} from "cultmesh-ts";
 
 const point: CultMeshVec2 = CultMesh.vec2(3, 4);
 const defineDocument: typeof defineDocumentType = defineDocumentType;
 const peerType: typeof CultNetPeer = CultNetPeer;
+const providerSessionType: typeof CultMeshProviderSession = CultMeshProviderSession;
+const providerIdentity: CultMeshProviderIdentity = {
+  providerId: "smoke.provider",
+  serviceInstanceId: "smoke.instance",
+  endpointId: "odin:smoke.instance",
+  verseId: "smoke",
+};
+let providerTransport: CultMeshProviderTransport | undefined;
 void point;
 void defineDocument;
 void peerType;
+void providerSessionType;
+void providerIdentity;
+void providerTransport;
 `);
   const tsc = join(repoRoot, "node_modules", "typescript", "bin", "tsc");
   assert.ok(readFileSync(tsc, "utf8").length > 0, "workspace TypeScript compiler is unavailable");

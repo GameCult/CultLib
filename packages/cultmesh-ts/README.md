@@ -262,6 +262,44 @@ Schema and shard catalog factories delegate to `cultnet-ts`; the branded
 `CultMesh` entrypoint does not create a second owner for schema discovery or
 topology truth.
 
+## Long-Lived Providers
+
+TypeScript provider daemons use `CultMeshProviderSession` to retain one logical
+provider lifecycle across physical reconnects. The session owns registration,
+lease renewal, desired typed publication replay, command dispatch, receipt
+publication, and withdrawal. Provider code owns domain state and idempotent
+command transactions; the injected transport owns CultNet wire details.
+
+```ts
+import { CultMeshProviderSession } from "cultmesh-ts";
+
+const session = new CultMeshProviderSession({
+  identity: {
+    providerId: "voidbot.swarm",
+    serviceInstanceId: "voidbot-worker-7",
+    endpointId: "odin:voidbot-worker-7",
+    verseId: "voidbot.local",
+  },
+  transport: odinTransport,
+  receiptStore: durableReceiptStore,
+  publications: [advertisementPublication, surfacePublication],
+  commandHandlers: {
+    "swarm.set_heat": applyHeatCommandTransaction,
+  },
+});
+
+await session.start();
+await session.upsertPublication(nextSurfacePublication);
+```
+
+Provider, service-instance, endpoint, and body-producer identities are separate
+contracts. The provider session never infers one from another. A durable
+receipt store is required; `CultMeshMemoryProviderReceiptStore` is intended
+only for tests and disposable tools. The store is a durable outbox: a receipt
+is persisted before transport publication, remains pending across reconnects,
+and is marked published only after the current connection accepts it. Receipt
+store failure degrades command intake without inventing a network outage.
+
 ## RUDP Helpers
 
 Node runtimes can build the shared CultNet reliable-UDP transport from the

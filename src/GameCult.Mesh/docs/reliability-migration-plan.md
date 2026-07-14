@@ -496,6 +496,54 @@ after bounded replay. The Aetheria/EveUnity witness proves provider
 discovery, live SoA state, commands, receipts, and assets through the migrated
 session path.
 
+### Phase 2 TypeScript provider-lifecycle slice
+
+**Owner:** `CultMeshProviderSession` owns one TypeScript provider's discovery
+registration, lease renewal, physical reconnect, desired typed publication
+replay, command dispatch, receipt publication, and explicit withdrawal. It is
+keyed by provider, service-instance, endpoint, and Verse identity; those
+identities are never collapsed.
+
+**Inputs:** an injected `CultMeshProviderTransport`, stable provider identity,
+lease/reconnect policy, desired typed publications, domain command handlers, a
+required durable receipt store, and an injected scheduler.
+
+**Outputs:** watchable connecting/active/reconnecting/withdrawing/stopped
+state, current lease evidence, ordered document publication, a durable typed
+receipt outbox, and withdrawal of the lease plus remaining publications.
+
+**Derived state:** reconnect attempt, backoff, current physical connection, and
+the in-flight duplicate-command set. Pending receipt delivery is derived from
+the durable receipt store, not volatile session memory. Provider state, Eve surface semantics,
+command effects, endpoint discovery evidence, and body-producer identity are
+not derived by the session.
+
+**Forbidden writers:** renderers, HTML exporters, and scheduled projection
+scripts may not register providers, renew leases, reconnect, publish receipts,
+or withdraw provider state. A transport connection cannot mutate provider
+domain state or treat successful delivery as authorization.
+
+**Shared paths:** initial connect and reconnect both register, subscribe, and
+replay the same desired publication set. Live publication updates use one
+serialized lane, so an older update cannot arrive after a newer one. Duplicate
+command deliveries share one in-flight transaction and later deliveries reuse
+the durable receipt. A receipt is stored before publication and marked only
+after acceptance; reconnect drains pending receipts before command intake.
+
+**Cut line:** TypeScript one-shot RUDP publication helpers remain low-level
+compatibility surfaces, not provider lifecycle owners. VoidBot's swarm renderer
+is the first identified obsolete owner; its provider catalog mutation,
+publication, reconnect, and receipt paths must be deleted when it adopts this
+session. That consumer migration is still open and must not run both owners.
+
+**Verification layer:** deterministic TypeScript tests prove initial
+registration, renewal, stable publication order, reconnect and replay,
+duplicate receipt reuse, explicit withdrawal, and the negative stop-during-
+registration timeline, durable receipt replay, observer isolation, conflicting
+command IDs, and exception-safe shutdown. The empty-consumer tarball smoke proves the session is
+present in the installable `cultmesh-ts` package. A live Odin transport adapter
+and the VoidBot migration remain required for the production proof.
+
 ## Phase 3: Authority as a Mandatory Boundary
 
 ### Cut first
