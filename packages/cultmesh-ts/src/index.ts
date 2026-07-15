@@ -75,6 +75,20 @@ export interface CultMeshRouteRecord {
   readonly description: string;
 }
 
+/**
+ * Consumer view of provider-session publications. The provider-session client
+ * owns ordering, replay, and reconnect; document handles only project that
+ * live publication state into typed latest/watch semantics.
+ */
+export interface CultMeshLivePublicationSource {
+  latest(schemaId: string, recordKey: string): Promise<unknown>;
+  watch(
+    schemaId: string,
+    recordKey: string,
+    callback: (value: unknown) => void,
+  ): CultMeshUnsubscribe;
+}
+
 export type CultMeshDocumentPublicationSource =
   | {
       readonly kind: "single-file";
@@ -87,6 +101,11 @@ export type CultMeshDocumentPublicationSource =
   | {
       readonly kind: "peer-snapshot";
       readonly peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>);
+      readonly endpoint?: string;
+    }
+  | {
+      readonly kind: "live-publication";
+      readonly source: CultMeshLivePublicationSource;
       readonly endpoint?: string;
     };
 
@@ -2712,6 +2731,33 @@ export function cultMeshDocumentFromPublication(
   requireNonEmpty(recordKey, "recordKey");
 
   switch (source.kind) {
+    case "live-publication": {
+      const schema = typeof schemaOrDefinition === "string"
+        ? { schemaId: schemaOrDefinition }
+        : cultMeshSchemaFromDefinition(schemaOrDefinition);
+      const schemaId = schema.schemaId ?? schema.type;
+      if (!schemaId) {
+        throw new Error("CultMesh live publication document requires a schema id or document type.");
+      }
+      const parse = (value: unknown) => parseCultMeshDocumentValue(schemaOrDefinition, value);
+      return cultMeshDocument(
+        options.documentId ?? recordKey,
+        schema,
+        async () => parse(await source.source.latest(schemaId, recordKey)),
+        {
+          routeHint: options.routeHint ?? cultMeshRouteHint(
+            "network",
+            source.endpoint ?? "CultMesh provider-session publication",
+          ),
+          sources: [cultMeshProjectionSource(options.sourceId ?? recordKey, { schemaId })],
+          watchDocument: (_context, callback) => source.source.watch(
+            schemaId,
+            recordKey,
+            value => callback(parse(value)),
+          ),
+        },
+      );
+    }
     case "single-file":
       return typeof schemaOrDefinition === "string"
         ? cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {

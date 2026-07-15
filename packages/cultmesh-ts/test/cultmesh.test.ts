@@ -619,6 +619,76 @@ test("CultMesh TS document handles read schema publications from single-file sto
   ]);
 });
 
+test("CultMesh TS projects live provider publications as typed document handles", async () => {
+  let current: unknown = {
+    noteId: "note:live-provider",
+    body: "initial publication",
+  };
+  let watcher: ((value: unknown) => void) | undefined;
+  const calls: string[] = [];
+
+  const document = CultMesh.documentFromPublication(
+    {
+      kind: "live-publication",
+      endpoint: "provider-session:aetheria",
+      source: {
+        latest: async (schemaId, recordKey) => {
+          calls.push(`latest:${schemaId}:${recordKey}`);
+          return current;
+        },
+        watch: (schemaId, recordKey, callback) => {
+          calls.push(`watch:${schemaId}:${recordKey}`);
+          watcher = callback;
+          return () => {
+            calls.push("unsubscribed");
+            watcher = undefined;
+          };
+        },
+      },
+    },
+    noteDocument,
+    "note:live-provider",
+    { documentId: "aetheria.note.live" },
+  );
+
+  assert.deepEqual(await document.latest(), current);
+  assert.equal(document.routeHint.kind, "network");
+  assert.equal(document.routeHint.description, "provider-session:aetheria");
+
+  const observed: string[] = [];
+  const unsubscribe = document.watch(value => observed.push(value.body));
+  current = {
+    noteId: "note:live-provider",
+    body: "ordered live upsert",
+  };
+  watcher?.(current);
+  unsubscribe();
+
+  assert.deepEqual(observed, ["ordered live upsert"]);
+  assert.deepEqual(calls, [
+    "latest:cultmesh.note.v0:note:live-provider",
+    "watch:cultmesh.note.v0:note:live-provider",
+    "unsubscribed",
+  ]);
+  assert.equal(watcher, undefined);
+});
+
+test("CultMesh TS validates live provider publications through typed document schemas", async () => {
+  const document = CultMesh.documentFromPublication(
+    {
+      kind: "live-publication",
+      source: {
+        latest: async () => ({ noteId: 42, body: "invalid" }),
+        watch: () => () => undefined,
+      },
+    },
+    noteDocument,
+    "note:invalid-live-provider",
+  );
+
+  await assert.rejects(document.latest(), /noteId/);
+});
+
 test("CultMesh TS binds publication document catalogs from source resolvers", async () => {
   const root = await mkdtemp(join(tmpdir(), "cultmesh-ts-publication-catalog-"));
   const firstPath = join(root, "first.ccmp");
