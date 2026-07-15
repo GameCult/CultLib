@@ -30,6 +30,7 @@ import {
   cultMeshProviderSessionOperations,
   cultMeshProviderSessionSchemas,
   decodeProviderCommandDocument,
+  encodeProviderConnectEvidence,
   decodeProviderSessionPayload,
   encodeProviderSessionPayload,
   type CultMeshProviderCommandReceiptWire,
@@ -45,6 +46,7 @@ export interface CultMeshProviderRudpTransportOptions {
   readonly connectTimeoutMs?: number;
   readonly operationTimeoutMs?: number;
   readonly maxFragmentBytes?: number;
+  readonly sessionToken?: string;
   readonly socketFactory?: () => Socket;
 }
 
@@ -81,7 +83,10 @@ export class CultMeshProviderRudpTransport implements CultMeshProviderTransport 
       maxFragmentBytes: this.#options.maxFragmentBytes ?? 2_048,
     });
     const peer = new CultNetPeer(transport, { wireContract: "cultnet.schema.v0" });
-    transport.connect();
+    transport.connect(Buffer.from(encodeProviderConnectEvidence({
+      clientSessionId: randomUUID(),
+      sessionToken: this.#options.sessionToken ?? null,
+    })));
     try {
       await waitUntilConnected(transport, signal, this.#options.connectTimeoutMs ?? 2_000);
       return new RudpProviderConnection(identity, peer, transport, this.#options.operationTimeoutMs ?? 5_000);

@@ -31,6 +31,11 @@ export type CultMeshProviderOperationStatus =
   | "denied"
   | "invalid";
 
+export interface CultMeshProviderConnectEvidenceWire {
+  clientSessionId: string;
+  sessionToken: string | null;
+}
+
 export interface CultMeshProviderRegistrationWire {
   providerId: string;
   serviceInstanceId: string;
@@ -116,6 +121,23 @@ export function decodeProviderSessionPayload<T>(payload: string): T {
     throw new Error("CultMesh provider-session payload must be non-empty MessagePack base64.");
   }
   return decode(Buffer.from(payload, "base64")) as T;
+}
+
+export function encodeProviderConnectEvidence(evidence: CultMeshProviderConnectEvidenceWire): Uint8Array {
+  assertProviderConnectEvidence(evidence);
+  return encode(evidence);
+}
+
+export function decodeProviderConnectEvidence(payload: Uint8Array): CultMeshProviderConnectEvidenceWire {
+  const evidence = decode(payload) as unknown;
+  assertProviderConnectEvidence(evidence);
+  return evidence;
+}
+
+export function assertProviderConnectEvidence(value: unknown): asserts value is CultMeshProviderConnectEvidenceWire {
+  const evidence = requireObject(value, "provider Connect evidence");
+  requireText(evidence.clientSessionId, "clientSessionId");
+  if (evidence.sessionToken !== null) requireText(evidence.sessionToken, "sessionToken");
 }
 
 export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord): CultMeshProviderCommandWire {
