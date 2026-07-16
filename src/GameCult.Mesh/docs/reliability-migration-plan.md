@@ -658,7 +658,7 @@ instead of paying a Windows scheduler quantum for every fragment; a real UDP
 content-session test transfers a four-chunk, one-megabyte request window through
 the public transfer owner within its ten-second regression bound.
 The released EveUnity/Aetheria `cold-start-lowering` run now promotes the
-55,539,565-byte bundle to its exact SHA-256 `.body` under the unchanged
+56,168,017-byte bundle to its exact SHA-256 `.body` under the unchanged
 300-second deadline with no partial left behind. It starts with zero bodies,
 lowers the provider-owned world after promotion, and proves pilot/map camera
 separation. The separate `full-session-gameplay` profile starts a fresh warm
@@ -706,10 +706,11 @@ repeating transfer or cache-path policy.
 
 **Verification layer:** focused Mesh tests bind the mapped descriptor to the
 exact verified path and reject partial/cache-layout inference. The released
-EveUnity `0.3.53` / CultLib Unity `1.0.15` cold Aetheria witness starts with no
-body, transfers and promotes one exact 55,539,565-byte body, selects
-`SharedFileMapping`, lowers the provider-owned world, and preserves pilot/map
-camera channel separation.
+EveUnity `0.3.57` / CultLib Unity `1.0.15` cold Aetheria witness starts with no
+body, transfers and promotes one exact 56,168,017-byte body with SHA-256
+`f54177cc8aadd5cd39ba0757cfd2b90a403a1b9efcfcb32060b86e8c152dce10`, leaves no
+partial, selects `SharedFileMapping`, lowers the provider-owned shield-free hull,
+and preserves pilot/map camera channel separation in 102,912.852 milliseconds.
 
 ### Cut first
 
