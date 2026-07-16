@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -67,6 +70,81 @@ public sealed class CultMeshContentSessionTests
     }
 
     [Test]
+    public async Task RudpContentSessionCarriesConcurrentChunkWindowWithoutPerFragmentSchedulerDelay()
+    {
+        var payload = Enumerable.Range(0, 1024 * 1024).Select(value => (byte)(value % 251)).ToArray();
+        var artifact = CultMesh.PackCdnArtifact("aetheria/world/rudp", payload);
+        using var providerCache = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
+            typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
+        await CultMeshCdn.PublishAsync(providerCache, artifact);
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        using var wireServer = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+        {
+            RuntimeId = "cultmesh-content-rudp-test",
+            Socket = socket,
+            MaxFragmentBytes = 1024,
+            MaxPendingReliablePackets = 8192
+        });
+        using var contentServer = new CultMeshContentServer(wireServer, providerCache);
+        using var pumpCancellation = new CancellationTokenSource();
+        var pump = Task.Run(async () =>
+        {
+            while (!pumpCancellation.IsCancellationRequested)
+            {
+                var progress = await wireServer.PollAvailableAsync(256);
+                wireServer.PollResends();
+                if (progress.TransportItemsConsumed == 0)
+                    await Task.Delay(1, pumpCancellation.Token);
+            }
+        });
+
+        var endpoint = $"rudp://127.0.0.1:{wireServer.LocalEndPoint.Port}";
+        using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
+        using var sessions = new CultMeshSessionManager(
+            discovery,
+            new ICultMeshTransportConnector[] { new CultMeshSchemaTransportConnector() });
+        var provider = new CultMeshSessionContentProvider(
+            "aetheria.daemon",
+            sessions,
+            CultMeshEndpointId.Parse("service:aetheria.daemon"),
+            new CultMeshSessionContentProviderOptions { ResponseTimeout = TimeSpan.FromSeconds(20) });
+        using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
+            typeof(CultMeshContentTransferStateDocument)));
+        var transfer = new CultMeshContentTransferService(
+            transferState,
+            new[] { provider },
+            new CultMeshContentTransferOptions(_directory));
+
+        var elapsed = Stopwatch.StartNew();
+        string path;
+        try
+        {
+            path = await transfer.FetchAsync(artifact.Manifest);
+        }
+        catch (Exception error)
+        {
+            var stats = wireServer.Stats;
+            Assert.Fail(
+                $"RUDP content transfer failed after {elapsed.Elapsed}; " +
+                $"server sent {stats.BytesSent} bytes and received {stats.BytesReceived} bytes; " +
+                $"pump status is {pump.Status}: {error}");
+            return;
+        }
+        finally
+        {
+            pumpCancellation.Cancel();
+            try { await pump; }
+            catch (OperationCanceledException) { }
+        }
+        elapsed.Stop();
+
+        File.ReadAllBytes(path).Should().Equal(payload);
+        elapsed.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10),
+            "a bounded content request window must not pay one scheduler quantum per RUDP fragment");
+    }
+
+    [Test]
     public void ContentWireMessagesRoundTripThroughTheSchemaDispatcher()
     {
         var request = new CultMeshContentChunkRequestMessage
@@ -93,7 +171,11 @@ public sealed class CultMeshContentSessionTests
 
     private sealed class RouteSource : ICultMeshLookupSource
     {
-        public string SourceId => "odin";
+        private readonly string _endpoint;
+
+        public RouteSource(string endpoint = "rudp://content.test:3076") => _endpoint = endpoint;
+
+        public string SourceId => "test-rendezvous";
 
         public Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(
             CultMeshDiscoveryQuery query,
@@ -108,7 +190,7 @@ public sealed class CultMeshContentSessionTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "rules"),
-                        new[] { "rudp://content.test:3076" }),
+                        new[] { _endpoint }),
                     SourceId,
                     now,
                     now.AddMinutes(1),
