@@ -657,13 +657,17 @@ idle sleeps. Wire sends pace one 32-packet acknowledgement window at a time
 instead of paying a Windows scheduler quantum for every fragment; a real UDP
 content-session test transfers a four-chunk, one-megabyte request window through
 the public transfer owner within its ten-second regression bound.
-The released EveUnity/Aetheria cold run now promotes the 13,006,384-byte bundle
-to its exact SHA-256 `.body` under the unchanged 300-second deadline with no
-partial left behind. The combined cold gameplay witness remains open because
-the authoritative witness world can lose its targeting candidates while the
-cold body transfers; the same released client passes gameplay and camera
-contracts on the promoted warm body. Content-session delivery is proven, while
-the product readiness/lifecycle proof remains separate and incomplete.
+The released EveUnity/Aetheria `cold-start-lowering` run now promotes the
+46,412,384-byte bundle to its exact SHA-256 `.body` under the unchanged
+300-second deadline with no partial left behind. It starts with zero bodies,
+lowers the provider-owned world after promotion, and proves pilot/map camera
+separation. The separate `full-session-gameplay` profile starts a fresh warm
+daemon session and proves combat, destruction-created canonical loot, Ymir
+contact collection, and exactly-once cargo mutation. This split is deliberate:
+cold download latency does not own the lifetime of transient gameplay objects.
+Content-session delivery and product lifecycle are proven without claiming a
+mapped/zero-copy transfer; the managed session still copies and fragments the
+body in process.
 
 ### Phase 5 verified CDN mapped-body slice
 
