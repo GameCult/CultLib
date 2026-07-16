@@ -678,6 +678,8 @@ the equivalent network body descriptor, and a bounded lease.
 **Outputs:** a read-only file-mapping descriptor for the same logical generation.
 Multiple consumers map the same completed cache file and therefore share the OS
 page cache; no process-sized byte array or republished body file is created.
+`CultMeshMappedContent` binds that descriptor to the exact final path returned
+by the transfer owner, so runtime lowerers never reconstruct cache layout.
 
 **Derived state:** opaque capability tokens and their expiry. Tokens are neither
 content hashes nor paths and do not confer producer authority or content trust.
@@ -692,7 +694,9 @@ failure is observed by body negotiation and falls back to that network
 representation.
 
 **Cut line:** there is no second CDN publication path. Mapping is granted only
-after the transfer owner returns its verified final file.
+after the transfer owner returns its verified final file. The compatibility
+descriptor-only method delegates to the path-and-descriptor result rather than
+repeating transfer or cache-path policy.
 
 ### Cut first
 

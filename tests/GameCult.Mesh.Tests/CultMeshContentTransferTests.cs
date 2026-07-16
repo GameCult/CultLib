@@ -228,10 +228,13 @@ public sealed class CultMeshContentTransferTests
         var now = DateTimeOffset.UtcNow;
         var network = NetworkDescriptor(artifact, now);
 
-        var first = await service.FetchMappedBodyAsync(artifact.Manifest, network, now, TimeSpan.FromMinutes(1));
+        var firstContent = await service.FetchMappedContentAsync(
+            artifact.Manifest, network, now, TimeSpan.FromMinutes(1));
+        var first = firstContent.Descriptor;
         var second = await service.FetchMappedBodyAsync(artifact.Manifest, network, now, TimeSpan.FromMinutes(1));
 
         first.Should().BeEquivalentTo(second, options => options.Excluding(value => value.CapabilityToken));
+        firstContent.VerifiedPath.Should().Be(Path.Combine(_directory, artifact.Manifest.ContentHash + ".body"));
         first.CapabilityToken.Should().NotBe(artifact.Manifest.ContentHash);
         first.CapabilityToken.Should().NotContain(Path.DirectorySeparatorChar.ToString());
         first.CapabilityToken.Should().NotContain(Path.AltDirectorySeparatorChar.ToString());

@@ -80,6 +80,27 @@ namespace GameCult.Mesh
         public int MaxConcurrentChunkRequests { get; set; } = DefaultMaxConcurrentChunkRequests;
     }
 
+    /// <summary>
+    /// Binds the transfer owner's atomically committed file to an ephemeral read-only
+    /// mapped-body descriptor for the same logical generation.
+    /// </summary>
+    public sealed class CultMeshMappedContent
+    {
+        internal CultMeshMappedContent(string verifiedPath, CultMeshBodyDescriptor descriptor)
+        {
+            VerifiedPath = string.IsNullOrWhiteSpace(verifiedPath)
+                ? throw new ArgumentException("Verified content path is required.", nameof(verifiedPath))
+                : Path.GetFullPath(verifiedPath);
+            Descriptor = descriptor ?? throw new ArgumentNullException(nameof(descriptor));
+        }
+
+        /// <summary>Gets the immutable file promoted by the content transfer owner.</summary>
+        public string VerifiedPath { get; }
+
+        /// <summary>Gets the opaque mapped-body capability for the same verified file.</summary>
+        public CultMeshBodyDescriptor Descriptor { get; }
+    }
+
     public sealed class CultMeshContentTransferService
     {
         private readonly CultCache _stateCache;
@@ -116,6 +137,26 @@ namespace GameCult.Mesh
             TimeSpan leaseDuration,
             CancellationToken cancellationToken = default)
         {
+            var mapped = await FetchMappedContentAsync(
+                manifest,
+                networkDescriptor,
+                nowUtc,
+                leaseDuration,
+                cancellationToken).ConfigureAwait(false);
+            return mapped.Descriptor;
+        }
+
+        /// <summary>
+        /// Fetches and atomically verifies one artifact, then grants a mapped read-only
+        /// representation without making the consumer infer the transfer cache path.
+        /// </summary>
+        public async Task<CultMeshMappedContent> FetchMappedContentAsync(
+            CultMeshCdnArtifactManifest manifest,
+            CultMeshBodyDescriptor networkDescriptor,
+            DateTimeOffset nowUtc,
+            TimeSpan leaseDuration,
+            CancellationToken cancellationToken = default)
+        {
             if (_mappedBodies == null)
                 throw new InvalidOperationException("Verified body mapping is not configured for this transfer service.");
             if (networkDescriptor == null) throw new ArgumentNullException(nameof(networkDescriptor));
@@ -132,7 +173,8 @@ namespace GameCult.Mesh
             var networkExpiry = DateTimeOffset.FromUnixTimeMilliseconds(networkDescriptor.LeaseExpiresAtUnixMs);
             var expiry = requestedExpiry <= networkExpiry ? requestedExpiry : networkExpiry;
             if (expiry <= nowUtc) throw new InvalidOperationException("Network body lease has expired.");
-            return _mappedBodies.GrantVerified(contentHash, path, networkDescriptor, expiry);
+            var descriptor = _mappedBodies.GrantVerified(contentHash, path, networkDescriptor, expiry);
+            return new CultMeshMappedContent(path, descriptor);
         }
 
         public async Task<string> FetchAsync(
