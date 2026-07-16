@@ -34,9 +34,11 @@ verifies the complete SHA-256 identity, and atomically publishes
 implement a second retry, failover, or promotion policy.
 
 For local consumers, configure `CultMeshVerifiedBodyMappingBroker` and call
-`FetchMappedBodyAsync`. The resulting descriptor maps only the completed body;
-mapping failure remains observable and falls back through the equivalent
-network descriptor without changing logical identity.
+`FetchMappedContentAsync`. The result binds the transfer owner's verified path
+to the mapped descriptor, so consumers do not infer cache filenames. The older
+`FetchMappedBodyAsync` shape delegates to the same owner when only the
+descriptor is needed. Mapping failure remains observable and falls back through
+the equivalent network descriptor without changing logical identity.
 
 The content protocol uses one bounded response per manifest chunk. A snapshot
 response containing `gamecult.mesh.cdn_artifact_chunk.v1` payload records is a
