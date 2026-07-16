@@ -1509,7 +1509,10 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportConnection : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
-        private const int WireBurstPackets = 1;
+        // One acknowledgement carries the preceding 32-packet receive mask.
+        // Pace at that transport window instead of sleeping after every fragment;
+        // a one-millisecond sleep can consume a full scheduler quantum on Windows.
+        private const int WireBurstPackets = 32;
         private readonly Socket _socket;
         private readonly CultNetRudpSession _session;
         private readonly CultNetRudpSocketMode _mode;
@@ -1838,10 +1841,23 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetTransportFrame? ReceiveOnce()
         {
+            TryReceiveOnce(out var delivered);
+            return delivered;
+        }
+
+        /// <summary>
+        /// Consumes one available transport work item and reports progress independently
+        /// of whether that packet completed an application frame.
+        /// </summary>
+        public bool TryReceiveOnce(out CultNetTransportFrame? delivered)
+        {
             if (_deliveredFrames.Count > 0)
             {
-                return _deliveredFrames.Dequeue();
+                delivered = _deliveredFrames.Dequeue();
+                return true;
             }
+
+            delivered = null;
 
             var buffer = new byte[65535];
             EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
@@ -1850,7 +1866,7 @@ namespace GameCult.Networking
             {
                 if (!_socket.Poll(0, SelectMode.SelectRead))
                 {
-                    return null;
+                    return false;
                 }
 
                 received = _socket.ReceiveFrom(buffer, ref remote);
@@ -1859,7 +1875,7 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.WouldBlock ||
                 error.SocketErrorCode == SocketError.TimedOut)
             {
-                return null;
+                return false;
             }
             catch (SocketException error) when (
                 error.SocketErrorCode == SocketError.ConnectionReset ||
@@ -1867,7 +1883,7 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.Shutdown)
             {
                 DisconnectReason = Array.Empty<byte>();
-                return null;
+                return false;
             }
 
             _stats.BytesReceived += received;
@@ -1877,7 +1893,7 @@ namespace GameCult.Networking
             }
             else if (!_remoteEndPoint.Equals(remote))
             {
-                return null;
+                return true;
             }
 
             var wire = new byte[received];
@@ -1887,7 +1903,7 @@ namespace GameCult.Networking
             if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
             {
                 SendPacket(_session.AcceptConnect(packet, NowMs()));
-                return null;
+                return true;
             }
 
             var result = _session.Receive(packet, NowMs());
@@ -1902,7 +1918,7 @@ namespace GameCult.Networking
             if (result.Disconnected)
             {
                 DisconnectReason = result.DisconnectReason;
-                return null;
+                return true;
             }
 
             foreach (var frame in result.Delivered)
@@ -1915,7 +1931,7 @@ namespace GameCult.Networking
                 _stats.FramesReceived++;
             }
 
-            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
             if (packet.PacketType == CultNetRudpPacketType.Accept ||
                 packet.PacketType == CultNetRudpPacketType.Data ||
                 delivered != null)
@@ -1923,7 +1939,7 @@ namespace GameCult.Networking
                 SendPacket(_session.CreateAck());
             }
 
-            return delivered;
+            return true;
         }
 
         /// <summary>
@@ -1941,7 +1957,7 @@ namespace GameCult.Networking
             for (var index = 0; index < packets.Count; index++)
             {
                 SendPacket(packets[index]);
-                if ((index + 1) % WireBurstPackets == 0)
+                if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
                     Thread.Sleep(1);
             }
         }
@@ -2096,7 +2112,9 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportServer : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
-        private const int WireBurstPackets = 1;
+        // Keep server response pacing aligned with the 32-packet ACK mask. Large
+        // content responses otherwise pay one Windows scheduler quantum per 1 KiB.
+        private const int WireBurstPackets = 32;
         private readonly Socket _socket;
         private readonly uint _connectionId;
         private readonly uint _initialSequence;
@@ -2335,7 +2353,7 @@ namespace GameCult.Networking
             for (var index = 0; index < packets.Count; index++)
             {
                 SendPacket(peer.RemoteEndPoint, packets[index]);
-                if ((index + 1) % WireBurstPackets == 0)
+                if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
                     Thread.Sleep(1);
             }
         }

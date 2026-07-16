@@ -651,8 +651,12 @@ descriptors; the managed content protocol carries bounded payload responses.
 **Verification layer:** Mesh tests transfer a multi-chunk body through one
 managed session, assert zero snapshot requests, assert warm committed reuse
 without another network request, and round-trip both wire messages through the
-schema dispatcher. RUDP schema-host tests distinguish control-packet progress
-from dispatched messages and drain bounded available work without idle sleeps.
+schema dispatcher. RUDP schema hosts and managed clients distinguish transport
+progress from dispatched messages and drain bounded available work without
+idle sleeps. Wire sends pace one 32-packet acknowledgement window at a time
+instead of paying a Windows scheduler quantum for every fragment; a real UDP
+content-session test transfers a four-chunk, one-megabyte request window through
+the public transfer owner within its ten-second regression bound.
 The released EveUnity/Aetheria cold run now promotes the 13,006,384-byte bundle
 to its exact SHA-256 `.body` under the unchanged 300-second deadline with no
 partial left behind. The combined cold gameplay witness remains open because

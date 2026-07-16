@@ -247,15 +247,16 @@ namespace GameCult.Networking
                         return;
                     }
 
-                    var message = transport.ReceiveSchemaMessageOnce();
-                    transport.PollResends();
-
-                    if (message != null)
+                    var consumed = 0;
+                    while (consumed < 256 && transport.TryReceiveOnce(out var frame))
                     {
-                        Dispatch(message);
+                        consumed++;
+                        if (frame != null && string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
+                            Dispatch(CultNetSchemaMessageSerialization.Deserialize(frame.Payload));
                     }
-
-                    Thread.Sleep(1);
+                    transport.PollResends();
+                    if (consumed == 0)
+                        Thread.Sleep(1);
                 }
             }
             catch (ObjectDisposedException) when (_disposed)

@@ -49,7 +49,10 @@ them in manifest-offset order. If one request fails, the owner observes the
 rest of that window before returning; fetched-but-uncommitted bytes never become
 trusted resume state. Concurrent artifacts have independent windows.
 
-RUDP schema hosts should drain immediately available transport work with
-`PollAvailableAsync`. Its result distinguishes transport items consumed from
-application messages dispatched, so ACK and connection traffic counts as
-progress without impersonating a message or triggering an idle delay.
+RUDP schema hosts drain immediately available transport work with
+`PollAvailableAsync`, and the managed schema client pump applies the same
+bounded-drain rule. Transport packets, including fragments, ACKs, and connection
+traffic, count as progress without impersonating an application message or
+paying one operating-system scheduler delay per packet. Reliable sends are
+paced in one 32-packet acknowledgement window rather than one fragment at a
+time.
