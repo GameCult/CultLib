@@ -658,16 +658,18 @@ instead of paying a Windows scheduler quantum for every fragment; a real UDP
 content-session test transfers a four-chunk, one-megabyte request window through
 the public transfer owner within its ten-second regression bound.
 The released EveUnity/Aetheria `cold-start-lowering` run now promotes the
-46,412,384-byte bundle to its exact SHA-256 `.body` under the unchanged
+55,539,565-byte bundle to its exact SHA-256 `.body` under the unchanged
 300-second deadline with no partial left behind. It starts with zero bodies,
 lowers the provider-owned world after promotion, and proves pilot/map camera
 separation. The separate `full-session-gameplay` profile starts a fresh warm
 daemon session and proves combat, destruction-created canonical loot, Ymir
 contact collection, and exactly-once cargo mutation. This split is deliberate:
 cold download latency does not own the lifetime of transient gameplay objects.
-Content-session delivery and product lifecycle are proven without claiming a
-mapped/zero-copy transfer; the managed session still copies and fragments the
-body in process.
+Content-session delivery and product lifecycle are proven. The current released
+run then selects `SharedFileMapping` over the exact transfer-owned verified path,
+so Unity does not allocate a second process-sized bundle array. The managed
+session still copies and fragments network bytes; provider-to-client network,
+shared-memory, and GPU zero-copy are not claimed.
 
 ### Phase 5 verified CDN mapped-body slice
 
@@ -701,6 +703,13 @@ representation.
 after the transfer owner returns its verified final file. The compatibility
 descriptor-only method delegates to the path-and-descriptor result rather than
 repeating transfer or cache-path policy.
+
+**Verification layer:** focused Mesh tests bind the mapped descriptor to the
+exact verified path and reject partial/cache-layout inference. The released
+EveUnity `0.3.53` / CultLib Unity `1.0.15` cold Aetheria witness starts with no
+body, transfers and promotes one exact 55,539,565-byte body, selects
+`SharedFileMapping`, lowers the provider-owned world, and preserves pilot/map
+camera channel separation.
 
 ### Cut first
 
