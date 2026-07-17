@@ -893,6 +893,7 @@ namespace GameCult.Networking
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
+        private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Dictionary<string, uint> _orderedNextSequenceByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
         private readonly Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>> _orderedBuffers =
@@ -935,7 +936,16 @@ namespace GameCult.Networking
         /// <summary>
         /// Gets reliable packet sequences awaiting acknowledgement.
         /// </summary>
-        public IReadOnlyList<uint> PendingReliableSequences => _pendingReliable.Keys.OrderBy(value => value).ToArray();
+        public IReadOnlyList<uint> PendingReliableSequences
+        {
+            get
+            {
+                lock (_pendingReliableGate)
+                {
+                    return _pendingReliable.Keys.OrderBy(value => value).ToArray();
+                }
+            }
+        }
 
         /// <summary>
         /// Creates a reliable ordered connect packet.
@@ -1186,12 +1196,15 @@ namespace GameCult.Networking
         public IReadOnlyList<CultNetRudpPacket> DueResends(long nowMs)
         {
             var due = new List<CultNetRudpPacket>();
-            foreach (var pending in _pendingReliable.Values)
+            lock (_pendingReliableGate)
             {
-                if (nowMs - pending.LastSentAtMs >= ResendDelayMs)
+                foreach (var pending in _pendingReliable.Values)
                 {
-                    pending.LastSentAtMs = nowMs;
-                    due.Add(ClonePacket(pending.Packet));
+                    if (nowMs - pending.LastSentAtMs >= ResendDelayMs)
+                    {
+                        pending.LastSentAtMs = nowMs;
+                        due.Add(ClonePacket(pending.Packet));
+                    }
                 }
             }
 
@@ -1243,11 +1256,14 @@ namespace GameCult.Networking
 
         private void TrackReliable(CultNetRudpPacket packet, long nowMs)
         {
-            _pendingReliable[packet.Sequence] = new PendingReliablePacket
+            lock (_pendingReliableGate)
             {
-                Packet = ClonePacket(packet),
-                LastSentAtMs = nowMs
-            };
+                _pendingReliable[packet.Sequence] = new PendingReliablePacket
+                {
+                    Packet = ClonePacket(packet),
+                    LastSentAtMs = nowMs
+                };
+            }
         }
 
         private void EnsureReliableCapacity(int packetCount)
@@ -1257,20 +1273,26 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (_pendingReliable.Count + packetCount > _maxPendingReliablePackets.Value)
+            lock (_pendingReliableGate)
             {
-                throw new InvalidOperationException("RUDP reliable send queue is full.");
+                if (_pendingReliable.Count + packetCount > _maxPendingReliablePackets.Value)
+                {
+                    throw new InvalidOperationException("RUDP reliable send queue is full.");
+                }
             }
         }
 
         private void ApplyAcknowledgements(CultNetRudpPacket packet)
         {
-            _pendingReliable.Remove(packet.Ack);
-            for (var bit = 0; bit < 32; bit++)
+            lock (_pendingReliableGate)
             {
-                if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit)
+                _pendingReliable.Remove(packet.Ack);
+                for (var bit = 0; bit < 32; bit++)
                 {
-                    _pendingReliable.Remove(packet.Ack - (uint)bit - 1);
+                    if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit)
+                    {
+                        _pendingReliable.Remove(packet.Ack - (uint)bit - 1);
+                    }
                 }
             }
         }

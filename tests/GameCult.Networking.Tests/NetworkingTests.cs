@@ -772,6 +772,51 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task RudpSession_ResendsAndAcknowledgementsCanRunConcurrently()
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 100,
+                InitialSequence = 1,
+                ResendDelayMs = 1
+            });
+            session.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Accept,
+                ConnectionId = 100,
+                Sequence = 5000,
+                ChannelId = "control"
+            });
+            var packets = Enumerable.Range(0, 1000)
+                .Select(index => session.Send("schema", Encoding.UTF8.GetBytes(index.ToString()),
+                    new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 }))
+                .ToArray();
+
+            await Task.WhenAll(
+                Task.Run(() =>
+                {
+                    for (var now = 1; now <= 1000; now++)
+                        _ = session.DueResends(now);
+                }),
+                Task.Run(() =>
+                {
+                    foreach (var packet in packets)
+                    {
+                        session.Receive(new CultNetRudpPacket
+                        {
+                            PacketType = CultNetRudpPacketType.Ack,
+                            ConnectionId = 100,
+                            Sequence = 5001,
+                            Ack = packet.Sequence,
+                            ChannelId = "control"
+                        });
+                    }
+                }));
+
+            Assert.That(session.PendingReliableSequences, Is.Empty);
+        }
+
+        [Test]
         public void RudpSession_PingsAndDetectsReceiveTimeout()
         {
             var client = new CultNetRudpSession(new CultNetRudpSessionOptions
