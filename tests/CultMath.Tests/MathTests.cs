@@ -235,6 +235,16 @@ public sealed class MathTests
         Assert.True(bicubic > -0.25f && bicubic < 1.25f);
     }
 
+    [Theory]
+    [InlineData(0.0f, 0.0f, 0.0f)]
+    [InlineData(0.25f, -0.5f, -0.425866783f)]
+    [InlineData(12.25f, -4.5f, 0.258312f)]
+    [InlineData(536.5106f, 536.5106f, -0.6901103f)]
+    public void SimplexNoiseMatchesUnityMathematics(float x, float y, float expected)
+    {
+        Assert.Equal(expected, math.simplex_noise(new float2(x, y)), precision: 6);
+    }
+
     [Fact]
     public void VoronoiBatchProducesToneMappedColors()
     {

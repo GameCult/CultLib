@@ -327,6 +327,50 @@ public static class math
     public static float hash(float2 value) => hash(dot(value, new float2(127.1f, 311.7f)));
     public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
 
+    // Ashima Arts / Ian McEwan 2D simplex noise, kept component-explicit so
+    // the C# and HLSL mirrors preserve the same float32 evaluation order.
+    public static float simplex_noise(float2 value)
+    {
+        var c = new float4(
+            0.211324865405187f,
+            0.366025403784439f,
+            -0.577350269189626f,
+            0.024390243902439f);
+        var i = floor(value + dot(value, new float2(c.y, c.y)));
+        var x0 = value - i + dot(i, new float2(c.x, c.x));
+        var i1 = x0.x > x0.y ? new float2(1.0f, 0.0f) : new float2(0.0f, 1.0f);
+        var x12 = new float4(
+            x0.x + c.x - i1.x,
+            x0.y + c.x - i1.y,
+            x0.x + c.z,
+            x0.y + c.z);
+
+        i = simplex_mod289(i);
+        var p = simplex_permute(simplex_permute(i.y + new float3(0.0f, i1.y, 1.0f)) + i.x + new float3(0.0f, i1.x, 1.0f));
+        var m = max(0.5f - new float3(
+            dot(x0, x0),
+            x12.x * x12.x + x12.y * x12.y,
+            x12.z * x12.z + x12.w * x12.w), 0.0f);
+        m = m * m;
+        m = m * m;
+
+        var x = 2.0f * frac(p * c.w) - 1.0f;
+        var h = abs(x) - 0.5f;
+        var ox = floor(x + 0.5f);
+        var a0 = x - ox;
+        m *= 1.79284291400159f - 0.85373472095314f * (a0 * a0 + h * h);
+
+        var g = new float3(
+            a0.x * x0.x + h.x * x0.y,
+            a0.y * x12.x + h.y * x12.y,
+            a0.z * x12.z + h.z * x12.w);
+        return 130.0f * dot(m, g);
+    }
+
+    private static float2 simplex_mod289(float2 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
+    private static float3 simplex_mod289(float3 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
+    private static float3 simplex_permute(float3 value) => simplex_mod289(((value * 34.0f) + 1.0f) * value);
+
     public static float value_noise(float2 position)
     {
         var cell = floor(position);

@@ -73,6 +73,42 @@ float cultmath_smootherstep(float value)
     return value * value * value * (value * (value * 6.0 - 15.0) + 10.0);
 }
 
+float2 cultmath_simplex_mod289(float2 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
+float3 cultmath_simplex_mod289(float3 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
+float3 cultmath_simplex_permute(float3 value) { return cultmath_simplex_mod289(((value * 34.0) + 1.0) * value); }
+
+float cultmath_simplex_noise(float2 value)
+{
+    const float4 c = float4(
+        0.211324865405187,
+        0.366025403784439,
+        -0.577350269189626,
+        0.024390243902439);
+    float2 i = floor(value + dot(value, c.yy));
+    float2 x0 = value - i + dot(i, c.xx);
+    float2 i1 = x0.x > x0.y ? float2(1.0, 0.0) : float2(0.0, 1.0);
+    float4 x12 = float4(x0.x + c.x - i1.x, x0.y + c.x - i1.y, x0.x + c.z, x0.y + c.z);
+
+    i = cultmath_simplex_mod289(i);
+    float3 p = cultmath_simplex_permute(
+        cultmath_simplex_permute(i.y + float3(0.0, i1.y, 1.0)) + i.x + float3(0.0, i1.x, 1.0));
+    float3 m = max(0.5 - float3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
+    m *= m;
+    m *= m;
+
+    float3 x = 2.0 * frac(p * c.w) - 1.0;
+    float3 h = abs(x) - 0.5;
+    float3 ox = floor(x + 0.5);
+    float3 a0 = x - ox;
+    m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+
+    float3 g = float3(
+        a0.x * x0.x + h.x * x0.y,
+        a0.y * x12.x + h.y * x12.y,
+        a0.z * x12.z + h.z * x12.w);
+    return 130.0 * dot(m, g);
+}
+
 float cultmath_lengthsq(float2 value) { return dot(value, value); }
 float cultmath_lengthsq(float3 value) { return dot(value, value); }
 float cultmath_lengthsq(float4 value) { return dot(value, value); }

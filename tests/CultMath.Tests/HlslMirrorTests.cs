@@ -51,6 +51,7 @@ public sealed class HlslMirrorTests
             "cultmath_cubic_bezier",
             "cultmath_hash",
             "cultmath_value_noise",
+            "cultmath_simplex_noise",
             "cultmath_value_noise_bicubic",
             "cultmath_value_noise_texture",
             "cultmath_value_noise_texture_bicubic",
