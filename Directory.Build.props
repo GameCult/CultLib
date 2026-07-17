@@ -14,7 +14,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Copyright>© Meta Vens and contributors</Copyright>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-	<Version>1.0.15</Version>
+	<Version>1.0.16</Version>
 
     <!-- Symbols/debugging -->
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
