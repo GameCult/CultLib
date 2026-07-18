@@ -1,6 +1,6 @@
 {
   "name": "cultmesh-ts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CultMesh local typed state and mesh catalog primitives for TypeScript runtimes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -44,7 +44,7 @@
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
     "cultcache-ts": "^0.13.5",
-    "cultnet-ts": "^0.1.0"
+    "cultnet-ts": "^0.1.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
