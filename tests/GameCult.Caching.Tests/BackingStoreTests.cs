@@ -55,6 +55,59 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task SingleFileMessagePackBackingStore_PullAll_SeesFileCreatedAfterReaderOpened()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+
+            try
+            {
+                var readCache = new CultCache();
+                readCache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath));
+                await readCache.PullAllBackingStoresAsync();
+
+                var observedChanges = 0;
+                using var subscription = readCache.Watch<NamedTestEntry>()
+                    .Subscribe(_ => observedChanges++);
+
+                var writeStore = new SingleFileMessagePackBackingStore(filePath);
+                var writeCache = new CultCache();
+                writeCache.AddBackingStore(writeStore);
+                var handle = await writeCache.AddAsync(new NamedTestEntry
+                {
+                    Name = "external-writer",
+                    Value = "visible-after-refresh"
+                });
+                writeStore.PushAll();
+
+                await readCache.PullAllBackingStoresAsync();
+
+                Assert.That(readCache.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("visible-after-refresh"));
+                Assert.That(observedChanges, Is.EqualTo(1));
+
+                await readCache.PullAllBackingStoresAsync();
+                Assert.That(observedChanges, Is.EqualTo(1), "an unchanged snapshot must not replay its documents");
+
+                await writeCache.UpsertAsync(new NamedTestEntry
+                {
+                    Name = "external-writer",
+                    Value = "updated-once"
+                }, handle);
+                writeStore.PushAll();
+                await readCache.PullAllBackingStoresAsync();
+
+                Assert.That(readCache.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("updated-once"));
+                Assert.That(observedChanges, Is.EqualTo(2));
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+            }
+        }
+
+        [Test]
         public async Task CultCache_DirtyState_Tracks_Mutations_And_ExplicitFlush()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
@@ -330,6 +383,45 @@ namespace GameCult.Caching.Tests
             {
                 if (File.Exists(filePath)) File.Delete(filePath);
                 if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_PullsOnlyExternalRecordDeltas()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                using var reader = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                var observedChanges = 0;
+                using var subscription = reader.Watch<NamedTestEntry>().Subscribe(_ => observedChanges++);
+
+                using var writer = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                var handle = await writer.UpsertAsync(new NamedTestEntry
+                {
+                    Name = "external-command",
+                    Value = "once"
+                });
+                await writer.FlushAsync();
+
+                await reader.PullAllBackingStoresAsync();
+                await reader.PullAllBackingStoresAsync();
+
+                Assert.That(reader.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("once"));
+                Assert.That(observedChanges, Is.EqualTo(1), "unchanged paged records must not replay");
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+                if (Directory.Exists(recordsPath))
+                    Directory.Delete(recordsPath, recursive: true);
             }
         }
 
