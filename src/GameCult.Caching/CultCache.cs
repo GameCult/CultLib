@@ -2084,6 +2084,7 @@ namespace GameCult.Caching
         /// </summary>
         public override void PullAll()
         {
+            FileInfo.Refresh();
             if (!FileInfo.Exists)
             {
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
@@ -2091,14 +2092,42 @@ namespace GameCult.Caching
                 return;
             }
 
-            var snapshot = DeserializeSnapshot(File.ReadAllBytes(FileInfo.FullName));
+            CultPersistedStoreSnapshot snapshot;
+            try
+            {
+                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+            }
+            catch (FileNotFoundException)
+            {
+                FileInfo.Refresh();
+                if (!FileInfo.Exists)
+                    return;
+                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+            }
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
+            var persistedKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
+                persistedKeys.Add(record.Key);
                 reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, snapshot.SchemaCatalog));
                 var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload);
+                if (Entries.TryGetValue(stored.Key.Value, out var existing) &&
+                    string.Equals(existing.StoredAt, stored.StoredAt, StringComparison.Ordinal) &&
+                    string.Equals(existing.Descriptor.SchemaId, stored.Descriptor.SchemaId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
                 Entries[stored.Key.Value] = stored;
-                EntryAdded.OnNext(stored);
+                if (existing == null)
+                    EntryAdded.OnNext(stored);
+                else
+                    EntryUpdated.OnNext(stored);
+            }
+
+            foreach (var removedKey in Entries.Keys.Where(key => !persistedKeys.Contains(key)).ToArray())
+            {
+                if (Entries.TryRemove(removedKey, out var removed))
+                    EntryDeleted.OnNext(removed);
             }
 
             SetLastSchemaMigrationReports(reports);
@@ -2182,6 +2211,14 @@ namespace GameCult.Caching
                     File.Delete(tempPath);
                 }
             }
+        }
+
+        private static byte[] ReadAllBytesShared(string path)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return buffer.ToArray();
         }
     }
 }

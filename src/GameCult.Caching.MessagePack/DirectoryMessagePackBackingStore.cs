@@ -42,6 +42,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PullAll()
     {
+        _recordDirectory.Refresh();
         if (!File.Exists(_manifestFile.FullName) && !_recordDirectory.Exists)
         {
             SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
@@ -51,37 +52,53 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var manifest = ReadManifest();
         var reports = new List<CultSchemaMigrationReport>();
+        var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         foreach (var record in manifest.Records)
         {
             var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
             reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
             var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
-            Entries[stored.Key.Value] = stored;
-            _dirtyKeys[stored.Key.Value] = true;
-            EntryAdded.OnNext(stored);
+            loaded[stored.Key.Value] = stored;
         }
 
         if (_recordDirectory.Exists)
         {
             foreach (var recordFile in _recordDirectory.EnumerateFiles("*.msgpack").OrderBy(file => file.Name, StringComparer.Ordinal))
             {
-                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordFile.FullName));
+                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(ReadAllBytesShared(recordFile.FullName));
                 var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
                 reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
                 var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
-                Entries[stored.Key.Value] = stored;
-                EntryAdded.OnNext(stored);
+                loaded[stored.Key.Value] = stored;
             }
         }
 
-        SetLastSchemaMigrationReports(reports);
-        if (manifest.Records.Length == 0)
+        foreach (var pair in loaded)
         {
-            _dirtyKeys.Clear();
+            if (Entries.TryGetValue(pair.Key, out var existing) &&
+                string.Equals(existing.StoredAt, pair.Value.StoredAt, StringComparison.Ordinal) &&
+                string.Equals(existing.Descriptor.SchemaId, pair.Value.Descriptor.SchemaId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            Entries[pair.Key] = pair.Value;
+            if (existing == null)
+                EntryAdded.OnNext(pair.Value);
+            else
+                EntryUpdated.OnNext(pair.Value);
         }
 
+        foreach (var removedKey in Entries.Keys.Where(key => !loaded.ContainsKey(key)).ToArray())
+        {
+            if (Entries.TryRemove(removedKey, out var removed))
+                EntryDeleted.OnNext(removed);
+        }
+
+        SetLastSchemaMigrationReports(reports);
+        _dirtyKeys.Clear();
         _deletedKeys.Clear();
-        IsDirty = _dirtyKeys.Count > 0;
+        IsDirty = false;
     }
 
     /// <inheritdoc />
@@ -176,7 +193,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         if (File.Exists(_manifestFile.FullName))
         {
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifestFile.FullName));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(ReadAllBytesShared(_manifestFile.FullName));
             if (snapshot.SchemaCatalog.Length > 0 || snapshot.Records.Length == 0)
             {
                 return snapshot;
@@ -185,7 +202,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         if (File.Exists(_manifestFile.FullName))
         {
-            return CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(_manifestFile.FullName));
+            return CultDocumentMessagePackSerialization.DeserializeSnapshot(ReadAllBytesShared(_manifestFile.FullName));
         }
 
         return new CultPersistedStoreSnapshot
@@ -315,6 +332,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 File.Delete(tempPath);
             }
         }
+    }
+
+    private static byte[] ReadAllBytesShared(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
     }
 
     private static void ReplaceExistingFile(string sourcePath, string destinationPath)
