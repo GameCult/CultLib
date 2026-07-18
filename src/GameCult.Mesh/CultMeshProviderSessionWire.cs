@@ -60,6 +60,19 @@ namespace GameCult.Mesh
         public const string PayloadEncoding = "messagepack-base64";
     }
 
+    /// <summary>
+    /// Carries provider authorization evidence and a transport-owned connection
+    /// generation in an RUDP Connect packet. The token is not a session id.
+    /// </summary>
+    [MessagePackObject]
+    public sealed class CultMeshProviderConnectEvidenceWire
+    {
+        /// <summary>Gets or sets the fresh id minted for this physical connection.</summary>
+        [Key("clientSessionId")] public string ClientSessionId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the optional signed provider authorization token.</summary>
+        [Key("sessionToken")] public string? SessionToken { get; set; }
+    }
+
     /// <summary>Requests a fenced provider lease from the provider-session broker.</summary>
     [MessagePackObject]
     public sealed class CultMeshProviderRegistrationWire
@@ -245,6 +258,24 @@ namespace GameCult.Mesh
             return value;
         }
 
+        /// <summary>Encodes provider RUDP Connect evidence as a named MessagePack map.</summary>
+        public static byte[] EncodeConnectEvidence(CultMeshProviderConnectEvidenceWire evidence)
+        {
+            if (evidence == null) throw new ArgumentNullException(nameof(evidence));
+            Validate(evidence);
+            return MessagePackSerializer.Serialize(evidence, Options);
+        }
+
+        /// <summary>Decodes and validates provider RUDP Connect evidence.</summary>
+        public static CultMeshProviderConnectEvidenceWire DecodeConnectEvidence(byte[] payload)
+        {
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
+            var evidence = MessagePackSerializer.Deserialize<CultMeshProviderConnectEvidenceWire>(payload, Options);
+            if (evidence == null) throw new MessagePackSerializationException("Provider Connect evidence decoded to null.");
+            Validate(evidence);
+            return evidence;
+        }
+
         /// <summary>Decodes a retained provider command carried as a raw CultNet document.</summary>
         public static CultMeshProviderCommandWire DecodeCommandDocument(CultNetRawDocumentRecord document)
         {
@@ -336,6 +367,10 @@ namespace GameCult.Mesh
         {
             switch (value)
             {
+                case CultMeshProviderConnectEvidenceWire evidence:
+                    RequireText(evidence.ClientSessionId, nameof(evidence.ClientSessionId));
+                    RequireOptionalText(evidence.SessionToken, nameof(evidence.SessionToken));
+                    break;
                 case CultMeshProviderRegistrationWire registration:
                     RequireIdentity(registration.ProviderId, registration.ServiceInstanceId, registration.EndpointId, registration.VerseId);
                     RequirePositive(registration.RequestedLeaseDurationMs, nameof(registration.RequestedLeaseDurationMs));

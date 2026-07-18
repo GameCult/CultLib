@@ -415,6 +415,14 @@ test("rudp session handshake acks reliable connect and accept packets", () => {
   assert.equal(server.connected, true);
   assert.deepEqual(server.pendingReliableSequences, [100]);
 
+  const retransmittedAccept = server.acceptConnect(connect, 15, Buffer.from("ok", "utf8"));
+  assert.deepEqual(
+    encodeRudpPacket(retransmittedAccept),
+    encodeRudpPacket(accept),
+    "a retransmitted Connect reuses the pending Accept packet",
+  );
+  assert.deepEqual(server.pendingReliableSequences, [100]);
+
   client.receive(accept, 20);
   assert.equal(client.connected, true);
   assert.deepEqual(client.pendingReliableSequences, []);

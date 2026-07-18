@@ -31,6 +31,13 @@ export type CultMeshProviderOperationStatus =
   | "denied"
   | "invalid";
 
+/**
+ * Transport evidence carried by a provider's RUDP Connect packet.
+ *
+ * `clientSessionId` distinguishes an actual reconnect from retransmission of
+ * the same Connect packet. The token remains authorization evidence only; it
+ * is not a transport-session identifier.
+ */
 export interface CultMeshProviderConnectEvidenceWire {
   clientSessionId: string;
   sessionToken: string | null;
@@ -123,21 +130,29 @@ export function decodeProviderSessionPayload<T>(payload: string): T {
   return decode(Buffer.from(payload, "base64")) as T;
 }
 
-export function encodeProviderConnectEvidence(evidence: CultMeshProviderConnectEvidenceWire): Uint8Array {
+export function encodeProviderConnectEvidence(
+  evidence: CultMeshProviderConnectEvidenceWire,
+): Uint8Array {
   assertProviderConnectEvidence(evidence);
   return encode(evidence);
 }
 
-export function decodeProviderConnectEvidence(payload: Uint8Array): CultMeshProviderConnectEvidenceWire {
+export function decodeProviderConnectEvidence(
+  payload: Uint8Array,
+): CultMeshProviderConnectEvidenceWire {
   const evidence = decode(payload) as unknown;
   assertProviderConnectEvidence(evidence);
   return evidence;
 }
 
-export function assertProviderConnectEvidence(value: unknown): asserts value is CultMeshProviderConnectEvidenceWire {
+export function assertProviderConnectEvidence(
+  value: unknown,
+): asserts value is CultMeshProviderConnectEvidenceWire {
   const evidence = requireObject(value, "provider Connect evidence");
   requireText(evidence.clientSessionId, "clientSessionId");
-  if (evidence.sessionToken !== null) requireText(evidence.sessionToken, "sessionToken");
+  if (evidence.sessionToken !== null) {
+    requireText(evidence.sessionToken, "sessionToken");
+  }
 }
 
 export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord): CultMeshProviderCommandWire {

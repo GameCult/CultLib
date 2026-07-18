@@ -74,6 +74,8 @@ export class CultMeshProviderSessionBroker {
   readonly #commands = new Map<string, CultMeshProviderCommandWire>();
   readonly #receipts = new Map<string, CultMeshProviderCommandReceiptWire>();
   readonly #publicationOwners = new Map<string, { identityKey: string; publicationId: string }>();
+  readonly #closedSessions = new Set<string>();
+  readonly #inFlightBySession = new Map<string, number>();
   readonly #expiryTimer: NodeJS.Timeout;
   #work: Promise<void> = Promise.resolve();
   #leaseSequence = 0;
@@ -101,15 +103,34 @@ export class CultMeshProviderSessionBroker {
     request: CultNetOperationRequestMessage,
     session: CultMeshRudpServerSession,
   ): Promise<CultNetOperationResponseMessage> {
+    this.#inFlightBySession.set(
+      session.sessionId,
+      (this.#inFlightBySession.get(session.sessionId) ?? 0) + 1,
+    );
     const work = this.#work.then(() => this.#handle(request, session));
     this.#work = work.then(() => undefined, () => undefined);
-    return await work;
+    try {
+      return await work;
+    } finally {
+      const remaining = (this.#inFlightBySession.get(session.sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.#inFlightBySession.set(session.sessionId, remaining);
+      } else {
+        this.#inFlightBySession.delete(session.sessionId);
+        this.#closedSessions.delete(session.sessionId);
+      }
+    }
   }
 
   async #handle(
     request: CultNetOperationRequestMessage,
     session: CultMeshRudpServerSession,
   ): Promise<CultNetOperationResponseMessage> {
+    if (this.#closedSessions.has(session.sessionId)) {
+      return this.#response(request, "denied", cultMeshProviderSessionSchemas.mutationAcceptance, {}, [
+        "The physical provider session is closed or replaced.",
+      ]);
+    }
     if (request.serviceId !== CULTMESH_PROVIDER_SESSION_SERVICE_ID) {
       return this.#response(request, "denied", cultMeshProviderSessionSchemas.mutationAcceptance, {}, [
         `Unsupported service ${request.serviceId}.`,
@@ -148,6 +169,9 @@ export class CultMeshProviderSessionBroker {
   }
 
   public sessionClosed(session: CultMeshRudpServerSession): void {
+    if ((this.#inFlightBySession.get(session.sessionId) ?? 0) > 0) {
+      this.#closedSessions.add(session.sessionId);
+    }
     for (const leaseId of this.#sessionLeases.get(session.sessionId) ?? []) {
       const record = this.#leases.get(leaseId);
       if (record?.session?.sessionId === session.sessionId) record.session = undefined;
@@ -205,6 +229,11 @@ export class CultMeshProviderSessionBroker {
     if (!await infrastructure(() => this.#options.authorizeRegistration(identity, session))) {
       return this.#response(request, "denied", cultMeshProviderSessionSchemas.mutationAcceptance, {}, [
         "The CultNet session does not authorize this provider identity.",
+      ]);
+    }
+    if (this.#closedSessions.has(session.sessionId)) {
+      return this.#response(request, "denied", cultMeshProviderSessionSchemas.mutationAcceptance, {}, [
+        "The physical provider session closed while registration authority was being checked.",
       ]);
     }
     const identityKey = identityTuple(identity);

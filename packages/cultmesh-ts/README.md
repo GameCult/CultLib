@@ -280,6 +280,7 @@ const odinTransport = new CultMeshProviderRudpTransport({
   endpoint: "rudp://127.0.0.1:17871",
   runtimeId: "voidbot-worker-7",
   connectionId: 0x43554c54,
+  sessionToken: process.env.ODIN_PROVIDER_SESSION_TOKEN,
 });
 
 const session = new CultMeshProviderSession({
@@ -321,6 +322,10 @@ desired documents and durable receipt outbox.
 Do not advertise it as a public provider boundary until the surrounding
 CultNet session authenticates a claim authorizing the four-part provider
 identity. Source address and successful contact are not authority.
+The adapter carries `sessionToken` in a typed RUDP Connect-evidence map beside
+a fresh `clientSessionId`. Packet retransmits reuse that id; an actual reconnect
+mints another. The receiver must decode and validate the token as authorization
+evidence for the requested provider identity.
 
 ## RUDP Helpers
 

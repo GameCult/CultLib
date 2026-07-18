@@ -10,6 +10,32 @@ namespace GameCult.Mesh.Tests;
 public sealed class CultMeshProviderSessionWireTests
 {
     private const string RegistrationGolden = "hqpwcm92aWRlcklkqGFldGhlcmlhsXNlcnZpY2VJbnN0YW5jZUlkq2FldGhlcmlhLTQyqmVuZHBvaW50SWSvYWV0aGVyaWEtcHVibGljp3ZlcnNlSWSmcHVibGljuHJlcXVlc3RlZExlYXNlRHVyYXRpb25Nc811MLBhdXRob3JpdHlMZWFzZUlkq2F1dGhvcml0eS03";
+    private const string ConnectEvidenceGolden = "gq9jbGllbnRTZXNzaW9uSWSyYWV0aGVyaWEtY2xpZW50LTQyrHNlc3Npb25Ub2tlbrJvZGluLXNlc3Npb24tdG9rZW4=";
+    private const string TokenlessConnectEvidenceGolden = "gq9jbGllbnRTZXNzaW9uSWSyYWV0aGVyaWEtY2xpZW50LTQyrHNlc3Npb25Ub2tlbsA=";
+
+    [Test]
+    public void ConnectEvidence_SeparatesTransportGenerationFromAuthorityToken()
+    {
+        var encoded = CultMeshProviderSessionWire.EncodeConnectEvidence(
+            new CultMeshProviderConnectEvidenceWire
+            {
+                ClientSessionId = "aetheria-client-42",
+                SessionToken = "odin-session-token"
+            });
+        var decoded = CultMeshProviderSessionWire.DecodeConnectEvidence(encoded);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Convert.ToBase64String(encoded), Is.EqualTo(ConnectEvidenceGolden),
+                "C#, TypeScript, and Rust must emit the same Connect evidence map");
+            Assert.That(decoded.ClientSessionId, Is.EqualTo("aetheria-client-42"));
+            Assert.That(decoded.SessionToken, Is.EqualTo("odin-session-token"));
+            Assert.That(
+                Convert.ToBase64String(CultMeshProviderSessionWire.EncodeConnectEvidence(
+                    new CultMeshProviderConnectEvidenceWire { ClientSessionId = "aetheria-client-42" })),
+                Is.EqualTo(TokenlessConnectEvidenceGolden));
+        });
+    }
 
     [Test]
     public void Registration_RoundTrips_InsideCanonicalCultNetOperationEnvelope()
