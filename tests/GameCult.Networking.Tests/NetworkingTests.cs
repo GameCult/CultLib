@@ -3207,10 +3207,15 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public void CultMeshAuthorityLeaseCatalog_Authorizes_PeerRoleAndShard()
+        public void CultMeshAuthorityResolver_Authorizes_PeerRoleAndShard()
         {
             var now = DateTimeOffset.Parse("2026-05-20T12:00:00.0000000Z");
             var catalog = CultMesh.CreateAuthorityLeaseCatalog();
+            var resolver = new CultMeshAuthorityResolver(
+                catalog,
+                new AcceptingAuthoritySignatureVerifier(),
+                new NoAuthorityRevocations(),
+                new ManualCultMeshClock(now));
             using var peers = CultMesh.CreatePeerCatalog();
             var peer = new CultMeshPeerCard(
                 "peer-primary",
@@ -3221,7 +3226,8 @@ namespace GameCult.Networking.Tests
                 authorityLeaseId: "lease-primary");
             peers.Upsert(peer);
 
-            Assert.That(peers.FindAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now), Is.Empty);
+            Assert.That(peers.FindAuthorized(
+                "aetheria-main", CultMeshPeerRoles.ShardPrimary, resolver, 1, "players-us-east"), Is.Empty);
             catalog.Upsert(new CultMeshAuthorityLease(
                 "lease-primary",
                 "aetheria-main",
@@ -3231,15 +3237,24 @@ namespace GameCult.Networking.Tests
                 "gc-operator",
                 now.AddMinutes(-5),
                 now.AddMinutes(5),
-                signature: "sig"));
+                signature: "sig",
+                authorityEpoch: 1));
 
-            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now), Is.True);
-            Assert.That(peers.FindAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now).Single(), Is.SameAs(peer));
-            Assert.That(peers.FirstAuthorized("aetheria-main", CultMeshPeerRoles.ShardPrimary, catalog, "players-us-east", now), Is.SameAs(peer));
-            Assert.That(peers.FirstAuthorized("aetheria-main", CultMeshPeerRoles.ReadReplica, catalog, "players-us-east", now), Is.Null);
-            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-eu", now), Is.False);
-            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ReadReplica, "players-us-east", now), Is.False);
-            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now.AddMinutes(6)), Is.False);
+            Assert.That(resolver.Resolve(new CultMeshAuthorityRequest(
+                peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", 1)).IsAuthorized, Is.True);
+            Assert.That(peers.FindAuthorized(
+                "aetheria-main", CultMeshPeerRoles.ShardPrimary, resolver, 1, "players-us-east").Single(), Is.SameAs(peer));
+            Assert.That(peers.FirstAuthorized(
+                "aetheria-main", CultMeshPeerRoles.ShardPrimary, resolver, 1, "players-us-east"), Is.SameAs(peer));
+            Assert.That(peers.FirstAuthorized(
+                "aetheria-main", CultMeshPeerRoles.ReadReplica, resolver, 1, "players-us-east"), Is.Null);
+            Assert.That(resolver.Resolve(new CultMeshAuthorityRequest(
+                peer, CultMeshPeerRoles.ShardPrimary, "players-eu", 1)).IsAuthorized, Is.False);
+            Assert.That(resolver.Resolve(new CultMeshAuthorityRequest(
+                peer, CultMeshPeerRoles.ReadReplica, "players-us-east", 1)).IsAuthorized, Is.False);
+#pragma warning disable CS0618
+            Assert.That(catalog.IsAuthorized(peer, CultMeshPeerRoles.ShardPrimary, "players-us-east", now), Is.False);
+#pragma warning restore CS0618
         }
 
         [Test]
@@ -3271,6 +3286,11 @@ namespace GameCult.Networking.Tests
             using var peers = CultMesh.CreatePeerCatalog();
             var leases = CultMesh.CreateAuthorityLeaseCatalog();
             var now = DateTimeOffset.UtcNow;
+            var authority = new CultMeshAuthorityResolver(
+                leases,
+                new AcceptingAuthoritySignatureVerifier(),
+                new NoAuthorityRevocations(),
+                new ManualCultMeshClock(now));
             var peer = new CultMeshPeerCard(
                 "csharp-cultmesh-rudp-server",
                 "local",
@@ -3283,10 +3303,10 @@ namespace GameCult.Networking.Tests
                 "csharp-cultmesh-rudp-client",
                 connectionId,
                 peers,
-                leases,
+                authority,
+                1,
                 "local",
                 "schema",
-                at: now,
                 options: new CultMeshRudpSocketOptions
                 {
                     ResendDelayMs = 25,
@@ -3302,7 +3322,9 @@ namespace GameCult.Networking.Tests
                 [],
                 "csharp-authority",
                 now.AddSeconds(-1),
-                now.AddSeconds(30)));
+                now.AddSeconds(30),
+                signature: "sig",
+                authorityEpoch: 1));
 
             using var serverPumpCts = new CancellationTokenSource();
             var serverPump = Task.Run(() =>
@@ -3319,10 +3341,10 @@ namespace GameCult.Networking.Tests
                 "csharp-cultmesh-rudp-client",
                 connectionId,
                 peers,
-                leases,
+                authority,
+                1,
                 "local",
                 "schema",
-                at: now,
                 options: new CultMeshRudpClientOptions
                 {
                     ConnectPayload = Encoding.UTF8.GetBytes("join"),
@@ -5083,6 +5105,17 @@ namespace GameCult.Networking.Tests
                 UtcNow += delay;
                 return Task.CompletedTask;
             }
+        }
+
+        private sealed class AcceptingAuthoritySignatureVerifier : ICultMeshAuthoritySignatureVerifier
+        {
+            public bool Verify(CultMeshAuthorityLease lease) =>
+                string.Equals(lease.Signature, "sig", StringComparison.Ordinal);
+        }
+
+        private sealed class NoAuthorityRevocations : ICultMeshAuthorityRevocationSource
+        {
+            public bool IsRevoked(string leaseId, long authorityEpoch) => false;
         }
 
         [MessagePack.MessagePackObject]
