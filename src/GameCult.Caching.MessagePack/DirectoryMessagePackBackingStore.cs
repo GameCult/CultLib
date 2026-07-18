@@ -75,6 +75,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         foreach (var pair in loaded)
         {
+            if (_dirtyKeys.ContainsKey(pair.Key) || _deletedKeys.ContainsKey(pair.Key))
+                continue;
+
             if (Entries.TryGetValue(pair.Key, out var existing) &&
                 string.Equals(existing.StoredAt, pair.Value.StoredAt, StringComparison.Ordinal) &&
                 string.Equals(existing.Descriptor.SchemaId, pair.Value.Descriptor.SchemaId, StringComparison.Ordinal))
@@ -91,14 +94,15 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         foreach (var removedKey in Entries.Keys.Where(key => !loaded.ContainsKey(key)).ToArray())
         {
+            if (_dirtyKeys.ContainsKey(removedKey) || _deletedKeys.ContainsKey(removedKey))
+                continue;
+
             if (Entries.TryRemove(removedKey, out var removed))
                 EntryDeleted.OnNext(removed);
         }
 
         SetLastSchemaMigrationReports(reports);
-        _dirtyKeys.Clear();
-        _deletedKeys.Clear();
-        IsDirty = false;
+        IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
     }
 
     /// <inheritdoc />

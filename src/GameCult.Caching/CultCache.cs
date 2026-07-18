@@ -2092,6 +2092,13 @@ namespace GameCult.Caching
                 return;
             }
 
+            // A single-file snapshot cannot distinguish local dirty keys from clean keys.
+            // Pulling while local mutations are staged would let an older disk snapshot
+            // erase those mutations before the next flush. Flush first; clean readers can
+            // still poll external snapshots incrementally.
+            if (IsDirty)
+                return;
+
             CultPersistedStoreSnapshot snapshot;
             try
             {

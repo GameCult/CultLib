@@ -108,6 +108,53 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task SingleFileMessagePackBackingStore_PullAll_DoesNotEraseUnflushedLocalMutations()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
+
+            try
+            {
+                using (var seed = await CultCacheMessagePack.OpenAsync(filePath))
+                {
+                    await seed.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "persisted",
+                        Value = "before-local-write"
+                    });
+                    await seed.FlushAsync();
+                }
+
+                CultRecordHandle<NamedTestEntry> localHandle;
+                using (var cache = await CultCacheMessagePack.OpenAsync(filePath))
+                {
+                    localHandle = await cache.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "local",
+                        Value = "must-survive-pull"
+                    });
+
+                    Assert.That(cache.IsDirty, Is.True);
+                    await cache.PullAllBackingStoresAsync();
+
+                    Assert.That(cache.Get<NamedTestEntry>(localHandle.Key)?.Value,
+                        Is.EqualTo("must-survive-pull"));
+                    Assert.That(cache.IsDirty, Is.True,
+                        "pulling a clean disk snapshot must not pardon staged local mutations");
+                    await cache.FlushAsync();
+                }
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(filePath);
+                Assert.That(reopened.Get<NamedTestEntry>(localHandle.Key)?.Value,
+                    Is.EqualTo("must-survive-pull"));
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+            }
+        }
+
+        [Test]
         public async Task CultCache_DirtyState_Tracks_Mutations_And_ExplicitFlush()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
@@ -415,6 +462,60 @@ namespace GameCult.Caching.Tests
 
                 Assert.That(reader.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("once"));
                 Assert.That(observedChanges, Is.EqualTo(1), "unchanged paged records must not replay");
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+                if (Directory.Exists(recordsPath))
+                    Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_PullAll_PreservesUnflushedLocalKeys()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                using (var seed = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    await seed.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "persisted",
+                        Value = "before-local-write"
+                    });
+                    await seed.FlushAsync();
+                }
+
+                CultRecordHandle<NamedTestEntry> localHandle;
+                using (var cache = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    localHandle = await cache.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "local",
+                        Value = "must-survive-pull"
+                    });
+
+                    await cache.PullAllBackingStoresAsync();
+
+                    Assert.That(cache.Get<NamedTestEntry>(localHandle.Key)?.Value,
+                        Is.EqualTo("must-survive-pull"));
+                    Assert.That(cache.IsDirty, Is.True);
+                    await cache.FlushAsync();
+                }
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(localHandle.Key)?.Value,
+                    Is.EqualTo("must-survive-pull"));
             }
             finally
             {
