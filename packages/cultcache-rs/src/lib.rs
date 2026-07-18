@@ -5,9 +5,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -97,6 +100,45 @@ pub struct PushAllOptions {
     pub soft: bool,
 }
 
+/// A complete new snapshot replaced the committed pathname, but its final
+/// durability barrier failed. Callers must fail-stop or reopen and reconcile;
+/// retrying as though the write never committed can duplicate higher-level work.
+#[derive(Debug)]
+pub struct CommittedSnapshotDurabilityUncertain {
+    path: PathBuf,
+    detail: String,
+}
+
+impl CommittedSnapshotDurabilityUncertain {
+    fn new(path: PathBuf, error: impl fmt::Display) -> Self {
+        Self {
+            path,
+            detail: error.to_string(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for CommittedSnapshotDurabilityUncertain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "snapshot {} was committed but its durability is uncertain: {}",
+            self.path.display(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for CommittedSnapshotDurabilityUncertain {}
+
 pub trait CacheBackingStore: Send {
     fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>>;
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
@@ -144,26 +186,50 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
+        self.write_all_unlocked_with_observer(entries, |_| Ok(()))
+    }
+
+    fn write_all_unlocked_with_observer(
+        &self,
+        entries: &[CultCacheEnvelope],
+        mut observe: impl FnMut(SnapshotReplacementStage) -> Result<()>,
+    ) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        remove_stale_candidates(&self.path)?;
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries))
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
-        fs::write(&tmp_path, bytes)
+        let mut candidate = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to open {}", tmp_path.display()))?;
+        candidate
+            .write_all(&bytes)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("failed to replace {}", self.path.display()))?;
+        candidate
+            .sync_all()
+            .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
+        drop(candidate);
+
+        observe(SnapshotReplacementStage::CandidateSynced)?;
+        replace_file(&tmp_path, &self.path)?;
+        if let Err(error) = observe(SnapshotReplacementStage::TargetReplaced) {
+            return Err(anyhow::Error::new(
+                CommittedSnapshotDurabilityUncertain::new(self.path.clone(), error),
+            ));
         }
-        fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!(
-                "failed to move {} to {}",
-                tmp_path.display(),
-                self.path.display()
-            )
-        })?;
+
+        if let Some(parent) = self.path.parent() {
+            if let Err(error) = sync_parent_directory(parent) {
+                return Err(anyhow::Error::new(
+                    CommittedSnapshotDurabilityUncertain::new(self.path.clone(), error),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -178,13 +244,26 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.with_exclusive_lock_using_unlock(action, |lock| fs2::FileExt::unlock(lock))
+    }
+
+    fn with_exclusive_lock_using_unlock<T>(
+        &self,
+        action: impl FnOnce() -> Result<T>,
+        unlock: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<T> {
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
-        let result = action();
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
-        result
+        let action_result = action();
+
+        // Closing the file handle releases the OS lock even when an explicit
+        // unlock reports an error. The action outcome remains authoritative:
+        // in particular, never replace a committed-durability-uncertain error
+        // with secondary lock-cleanup noise.
+        let _unlock_result = unlock(&lock);
+        drop(lock);
+        action_result
     }
 
     fn open_lock_file(&self) -> Result<File> {
@@ -742,6 +821,186 @@ fn temporary_path_for(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
+fn is_canonical_candidate_uuid(value: &[u8]) -> bool {
+    if value.len() != 36 || !value.is_ascii() {
+        return false;
+    }
+    let Ok(value) = std::str::from_utf8(value) else {
+        return false;
+    };
+    let Ok(uuid) = uuid::Uuid::parse_str(value) else {
+        return false;
+    };
+    uuid.hyphenated().to_string() == value
+}
+
+#[cfg(unix)]
+fn is_owned_candidate_name(target_name: &OsStr, candidate_name: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let target = target_name.as_bytes();
+    let candidate = candidate_name.as_bytes();
+    let Some(remainder) = candidate.strip_prefix(target) else {
+        return false;
+    };
+    let Some(remainder) = remainder.strip_prefix(b".") else {
+        return false;
+    };
+    let Some(uuid) = remainder.strip_suffix(b".tmp") else {
+        return false;
+    };
+    is_canonical_candidate_uuid(uuid)
+}
+
+#[cfg(windows)]
+fn is_owned_candidate_name(target_name: &OsStr, candidate_name: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    let target = target_name.encode_wide().collect::<Vec<_>>();
+    let candidate = candidate_name.encode_wide().collect::<Vec<_>>();
+    let Some(remainder) = candidate.strip_prefix(target.as_slice()) else {
+        return false;
+    };
+    let Some(remainder) = remainder.strip_prefix(&[b'.' as u16]) else {
+        return false;
+    };
+    let suffix = [b'.' as u16, b't' as u16, b'm' as u16, b'p' as u16];
+    let Some(uuid_wide) = remainder.strip_suffix(&suffix) else {
+        return false;
+    };
+    let Ok(uuid) = uuid_wide
+        .iter()
+        .map(|value| u8::try_from(*value))
+        .collect::<std::result::Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    is_canonical_candidate_uuid(&uuid)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_owned_candidate_name(target_name: &OsStr, candidate_name: &OsStr) -> bool {
+    let (Some(target), Some(candidate)) = (target_name.to_str(), candidate_name.to_str()) else {
+        return false;
+    };
+    let Some(remainder) = candidate.strip_prefix(target) else {
+        return false;
+    };
+    let Some(remainder) = remainder.strip_prefix('.') else {
+        return false;
+    };
+    let Some(uuid) = remainder.strip_suffix(".tmp") else {
+        return false;
+    };
+    is_canonical_candidate_uuid(uuid.as_bytes())
+}
+
+fn stale_candidate_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
+    let target_name = path
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("cultcache.msgpack"));
+    let mut candidates = Vec::new();
+    for entry in
+        fs::read_dir(parent).with_context(|| format!("failed to inspect {}", parent.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to inspect {}", parent.display()))?;
+        let name = entry.file_name();
+        if is_owned_candidate_name(target_name, &name) {
+            candidates.push(entry.path());
+        }
+    }
+    Ok(candidates)
+}
+
+fn remove_stale_candidates(path: &Path) -> Result<()> {
+    for candidate in stale_candidate_paths(path)? {
+        fs::remove_file(&candidate)
+            .with_context(|| format!("failed to remove stale candidate {}", candidate.display()))?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotReplacementStage {
+    CandidateSynced,
+    TargetReplaced,
+}
+
+#[cfg(unix)]
+fn replace_file(candidate: &Path, target: &Path) -> Result<()> {
+    fs::rename(candidate, target).with_context(|| {
+        format!(
+            "failed to atomically replace {} with {}",
+            target.display(),
+            candidate.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn replace_file(candidate: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let candidate_wide = candidate
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        MoveFileExW(
+            candidate_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to atomically replace {} with {}",
+                target.display(),
+                candidate.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_file(candidate: &Path, target: &Path) -> Result<()> {
+    fs::rename(candidate, target).with_context(|| {
+        format!(
+            "failed to replace {} with {}",
+            target.display(),
+            candidate.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    File::open(parent)
+        .with_context(|| format!("failed to open directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to flush directory {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +1036,263 @@ mod tests {
     }
 
     cultcache_registry!(TestEntries { Settings, Note });
+
+    fn test_envelope(value: &str) -> CultCacheEnvelope {
+        CultCacheEnvelope {
+            key: "state".to_string(),
+            r#type: "test-state".to_string(),
+            payload: value.as_bytes().to_vec(),
+            stored_at: "2026-07-15T00:00:00Z".to_string(),
+            schema_id: Some("tests.test_state.v1".to_string()),
+        }
+    }
+
+    #[test]
+    fn interruption_before_replacement_preserves_committed_snapshot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        let old = test_envelope("old");
+        let new = test_envelope("new");
+        store.push_all(std::slice::from_ref(&old), PushAllOptions::default())?;
+
+        let result = store.write_all_unlocked_with_observer(std::slice::from_ref(&new), |stage| {
+            assert_eq!(stage, SnapshotReplacementStage::CandidateSynced);
+            assert!(
+                store_path.exists(),
+                "the committed pathname must never be removed"
+            );
+            Err(anyhow!("simulated interruption before replacement"))
+        });
+
+        assert!(result.is_err());
+        let recovered = store.pull_all()?;
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].payload, old.payload);
+        assert_eq!(stale_candidate_paths(&store_path)?.len(), 1);
+
+        store.push_all(std::slice::from_ref(&new), PushAllOptions::default())?;
+        let recovered = store.pull_all()?;
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].payload, new.payload);
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn interruption_after_replacement_recovers_new_snapshot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        let old = test_envelope("old");
+        let new = test_envelope("new");
+        store.push_all(std::slice::from_ref(&old), PushAllOptions::default())?;
+
+        let result = store.write_all_unlocked_with_observer(std::slice::from_ref(&new), |stage| {
+            if stage == SnapshotReplacementStage::TargetReplaced {
+                return Err(anyhow!("simulated interruption after replacement"));
+            }
+            Ok(())
+        });
+
+        let error = result.expect_err("the injected post-replacement failure must surface");
+        let uncertain = error
+            .downcast_ref::<CommittedSnapshotDurabilityUncertain>()
+            .expect("post-replacement failures must be typed as committed but uncertain");
+        assert_eq!(uncertain.path(), store_path.as_path());
+        assert!(uncertain.detail().contains("simulated interruption"));
+        let recovered = store.pull_all()?;
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].payload, new.payload);
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn first_write_interruption_before_replacement_leaves_store_uncommitted() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let store = SingleFileMessagePackBackingStore::new(&store_path);
+        let new = test_envelope("new");
+
+        let result = store.write_all_unlocked_with_observer(std::slice::from_ref(&new), |stage| {
+            assert_eq!(stage, SnapshotReplacementStage::CandidateSynced);
+            Err(anyhow!("simulated interruption before first replacement"))
+        });
+
+        assert!(result.is_err());
+        assert!(!store_path.exists());
+        assert!(store.pull_all()?.is_empty());
+        assert_eq!(stale_candidate_paths(&store_path)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn first_write_interruption_after_replacement_exposes_complete_snapshot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let store = SingleFileMessagePackBackingStore::new(&store_path);
+        let new = test_envelope("new");
+
+        let result = store.write_all_unlocked_with_observer(std::slice::from_ref(&new), |stage| {
+            if stage == SnapshotReplacementStage::TargetReplaced {
+                return Err(anyhow!("simulated interruption after first replacement"));
+            }
+            Ok(())
+        });
+
+        let error = result.expect_err("the injected post-replacement failure must surface");
+        assert!(
+            error
+                .downcast_ref::<CommittedSnapshotDurabilityUncertain>()
+                .is_some()
+        );
+        let recovered = store.pull_all()?;
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].payload, new.payload);
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unlock_failure_never_masks_the_action_outcome() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let store = SingleFileMessagePackBackingStore::new(&store_path);
+
+        let completed = store.with_exclusive_lock_using_unlock(
+            || Ok(42_u32),
+            |_| Err(std::io::Error::other("simulated unlock failure")),
+        )?;
+        assert_eq!(completed, 42);
+
+        let uncertain: Result<()> = store.with_exclusive_lock_using_unlock(
+            || {
+                Err(anyhow::Error::new(
+                    CommittedSnapshotDurabilityUncertain::new(
+                        store_path.clone(),
+                        "primary post-commit failure",
+                    ),
+                ))
+            },
+            |_| Err(std::io::Error::other("secondary unlock failure")),
+        );
+        let error = uncertain.expect_err("the action error must survive unlock cleanup");
+        let error = error
+            .downcast_ref::<CommittedSnapshotDurabilityUncertain>()
+            .expect("the primary typed outcome must not be masked");
+        assert!(error.detail().contains("primary post-commit failure"));
+        assert!(!error.detail().contains("secondary unlock failure"));
+
+        // Both injected unlock failures still close their lock handles. A new
+        // exclusive operation must therefore acquire the lock normally.
+        store.with_exclusive_lock(|| Ok(()))?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_cleanup_preserves_non_uuid_lookalikes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let lookalike = temp.path().join("cache.msgpack.not-a-uuid.tmp");
+        fs::write(&lookalike, b"belongs to somebody else")?;
+
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        store.push_all(&[test_envelope("new")], PushAllOptions::default())?;
+
+        assert_eq!(fs::read(&lookalike)?, b"belongs to somebody else");
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_candidate_symlink_is_removed_without_clobbering_its_target() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let victim_path = temp.path().join("victim.txt");
+        fs::write(&victim_path, b"untouched")?;
+        let stale_path = temporary_path_for(&store_path);
+        symlink(&victim_path, &stale_path)?;
+
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        store.push_all(&[test_envelope("new")], PushAllOptions::default())?;
+
+        assert_eq!(fs::read(&victim_path)?, b"untouched");
+        assert!(!stale_path.exists());
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_target_names_recover_their_own_candidates() -> Result<()> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let store_name = OsString::from_vec(b"cache-\xff.msgpack".to_vec());
+        let store_path = temp.path().join(store_name);
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        let new = test_envelope("new");
+
+        let interrupted = store
+            .write_all_unlocked_with_observer(std::slice::from_ref(&new), |_| {
+                Err(anyhow!("simulated interruption"))
+            });
+        assert!(interrupted.is_err());
+        assert_eq!(stale_candidate_paths(&store_path)?.len(), 1);
+
+        store.push_all(std::slice::from_ref(&new), PushAllOptions::default())?;
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        assert_eq!(store.pull_all()?[0].payload, new.payload);
+        Ok(())
+    }
+
+    #[test]
+    fn two_contending_writers_leave_one_complete_snapshot() -> Result<()> {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cache.msgpack");
+        let barrier = Arc::new(Barrier::new(3));
+        let spawn_writer = |marker: u8| {
+            let store_path = store_path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || -> Result<()> {
+                let mut entries = Vec::new();
+                for index in 0..128 {
+                    let mut entry = test_envelope(std::str::from_utf8(&[marker]).unwrap());
+                    entry.key = format!("state-{index:03}");
+                    entry.payload = vec![marker; 4096];
+                    entries.push(entry);
+                }
+                let mut store = SingleFileMessagePackBackingStore::new(store_path);
+                barrier.wait();
+                store.push_all(&entries, PushAllOptions::default())
+            })
+        };
+
+        let writer_a = spawn_writer(b'a');
+        let writer_b = spawn_writer(b'b');
+        barrier.wait();
+        writer_a.join().expect("writer A panicked")?;
+        writer_b.join().expect("writer B panicked")?;
+
+        let recovered = SingleFileMessagePackBackingStore::new(&store_path).pull_all()?;
+        assert_eq!(recovered.len(), 128);
+        let winner = recovered[0].payload[0];
+        assert!(winner == b'a' || winner == b'b');
+        assert!(
+            recovered
+                .iter()
+                .all(|entry| entry.payload == vec![winner; 4096])
+        );
+        assert!(stale_candidate_paths(&store_path)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn familiar_cultcache_flow_persists_and_reloads_typed_documents() -> Result<()> {
