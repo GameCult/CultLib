@@ -40,6 +40,10 @@ namespace GameCult.Networking
         /// <summary>Gets the local reactive cache receiving replicated documents.</summary>
         public CultCache Cache => _cache;
 
+        /// <summary>Completes if the retained transport pump terminates with an unrecoverable error.</summary>
+        public Task<Exception>? BackgroundFailure =>
+            (_client as RudpCultNetSchemaClient)?.BackgroundFailure;
+
         /// <summary>
         /// Starts a remote subscription and waits until its initial matching snapshot is in the local cache.
         /// </summary>

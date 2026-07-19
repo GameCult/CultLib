@@ -30,6 +30,82 @@ public sealed class CultMeshFrameBodyTests
         lease.ReadByte(0).Should().Be(1);
     }
 
+    [Test]
+    public void MappedCursorObservesNewGenerationsWithoutNewControlDescriptors()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1, 2, 3 }, DateTimeOffset.UtcNow, out var bootstrap).Should().BeTrue();
+        using var cursor = new CultMeshMappedFrameBodyCursor(bootstrap);
+
+        cursor.TryAcquireLatest(out var first).Should().BeTrue();
+        using (first)
+        {
+            first.Descriptor.Sequence.Should().Be(bootstrap.Sequence);
+            first.ReadByte(0).Should().Be(1);
+        }
+        cursor.TryAcquireLatest(out _).Should().BeFalse();
+
+        publisher.TryPublish(new byte[] { 9, 8, 7 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+
+        cursor.TryAcquireLatest(out var second).Should().BeTrue();
+        using (second)
+        {
+            second.Descriptor.Sequence.Should().Be(bootstrap.Sequence + 1);
+            second.Descriptor.ByteSize.Should().Be(3);
+            second.ReadByte(0).Should().Be(9);
+        }
+        cursor.TryAcquireLatest(out _).Should().BeFalse();
+    }
+
+    [Test]
+    public void MappedCursorWaitsForNewControlContractWhenFrameLengthChanges()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1 }, DateTimeOffset.UtcNow, out var bootstrap).Should().BeTrue();
+        using var cursor = new CultMeshMappedFrameBodyCursor(bootstrap);
+        cursor.TryAcquireLatest(out var first).Should().BeTrue();
+        first.Dispose();
+
+        publisher.TryPublish(new byte[] { 2, 3 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+
+        cursor.TryAcquireLatest(out _).Should().BeFalse();
+    }
+
+    [Test]
+    public void MappedCursorReaderLeaseProtectsItsSlotUntilDisposed()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1 }, DateTimeOffset.UtcNow, out var bootstrap).Should().BeTrue();
+        using var cursor = new CultMeshMappedFrameBodyCursor(bootstrap);
+        cursor.TryAcquireLatest(out var protectedRead).Should().BeTrue();
+
+        publisher.TryPublish(new byte[] { 2 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 3 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+        publisher.TryPublish(new byte[] { 4 }, DateTimeOffset.UtcNow, out var fourth).Should().BeTrue();
+
+        fourth.CapabilityToken.Should().NotBe(bootstrap.CapabilityToken);
+        protectedRead.ReadByte(0).Should().Be(1);
+        protectedRead.Dispose();
+    }
+
+    [Test]
+    public void MappedCursorIgnoresExpiredGenerations()
+    {
+        var publishedAt = DateTimeOffset.UtcNow;
+        using var publisher = new CultMeshFrameBodyPublisher(
+            "body",
+            "tests.frame.v2",
+            layoutVersion: 2,
+            capacity: 64,
+            producerEpoch: 9,
+            slotByteLength: 64,
+            leaseDuration: TimeSpan.FromMilliseconds(10));
+        publisher.TryPublish(new byte[] { 42 }, publishedAt, out var bootstrap).Should().BeTrue();
+        using var cursor = new CultMeshMappedFrameBodyCursor(bootstrap);
+
+        cursor.TryAcquireLatest(publishedAt.AddMilliseconds(11), out _).Should().BeFalse();
+    }
+
     [TestCase("wrong", 2, 9)]
     [TestCase("tests.frame.v2", 1, 9)]
     [TestCase("tests.frame.v2", 2, 8)]

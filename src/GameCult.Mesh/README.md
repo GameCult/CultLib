@@ -380,6 +380,40 @@ runtime-native storage: shared D3D12 textures, shared memory rings, platform GPU
 handles, DMA buffers, or paged CultCache fallbacks when a zero-copy transport is
 not available.
 
+For entity SoA and other CPU-visible hot state, subscribe to the exact control
+records and logical bodies the lowerer consumes. The subscription advertises
+the transports the runtime can import; the provider's demand tracker selects
+the cheapest mutually usable representation. A same-machine consumer normally
+receives one shared-memory bootstrap descriptor, then observes later commits
+through the mapped ring header. Per-frame CultNet documents are neither needed
+nor desirable.
+
+```csharp
+var initial = await subscriptions.SubscribeAsync(
+    "pilot-world",
+    recordKeys: new[] { entityLayoutRecord, bodyPublicationRecord },
+    schemaIds: new[] { entityLayoutSchema, CultMeshBodyPublicationSchemaVersions.Publication },
+    consumerRuntimeId: "eve-unity",
+    bodyIds: new[] { "eve:entity-soa:aetheria.daemon:pilot" },
+    supportedBodyTransports: new[]
+    {
+        CultMeshBodyTransportKind.SharedMemory.ToString(),
+        CultMeshBodyTransportKind.Network.ToString()
+    });
+
+var bootstrap = initial.OfType<CultMeshBodyPublicationDocument>().Single();
+var mapped = bootstrap.Representations.Single(CultMeshMappedFrameBodyCursor.CanOpen);
+using var cursor = new CultMeshMappedFrameBodyCursor(mapped);
+
+// Call from the consumer's normal update loop. The returned lease is read-only
+// and must remain alive until the renderer has finished consuming that frame.
+if (cursor.TryAcquireLatest(out var frame))
+    Present(frame);
+```
+
+Snapshots remain bootstrap and recovery machinery. Reactive document changes
+carry small control state; mapped or negotiated network bodies carry hot data.
+
 ```csharp
 using GameCult.Mesh;
 
