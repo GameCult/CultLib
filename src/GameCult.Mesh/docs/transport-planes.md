@@ -30,8 +30,15 @@ and atomic promotion regardless of the selected content connector.
 Passing explicit connector lists replaces those defaults.
 
 Realtime frames declare whether they require reliable ordered delivery,
-latest-only delivery, or unreliable delivery. The contract is ready for a QUIC
-connector; no RUDP implementation is installed implicitly in its place.
+latest-only delivery, or unreliable delivery. The optional
+`GameCult.Mesh.Quic` package provides the .NET 10/MsQuic connector and server.
+It maps reliable ordered frames to one persistent stream and latest-only frames
+to independent streams with keyed `(producer epoch, sequence)` pending-state
+replacement. Its
+`System.Net.Quic` adapter fails closed for unreliable frames because that API
+does not expose QUIC datagrams. A native MsQuic connector must own that mode and
+the generic Unity runtime boundary. No RUDP implementation is installed
+implicitly in its place.
 
 **Derived state:** connector choice, physical endpoint, connection health, and
 transport diagnostics. None of these grant provider authority or become content
@@ -62,6 +69,11 @@ Remote release requires authenticated encryption and binding the authenticated
 peer to the advertised provider identity. Adding TLS must not move discovery,
 authorization, content verification, or application semantics into the TCP
 adapter.
+
+The QUIC adapter always uses TLS 1.3. Its certificate validation callback is
+given the advertised endpoint identity so the consumer can bind transport
+authentication to provider authorization. Test-only trust-all callbacks are not
+a release configuration.
 
 ## Local parity evidence
 
