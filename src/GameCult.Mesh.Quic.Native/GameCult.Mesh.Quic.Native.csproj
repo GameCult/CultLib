@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>GameCult.Mesh.Quic.Native</AssemblyName>
+    <RootNamespace>GameCult.Mesh.Quic.Native</RootNamespace>
+    <Description>Native MsQuic CultMesh realtime connector for Unity and other netstandard runtimes.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Mesh\GameCult.Mesh.csproj" />
+  </ItemGroup>
+</Project>

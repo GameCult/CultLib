@@ -6,7 +6,6 @@ using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 using System.Threading.Channels;
 
 namespace GameCult.Mesh.Quic;
@@ -539,79 +538,18 @@ internal sealed class CultMeshRealtimeInbox
 
 internal static class CultMeshQuicRealtimeProtocol
 {
-    public static readonly SslApplicationProtocol ApplicationProtocol = new("cultmesh-state-v1");
-    public const long ConnectionCloseCode = 0x43554c54;
-    public const long StreamAbortCode = 0x53544154;
-    public const byte ReliableStream = 1;
-    public const byte LatestOnlyStream = 2;
-    private const uint Magic = 0x31545343;
-    private const int FixedHeaderBytes = 37;
-    private const int MaximumFrameBytes = 64 * 1024 * 1024;
+    public static readonly SslApplicationProtocol ApplicationProtocol =
+        new(CultMeshRealtimeWireProtocol.ApplicationProtocolName);
+    public const long ConnectionCloseCode = CultMeshRealtimeWireProtocol.ConnectionCloseCode;
+    public const long StreamAbortCode = CultMeshRealtimeWireProtocol.StreamAbortCode;
+    public const byte ReliableStream = CultMeshRealtimeWireProtocol.ReliableStream;
+    public const byte LatestOnlyStream = CultMeshRealtimeWireProtocol.LatestOnlyStream;
 
-    public static byte[] EncodeFrame(CultMeshRealtimeFrame frame)
-    {
-        var channel = Encoding.UTF8.GetBytes(frame.ChannelId);
-        var schema = Encoding.UTF8.GetBytes(frame.SchemaId);
-        var body = Encoding.UTF8.GetBytes(frame.BodyId);
-        if (channel.Length > ushort.MaxValue || schema.Length > ushort.MaxValue || body.Length > ushort.MaxValue)
-            throw new InvalidDataException("Realtime frame identity exceeds the QUIC wire limit.");
-        if (frame.Payload.Length > MaximumFrameBytes)
-            throw new InvalidDataException("Realtime frame payload exceeds the QUIC wire limit.");
+    public static byte[] EncodeFrame(CultMeshRealtimeFrame frame) =>
+        CultMeshRealtimeWireProtocol.EncodeFrame(frame);
 
-        var result = new byte[checked(FixedHeaderBytes + channel.Length + schema.Length + body.Length + frame.Payload.Length)];
-        var span = result.AsSpan();
-        BinaryPrimitives.WriteUInt32LittleEndian(span, Magic);
-        span[4] = (byte)frame.Delivery;
-        BinaryPrimitives.WriteInt64LittleEndian(span[5..], frame.ProducerEpoch);
-        BinaryPrimitives.WriteInt64LittleEndian(span[13..], frame.Sequence);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[21..], (ushort)channel.Length);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[23..], (ushort)schema.Length);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[25..], (ushort)body.Length);
-        BinaryPrimitives.WriteInt32LittleEndian(span[27..], frame.Payload.Length);
-        BinaryPrimitives.WriteInt32LittleEndian(span[31..], FixedHeaderBytes);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[35..], 1);
-        var offset = FixedHeaderBytes;
-        channel.CopyTo(span[offset..]); offset += channel.Length;
-        schema.CopyTo(span[offset..]); offset += schema.Length;
-        body.CopyTo(span[offset..]); offset += body.Length;
-        frame.Payload.Span.CopyTo(span[offset..]);
-        return result;
-    }
-
-    public static CultMeshRealtimeFrame DecodeFrame(byte[] bytes)
-    {
-        if (bytes.Length < FixedHeaderBytes) throw new InvalidDataException("Realtime frame header is truncated.");
-        var span = bytes.AsSpan();
-        if (BinaryPrimitives.ReadUInt32LittleEndian(span) != Magic)
-            throw new InvalidDataException("Realtime frame magic is invalid.");
-        if (BinaryPrimitives.ReadUInt16LittleEndian(span[35..]) != 1 ||
-            BinaryPrimitives.ReadInt32LittleEndian(span[31..]) != FixedHeaderBytes)
-            throw new InvalidDataException("Realtime frame wire version is unsupported.");
-        var delivery = (CultMeshRealtimeDelivery)span[4];
-        if (delivery is < CultMeshRealtimeDelivery.ReliableOrdered or > CultMeshRealtimeDelivery.Unreliable)
-            throw new InvalidDataException("Realtime frame delivery mode is invalid.");
-        var channelLength = BinaryPrimitives.ReadUInt16LittleEndian(span[21..]);
-        var schemaLength = BinaryPrimitives.ReadUInt16LittleEndian(span[23..]);
-        var bodyLength = BinaryPrimitives.ReadUInt16LittleEndian(span[25..]);
-        var payloadLength = BinaryPrimitives.ReadInt32LittleEndian(span[27..]);
-        var expected = checked(FixedHeaderBytes + channelLength + schemaLength + bodyLength + payloadLength);
-        if (payloadLength < 0 || expected != bytes.Length)
-            throw new InvalidDataException("Realtime frame length is invalid.");
-        var offset = FixedHeaderBytes;
-        var channel = Encoding.UTF8.GetString(span.Slice(offset, channelLength)); offset += channelLength;
-        var schema = Encoding.UTF8.GetString(span.Slice(offset, schemaLength)); offset += schemaLength;
-        var body = Encoding.UTF8.GetString(span.Slice(offset, bodyLength)); offset += bodyLength;
-        return new CultMeshRealtimeFrame
-        {
-            ChannelId = channel,
-            SchemaId = schema,
-            BodyId = body,
-            ProducerEpoch = BinaryPrimitives.ReadInt64LittleEndian(span[5..]),
-            Sequence = BinaryPrimitives.ReadInt64LittleEndian(span[13..]),
-            Delivery = delivery,
-            Payload = bytes.AsMemory(offset, payloadLength)
-        };
-    }
+    public static CultMeshRealtimeFrame DecodeFrame(byte[] bytes) =>
+        CultMeshRealtimeWireProtocol.DecodeFrame(bytes);
 
     public static async Task WriteFramedAsync(Stream stream, byte[] payload, CancellationToken cancellationToken)
     {
@@ -628,7 +566,7 @@ internal static class CultMeshQuicRealtimeProtocol
         if (first == 0) return null;
         await ReadExactlyAsync(stream, header.AsMemory(1), cancellationToken).ConfigureAwait(false);
         var length = BinaryPrimitives.ReadInt32LittleEndian(header);
-        if (length <= 0 || length > MaximumFrameBytes + FixedHeaderBytes + (3 * ushort.MaxValue))
+        if (length <= 0 || length > CultMeshRealtimeWireProtocol.MaximumEncodedFrameBytes)
             throw new InvalidDataException("Realtime QUIC frame length is invalid.");
         var payload = new byte[length];
         await ReadExactlyAsync(stream, payload, cancellationToken).ConfigureAwait(false);

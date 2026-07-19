@@ -36,9 +36,18 @@ It maps reliable ordered frames to one persistent stream and latest-only frames
 to independent streams with keyed `(producer epoch, sequence)` pending-state
 replacement. Its
 `System.Net.Quic` adapter fails closed for unreliable frames because that API
-does not expose QUIC datagrams. A native MsQuic connector must own that mode and
-the generic Unity runtime boundary. No RUDP implementation is installed
-implicitly in its place.
+does not expose QUIC datagrams. `GameCult.Mesh.Quic.Native` owns the generic
+Unity/client boundary through the MsQuic C API. The Unity package carries its
+managed connector and the pinned Windows x64 Schannel runtime; consumers
+register `CultMeshNativeQuicRealtimeTransportConnector`, then ask CultMesh for
+the advertised realtime route. The connector currently receives provider state
+and fails closed if used to send; commands and receipts remain on the typed TCP
+control plane. No RUDP implementation is installed implicitly in its place.
+
+Local mapped bodies remain the first state plane. A consumer opens the
+advertised mapping when it is actually reachable; otherwise it connects to the
+advertised QUIC route. Latest-only receivers must replace pending generations
+per body rather than queueing render debt.
 
 **Derived state:** connector choice, physical endpoint, connection health, and
 transport diagnostics. None of these grant provider authority or become content
@@ -64,11 +73,10 @@ new seam does not pretend that migration has already occurred.
 
 ## Security and release gate
 
-The current TCP connectors are a local-development transport and are plaintext.
-Remote release requires authenticated encryption and binding the authenticated
-peer to the advertised provider identity. Adding TLS must not move discovery,
-authorization, content verification, or application semantics into the TCP
-adapter.
+The current TCP control and content connectors are plaintext and therefore
+restricted to local or otherwise trusted deployment. Adding TLS must not move
+discovery, authorization, content verification, or application semantics into
+the TCP adapter.
 
 The QUIC adapter always uses TLS 1.3. Its certificate validation callback is
 given the advertised endpoint identity so the consumer can bind transport

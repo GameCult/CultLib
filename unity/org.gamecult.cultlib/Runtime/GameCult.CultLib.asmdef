@@ -12,6 +12,7 @@
     "GameCult.Caching.MessagePack.dll",
     "GameCult.Logging.dll",
     "GameCult.Mesh.dll",
+    "GameCult.Mesh.Quic.Native.dll",
     "GameCult.Networking.dll",
     "Isopoh.Cryptography.Argon2.dll",
     "Isopoh.Cryptography.Blake2b.dll",
