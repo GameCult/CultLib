@@ -56,6 +56,44 @@ namespace GameCult.Networking
             (_client as RudpCultNetSchemaClient)?.BackgroundFailure;
 
         /// <summary>
+        /// Subscribes to one exact typed record as an ephemeral reactive value. The returned value
+        /// owns filtering and unsubscribe; no received payload is written into the local cache.
+        /// </summary>
+        public async Task<CultNetLiveValue<TDocument>> SubscribeLiveValueAsync<TDocument>(
+            string subscriptionId,
+            string recordKey,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            if (string.IsNullOrWhiteSpace(recordKey))
+                throw new ArgumentException("Record key is required.", nameof(recordKey));
+            var schemaId = _documents.GetByDocumentType(typeof(TDocument))?.SchemaId ??
+                _cache.Registry.GetRequired<TDocument>().SchemaId;
+            var value = new CultNetLiveValue<TDocument>(this, subscriptionId, recordKey, schemaId);
+            try
+            {
+                var initial = await SubscribeAsync(
+                        subscriptionId,
+                        recordKeys: new[] { recordKey },
+                        schemaIds: new[] { schemaId },
+                        deliveryMode: CultNetDatabaseSubscriptionDeliveryMode.Live,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                var documents = initial.OfType<TDocument>().ToArray();
+                if (documents.Length != 1)
+                    throw new InvalidOperationException(
+                        $"Live value subscription '{subscriptionId}' expected one '{schemaId}' record '{recordKey}' but received {documents.Length}.");
+                value.Initialize(documents[0]);
+                return value;
+            }
+            catch
+            {
+                value.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
         /// Starts a remote subscription and waits until its initial matching snapshot is in the local cache.
         /// </summary>
         public Task<IReadOnlyList<object>> SubscribeAsync(
@@ -247,6 +285,110 @@ namespace GameCult.Networking
             public string SubscriptionId { get; }
             public CultNetDatabaseSubscriptionDeliveryMode DeliveryMode { get; }
             public TaskCompletionSource<IReadOnlyList<object>> Completion { get; }
+        }
+    }
+
+    /// <summary>One exact typed remote record kept as an ephemeral current value.</summary>
+    public sealed class CultNetLiveValue<TDocument> : IDisposable where TDocument : class
+    {
+        private readonly CultNetDatabaseSubscriptionClient _owner;
+        private readonly string _subscriptionId;
+        private readonly string _recordKey;
+        private readonly string _schemaId;
+        private readonly object _gate = new();
+        private TDocument? _current;
+        private bool _hasValue;
+        private bool _disposed;
+
+        internal CultNetLiveValue(
+            CultNetDatabaseSubscriptionClient owner,
+            string subscriptionId,
+            string recordKey,
+            string schemaId)
+        {
+            _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+            _subscriptionId = string.IsNullOrWhiteSpace(subscriptionId)
+                ? throw new ArgumentException("Subscription id is required.", nameof(subscriptionId))
+                : subscriptionId;
+            _recordKey = recordKey;
+            _schemaId = schemaId;
+            _owner.Changed += OnChanged;
+        }
+
+        /// <summary>Raised when the provider publishes a new typed value.</summary>
+        public event Action<TDocument>? Changed;
+
+        /// <summary>Raised when the provider removes the selected record.</summary>
+        public event Action? Removed;
+
+        /// <summary>Gets whether the selected record currently exists.</summary>
+        public bool HasValue
+        {
+            get { lock (_gate) return _hasValue; }
+        }
+
+        /// <summary>Gets the current value, or fails when the record has not been published.</summary>
+        public TDocument Current
+        {
+            get
+            {
+                lock (_gate)
+                    return _hasValue
+                        ? _current!
+                        : throw new InvalidOperationException(
+                            $"Live value '{_recordKey}' is not currently published.");
+            }
+        }
+
+        internal void Initialize(TDocument document)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _hasValue) return;
+                _current = document;
+                _hasValue = true;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+            }
+            _owner.Changed -= OnChanged;
+            _owner.Unsubscribe(_subscriptionId);
+        }
+
+        private void OnChanged(CultNetReplicatedDocumentChange change)
+        {
+            if (!string.Equals(change.SubscriptionId, _subscriptionId, StringComparison.Ordinal) ||
+                !string.Equals(change.RecordKey, _recordKey, StringComparison.Ordinal) ||
+                !string.Equals(change.SchemaId, _schemaId, StringComparison.Ordinal))
+                return;
+
+            if (string.Equals(change.ChangeKind, "removed", StringComparison.Ordinal))
+            {
+                lock (_gate)
+                {
+                    if (_disposed) return;
+                    _current = null;
+                    _hasValue = false;
+                }
+                Removed?.Invoke();
+                return;
+            }
+
+            if (change.Document is not TDocument document)
+                return;
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _current = document;
+                _hasValue = true;
+            }
+            Changed?.Invoke(document);
         }
     }
 

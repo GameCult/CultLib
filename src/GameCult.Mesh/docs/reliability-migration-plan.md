@@ -947,6 +947,13 @@ ownership contract.
 **Outputs:** both modes produce the same typed initial values and change event.
 Only durable replication mutates the consumer's CultCache.
 
+`CultNetDatabaseSubscriptionClient.SubscribeLiveValueAsync<T>(...)` is the
+single-record ergonomic path. Its `CultNetLiveValue<T>` owns the exact
+record/schema filter, current value, typed change/removal notifications, and
+unsubscribe lifetime. Consumers no longer need a process-wide change handler,
+an object type switch, or a renderer-local replica cache to model one reactive
+variable.
+
 **Derived state:** renderer-local presentation and reactive variables are
 derived from live notifications. They are not database records merely because
 CultNet carried them.
