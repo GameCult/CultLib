@@ -1509,6 +1509,8 @@ namespace GameCult.Networking.Tests
             var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
             Assert.That(observed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(observed.SubscriptionId, Is.EqualTo("world-body"));
+            Assert.That(observed.RecordKeys, Is.EqualTo(new[] { "world:entities", "mesh:body:world:latest" }));
+            Assert.That(observed.SchemaIds, Is.Empty);
             Assert.That(observed.BodyIds, Is.EqualTo(new[] { "world" }));
             Assert.That(observed.SupportedBodyTransports, Is.EqualTo(new[] { "SharedMemory", "Network" }));
             Assert.That(observed.SameMachine, Is.True);
@@ -1522,6 +1524,53 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(removed.Active, Is.False);
+        }
+
+        [Test]
+        public async Task DatabaseSubscriptionServer_ProjectsExactReactiveStateDemandWithoutBodyDemand()
+        {
+            var database = new CultNetDatabase(new CultCache());
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-reactive-demand-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var active = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (demand.Active) active.TrySetResult(demand);
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("database-reactive-demand-client");
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-reactive",
+                SubscriptionId = "fog-field",
+                RecordKeys = ["world:field:fog"],
+                SchemaIds = ["gamecult.fields.splats.v1"],
+                ConsumerRuntimeId = "eve-unity",
+                IncludeSnapshot = false
+            });
+
+            var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            Assert.That(observed.RecordKeys, Is.EqualTo(new[] { "world:field:fog" }));
+            Assert.That(observed.SchemaIds, Is.EqualTo(new[] { "gamecult.fields.splats.v1" }));
+            Assert.That(observed.BodyIds, Is.Empty);
         }
 
         [Test]
@@ -1755,6 +1804,56 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(update.Text, Is.EqualTo("updated"));
             Assert.That(value.Current.Text, Is.EqualTo("updated"));
+        }
+
+        [Test]
+        public async Task DatabaseSubscriptionClient_ReceivesProviderMaterializedValueFromExactDemand()
+        {
+            var sourceDatabase = new CultNetDatabase(new CultCache());
+            const string recordKey = "tests:subscription-client:demanded-note";
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-demanded-value-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, sourceDatabase);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (!demand.Active || !demand.RecordKeys.Contains(recordKey, StringComparer.Ordinal))
+                    return;
+                sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+                {
+                    Schema = "tests.networking_note.v1",
+                    Text = "materialized-on-demand"
+                }).GetAwaiter().GetResult();
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            var targetCache = new CultCache();
+            var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(targetCache.Registry));
+            var transport = CultNetSchemaClients.CreateRudp("database-demanded-value-client");
+            using var client = new CultNetDatabaseSubscriptionClient(transport, targetCache, targetDocuments);
+            transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => transport.Connected, TimeSpan.FromSeconds(2));
+
+            using var value = await AwaitWithTimeout(
+                client.SubscribeLiveValueAsync<NetworkSchemaNote>("demanded-note", recordKey),
+                TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => value.HasValue, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(value.Current.Text, Is.EqualTo("materialized-on-demand"));
+            Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
         }
 
         [Test]

@@ -41,7 +41,11 @@ namespace GameCult.Networking
                 _peerLifecycle.PeerDisconnected += HandlePeerDisconnected;
         }
 
-        /// <summary>Raised when exact document subscriptions add or remove typed hot-body demand.</summary>
+        /// <summary>
+        /// Raised when an exact subscription is activated or withdrawn. Providers can use
+        /// the requested records and schemas to materialize reactive state only while a
+        /// consumer needs it; body publishers additionally use the negotiated body route.
+        /// </summary>
         public event Action<CultNetDatabaseSubscriptionDemand>? DemandChanged;
 
         /// <summary>Detaches handlers and releases all active watches.</summary>
@@ -142,11 +146,21 @@ namespace GameCult.Networking
             SubscriptionKey key,
             bool active)
         {
-            if (request.BodyIds is not { Length: > 0 }) return;
             DemandChanged?.Invoke(new CultNetDatabaseSubscriptionDemand(
                 string.IsNullOrWhiteSpace(request.ConsumerRuntimeId) ? key.Id : request.ConsumerRuntimeId!,
                 key.Id,
-                request.BodyIds.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                (request.RecordKeys ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                (request.SchemaIds ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                (request.BodyIds ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
                 (request.SupportedBodyTransports ?? Array.Empty<string>())
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -284,7 +298,7 @@ namespace GameCult.Networking
         }
     }
 
-    /// <summary>One active or withdrawn consumer demand for logical hot bodies.</summary>
+    /// <summary>One active or withdrawn exact state subscription and its optional hot-body route.</summary>
     public sealed class CultNetDatabaseSubscriptionDemand
     {
         public CultNetDatabaseSubscriptionDemand(
@@ -294,9 +308,32 @@ namespace GameCult.Networking
             IReadOnlyList<string> supportedBodyTransports,
             bool sameMachine,
             bool active)
+            : this(
+                consumerRuntimeId,
+                subscriptionId,
+                Array.Empty<string>(),
+                Array.Empty<string>(),
+                bodyIds,
+                supportedBodyTransports,
+                sameMachine,
+                active)
+        {
+        }
+
+        public CultNetDatabaseSubscriptionDemand(
+            string consumerRuntimeId,
+            string subscriptionId,
+            IReadOnlyList<string> recordKeys,
+            IReadOnlyList<string> schemaIds,
+            IReadOnlyList<string> bodyIds,
+            IReadOnlyList<string> supportedBodyTransports,
+            bool sameMachine,
+            bool active)
         {
             ConsumerRuntimeId = consumerRuntimeId;
             SubscriptionId = subscriptionId;
+            RecordKeys = recordKeys;
+            SchemaIds = schemaIds;
             BodyIds = bodyIds;
             SupportedBodyTransports = supportedBodyTransports;
             SameMachine = sameMachine;
@@ -305,6 +342,8 @@ namespace GameCult.Networking
 
         public string ConsumerRuntimeId { get; }
         public string SubscriptionId { get; }
+        public IReadOnlyList<string> RecordKeys { get; }
+        public IReadOnlyList<string> SchemaIds { get; }
         public IReadOnlyList<string> BodyIds { get; }
         public IReadOnlyList<string> SupportedBodyTransports { get; }
         public bool SameMachine { get; }

@@ -116,6 +116,7 @@ namespace GameCult.Networking
             var completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
             if (!_initialSnapshots.TryAdd(messageId, new PendingSubscription(subscriptionId, deliveryMode, completion)))
                 throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
+            _deliveryModes[subscriptionId] = deliveryMode;
 
             CancellationTokenRegistration cancellation = default;
             if (cancellationToken.CanBeCanceled)
@@ -151,6 +152,7 @@ namespace GameCult.Networking
             }
             catch
             {
+                _deliveryModes.TryRemove(subscriptionId, out _);
                 if (_initialSnapshots.TryRemove(messageId, out var pending))
                     pending.Completion.TrySetException(new InvalidOperationException("CultNet subscription request could not be sent."));
                 throw;
@@ -198,7 +200,6 @@ namespace GameCult.Networking
                     {
                         applied = await _documents.ApplyRawSnapshotResponseAsync(_cache, message).ConfigureAwait(false);
                     }
-                    _deliveryModes[pending.SubscriptionId] = pending.DeliveryMode;
                     pending.Completion.TrySetResult(applied);
                 }
                 catch (Exception error)

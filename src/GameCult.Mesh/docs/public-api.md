@@ -528,6 +528,11 @@ shared-file mapping, or network from observed locality and available adapters.
 Body bytes never become subscription snapshot payload. Either subscription may
 legitimately start with `HasValue == false`; it remains active until the provider
 publishes the exact record, avoiding a startup retry loop or broad snapshot.
+`CultNetDatabaseSubscriptionServer.DemandChanged` exposes the exact requested
+record and schema set as well as optional body negotiation. A provider can
+therefore materialize a computed record only while it has consumers. The watch
+is installed before demand is announced, so the first publication travels as a
+normal live change and does not require a bootstrap snapshot.
 
 ### Client Prediction
 

@@ -920,6 +920,18 @@ stream demand merely by existing.
 and server disposal all update the same typed demand projection. Stable peer
 identity, not per-message wrapper identity, keys subscription lifetime.
 
+Exact reactive document demand carries the requested record and schema set even
+when no hot body is involved. Providers may use that demand to materialize
+computed documents lazily; the subscription watch exists before activation is
+reported, so frame zero is delivered on the live path. Dynamic state is not
+forced back through a broad snapshot merely because the record did not exist at
+subscribe time.
+
+The client installs the declared delivery mode before sending the subscription.
+A provider may publish synchronously from demand activation, so a live change
+can correctly precede the empty bootstrap acknowledgement without briefly
+becoming durable replica state.
+
 `CultMesh.SubscribeLiveBodyAsync(...)` is the narrow public construction path.
 Its `CultMeshLiveBodySubscription` names only the logical body, consumer, and
 subscription lifetime. `CultMeshLiveBody` owns the ephemeral latest-publication

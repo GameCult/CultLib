@@ -317,6 +317,7 @@ namespace GameCult.Mesh
         public void Observe(CultNetDatabaseSubscriptionDemand demand)
         {
             if (demand == null) throw new ArgumentNullException(nameof(demand));
+            if (demand.BodyIds.Count == 0) return;
             var key = demand.ConsumerRuntimeId + "\u001f" + demand.SubscriptionId;
             lock (_gate)
             {
