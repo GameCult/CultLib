@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Quic;
 using System.Net.Security;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Channels;
@@ -81,8 +82,13 @@ public sealed class CultMeshQuicRealtimeTransportConnector : ICultMeshRealtimeTr
                 ApplicationProtocols = new List<SslApplicationProtocol> { _options.ApplicationProtocol },
                 EnabledSslProtocols = SslProtocols.Tls13,
                 RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
-                    validator?.Invoke(endpointId, certificate as X509Certificate2, chain, errors) ??
-                    errors == SslPolicyErrors.None
+                {
+                    var providerCertificate = certificate as X509Certificate2 ??
+                        (certificate == null ? null : new X509Certificate2(certificate));
+                    return validator?.Invoke(endpointId, providerCertificate, chain, errors) ??
+                        errors == SslPolicyErrors.None ||
+                        MatchesAdvertisedCertificatePin(candidate.Endpoint, providerCertificate);
+                }
             }
         }, cancellationToken).ConfigureAwait(false);
 
@@ -100,6 +106,29 @@ public sealed class CultMeshQuicRealtimeTransportConnector : ICultMeshRealtimeTr
         host = uri.Host;
         port = uri.Port;
         return true;
+    }
+
+    private static bool MatchesAdvertisedCertificatePin(string endpoint, X509Certificate2? certificate)
+    {
+        if (certificate == null || !Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+            return false;
+        var advertised = ParseQueryValue(uri.Query, "cert-sha256");
+        if (string.IsNullOrWhiteSpace(advertised)) return false;
+        var actual = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+        return string.Equals(advertised, actual, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? ParseQueryValue(string query, string key)
+    {
+        foreach (var component in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = component.IndexOf('=');
+            var candidateKey = separator < 0 ? component : component[..separator];
+            if (!string.Equals(Uri.UnescapeDataString(candidateKey), key, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return separator < 0 ? string.Empty : Uri.UnescapeDataString(component[(separator + 1)..]);
+        }
+        return null;
     }
 }
 

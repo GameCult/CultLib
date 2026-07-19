@@ -73,7 +73,9 @@ adapter.
 The QUIC adapter always uses TLS 1.3. Its certificate validation callback is
 given the advertised endpoint identity so the consumer can bind transport
 authentication to provider authorization. Test-only trust-all callbacks are not
-a release configuration.
+a release configuration. A trusted discovery record may carry
+`cert-sha256=<fingerprint>` on its QUIC route; absent a caller validator, the
+connector accepts a self-signed provider certificate only when that pin matches.
 
 ## Local parity evidence
 

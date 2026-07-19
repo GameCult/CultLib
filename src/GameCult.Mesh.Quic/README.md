@@ -37,6 +37,10 @@ await server.BroadcastAsync(new CultMeshRealtimeFrame
 Advertise the listener as `cultmesh-state+quic://host:port`. Certificate
 identity and provider identity must be bound by the application trust policy;
 accepting every certificate is appropriate only in isolated tests.
+For directly trusted discovery records, a provider may append its uppercase
+SHA-256 certificate fingerprint as `?cert-sha256=...`. The default connector
+accepts a self-signed certificate only when its raw certificate bytes match that
+advertised pin. A caller-supplied validator remains authoritative when present.
 
 ## Consumer
 

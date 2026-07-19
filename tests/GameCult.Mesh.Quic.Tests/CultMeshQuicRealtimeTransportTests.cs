@@ -47,6 +47,28 @@ public sealed class CultMeshQuicRealtimeTransportTests
     }
 
     [Test]
+    public async Task AdvertisedCertificatePinAuthenticatesASelfSignedProvider()
+    {
+        if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
+        using var certificate = CreateCertificate();
+        await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+        {
+            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
+            ServerCertificate = certificate
+        });
+        var pin = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+        var endpoint = $"{CultMeshQuicRealtimeTransportConnector.Scheme}://127.0.0.1:{server.LocalEndPoint.Port}?cert-sha256={pin}";
+        var connector = new CultMeshQuicRealtimeTransportConnector();
+
+        using var client = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint),
+            CultMeshEndpointId.Parse("service:aetheria.daemon"));
+
+        client.TransportId.Should().Be("msquic-realtime");
+        await WaitUntilAsync(() => server.ConnectionCount == 1);
+    }
+
+    [Test]
     public async Task ReliableOrderedFramesShareAnOrderedStreamInBothDirections()
     {
         if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
