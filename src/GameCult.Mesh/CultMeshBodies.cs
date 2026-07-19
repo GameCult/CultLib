@@ -572,9 +572,18 @@ namespace GameCult.Mesh
     public sealed class CultMeshNetworkBodyAdapter : ICultMeshBodyTransportAdapter
     {
         private readonly Func<CultMeshBodyDescriptor, byte[]> _fetch;
+        private readonly bool _fetchIsVerified;
 
         public CultMeshNetworkBodyAdapter(Func<CultMeshBodyDescriptor, byte[]> fetch) =>
             _fetch = fetch ?? throw new ArgumentNullException(nameof(fetch));
+
+        /// <summary>Uses a session provider that already verifies the response against the descriptor.</summary>
+        public CultMeshNetworkBodyAdapter(CultMeshSessionBodyProvider provider)
+        {
+            if (provider == null) throw new ArgumentNullException(nameof(provider));
+            _fetch = provider.CreateFetchDelegate();
+            _fetchIsVerified = true;
+        }
 
         public CultMeshBodyTransportKind TransportKind => CultMeshBodyTransportKind.Network;
         public bool CanOpen(CultMeshBodyDescriptor descriptor) =>
@@ -590,9 +599,12 @@ namespace GameCult.Mesh
                 throw new InvalidDataException("CultMesh network body size does not match its descriptor.");
             if (string.IsNullOrWhiteSpace(descriptor.SemanticHash))
                 throw new InvalidDataException("CultMesh network body descriptor has no semantic digest.");
-            var actualHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(bytes);
-            if (!string.Equals(actualHash, descriptor.SemanticHash, StringComparison.Ordinal))
-                throw new InvalidDataException("CultMesh network body semantic digest does not match its descriptor.");
+            if (!_fetchIsVerified)
+            {
+                var actualHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(bytes);
+                if (!string.Equals(actualHash, descriptor.SemanticHash, StringComparison.Ordinal))
+                    throw new InvalidDataException("CultMesh network body semantic digest does not match its descriptor.");
+            }
             return new CultMeshBufferedBodyLease(descriptor, bytes);
         }
     }

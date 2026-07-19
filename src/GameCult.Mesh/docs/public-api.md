@@ -525,7 +525,11 @@ and own their unsubscribe lifetime. Hot body state uses
 `CultMesh.SubscribeLiveBodyAsync(...)`: the reactive value is only the current
 body descriptor, while `OpenCurrentReadOnly()` negotiates shared memory,
 shared-file mapping, or network from observed locality and available adapters.
-Body bytes never become subscription snapshot payload. Either subscription may
+Same-machine bodies are opened from the mapped producer slab. Remote live bodies
+are capability-bound and read through one reusable `cultmesh.bodies.v1` session;
+they are not packed into CultCache or CDN records. `CultMeshClient.BodyProvider(...)`
+creates that verified network adapter without exposing session machinery to the
+consumer. Body bytes never become subscription snapshot payload. Either subscription may
 legitimately start with `HasValue == false`; it remains active until the provider
 publishes the exact record, avoiding a startup retry loop or broad snapshot.
 `CultNetDatabaseSubscriptionServer.DemandChanged` exposes the exact requested

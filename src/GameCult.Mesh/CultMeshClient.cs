@@ -108,6 +108,20 @@ namespace GameCult.Mesh
                 options);
         }
 
+        /// <summary>Creates a direct body provider over this client's reusable negotiated session owner.</summary>
+        public CultMeshSessionBodyProvider BodyProvider(
+            string providerId,
+            string endpointId,
+            CultMeshSessionBodyProviderOptions? options = null)
+        {
+            ThrowIfDisposed();
+            return new CultMeshSessionBodyProvider(
+                providerId,
+                _sessions,
+                CultMeshEndpointId.Parse(endpointId),
+                options);
+        }
+
         /// <summary>Opens one live typed document by stable provider identity and record key.</summary>
         public async Task<CultMeshDocumentHandle<TDocument>> DocumentAsync<TDocument>(
             string endpointId,

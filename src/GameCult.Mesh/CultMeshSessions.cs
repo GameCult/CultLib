@@ -35,6 +35,7 @@ namespace GameCult.Mesh
     {
         public static CultMeshProtocolId Documents { get; } = new CultMeshProtocolId("cultmesh.documents.v1");
         public static CultMeshProtocolId Content { get; } = new CultMeshProtocolId("cultmesh.content.v1");
+        public static CultMeshProtocolId Bodies { get; } = new CultMeshProtocolId("cultmesh.bodies.v1");
         public static CultMeshProtocolId Discovery { get; } = new CultMeshProtocolId("cultmesh.discovery.v1");
         public static CultMeshProtocolId PeerExchange { get; } = new CultMeshProtocolId("cultmesh.peer_exchange.v1");
         public static CultMeshProtocolId Subscriptions { get; } = new CultMeshProtocolId("cultmesh.subscriptions.v1");
