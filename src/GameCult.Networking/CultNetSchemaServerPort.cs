@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Threading.Tasks;
 
 namespace GameCult.Networking
@@ -31,6 +32,13 @@ namespace GameCult.Networking
         /// </summary>
         void RemoveCultNetMessageListener<TMessage>(Delegate callback)
             where TMessage : ICultNetSchemaMessage;
+    }
+
+    /// <summary>Optional physical peer location used for locality-sensitive transport negotiation.</summary>
+    public interface ICultNetSchemaServerPeerLocation
+    {
+        /// <summary>Gets the remote physical endpoint when the transport exposes one.</summary>
+        EndPoint? RemoteEndPoint { get; }
     }
 
     /// <summary>

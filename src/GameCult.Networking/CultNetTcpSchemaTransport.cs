@@ -189,20 +189,23 @@ namespace GameCult.Networking
             }
         }
 
-        private sealed class TcpPeer : ICultNetSchemaServerPeer, IDisposable
+        private sealed class TcpPeer : ICultNetSchemaServerPeer, ICultNetSchemaServerPeerLocation, IDisposable
         {
             private readonly TcpClient _client;
             private readonly object _sendGate = new();
+            private readonly EndPoint? _remoteEndPoint;
 
             public TcpPeer(TcpClient client)
             {
                 _client = client;
+                _remoteEndPoint = client.Client.RemoteEndPoint;
                 Transport = new TcpFramedTransportConnection(
                     client.GetStream(),
                     CultNetTransportProfiles.CreateTcpFramed("csharp-tcp-schema-server"));
             }
 
             public bool Connected => _client.Connected;
+            public EndPoint? RemoteEndPoint => _remoteEndPoint;
             public TcpFramedTransportConnection Transport { get; }
 
             public void SendCultNet<TMessage>(TMessage message) where TMessage : ICultNetSchemaMessage

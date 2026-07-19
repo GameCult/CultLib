@@ -70,7 +70,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Peer context for a schema-v0 RUDP server.
     /// </summary>
-    public sealed class RudpCultNetSchemaServerPeer : ICultNetSchemaServerPeer
+    public sealed class RudpCultNetSchemaServerPeer : ICultNetSchemaServerPeer, ICultNetSchemaServerPeerLocation
     {
         private readonly RudpCultNetSchemaServer _server;
 

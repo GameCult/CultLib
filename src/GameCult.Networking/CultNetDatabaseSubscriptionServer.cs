@@ -171,9 +171,9 @@ namespace GameCult.Networking
 
         private static bool IsSameMachine(ICultNetSchemaServerPeer peer)
         {
-            if (peer is RudpCultNetSchemaServerPeer rudp && rudp.RemoteEndPoint is IPEndPoint ip)
+            if (peer is ICultNetSchemaServerPeerLocation located && located.RemoteEndPoint is IPEndPoint ip)
                 return IPAddress.IsLoopback(ip.Address);
-            return peer is CultNetServerPeer liteNet && IPAddress.IsLoopback(liteNet.Peer.Address);
+            return false;
         }
 
         private IDisposable Watch(

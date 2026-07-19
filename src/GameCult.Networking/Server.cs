@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using GameCult.Caching;
@@ -820,7 +821,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Transport-aware server peer context for built-in CultNet service bodies.
     /// </summary>
-    public sealed class CultNetServerPeer : ICultNetSchemaServerPeer
+    public sealed class CultNetServerPeer : ICultNetSchemaServerPeer, ICultNetSchemaServerPeerLocation
     {
         internal CultNetServerPeer(NetPeer peer, LiteNetLibTransportConnection transport)
         {
@@ -832,6 +833,9 @@ namespace GameCult.Networking
         /// Gets the underlying LiteNetLib peer identity.
         /// </summary>
         public NetPeer Peer { get; }
+
+        /// <inheritdoc />
+        public EndPoint RemoteEndPoint => new IPEndPoint(Peer.Address, Peer.Port);
 
         /// <summary>
         /// Gets the channel-aware LiteNetLib transport adapter for this peer.

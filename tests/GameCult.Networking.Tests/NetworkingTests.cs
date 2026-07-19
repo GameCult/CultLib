@@ -1527,6 +1527,36 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_ClassifiesLoopbackTcpDemandAsSameMachine()
+        {
+            var database = new CultNetDatabase(new CultCache());
+            using var server = new TcpFramedCultNetSchemaServer(new TcpListener(IPAddress.Loopback, 0));
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var active = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (demand.Active) active.TrySetResult(demand);
+            };
+            using var client = new TcpFramedCultNetSchemaClient();
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-tcp-body",
+                SubscriptionId = "world-body",
+                ConsumerRuntimeId = "eve-unity",
+                BodyIds = ["world"],
+                SupportedBodyTransports = ["SharedMemory", "Network"],
+                IncludeSnapshot = false
+            });
+
+            var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(observed.SameMachine, Is.True);
+            Assert.That(observed.BodyIds, Is.EqualTo(new[] { "world" }));
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionServer_ProjectsExactReactiveStateDemandWithoutBodyDemand()
         {
             var database = new CultNetDatabase(new CultCache());
