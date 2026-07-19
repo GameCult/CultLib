@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using MessagePack;
 
 namespace GameCult.Caching.MessagePack;
@@ -63,12 +64,32 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         if (_recordDirectory.Exists)
         {
-            foreach (var recordFile in _recordDirectory.EnumerateFiles("*.msgpack").OrderBy(file => file.Name, StringComparer.Ordinal))
+            var recordFiles = _recordDirectory
+                .EnumerateFiles("*.msgpack")
+                .OrderBy(file => file.Name, StringComparer.Ordinal)
+                .ToArray();
+            var recordReports = new CultSchemaMigrationReport[recordFiles.Length];
+            var storedRecords = new CultStoredDocument[recordFiles.Length];
+            Parallel.For(
+                0,
+                recordFiles.Length,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
+                index =>
+                {
+                    var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(
+                        ReadAllBytesShared(recordFiles[index].FullName));
+                    var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
+                    recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog);
+                    storedRecords[index] = ToStoredDocument(
+                        record,
+                        catalog,
+                        CultDocumentMessagePackSerialization.DeserializeUntyped);
+                });
+
+            for (var index = 0; index < storedRecords.Length; index++)
             {
-                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(ReadAllBytesShared(recordFile.FullName));
-                var catalog = ResolveLegacyUncataloguedRecordCatalog(record, manifest.SchemaCatalog);
-                reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog));
-                var stored = ToStoredDocument(record, catalog, CultDocumentMessagePackSerialization.DeserializeUntyped);
+                reports.Add(recordReports[index]);
+                var stored = storedRecords[index];
                 loaded[stored.Key.Value] = stored;
             }
         }
