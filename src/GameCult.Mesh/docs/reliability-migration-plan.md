@@ -669,6 +669,63 @@ Content-session delivery and product lifecycle are proven without claiming a
 mapped/zero-copy transfer; the managed session still copies and fragments the
 body in process.
 
+### Phase 4 transport parity and body-plane cut
+
+**Owner:** CultMesh negotiation selects a body transport from provider-owned
+capabilities and consumer demand. The selected transport owns byte movement;
+`CultMeshContentTransferService` continues to own content identity, resumable
+verification, and atomic cache promotion. CultNet RUDP does not own bulk-body
+performance.
+
+**Inputs:** content hash and size, provider-advertised transport candidates,
+consumer-supported transports, same-machine evidence, and platform support.
+
+**Outputs:** an authorized mapped body for same-machine deployments, or a
+dedicated remote byte stream feeding the existing verification/promotion owner.
+Typed control state, reactive variables, commands, and receipts remain CultNet
+messages and are not smuggled into the bulk stream.
+
+**Derived state:** selected plane, physical endpoint, mapped-file descriptor,
+stream progress, and transport telemetry. None can change content identity,
+provider authority, or the final verified cache record.
+
+**Forbidden writers:** applications and renderers cannot choose an unadvertised
+path or turn a local filesystem path into authority. Snapshot and schema-message
+helpers cannot regain ownership of immutable body bytes. A remote stream cannot
+publish a completed body without the transfer owner's hash verification and
+atomic promotion.
+
+**Shared paths:** every remote plane terminates in the same partial-file,
+checkpoint, final-hash, and promotion primitives. Same-machine mapping uses the
+same advertised content hash and provider authorization but does not copy the
+body merely to prove that two processes inhabit one machine.
+
+**Cut line:** request-window and scheduler-yield tuning is not the bulk-content
+roadmap. RUDP remains a compatibility fallback while dedicated stream and local
+mapping planes are integrated. The old fallback stays unable to become the
+preferred same-machine or remote bulk plane through timing tweaks.
+
+**Parity evidence:** `tools/GameCult.TransportParity` measures the public
+CultMesh RUDP content path against file mapping, TCP, and .NET's MsQuic-backed
+QUIC stream with the Aetheria 56,204,750-byte body size. On the 2026-07-19
+Windows development host, a representative released-source run opened the
+existing mapped body in 10.9 ms, moved and verified it over TCP in 213.8 ms
+(250.7 MiB/s), moved and verified it over QUIC in 753.4 ms (71.1 MiB/s), and
+moved it through CultMesh RUDP in 5,322.9 ms (10.1 MiB/s) while emitting
+129,241,066 server bytes. Repeated QUIC runs reached 87.0-107.4 MiB/s; repeated
+RUDP runs reached 10.1-13.0 MiB/s. This is a plane-selection result, not a case
+for a more elaborate home-grown congestion controller.
+
+**Dedicated references:** .NET's stable `System.Net.Quic` API delegates to
+MsQuic on supported platforms:
+https://learn.microsoft.com/dotnet/fundamentals/networking/quic/quic-overview.
+MsQuic publishes its performance methodology and dashboard at
+https://microsoft.github.io/msquic/. Valve GameNetworkingSockets remains a
+candidate for the cross-platform realtime message plane because it provides
+reliable/unreliable messages, acknowledgement vectors, fragmentation,
+congestion behavior, encryption, and priority lanes:
+https://github.com/ValveSoftware/GameNetworkingSockets.
+
 ### Phase 5 verified CDN mapped-body slice
 
 **Owner:** `CultMeshContentTransferService` remains the sole writer and promoter
