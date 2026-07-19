@@ -1,5 +1,7 @@
 # CultMesh Reliability Migration Plan
 
+Incident record: [CultMesh bulk content over custom RUDP, July 2026](postmortem-2026-07-cultmesh-bulk-rudp.md).
+
 ## Objective
 
 CultMesh should give an application one typed, watchable route to a Verse,
