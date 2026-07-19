@@ -357,6 +357,30 @@ public sealed class CultMeshBodyTransportTests
         plan.Consumers.Should().ContainSingle().Which.ConsumerRuntimeId.Should().Be("unknown");
     }
 
+    [Test]
+    public void HotBodySubscriptionKeepsViewPublicationAndDemandInOneExactContract()
+    {
+        var subscription = new CultMeshHotBodySubscription(
+            "pilot-world",
+            "eve-unity",
+            "eve:view:pilot",
+            "gamecult.eve.entity_soa_view.v2",
+            "eve:body:pilot",
+            new[] { "eve:field:gravity" },
+            new[] { "gamecult.eve.fields_splats.v1" });
+
+        subscription.RecordKeys.Should().Equal(
+            "eve:view:pilot",
+            CultMeshBodyPublicationDocument.CreateLatestRecordKey("eve:body:pilot").Value,
+            "eve:field:gravity");
+        subscription.SchemaIds.Should().Equal(
+            "gamecult.eve.entity_soa_view.v2",
+            CultMeshBodyPublicationSchemaVersions.Publication,
+            "gamecult.eve.fields_splats.v1");
+        subscription.BodyId.Should().Be("eve:body:pilot");
+        subscription.ConsumerRuntimeId.Should().Be("eve-unity");
+    }
+
     private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()
     {
         BodyId = descriptor.BodyId,

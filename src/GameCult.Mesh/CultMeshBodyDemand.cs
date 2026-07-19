@@ -7,6 +7,57 @@ using GameCult.Networking;
 
 namespace GameCult.Mesh
 {
+    /// <summary>
+    /// One exact hot-body subscription. The view record, latest-publication record, consumer body
+    /// demand, and locally supported planes are one contract so callers cannot accidentally stream
+    /// body bytes through retained document snapshots.
+    /// </summary>
+    public sealed class CultMeshHotBodySubscription
+    {
+        public CultMeshHotBodySubscription(
+            string subscriptionId,
+            string consumerRuntimeId,
+            string viewRecordKey,
+            string viewSchemaId,
+            string bodyId,
+            IEnumerable<string>? additionalRecordKeys = null,
+            IEnumerable<string>? additionalSchemaIds = null)
+        {
+            SubscriptionId = Require(subscriptionId, nameof(subscriptionId));
+            ConsumerRuntimeId = Require(consumerRuntimeId, nameof(consumerRuntimeId));
+            BodyId = Require(bodyId, nameof(bodyId));
+            RecordKeys = new[]
+                {
+                    Require(viewRecordKey, nameof(viewRecordKey)),
+                    CultMeshBodyPublicationDocument.CreateLatestRecordKey(bodyId).Value
+                }
+                .Concat(additionalRecordKeys ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            SchemaIds = new[]
+                {
+                    Require(viewSchemaId, nameof(viewSchemaId)),
+                    CultMeshBodyPublicationSchemaVersions.Publication
+                }
+                .Concat(additionalSchemaIds ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        public string SubscriptionId { get; }
+        public string ConsumerRuntimeId { get; }
+        public string BodyId { get; }
+        public IReadOnlyList<string> RecordKeys { get; }
+        public IReadOnlyList<string> SchemaIds { get; }
+
+        private static string Require(string value, string parameterName) =>
+            string.IsNullOrWhiteSpace(value)
+                ? throw new ArgumentException("Value is required.", parameterName)
+                : value;
+    }
+
     /// <summary>Derived transport work for one logical hot body.</summary>
     public sealed class CultMeshBodyDemandPlan
     {

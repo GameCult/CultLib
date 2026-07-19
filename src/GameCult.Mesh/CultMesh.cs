@@ -2852,6 +2852,40 @@ namespace GameCult.Mesh
             return new CultMeshRudpEndpoint(host, uri.Port, $"rudp://{uriHost}:{uri.Port}");
         }
 
+        /// <summary>
+        /// Opens one exact hot-body subscription and advertises every body plane this runtime can
+        /// actually open. The provider derives locality and publishes only the selected plane.
+        /// </summary>
+        public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            IEnumerable<CultMeshBodyTransportKind> supportedBodyTransports,
+            CultMeshHotBodySubscription subscription)
+        {
+            if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
+            if (supportedBodyTransports == null) throw new ArgumentNullException(nameof(supportedBodyTransports));
+            if (subscription == null) throw new ArgumentNullException(nameof(subscription));
+            var transports = supportedBodyTransports.Distinct().ToArray();
+            if (transports.Length == 0)
+                throw new ArgumentException("At least one readable body transport is required.", nameof(supportedBodyTransports));
+            return subscriptions.SubscribeAsync(
+                subscription.SubscriptionId,
+                recordKeys: subscription.RecordKeys,
+                schemaIds: subscription.SchemaIds,
+                consumerRuntimeId: subscription.ConsumerRuntimeId,
+                bodyIds: new[] { subscription.BodyId },
+                supportedBodyTransports: transports.Select(value => value.ToString()));
+        }
+
+        /// <summary>Opens an exact hot-body subscription using a resolver's readable planes.</summary>
+        public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            CultMeshBodyPublicationResolver bodyResolver,
+            CultMeshHotBodySubscription subscription)
+        {
+            if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
+            return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription);
+        }
+
         /// <summary>Resolves a CultMesh URI or RUDP endpoint into a concrete RUDP endpoint.</summary>
         public static CultMeshRudpEndpoint ResolveRudpEndpoint(string endpointOrUri)
         {

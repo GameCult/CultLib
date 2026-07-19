@@ -1141,9 +1141,14 @@ namespace GameCult.Networking
         /// <summary>
         /// Creates a packet carrying the current acknowledgement state.
         /// </summary>
-        public CultNetRudpPacket CreateAck()
+        public CultNetRudpPacket CreateAck(uint? acknowledgedSequence = null)
         {
             var (ack, ackMask) = AckState();
+            if (acknowledgedSequence.HasValue)
+            {
+                ack = acknowledgedSequence.Value;
+                ackMask = 0;
+            }
             return new CultNetRudpPacket
             {
                 PacketType = CultNetRudpPacketType.Ack,
@@ -1955,10 +1960,9 @@ namespace GameCult.Networking
 
             delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
             if (packet.PacketType == CultNetRudpPacketType.Accept ||
-                packet.PacketType == CultNetRudpPacketType.Data ||
-                delivered != null)
+                packet.PacketType == CultNetRudpPacketType.Data)
             {
-                SendPacket(_session.CreateAck());
+                SendPacket(_session.CreateAck(packet.Sequence));
             }
 
             return true;
@@ -2107,6 +2111,10 @@ namespace GameCult.Networking
         /// Gets whether the peer RUDP handshake has completed.
         /// </summary>
         public bool Connected => Session.Connected;
+        /// <summary>
+        /// Gets the number of reliable packets still awaiting acknowledgement.
+        /// </summary>
+        public int PendingReliablePacketCount => Session.PendingReliableSequences.Count;
         /// <summary>
         /// Gets the last transport-level remote disconnect reason, if one was received.
         /// </summary>
@@ -2349,9 +2357,9 @@ namespace GameCult.Networking
             }
 
             delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
-            if (packet.PacketType == CultNetRudpPacketType.Data || delivered != null)
+            if (packet.PacketType == CultNetRudpPacketType.Data)
             {
-                SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.CreateAck());
+                SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.CreateAck(packet.Sequence));
             }
 
             return true;

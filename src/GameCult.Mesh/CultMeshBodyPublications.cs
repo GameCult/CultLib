@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -360,6 +361,9 @@ namespace GameCult.Mesh
 
         public CultMeshBodyPublicationResolver(CultMeshBodyTransportService transport) =>
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+
+        /// <summary>Gets the body planes this resolver can actually open.</summary>
+        public IReadOnlyList<CultMeshBodyTransportKind> SupportedTransports => _transport.SupportedTransports;
 
         public ICultMeshBodyReadLease ResolveReadOnly(
             CultMeshBodyPublicationDocument publication,

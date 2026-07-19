@@ -918,12 +918,26 @@ stream demand merely by existing.
 and server disposal all update the same typed demand projection. Stable peer
 identity, not per-message wrapper identity, keys subscription lifetime.
 
+`CultMesh.SubscribeHotBodyAsync(...)` is the public construction path. Its
+`CultMeshHotBodySubscription` keeps the exact view record, the body's stable
+latest-publication record, consumer identity, and logical body demand in one
+contract. The local `CultMeshBodyTransportService` contributes only adapters it
+can actually open, ordered shared-memory first; the server combines those
+capabilities with observed peer locality. Applications do not hand-assemble
+transport-name arrays or request one snapshot per frame.
+
 **Cut line:** local frame publication writes directly into a mapped write lease
 and commits its descriptor. The compatibility byte-array publisher is copy-in
 only. The current remote frame representation may still use the verified CDN
 body path when remote demand exists; Phase 6 must replace that expiry-sensitive
 traffic with a stream/datagram body plane rather than enlarging snapshot or CDN
 timeouts.
+
+Reliable control messages larger than the RUDP receive mask explicitly
+acknowledge the packet just received. A retransmit older than the rolling
+32-packet summary can therefore always leave the sender queue; the rolling mask
+remains useful for piggyback acknowledgements but is not allowed to strand a
+fragment indefinitely.
 
 ### Gate
 

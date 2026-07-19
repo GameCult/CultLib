@@ -150,6 +150,11 @@ namespace GameCult.Mesh
         private readonly Func<CultMeshBodyDescriptor, bool> _authorizeProducer;
         private readonly Func<string, CultMeshBodyDescriptor, bool>? _authorizeNamedProducer;
 
+        /// <summary>Gets locally available body planes in fastest-local-first order.</summary>
+        public IReadOnlyList<CultMeshBodyTransportKind> SupportedTransports => _adapters.Keys
+            .OrderByDescending(TransportPreference)
+            .ToArray();
+
         public CultMeshBodyTransportService(
             IEnumerable<ICultMeshBodyTransportAdapter> adapters,
             Func<CultMeshBodyDescriptor, bool> authorizeProducer)
@@ -264,6 +269,13 @@ namespace GameCult.Mesh
             left.AccessMode == right.AccessMode &&
             left.Synchronization == right.Synchronization &&
             string.Equals(left.SemanticHash, right.SemanticHash, StringComparison.Ordinal);
+
+        private static int TransportPreference(CultMeshBodyTransportKind transport) => transport switch
+        {
+            CultMeshBodyTransportKind.SharedMemory => 3,
+            CultMeshBodyTransportKind.SharedFileMapping => 2,
+            _ => 1
+        };
     }
 
     public sealed class CultMeshMappedBodyPublisher

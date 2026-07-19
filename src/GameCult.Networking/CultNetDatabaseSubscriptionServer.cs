@@ -163,16 +163,17 @@ namespace GameCult.Networking
         {
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(""));
-            var schemaId = (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? "";
             if (request.RecordKeys is { Length: > 0 } && !request.RecordKeys.Contains(key.Value, StringComparer.Ordinal))
-                return null;
-            if (request.SchemaIds is { Length: > 0 } && !request.SchemaIds.Contains(schemaId, StringComparer.Ordinal))
                 return null;
 
             var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
             var document = changeType.GetProperty("Document")?.GetValue(change);
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
             {
+                var previous = changeType.GetProperty("PreviousDocument")?.GetValue(change);
+                var schemaId = ResolveWireSchemaId(previous, (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? "");
+                if (!MatchesRequestedSchema(request.SchemaIds, previous, schemaId))
+                    return null;
                 return new CultNetDatabaseChangeRawMessage
                 {
                     MessageId = Guid.NewGuid().ToString("N"),
@@ -183,13 +184,31 @@ namespace GameCult.Networking
                 };
             }
 
+            var raw = CreateRawRecord(key, document);
+            if (!MatchesRequestedSchema(request.SchemaIds, document, raw.SchemaId))
+                return null;
             return new CultNetDatabaseChangeRawMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
                 ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
-                Document = CreateRawRecord(key, document)
+                Document = raw
             };
+        }
+
+        private string ResolveWireSchemaId(object? document, string fallback)
+        {
+            if (document == null) return fallback;
+            return _database.Documents.GetByDocumentType(document.GetType())?.SchemaId ?? fallback;
+        }
+
+        private bool MatchesRequestedSchema(string[]? requestedSchemaIds, object? document, string wireSchemaId)
+        {
+            if (requestedSchemaIds is not { Length: > 0 }) return true;
+            if (requestedSchemaIds.Contains(wireSchemaId, StringComparer.Ordinal)) return true;
+            return document != null && CultNetSchemaAliasMatching.MatchesAny(
+                requestedSchemaIds,
+                _database.Cache.Registry.GetRequired(document.GetType()));
         }
 
         private CultNetRawDocumentRecord CreateRawRecord(CultRecordKey key, object document)

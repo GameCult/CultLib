@@ -772,6 +772,43 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_ExplicitlyAcknowledgesRetransmitsOlderThanTheReceiveMask()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 991,
+                InitialSequence = 1,
+                ResendDelayMs = 10
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 991,
+                InitialSequence = 500
+            });
+            sender.Receive(new CultNetRudpPacket
+                { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 991, Sequence = 400, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket
+                { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 991, Sequence = 0, ChannelId = "control" });
+
+            var packets = sender.SendMany(
+                "snapshot",
+                Enumerable.Range(0, 80).Select(index => (byte)index).ToArray(),
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 },
+                maxFragmentBytes: 1);
+            foreach (var packet in packets)
+                receiver.Receive(packet);
+
+            sender.Receive(receiver.CreateAck());
+            Assert.That(sender.PendingReliableSequences.First(), Is.EqualTo(1u));
+
+            var oldRetransmit = sender.DueResends(10).Single(packet => packet.Sequence == 1);
+            receiver.Receive(oldRetransmit);
+            sender.Receive(receiver.CreateAck(oldRetransmit.Sequence));
+
+            Assert.That(sender.PendingReliableSequences, Does.Not.Contain(1u));
+        }
+
+        [Test]
         public async Task RudpSession_ResendsAndAcknowledgementsCanRunConcurrently()
         {
             var session = new CultNetRudpSession(new CultNetRudpSessionOptions
@@ -1545,6 +1582,104 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscription_FiltersLiveChangesByWireSchemaBinding()
+        {
+            const string recordKey = "tests:subscription-client:wire-note";
+            const string wireSchema = "tests.wire_note.v1";
+            var sourceCache = new CultCache();
+            var sourceDocuments = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(sourceCache.Registry, wireSchema));
+            using var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceDocuments
+            });
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-wire-schema-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, sourceDatabase);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            var targetCache = new CultCache();
+            var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(targetCache.Registry, wireSchema));
+            var transport = CultNetSchemaClients.CreateRudp("database-wire-schema-subscription-client");
+            using var client = new CultNetDatabaseSubscriptionClient(transport, targetCache, targetDocuments);
+            transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => transport.Connected, TimeSpan.FromSeconds(2));
+            await AwaitWithTimeout(
+                client.SubscribeAsync("wire-notes", recordKeys: [recordKey], schemaIds: [wireSchema]),
+                TimeSpan.FromSeconds(2));
+            var changed = new TaskCompletionSource<CultNetReplicatedDocumentChange>(TaskCreationOptions.RunContinuationsAsynchronously);
+            client.Changed += change => changed.TrySetResult(change);
+
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "wire-live"
+            });
+            var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(update.SchemaId, Is.EqualTo(wireSchema));
+            Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("wire-live"));
+        }
+
+        [Test]
+        public void DatabaseSubscription_FiltersCanonicalWireChangesByRequestedSchemaAlias()
+        {
+            var cache = new CultCache();
+            var documents = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            using var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = documents
+            });
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-schema-alias-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var change = new CultNetDatabaseChange<NetworkSchemaNote>(
+                CultNetDatabaseChangeKind.Added,
+                new CultRecordKey("tests:subscription-client:alias-note"),
+                descriptor.SchemaId,
+                database.Shards[0],
+                new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "alias-live" },
+                previousDocument: null);
+            var method = typeof(CultNetDatabaseSubscriptionServer).GetMethod(
+                "CreateChange",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            var message = (CultNetDatabaseChangeRawMessage?)method.Invoke(subscriptions, new object[]
+            {
+                change,
+                new CultNetDatabaseSubscribeMessage
+                {
+                    SubscriptionId = "alias-notes",
+                    SchemaIds = ["tests.networking_note.v1"],
+                    RecordKeys = ["tests:subscription-client:alias-note"]
+                },
+                "alias-notes"
+            });
+
+            Assert.That(message, Is.Not.Null);
+            Assert.That(message!.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
+        }
+
+        [Test]
         public async Task RudpCultNetSchemaServer_DeliversLargeSnapshotResponse()
         {
             using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
@@ -1607,9 +1742,14 @@ namespace GameCult.Networking.Tests
             if (completed != responseCompletion.Task)
                 Assert.Fail($"Large snapshot timed out; server sent {server.Stats.BytesSent} bytes, received {server.Stats.BytesReceived} bytes, transports {server.Profile.Transports.Count()}.");
             var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromMilliseconds(1));
+            await WaitUntilAsync(
+                () => server.Peers.Count == 1 && server.Peers.Single().PendingReliablePacketCount == 0,
+                TimeSpan.FromSeconds(2));
             cancellation.Cancel();
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].Payload, Has.Length.EqualTo(128 * 1024));
+            Assert.That(server.Stats.BytesSent, Is.LessThan(512 * 1024),
+                "A lossless large response must not remain trapped in the reliable resend queue.");
         }
 
         [Test]
