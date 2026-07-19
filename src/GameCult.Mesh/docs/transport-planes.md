@@ -49,9 +49,15 @@ advertised mapping when it is actually reachable; otherwise it connects to the
 advertised QUIC route. Latest-only receivers must replace pending generations
 per body rather than queueing render debt.
 
-Provider broadcast isolates physical peers. A client disconnect or send failure
-removes that session without failing the publication tick for healthy clients;
-only caller cancellation stops the broadcast operation.
+Provider simulation owns state generation, not socket completion. Latest-only
+broadcast enqueues into a keyed, coalescing outbox owned by each physical peer
+and returns without waiting for network delivery. The peer's transport worker
+owns stream writes and eviction after disconnect or send failure. Thus a slow,
+stalled, or departed client cannot backpressure a simulation tick, while a
+healthy peer still converges on the newest generation. Reliable-ordered
+broadcast remains completion-bearing because dropping or replacing it would
+violate its declared delivery contract; caller cancellation can stop that
+operation.
 
 **Derived state:** connector choice, physical endpoint, connection health, and
 transport diagnostics. None of these grant provider authority or become content

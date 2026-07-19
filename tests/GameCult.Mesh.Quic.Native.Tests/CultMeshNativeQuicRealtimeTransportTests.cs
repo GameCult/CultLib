@@ -92,19 +92,32 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
         var pin = Convert.ToHexString(SHA256.HashData(certificate.RawData));
         var endpoint = $"cultmesh-state+quic://127.0.0.1:{server.LocalEndPoint.Port}?cert-sha256={pin}";
         var connector = new CultMeshNativeQuicRealtimeTransportConnector();
-        var client = await connector.ConnectAsync(
+        var departedClient = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
             CultMeshEndpointId.Parse("aetheria.local"));
-        await WaitUntilAsync(() => server.ConnectionCount == 1);
+        using var healthyClient = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint),
+            CultMeshEndpointId.Parse("aetheria.local"));
+        await WaitUntilAsync(() => server.ConnectionCount == 2);
         await server.BroadcastAsync(Frame(sequence: 1));
         using var receiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        await client.ReceiveAsync(receiveTimeout.Token);
+        await departedClient.ReceiveAsync(receiveTimeout.Token);
+        await healthyClient.ReceiveAsync(receiveTimeout.Token);
 
-        client.Dispose();
+        departedClient.Dispose();
 
-        Func<Task> broadcastAfterDeparture = () => server.BroadcastAsync(Frame(sequence: 2));
-        await broadcastAfterDeparture.Should().NotThrowAsync(
-            "a short-lived realtime observer cannot terminate provider publication");
+        for (var sequence = 2; sequence <= 100; sequence++)
+            await server.BroadcastAsync(Frame(sequence)).WaitAsync(TimeSpan.FromSeconds(1));
+
+        CultMeshRealtimeFrame received;
+        do
+        {
+            received = await healthyClient.ReceiveAsync(receiveTimeout.Token);
+        }
+        while (received.Sequence < 100);
+
+        received.Sequence.Should().Be(100,
+            "a departed observer cannot stall provider publication or starve healthy peers");
     }
 
     private static CultMeshRealtimeFrame Frame(long sequence) => new()

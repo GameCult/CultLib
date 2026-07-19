@@ -217,6 +217,18 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         if (frame == null) throw new ArgumentNullException(nameof(frame));
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (frame.Delivery == CultMeshRealtimeDelivery.LatestOnly)
+        {
+            foreach (var client in _clients.Keys)
+            {
+                if (client.TryPublishLatest(frame)) continue;
+                if (_clients.TryRemove(client, out _)) client.Dispose();
+            }
+            return;
+        }
+
         var sends = _clients.Keys.Select(client => SendToConnectedClientAsync(client, frame, cancellationToken)).ToArray();
         if (sends.Length > 0) await Task.WhenAll(sends).ConfigureAwait(false);
     }
@@ -304,8 +316,11 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
     private readonly ConcurrentDictionary<string, CultMeshGeneration> _latestGenerations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<int, Task> _streamReaders = new();
     private readonly SemaphoreSlim _reliableSendGate = new(1, 1);
+    private readonly CultMeshRealtimeInbox _outbound = new();
     private readonly Action<CultMeshRealtimeFrame>? _observer;
     private readonly Task _acceptLoop;
+    private readonly Task _outboundLoop;
+    private readonly Task _completion;
     private QuicStream? _reliableOutbound;
     private int _nextReaderId;
     private bool _disposed;
@@ -319,11 +334,19 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
         _connection = connection;
         _observer = observer;
         _acceptLoop = AcceptStreamsAsync(_shutdown.Token);
+        _outboundLoop = SendPublishedFramesAsync(_shutdown.Token);
+        _completion = Task.WhenAll(_acceptLoop, _outboundLoop);
     }
 
     public string TransportId => "msquic-realtime";
     public string Endpoint { get; }
-    public Task Completion => _acceptLoop;
+    public Task Completion => _completion;
+
+    internal bool TryPublishLatest(CultMeshRealtimeFrame frame)
+    {
+        if (_disposed || frame.Delivery != CultMeshRealtimeDelivery.LatestOnly) return false;
+        return _outbound.Publish(frame);
+    }
 
     public async Task SendAsync(CultMeshRealtimeFrame frame, CancellationToken cancellationToken = default)
     {
@@ -368,12 +391,33 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
     {
         if (_disposed) return;
         _disposed = true;
+        _outbound.Complete();
         _shutdown.Cancel();
         _reliableOutbound?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _connection.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _received.Complete();
         _reliableSendGate.Dispose();
         _shutdown.Dispose();
+    }
+
+    private async Task SendPublishedFramesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var frame = await _outbound.ReceiveAsync(cancellationToken).ConfigureAwait(false);
+                await SendAsync(frame, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            _shutdown.Cancel();
+            throw;
+        }
     }
 
     private async Task<QuicStream> OpenStreamAsync(byte kind, CancellationToken cancellationToken)
@@ -515,21 +559,20 @@ internal sealed class CultMeshRealtimeInbox
     private readonly Dictionary<string, CultMeshRealtimeFrame> _latest = new(StringComparer.Ordinal);
     private bool _completed;
 
-    public void Publish(CultMeshRealtimeFrame frame)
+    public bool Publish(CultMeshRealtimeFrame frame)
     {
         if (frame.Delivery != CultMeshRealtimeDelivery.LatestOnly)
         {
-            _ready.Writer.TryWrite(new InboxToken(frame, null));
-            return;
+            return _ready.Writer.TryWrite(new InboxToken(frame, null));
         }
 
         var key = frame.ChannelId + "\u001f" + frame.BodyId;
         lock (_gate)
         {
-            if (_completed) return;
+            if (_completed) return false;
             var alreadyPending = _latest.ContainsKey(key);
             _latest[key] = frame;
-            if (!alreadyPending) _ready.Writer.TryWrite(new InboxToken(null, key));
+            return alreadyPending || _ready.Writer.TryWrite(new InboxToken(null, key));
         }
     }
 
