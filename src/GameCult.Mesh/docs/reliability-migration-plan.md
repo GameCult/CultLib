@@ -2,6 +2,8 @@
 
 Incident record: [CultMesh bulk content over custom RUDP, July 2026](postmortem-2026-07-cultmesh-bulk-rudp.md).
 
+Physical-plane authority: [CultMesh transport planes](transport-planes.md).
+
 ## Objective
 
 CultMesh should give an application one typed, watchable route to a Verse,
@@ -676,16 +678,17 @@ body in process.
 **Owner:** CultMesh negotiation selects a body transport from provider-owned
 capabilities and consumer demand. The selected transport owns byte movement;
 `CultMeshContentTransferService` continues to own content identity, resumable
-verification, and atomic cache promotion. CultNet RUDP does not own bulk-body
-performance.
+verification, and atomic cache promotion. TCP owns remote immutable content;
+CultNet RUDP does not own bulk-body performance.
 
 **Inputs:** content hash and size, provider-advertised transport candidates,
 consumer-supported transports, same-machine evidence, and platform support.
 
 **Outputs:** an authorized mapped body for same-machine deployments, or a
-dedicated remote byte stream feeding the existing verification/promotion owner.
-Typed control state, reactive variables, commands, and receipts remain CultNet
-messages and are not smuggled into the bulk stream.
+dedicated TCP byte stream feeding the existing verification/promotion owner.
+Schemas, commands, receipts, and manifests use framed TCP CultNet messages.
+Realtime state uses a separately negotiated QUIC stream or datagram and is not
+smuggled through either snapshots or the immutable-content stream.
 
 **Derived state:** selected plane, physical endpoint, mapped-file descriptor,
 stream progress, and transport telemetry. None can change content identity,

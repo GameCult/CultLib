@@ -22,8 +22,21 @@ namespace GameCult.Mesh
         /// <summary>Gets or sets session path and diagnostic policy.</summary>
         public CultMeshSessionManagerOptions Sessions { get; set; } = new();
 
-        /// <summary>Gets or sets optional transport connectors. The CultNet schema connector is used by default.</summary>
+        /// <summary>Gets or sets schema connectors. Length-prefixed TCP is used by default.</summary>
         public IReadOnlyList<ICultMeshTransportConnector>? Connectors { get; set; }
+
+        /// <summary>
+        /// Gets or sets streaming content connectors. TCP content delivery is used by default;
+        /// applications may replace it or explicitly add legacy RUDP.
+        /// </summary>
+        public IReadOnlyList<ICultMeshContentTransportConnector>? ContentConnectors { get; set; }
+
+        /// <summary>
+        /// Gets or sets realtime state connectors. No connector is installed implicitly;
+        /// promoted runtimes should register QUIC and may explicitly add a legacy fallback.
+        /// </summary>
+        public IReadOnlyList<ICultMeshRealtimeTransportConnector> RealtimeConnectors { get; set; } =
+            Array.Empty<ICultMeshRealtimeTransportConnector>();
 
         /// <summary>Gets or sets the deadline before an unanswered subscription intent is replayed.</summary>
         public TimeSpan SubscriptionResponseTimeout { get; set; } = TimeSpan.FromSeconds(2);
@@ -68,8 +81,13 @@ namespace GameCult.Mesh
                 _discovery,
                 options.Connectors ?? new ICultMeshTransportConnector[]
                 {
-                    new CultMeshSchemaTransportConnector(clock: options.Sessions.Clock)
+                    new CultMeshTcpSchemaTransportConnector(clock: options.Sessions.Clock)
                 },
+                options.ContentConnectors ?? new ICultMeshContentTransportConnector[]
+                {
+                    new CultMeshTcpContentTransportConnector()
+                },
+                options.RealtimeConnectors,
                 options.Sessions);
             _subscriptionResponseTimeout = options.SubscriptionResponseTimeout;
         }
@@ -82,6 +100,15 @@ namespace GameCult.Mesh
         {
             ThrowIfDisposed();
             return _sessions.ConnectAsync(CultMeshEndpointId.Parse(endpointId), protocol, cancellationToken);
+        }
+
+        /// <summary>Connects the reusable realtime state plane by stable endpoint identity.</summary>
+        public Task<CultMeshRealtimeSession> ConnectRealtimeAsync(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfDisposed();
+            return _sessions.ConnectRealtimeAsync(CultMeshEndpointId.Parse(endpointId), cancellationToken);
         }
 
         /// <summary>Connects to a stable endpoint identity using one application protocol.</summary>
@@ -97,15 +124,13 @@ namespace GameCult.Mesh
         /// <summary>Creates a verified-transfer provider over this client's reusable content session owner.</summary>
         public CultMeshSessionContentProvider ContentProvider(
             string providerId,
-            string endpointId,
-            CultMeshSessionContentProviderOptions? options = null)
+            string endpointId)
         {
             ThrowIfDisposed();
             return new CultMeshSessionContentProvider(
                 providerId,
                 _sessions,
-                CultMeshEndpointId.Parse(endpointId),
-                options);
+                CultMeshEndpointId.Parse(endpointId));
         }
 
         /// <summary>Creates a direct body provider over this client's reusable negotiated session owner.</summary>

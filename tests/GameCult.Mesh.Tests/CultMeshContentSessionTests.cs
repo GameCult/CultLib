@@ -30,19 +30,23 @@ public sealed class CultMeshContentSessionTests
     }
 
     [Test]
-    public async Task ContentSessionTransfersLargeBodyWithoutSnapshotPayloadsAndReusesCommittedBody()
+    public async Task TcpContentSessionStreamsLargeBodyAndReusesCommittedBody()
     {
         var payload = Enumerable.Range(0, 700_000).Select(value => (byte)(value % 251)).ToArray();
         var artifact = CultMesh.PackCdnArtifact("aetheria/world/windows", payload);
         using var providerCache = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
         await CultMeshCdn.PublishAsync(providerCache, artifact);
-        var wireServer = new LoopbackSchemaServer();
-        using var contentServer = new CultMeshContentServer(wireServer, providerCache);
-        var wireClient = new LoopbackSchemaClient(wireServer);
-        var connector = new LoopbackConnector(wireClient);
-        using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource() });
-        using var sessions = new CultMeshSessionManager(discovery, new[] { connector });
+        using var contentServer = new CultMeshTcpContentServer(
+            new TcpListener(IPAddress.Loopback, 0),
+            providerCache);
+        var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
+        var connector = new CultMeshTcpContentTransportConnector();
+        using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
+        using var sessions = new CultMeshSessionManager(
+            discovery,
+            Array.Empty<ICultMeshTransportConnector>(),
+            new ICultMeshContentTransportConnector[] { connector });
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
@@ -55,16 +59,14 @@ public sealed class CultMeshContentSessionTests
             new CultMeshContentTransferOptions(_directory));
 
         var first = await transfer.FetchAsync(artifact.Manifest);
-        var requestsAfterCold = wireClient.ContentRequestCount;
+        var requestsAfterCold = contentServer.ChunkRequestsServed;
         var second = await transfer.FetchAsync(artifact.Manifest);
 
         File.ReadAllBytes(first).Should().Equal(payload);
         second.Should().Be(first);
         requestsAfterCold.Should().Be(artifact.Manifest.Chunks.Length);
-        wireClient.ContentRequestCount.Should().Be(requestsAfterCold,
+        contentServer.ChunkRequestsServed.Should().Be(requestsAfterCold,
             "a committed verified body is the warm-cache authority");
-        wireClient.SnapshotRequestCount.Should().Be(0,
-            "bulk content must never be represented as snapshot records");
         connector.ConnectCount.Should().Be(1,
             "all chunk requests borrow one identity-first content session");
     }
@@ -86,7 +88,7 @@ public sealed class CultMeshContentSessionTests
             MaxFragmentBytes = 1024,
             MaxPendingReliablePackets = 8192
         });
-        using var contentServer = new CultMeshContentServer(wireServer, providerCache);
+        using var contentServer = new CultMeshLegacyRudpContentServer(wireServer, providerCache);
         using var pumpCancellation = new CancellationTokenSource();
         var pump = Task.Run(async () =>
         {
@@ -101,14 +103,16 @@ public sealed class CultMeshContentSessionTests
 
         var endpoint = $"rudp://127.0.0.1:{wireServer.LocalEndPoint.Port}";
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
+        var connector = new CultMeshLegacyRudpContentTransportConnector(
+            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromSeconds(20) });
         using var sessions = new CultMeshSessionManager(
             discovery,
-            new ICultMeshTransportConnector[] { new CultMeshSchemaTransportConnector() });
+            Array.Empty<ICultMeshTransportConnector>(),
+            new ICultMeshContentTransportConnector[] { connector });
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
-            CultMeshEndpointId.Parse("service:aetheria.daemon"),
-            new CultMeshSessionContentProviderOptions { ResponseTimeout = TimeSpan.FromSeconds(20) });
+            CultMeshEndpointId.Parse("service:aetheria.daemon"));
         using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshContentTransferStateDocument)));
         var transfer = new CultMeshContentTransferService(
@@ -205,6 +209,7 @@ public sealed class CultMeshContentSessionTests
         private int _connectCount;
         public LoopbackConnector(ICultNetSchemaClient client) => _client = client;
         public string ConnectorId => "loopback";
+        public int Priority => 0;
         public int ConnectCount => Volatile.Read(ref _connectCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
         public Task<ICultNetSchemaClient> ConnectAsync(

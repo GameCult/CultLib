@@ -227,6 +227,7 @@ public sealed class CultMeshClientTests
     {
         private int _connectCount;
         public string ConnectorId => "test";
+        public int Priority => 0;
         public int ConnectCount => Volatile.Read(ref _connectCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
         public Task<ICultNetSchemaClient> ConnectAsync(
@@ -254,6 +255,7 @@ public sealed class CultMeshClientTests
         public bool SuppressFirstSnapshot { get; set; }
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public string ConnectorId => "document-test";
+        public int Priority => 0;
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
         public Task<ICultNetSchemaClient> ConnectAsync(

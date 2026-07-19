@@ -39,6 +39,7 @@ namespace GameCult.Mesh
         public static CultMeshProtocolId Discovery { get; } = new CultMeshProtocolId("cultmesh.discovery.v1");
         public static CultMeshProtocolId PeerExchange { get; } = new CultMeshProtocolId("cultmesh.peer_exchange.v1");
         public static CultMeshProtocolId Subscriptions { get; } = new CultMeshProtocolId("cultmesh.subscriptions.v1");
+        public static CultMeshProtocolId RealtimeState { get; } = new CultMeshProtocolId("cultmesh.realtime_state.v1");
     }
 
     public enum CultMeshTransportPathKind { Direct, Relay, Tunnel }
@@ -101,6 +102,7 @@ namespace GameCult.Mesh
     public interface ICultMeshTransportConnector
     {
         string ConnectorId { get; }
+        int Priority { get; }
         bool CanConnect(CultMeshTransportCandidate candidate);
         Task<ICultNetSchemaClient> ConnectAsync(
             CultMeshTransportCandidate candidate,
@@ -108,6 +110,10 @@ namespace GameCult.Mesh
             CancellationToken cancellationToken = default);
     }
 
+    /// <summary>
+    /// Explicit compatibility connector for the previous RUDP/LiteNetLib schema lanes.
+    /// Prefer <see cref="CultMeshTcpSchemaTransportConnector"/> for registered schemas.
+    /// </summary>
     public sealed class CultMeshSchemaTransportConnector : ICultMeshTransportConnector
     {
         private readonly Func<string, ICultNetSchemaClient> _createClient;
@@ -124,7 +130,8 @@ namespace GameCult.Mesh
             _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5);
         }
 
-        public string ConnectorId => "cultnet-schema";
+        public string ConnectorId => "legacy-datagram-schema";
+        public int Priority => 10_000;
         public bool CanConnect(CultMeshTransportCandidate candidate) =>
             Uri.TryCreate(candidate.Endpoint, UriKind.Absolute, out var uri) &&
             (string.Equals(uri.Scheme, "rudp", StringComparison.OrdinalIgnoreCase) ||
@@ -136,6 +143,59 @@ namespace GameCult.Mesh
             CancellationToken cancellationToken = default)
         {
             if (!CanConnect(candidate)) throw new NotSupportedException($"Unsupported CultNet endpoint '{candidate.Endpoint}'.");
+            var client = _createClient(candidate.Endpoint);
+            try
+            {
+                var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(candidate.Endpoint);
+                client.Connect(host, port);
+                var deadline = _clock.UtcNow + _connectTimeout;
+                while (!client.Connected)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (_clock.UtcNow >= deadline)
+                        throw new TimeoutException($"Timed out connecting to '{candidate.Endpoint}'.");
+                    await _clock.DelayAsync(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+                }
+                return client;
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Preferred connector for registered schema, command, receipt, and manifest traffic.</summary>
+    public sealed class CultMeshTcpSchemaTransportConnector : ICultMeshTransportConnector
+    {
+        private readonly Func<string, ICultNetSchemaClient> _createClient;
+        private readonly ICultMeshClock _clock;
+        private readonly TimeSpan _connectTimeout;
+
+        public CultMeshTcpSchemaTransportConnector(
+            Func<string, ICultNetSchemaClient>? createClient = null,
+            ICultMeshClock? clock = null,
+            TimeSpan? connectTimeout = null)
+        {
+            _createClient = createClient ?? (_ => CultNetSchemaClients.CreateTcpFramed());
+            _clock = clock ?? CultMeshSystemClock.Instance;
+            _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5);
+        }
+
+        public string ConnectorId => "tcp-schema";
+        public int Priority => 0;
+        public bool CanConnect(CultMeshTransportCandidate candidate) =>
+            Uri.TryCreate(candidate.Endpoint, UriKind.Absolute, out var uri) &&
+            string.Equals(uri.Scheme, "cultnet+tcp", StringComparison.OrdinalIgnoreCase);
+
+        public async Task<ICultNetSchemaClient> ConnectAsync(
+            CultMeshTransportCandidate candidate,
+            CultMeshProtocolId protocol,
+            CancellationToken cancellationToken = default)
+        {
+            if (!CanConnect(candidate))
+                throw new NotSupportedException($"TCP schema connector does not support '{candidate.Endpoint}'.");
             var client = _createClient(candidate.Endpoint);
             try
             {
@@ -328,8 +388,12 @@ namespace GameCult.Mesh
     {
         private readonly CultMeshDiscoveryService _discovery;
         private readonly ICultMeshTransportConnector[] _connectors;
+        private readonly ICultMeshContentTransportConnector[] _contentConnectors;
+        private readonly ICultMeshRealtimeTransportConnector[] _realtimeConnectors;
         private readonly CultMeshSessionManagerOptions _options;
         private readonly ConcurrentDictionary<string, Lazy<Task<CultMeshSession>>> _sessions = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, Lazy<Task<CultMeshContentSession>>> _contentSessions = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, Lazy<Task<CultMeshRealtimeSession>>> _realtimeSessions = new(StringComparer.Ordinal);
         private long _diagnosticSequence;
         private bool _disposed;
 
@@ -337,9 +401,44 @@ namespace GameCult.Mesh
             CultMeshDiscoveryService discovery,
             IEnumerable<ICultMeshTransportConnector> connectors,
             CultMeshSessionManagerOptions? options = null)
+            : this(
+                discovery,
+                connectors,
+                Array.Empty<ICultMeshContentTransportConnector>(),
+                Array.Empty<ICultMeshRealtimeTransportConnector>(),
+                options)
+        {
+        }
+
+        public CultMeshSessionManager(
+            CultMeshDiscoveryService discovery,
+            IEnumerable<ICultMeshTransportConnector> connectors,
+            IEnumerable<ICultMeshContentTransportConnector> contentConnectors,
+            CultMeshSessionManagerOptions? options = null)
+            : this(
+                discovery,
+                connectors,
+                contentConnectors,
+                Array.Empty<ICultMeshRealtimeTransportConnector>(),
+                options)
+        {
+        }
+
+        public CultMeshSessionManager(
+            CultMeshDiscoveryService discovery,
+            IEnumerable<ICultMeshTransportConnector> connectors,
+            IEnumerable<ICultMeshContentTransportConnector> contentConnectors,
+            IEnumerable<ICultMeshRealtimeTransportConnector> realtimeConnectors,
+            CultMeshSessionManagerOptions? options = null)
         {
             _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
             _connectors = connectors?.ToArray() ?? throw new ArgumentNullException(nameof(connectors));
+            _contentConnectors = contentConnectors?.ToArray() ?? throw new ArgumentNullException(nameof(contentConnectors));
+            _realtimeConnectors = realtimeConnectors?.ToArray() ?? throw new ArgumentNullException(nameof(realtimeConnectors));
+            if (_contentConnectors.Any(connector => connector == null))
+                throw new ArgumentException("Content transport connectors cannot contain null entries.", nameof(contentConnectors));
+            if (_realtimeConnectors.Any(connector => connector == null))
+                throw new ArgumentException("Realtime transport connectors cannot contain null entries.", nameof(realtimeConnectors));
             _options = options ?? new CultMeshSessionManagerOptions();
             if (_options.MaxRacedCandidates <= 0) throw new ArgumentOutOfRangeException(nameof(options));
         }
@@ -371,6 +470,257 @@ namespace GameCult.Mesh
             }
         }
 
+        /// <summary>
+        /// Connects one reusable streaming content plane by stable endpoint identity.
+        /// Preferred connector tiers are exhausted before legacy fallback tiers are attempted.
+        /// </summary>
+        public async Task<CultMeshContentSession> ConnectContentAsync(
+            CultMeshEndpointId endpointId,
+            CancellationToken cancellationToken = default)
+        {
+            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            ThrowIfDisposed();
+            var key = endpointId.Value;
+            while (true)
+            {
+                var lazy = _contentSessions.GetOrAdd(key, _ => new Lazy<Task<CultMeshContentSession>>(
+                    () => ConnectContentOwnedAsync(key, endpointId), LazyThreadSafetyMode.ExecutionAndPublication));
+                try
+                {
+                    var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
+                    if (session.State.Status != CultMeshSessionStatus.Offline) return session;
+                    _contentSessions.TryRemove(key, out _);
+                }
+                catch
+                {
+                    _contentSessions.TryRemove(key, out _);
+                    throw;
+                }
+            }
+        }
+
+        private async Task<CultMeshContentSession> ConnectContentOwnedAsync(
+            string key,
+            CultMeshEndpointId endpointId)
+        {
+            var result = await ResolveContentPathAsync(endpointId).ConfigureAwait(false);
+            var session = new CultMeshContentSession(
+                endpointId,
+                result.Transport,
+                new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate),
+                failed => InvalidateContentSession(key, failed));
+            Emit(endpointId, CultMeshProtocols.Content, "online", result.Candidate.Endpoint);
+            return session;
+        }
+
+        private async Task<ConnectedContentPath> ResolveContentPathAsync(CultMeshEndpointId endpointId)
+        {
+            if (_contentConnectors.Length == 0)
+                throw Failure(
+                    CultMeshSessionFailureReason.UnsupportedPath,
+                    "No streaming content connectors are configured. Register the TCP content connector or the explicit legacy RUDP connector.");
+
+            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
+            var candidates = discovery.Candidates
+                .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
+                .Distinct(StringComparer.Ordinal)
+                .Select(endpoint => new CultMeshTransportCandidate(endpoint))
+                .ToArray();
+            var routes = candidates
+                .SelectMany(candidate => _contentConnectors
+                    .Where(connector => connector.CanConnect(candidate))
+                    .Select(connector => new ContentRoute(candidate, connector)))
+                .OrderBy(route => route.Connector.Priority)
+                .ThenBy(route => route.Candidate.Priority)
+                .ToArray();
+            if (routes.Length == 0)
+                throw Failure(
+                    CultMeshSessionFailureReason.UnsupportedPath,
+                    $"No streaming content connector supports an advertised route for '{endpointId}'.");
+
+            var failures = new List<Exception>();
+            foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
+            {
+                var attempts = tier.Take(_options.MaxRacedCandidates)
+                    .Select(route => ConnectContentCandidateAsync(endpointId, route))
+                    .ToList();
+                while (attempts.Count > 0)
+                {
+                    var completed = await Task.WhenAny(attempts).ConfigureAwait(false);
+                    attempts.Remove(completed);
+                    try
+                    {
+                        var result = await completed.ConfigureAwait(false);
+                        foreach (var loser in attempts)
+                            _ = loser.ContinueWith(task =>
+                            {
+                                if (task.Status == TaskStatus.RanToCompletion) task.Result.Transport.Dispose();
+                            }, TaskScheduler.Default);
+                        return result;
+                    }
+                    catch (Exception error)
+                    {
+                        failures.Add(error);
+                    }
+                }
+            }
+
+            var last = failures.LastOrDefault();
+            throw Failure(
+                last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
+                $"No streaming content path connected for '{endpointId}'.",
+                last);
+        }
+
+        private static async Task<ConnectedContentPath> ConnectContentCandidateAsync(
+            CultMeshEndpointId endpointId,
+            ContentRoute route)
+        {
+            var transport = await route.Connector.ConnectAsync(route.Candidate, endpointId).ConfigureAwait(false);
+            return new ConnectedContentPath(route.Candidate, transport);
+        }
+
+        private void InvalidateContentSession(string key, CultMeshContentSession session)
+        {
+            session.MarkOffline(new CultMeshSessionState(
+                CultMeshSessionStatus.Offline,
+                _options.Clock.UtcNow,
+                session.State.Path,
+                new CultMeshSessionFailure(
+                    CultMeshSessionFailureReason.Transport,
+                    "The selected streaming content transport failed.",
+                    session.State.Path?.Endpoint ?? string.Empty)));
+            if (_contentSessions.TryRemove(key, out var removed) &&
+                removed.IsValueCreated && removed.Value.Status == TaskStatus.RanToCompletion)
+                removed.Value.Result.Dispose();
+            Emit(session.EndpointId, CultMeshProtocols.Content, "offline", session.State.Path?.Endpoint ?? string.Empty);
+        }
+
+        /// <summary>
+        /// Connects the realtime state plane. No connector is implied: promoted runtimes
+        /// register QUIC explicitly, while RUDP compatibility remains opt-in.
+        /// </summary>
+        public async Task<CultMeshRealtimeSession> ConnectRealtimeAsync(
+            CultMeshEndpointId endpointId,
+            CancellationToken cancellationToken = default)
+        {
+            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            ThrowIfDisposed();
+            var key = endpointId.Value;
+            while (true)
+            {
+                var lazy = _realtimeSessions.GetOrAdd(key, _ => new Lazy<Task<CultMeshRealtimeSession>>(
+                    () => ConnectRealtimeOwnedAsync(key, endpointId), LazyThreadSafetyMode.ExecutionAndPublication));
+                try
+                {
+                    var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
+                    if (session.State.Status != CultMeshSessionStatus.Offline) return session;
+                    _realtimeSessions.TryRemove(key, out _);
+                }
+                catch
+                {
+                    _realtimeSessions.TryRemove(key, out _);
+                    throw;
+                }
+            }
+        }
+
+        private async Task<CultMeshRealtimeSession> ConnectRealtimeOwnedAsync(
+            string key,
+            CultMeshEndpointId endpointId)
+        {
+            var result = await ResolveRealtimePathAsync(endpointId).ConfigureAwait(false);
+            var session = new CultMeshRealtimeSession(
+                endpointId,
+                result.Transport,
+                new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate),
+                failed => InvalidateRealtimeSession(key, failed));
+            Emit(endpointId, CultMeshProtocols.RealtimeState, "online", result.Candidate.Endpoint);
+            return session;
+        }
+
+        private async Task<ConnectedRealtimePath> ResolveRealtimePathAsync(CultMeshEndpointId endpointId)
+        {
+            if (_realtimeConnectors.Length == 0)
+                throw Failure(
+                    CultMeshSessionFailureReason.UnsupportedPath,
+                    "No realtime state connectors are configured. Register a QUIC connector explicitly.");
+
+            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
+            var routes = discovery.Candidates
+                .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
+                .Distinct(StringComparer.Ordinal)
+                .Select(endpoint => new CultMeshTransportCandidate(endpoint))
+                .SelectMany(candidate => _realtimeConnectors
+                    .Where(connector => connector.CanConnect(candidate))
+                    .Select(connector => new RealtimeRoute(candidate, connector)))
+                .OrderBy(route => route.Connector.Priority)
+                .ThenBy(route => route.Candidate.Priority)
+                .ToArray();
+            if (routes.Length == 0)
+                throw Failure(
+                    CultMeshSessionFailureReason.UnsupportedPath,
+                    $"No realtime connector supports an advertised route for '{endpointId}'.");
+
+            var failures = new List<Exception>();
+            foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
+            {
+                var attempts = tier.Take(_options.MaxRacedCandidates)
+                    .Select(route => ConnectRealtimeCandidateAsync(endpointId, route))
+                    .ToList();
+                while (attempts.Count > 0)
+                {
+                    var completed = await Task.WhenAny(attempts).ConfigureAwait(false);
+                    attempts.Remove(completed);
+                    try
+                    {
+                        var result = await completed.ConfigureAwait(false);
+                        foreach (var loser in attempts)
+                            _ = loser.ContinueWith(task =>
+                            {
+                                if (task.Status == TaskStatus.RanToCompletion) task.Result.Transport.Dispose();
+                            }, TaskScheduler.Default);
+                        return result;
+                    }
+                    catch (Exception error)
+                    {
+                        failures.Add(error);
+                    }
+                }
+            }
+
+            var last = failures.LastOrDefault();
+            throw Failure(
+                last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
+                $"No realtime state path connected for '{endpointId}'.",
+                last);
+        }
+
+        private static async Task<ConnectedRealtimePath> ConnectRealtimeCandidateAsync(
+            CultMeshEndpointId endpointId,
+            RealtimeRoute route)
+        {
+            var transport = await route.Connector.ConnectAsync(route.Candidate, endpointId).ConfigureAwait(false);
+            return new ConnectedRealtimePath(route.Candidate, transport);
+        }
+
+        private void InvalidateRealtimeSession(string key, CultMeshRealtimeSession session)
+        {
+            var endpoint = session.State.Path?.Endpoint ?? string.Empty;
+            session.MarkOffline(new CultMeshSessionState(
+                CultMeshSessionStatus.Offline,
+                _options.Clock.UtcNow,
+                session.State.Path,
+                new CultMeshSessionFailure(
+                    CultMeshSessionFailureReason.Transport,
+                    "The selected realtime state transport failed.",
+                    endpoint)));
+            if (_realtimeSessions.TryRemove(key, out var removed) &&
+                removed.IsValueCreated && removed.Value.Status == TaskStatus.RanToCompletion)
+                removed.Value.Result.Dispose();
+            Emit(session.EndpointId, CultMeshProtocols.RealtimeState, "offline", endpoint);
+        }
+
         private async Task<CultMeshSession> ConnectOwnedAsync(string key, CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
         {
             var result = await ResolveConnectedPathAsync(endpointId, protocol).ConfigureAwait(false);
@@ -387,26 +737,43 @@ namespace GameCult.Mesh
             var candidates = discovery.Candidates.SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
                 .Select(endpoint => new CultMeshTransportCandidate(endpoint))
-                .OrderBy(candidate => candidate.Priority)
-                .Take(_options.MaxRacedCandidates)
+                .ToArray();
+            var routes = candidates
+                .SelectMany(candidate => _connectors
+                    .Where(connector => connector.CanConnect(candidate))
+                    .Select(connector => new SchemaRoute(candidate, connector)))
+                .OrderBy(route => route.Connector.Priority)
+                .ThenBy(route => route.Candidate.Priority)
                 .ToArray();
             if (candidates.Length == 0)
                 throw Failure(CultMeshSessionFailureReason.Resolution, $"No route candidates for '{endpointId}'.");
+            if (routes.Length == 0)
+                throw Failure(
+                    CultMeshSessionFailureReason.Transport,
+                    $"No transport path connected for '{endpointId}' and protocol '{protocol}'.",
+                    Failure(
+                        CultMeshSessionFailureReason.UnsupportedPath,
+                        $"No registered connector supports an advertised route for '{endpointId}'."));
 
-            var attempts = candidates.Select(candidate => ConnectCandidateAsync(candidate, protocol)).ToList();
             var failures = new List<Exception>();
-            while (attempts.Count > 0)
+            foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
             {
-                var completed = await Task.WhenAny(attempts).ConfigureAwait(false);
-                attempts.Remove(completed);
-                try
+                var attempts = tier.Take(_options.MaxRacedCandidates)
+                    .Select(route => ConnectCandidateAsync(route, protocol))
+                    .ToList();
+                while (attempts.Count > 0)
                 {
-                    var result = await completed.ConfigureAwait(false);
-                    foreach (var loser in attempts)
-                        _ = loser.ContinueWith(task => { if (task.Status == TaskStatus.RanToCompletion) task.Result.Client.Dispose(); }, TaskScheduler.Default);
-                    return result;
+                    var completed = await Task.WhenAny(attempts).ConfigureAwait(false);
+                    attempts.Remove(completed);
+                    try
+                    {
+                        var result = await completed.ConfigureAwait(false);
+                        foreach (var loser in attempts)
+                            _ = loser.ContinueWith(task => { if (task.Status == TaskStatus.RanToCompletion) task.Result.Client.Dispose(); }, TaskScheduler.Default);
+                        return result;
+                    }
+                    catch (Exception error) { failures.Add(error); }
                 }
-                catch (Exception error) { failures.Add(error); }
             }
             var last = failures.LastOrDefault();
             throw Failure(last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
@@ -467,12 +834,10 @@ namespace GameCult.Mesh
             }
         }
 
-        private async Task<ConnectedPath> ConnectCandidateAsync(CultMeshTransportCandidate candidate, CultMeshProtocolId protocol)
+        private static async Task<ConnectedPath> ConnectCandidateAsync(SchemaRoute route, CultMeshProtocolId protocol)
         {
-            var connector = _connectors.FirstOrDefault(item => item.CanConnect(candidate));
-            if (connector == null) throw Failure(CultMeshSessionFailureReason.UnsupportedPath, $"No connector supports '{candidate.Endpoint}'.");
-            var client = await connector.ConnectAsync(candidate, protocol).ConfigureAwait(false);
-            return new ConnectedPath(candidate, client);
+            var client = await route.Connector.ConnectAsync(route.Candidate, protocol).ConfigureAwait(false);
+            return new ConnectedPath(route.Candidate, client);
         }
 
         private static async Task<T> AwaitForCallerAsync<T>(Task<T> shared, CancellationToken cancellationToken)
@@ -506,6 +871,12 @@ namespace GameCult.Mesh
             foreach (var lazy in _sessions.Values)
                 if (lazy.IsValueCreated && lazy.Value.Status == TaskStatus.RanToCompletion) lazy.Value.Result.Dispose();
             _sessions.Clear();
+            foreach (var lazy in _contentSessions.Values)
+                if (lazy.IsValueCreated && lazy.Value.Status == TaskStatus.RanToCompletion) lazy.Value.Result.Dispose();
+            _contentSessions.Clear();
+            foreach (var lazy in _realtimeSessions.Values)
+                if (lazy.IsValueCreated && lazy.Value.Status == TaskStatus.RanToCompletion) lazy.Value.Result.Dispose();
+            _realtimeSessions.Clear();
         }
 
         private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(CultMeshSessionManager)); }
@@ -515,6 +886,61 @@ namespace GameCult.Mesh
             public ConnectedPath(CultMeshTransportCandidate candidate, ICultNetSchemaClient client) { Candidate = candidate; Client = client; }
             public CultMeshTransportCandidate Candidate { get; }
             public ICultNetSchemaClient Client { get; }
+        }
+
+        private sealed class ConnectedContentPath
+        {
+            public ConnectedContentPath(CultMeshTransportCandidate candidate, ICultMeshContentTransport transport)
+            {
+                Candidate = candidate;
+                Transport = transport;
+            }
+            public CultMeshTransportCandidate Candidate { get; }
+            public ICultMeshContentTransport Transport { get; }
+        }
+
+        private sealed class SchemaRoute
+        {
+            public SchemaRoute(CultMeshTransportCandidate candidate, ICultMeshTransportConnector connector)
+            {
+                Candidate = candidate;
+                Connector = connector;
+            }
+            public CultMeshTransportCandidate Candidate { get; }
+            public ICultMeshTransportConnector Connector { get; }
+        }
+
+        private sealed class ContentRoute
+        {
+            public ContentRoute(CultMeshTransportCandidate candidate, ICultMeshContentTransportConnector connector)
+            {
+                Candidate = candidate;
+                Connector = connector;
+            }
+            public CultMeshTransportCandidate Candidate { get; }
+            public ICultMeshContentTransportConnector Connector { get; }
+        }
+
+        private sealed class ConnectedRealtimePath
+        {
+            public ConnectedRealtimePath(CultMeshTransportCandidate candidate, ICultMeshRealtimeTransport transport)
+            {
+                Candidate = candidate;
+                Transport = transport;
+            }
+            public CultMeshTransportCandidate Candidate { get; }
+            public ICultMeshRealtimeTransport Transport { get; }
+        }
+
+        private sealed class RealtimeRoute
+        {
+            public RealtimeRoute(CultMeshTransportCandidate candidate, ICultMeshRealtimeTransportConnector connector)
+            {
+                Candidate = candidate;
+                Connector = connector;
+            }
+            public CultMeshTransportCandidate Candidate { get; }
+            public ICultMeshRealtimeTransportConnector Connector { get; }
         }
     }
 }

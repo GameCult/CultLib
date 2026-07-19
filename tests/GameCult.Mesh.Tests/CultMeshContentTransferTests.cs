@@ -365,7 +365,10 @@ public sealed class CultMeshContentTransferTests
 
         public void ReleaseBlockedChunk() => _releaseBlockedChunk.TrySetResult(true);
 
-        public async Task<CultMeshCdnArtifactChunk?> GetChunkAsync(CultMeshCdnChunkRef chunk, CancellationToken cancellationToken = default)
+        public async Task CopyChunkToAsync(
+            CultMeshCdnChunkRef chunk,
+            Stream destination,
+            CancellationToken cancellationToken = default)
         {
             Requests.AddOrUpdate(chunk.ChunkHash, 1, (_, count) => count + 1);
             var request = Interlocked.Increment(ref _requestCount);
@@ -384,7 +387,9 @@ public sealed class CultMeshContentTransferTests
                 }
                 if (DelayMilliseconds > 0)
                     await Task.Delay(DelayMilliseconds, cancellationToken);
-                return _chunks.TryGetValue(chunk.ChunkHash, out var value) ? Clone(value) : null;
+                if (!_chunks.TryGetValue(chunk.ChunkHash, out var value))
+                    throw new FileNotFoundException("Synthetic content chunk is missing.", chunk.RecordKey);
+                await destination.WriteAsync(value.Payload, cancellationToken);
             }
             finally
             {

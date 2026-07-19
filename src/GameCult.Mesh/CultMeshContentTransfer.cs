@@ -32,7 +32,10 @@ namespace GameCult.Mesh
     public interface ICultMeshContentProvider
     {
         string ProviderId { get; }
-        Task<CultMeshCdnArtifactChunk?> GetChunkAsync(CultMeshCdnChunkRef chunk, CancellationToken cancellationToken = default);
+        Task CopyChunkToAsync(
+            CultMeshCdnChunkRef chunk,
+            Stream destination,
+            CancellationToken cancellationToken = default);
     }
 
     public sealed class CultMeshDatabaseContentProvider : ICultMeshContentProvider
@@ -47,15 +50,23 @@ namespace GameCult.Mesh
 
         public string ProviderId { get; }
 
-        public async Task<CultMeshCdnArtifactChunk?> GetChunkAsync(CultMeshCdnChunkRef chunk, CancellationToken cancellationToken = default)
+        public async Task CopyChunkToAsync(
+            CultMeshCdnChunkRef chunk,
+            Stream destination,
+            CancellationToken cancellationToken = default)
         {
+            if (chunk == null) throw new ArgumentNullException(nameof(chunk));
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
             cancellationToken.ThrowIfCancellationRequested();
             var key = string.IsNullOrWhiteSpace(chunk.RecordKey)
                 ? CultMeshCdnArtifactChunk.CreateRecordKey(chunk.ChunkHash)
                 : new CultRecordKey(chunk.RecordKey);
             var result = await _database.GetAsync<CultMeshCdnArtifactChunk>(key).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            return result;
+            if (result == null)
+                throw new FileNotFoundException("CDN artifact chunk is missing from the provider.", key.Value);
+            CultMeshCdn.ValidateChunkPayload(chunk, result);
+            await destination.WriteAsync(result.Payload, 0, result.Payload.Length, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -218,44 +229,51 @@ namespace GameCult.Mesh
             var state = _stateCache.Get<CultMeshContentTransferStateDocument>(stateKey);
             var verified = RestoreVerifiedState(state, manifest, fingerprint, partialPath);
 
-            using (var stream = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 81920, FileOptions.Asynchronous))
+            using (var stream = new FileStream(
+                       partialPath,
+                       FileMode.OpenOrCreate,
+                       FileAccess.ReadWrite,
+                       FileShare.ReadWrite,
+                       81920,
+                       FileOptions.Asynchronous))
             {
                 stream.SetLength(manifest.SizeBytes);
-                var ordered = manifest.Chunks
-                    .Select((chunk, index) => new { Chunk = chunk, Index = index })
-                    .OrderBy(item => item.Chunk.Offset)
-                    .ToArray();
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-                var remaining = ordered.Where(item => !verified.Contains(item.Index)).ToArray();
-                for (var windowStart = 0; windowStart < remaining.Length; windowStart += _maxConcurrentChunkRequests)
+            var ordered = manifest.Chunks
+                .Select((chunk, index) => new { Chunk = chunk, Index = index })
+                .OrderBy(item => item.Chunk.Offset)
+                .ToArray();
+            var remaining = ordered.Where(item => !verified.Contains(item.Index)).ToArray();
+            for (var windowStart = 0; windowStart < remaining.Length; windowStart += _maxConcurrentChunkRequests)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var window = remaining
+                    .Skip(windowStart)
+                    .Take(_maxConcurrentChunkRequests)
+                    .Select(item => (Item: item, Copy: CopyVerifiedChunkToPartialAsync(
+                        item.Chunk,
+                        partialPath,
+                        cancellationToken)))
+                    .ToArray();
+                try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var window = remaining
-                        .Skip(windowStart)
-                        .Take(_maxConcurrentChunkRequests)
-                        .Select(item => (Item: item, Fetch: FetchVerifiedChunkAsync(item.Chunk, cancellationToken)))
-                        .ToArray();
-                    try
+                    foreach (var pending in window)
                     {
-                        foreach (var pending in window)
-                        {
-                            var chunk = await pending.Fetch.ConfigureAwait(false);
-                            stream.Position = pending.Item.Chunk.Offset;
-                            await stream.WriteAsync(chunk.Payload, 0, chunk.Payload.Length, cancellationToken).ConfigureAwait(false);
-                            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                            verified.Add(pending.Item.Index);
-                            await SaveStateAsync(contentHash, fingerprint, manifest.SizeBytes, verified, stateKey).ConfigureAwait(false);
-                        }
+                        await pending.Copy.ConfigureAwait(false);
+                        verified.Add(pending.Item.Index);
+                        await SaveStateAsync(contentHash, fingerprint, manifest.SizeBytes, verified, stateKey).ConfigureAwait(false);
                     }
-                    catch
+                }
+                catch
+                {
+                    foreach (var pending in window)
                     {
-                        foreach (var pending in window)
-                        {
-                            try { await pending.Fetch.ConfigureAwait(false); }
-                            catch { }
-                        }
-                        throw;
+                        try { await pending.Copy.ConfigureAwait(false); }
+                        catch { }
                     }
+                    throw;
                 }
             }
 
@@ -307,8 +325,9 @@ namespace GameCult.Mesh
             return verified;
         }
 
-        private async Task<CultMeshCdnArtifactChunk> FetchVerifiedChunkAsync(
+        private async Task CopyVerifiedChunkToPartialAsync(
             CultMeshCdnChunkRef reference,
+            string partialPath,
             CancellationToken cancellationToken)
         {
             var failures = new List<Exception>();
@@ -317,10 +336,22 @@ namespace GameCult.Mesh
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    var chunk = await provider.GetChunkAsync(reference, cancellationToken).ConfigureAwait(false)
-                        ?? throw new FileNotFoundException("CDN artifact chunk is missing from the provider.", reference.RecordKey);
-                    CultMeshCdn.ValidateChunkPayload(reference, chunk);
-                    return chunk;
+                    using var partial = new FileStream(
+                        partialPath,
+                        FileMode.Open,
+                        FileAccess.Write,
+                        FileShare.ReadWrite,
+                        81920,
+                        FileOptions.Asynchronous | FileOptions.RandomAccess);
+                    partial.Position = reference.Offset;
+                    using var destination = new BoundedHashingWriteStream(partial, reference.SizeBytes);
+                    await provider.CopyChunkToAsync(reference, destination, cancellationToken).ConfigureAwait(false);
+                    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    var actualHash = destination.CompleteHash();
+                    var expectedHash = CultMeshCdn.NormalizeHash(reference.ChunkHash, nameof(reference.ChunkHash));
+                    if (!string.Equals(actualHash, expectedHash, StringComparison.Ordinal))
+                        throw new InvalidDataException("CDN artifact chunk hash does not match its manifest.");
+                    return;
                 }
                 catch (Exception error) when (!(error is OperationCanceledException && cancellationToken.IsCancellationRequested))
                 {
@@ -329,6 +360,89 @@ namespace GameCult.Mesh
             }
 
             throw new AggregateException("No content provider supplied a valid CDN chunk.", failures);
+        }
+
+        private sealed class BoundedHashingWriteStream : Stream
+        {
+            private readonly Stream _destination;
+            private readonly long _expectedBytes;
+            private readonly SHA256 _sha = SHA256.Create();
+            private long _written;
+            private bool _completed;
+
+            public BoundedHashingWriteStream(Stream destination, long expectedBytes)
+            {
+                _destination = destination ?? throw new ArgumentNullException(nameof(destination));
+                if (!destination.CanWrite) throw new ArgumentException("Content destination must be writable.", nameof(destination));
+                if (expectedBytes < 0) throw new ArgumentOutOfRangeException(nameof(expectedBytes));
+                _expectedBytes = expectedBytes;
+            }
+
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position
+            {
+                get => _written;
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush() => _destination.Flush();
+            public override Task FlushAsync(CancellationToken cancellationToken) =>
+                _destination.FlushAsync(cancellationToken);
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                ValidateWrite(buffer, offset, count);
+                _destination.Write(buffer, offset, count);
+                _sha.TransformBlock(buffer, offset, count, null, 0);
+                _written += count;
+            }
+
+            public override async Task WriteAsync(
+                byte[] buffer,
+                int offset,
+                int count,
+                CancellationToken cancellationToken)
+            {
+                ValidateWrite(buffer, offset, count);
+                await _destination.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+                _sha.TransformBlock(buffer, offset, count, null, 0);
+                _written += count;
+            }
+
+            public string CompleteHash()
+            {
+                if (_completed) throw new InvalidOperationException("Content destination hash is already complete.");
+                if (_written != _expectedBytes)
+                    throw new EndOfStreamException(
+                        $"Content transport wrote {_written} bytes; expected {_expectedBytes} bytes.");
+                _sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                _completed = true;
+                return string.Concat(_sha.Hash!.Select(value => value.ToString("x2", CultureInfo.InvariantCulture)));
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _sha.Dispose();
+                base.Dispose(disposing);
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            private void ValidateWrite(byte[] buffer, int offset, int count)
+            {
+                if (_completed) throw new InvalidOperationException("Content destination is already complete.");
+                if (buffer == null) throw new ArgumentNullException(nameof(buffer));
+                if (offset < 0 || count < 0 || offset > buffer.Length - count)
+                    throw new ArgumentOutOfRangeException(nameof(offset));
+                if (_written + count > _expectedBytes)
+                    throw new InvalidDataException(
+                        $"Content transport exceeded its advertised {_expectedBytes}-byte chunk boundary.");
+            }
         }
 
         private async Task SaveStateAsync(

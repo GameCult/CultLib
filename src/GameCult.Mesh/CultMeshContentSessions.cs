@@ -11,7 +11,7 @@ namespace GameCult.Mesh
     /// Serves bounded, content-addressed CDN chunks over the CultMesh content protocol.
     /// Manifests and descriptors remain typed document state; payload bytes do not.
     /// </summary>
-    public sealed class CultMeshContentServer : IDisposable
+    public sealed class CultMeshLegacyRudpContentServer : IDisposable
     {
         private readonly ICultNetSchemaServer _server;
         private readonly CultCache _content;
@@ -20,7 +20,7 @@ namespace GameCult.Mesh
         private bool _disposed;
 
         /// <summary>Attaches content serving to an existing schema host and provider cache.</summary>
-        public CultMeshContentServer(
+        public CultMeshLegacyRudpContentServer(
             ICultNetSchemaServer server,
             CultCache content,
             Func<string, bool>? canServeHash = null)
@@ -85,8 +85,8 @@ namespace GameCult.Mesh
         }
     }
 
-    /// <summary>Configures bounded response waiting for session-backed content requests.</summary>
-    public sealed class CultMeshSessionContentProviderOptions
+    /// <summary>Configures the explicit compatibility path for content over schema-message RUDP.</summary>
+    public sealed class CultMeshLegacyRudpContentTransportOptions
     {
         /// <summary>Gets or sets the injected reliability clock.</summary>
         public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
@@ -95,97 +95,148 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
-    /// Retrieves verified CDN chunks through one reusable identity-first CultMesh session.
-    /// Transfer verification and final cache promotion remain owned by CultMeshContentTransferService.
+    /// Explicit low-priority compatibility connector for the retired content-over-RUDP path.
+    /// It is never installed by default.
     /// </summary>
-    public sealed class CultMeshSessionContentProvider : ICultMeshContentProvider
+    public sealed class CultMeshLegacyRudpContentTransportConnector : ICultMeshContentTransportConnector
     {
-        private readonly CultMeshSessionManager _sessions;
-        private readonly CultMeshEndpointId _endpointId;
-        private readonly CultMeshSessionContentProviderOptions _options;
+        public const int LegacyPriority = 10_000;
+        private readonly CultMeshSchemaTransportConnector _schemaConnector;
+        private readonly CultMeshLegacyRudpContentTransportOptions _options;
 
-        /// <summary>Creates a content provider backed by a reusable identity-first session.</summary>
-        public CultMeshSessionContentProvider(
-            string providerId,
-            CultMeshSessionManager sessions,
-            CultMeshEndpointId endpointId,
-            CultMeshSessionContentProviderOptions? options = null)
+        public CultMeshLegacyRudpContentTransportConnector(
+            CultMeshLegacyRudpContentTransportOptions? options = null,
+            Func<string, ICultNetSchemaClient>? createClient = null)
         {
-            ProviderId = string.IsNullOrWhiteSpace(providerId)
-                ? throw new ArgumentException("Provider identity is required.", nameof(providerId))
-                : providerId;
-            _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
-            _endpointId = endpointId ?? throw new ArgumentNullException(nameof(endpointId));
-            _options = options ?? new CultMeshSessionContentProviderOptions();
+            _options = options ?? new CultMeshLegacyRudpContentTransportOptions();
             if (_options.ResponseTimeout <= TimeSpan.Zero)
                 throw new ArgumentOutOfRangeException(nameof(options), "Content response timeout must be positive.");
+            _schemaConnector = new CultMeshSchemaTransportConnector(createClient, _options.Clock, _options.ResponseTimeout);
         }
 
-        /// <inheritdoc />
-        public string ProviderId { get; }
+        public string ConnectorId => "legacy-rudp-content";
+        public int Priority => LegacyPriority;
+        public bool CanConnect(CultMeshTransportCandidate candidate) =>
+            Uri.TryCreate(candidate.Endpoint, UriKind.Absolute, out var uri) &&
+            string.Equals(uri.Scheme, "rudp", StringComparison.OrdinalIgnoreCase);
 
-        /// <inheritdoc />
-        public async Task<CultMeshCdnArtifactChunk?> GetChunkAsync(
-            CultMeshCdnChunkRef chunk,
+        public async Task<ICultMeshContentTransport> ConnectAsync(
+            CultMeshTransportCandidate candidate,
+            CultMeshEndpointId endpointId,
             CancellationToken cancellationToken = default)
         {
-            if (chunk == null) throw new ArgumentNullException(nameof(chunk));
-            var hash = CultMeshCdn.NormalizeHash(chunk.ChunkHash, nameof(chunk.ChunkHash));
-            var session = await _sessions.ConnectAsync(
-                _endpointId,
-                CultMeshProtocols.Content,
-                cancellationToken).ConfigureAwait(false);
-            var messageId = Guid.NewGuid().ToString("N");
-            var completion = new TaskCompletionSource<CultMeshContentChunkResponseMessage>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            using var responseSubscription = session.OnCultNet<CultMeshContentChunkResponseMessage>(response =>
-            {
-                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
-                    completion.TrySetResult(response);
-            });
-            using var errorSubscription = session.OnCultNet<CultNetErrorMessage>(error =>
-                completion.TrySetException(new IOException(error.Error)));
-            session.SendCultNet(new CultMeshContentChunkRequestMessage
-            {
-                MessageId = messageId,
-                ChunkHash = hash,
-                RecordKey = string.IsNullOrWhiteSpace(chunk.RecordKey)
-                    ? CultMeshCdnArtifactChunk.CreateRecordKey(hash).Value
-                    : chunk.RecordKey,
-                ExpectedSizeBytes = chunk.SizeBytes
-            });
-
-            var response = await WaitForResponseAsync(completion.Task, cancellationToken).ConfigureAwait(false);
-            if (!response.Found)
-                throw new FileNotFoundException(
-                    "Content provider '" + ProviderId + "' rejected chunk '" + hash + "': " + response.Error,
-                    chunk.RecordKey);
-            var resolved = new CultMeshCdnArtifactChunk
-            {
-                ChunkHash = response.ChunkHash,
-                SizeBytes = response.SizeBytes,
-                Payload = response.Payload ?? Array.Empty<byte>()
-            };
-            CultMeshCdn.ValidateChunkPayload(chunk, resolved);
-            return resolved;
+            if (!CanConnect(candidate))
+                throw new NotSupportedException($"Legacy RUDP content connector does not support '{candidate.Endpoint}'.");
+            var client = await _schemaConnector.ConnectAsync(candidate, CultMeshProtocols.Content, cancellationToken)
+                .ConfigureAwait(false);
+            return new LegacyRudpContentTransport(candidate.Endpoint, client, _options);
         }
 
-        private async Task<CultMeshContentChunkResponseMessage> WaitForResponseAsync(
-            Task<CultMeshContentChunkResponseMessage> response,
-            CancellationToken cancellationToken)
+        private sealed class LegacyRudpContentTransport : ICultMeshContentTransport
         {
-            using var deadlineCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var deadline = _options.Clock.DelayAsync(_options.ResponseTimeout, deadlineCancellation.Token);
-            var completed = await Task.WhenAny(response, deadline).ConfigureAwait(false);
-            if (completed == response)
+            private readonly ICultNetSchemaClient _client;
+            private readonly CultMeshLegacyRudpContentTransportOptions _options;
+            private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<CultMeshContentChunkResponseMessage>> _pending = new(StringComparer.Ordinal);
+            private bool _disposed;
+
+            public LegacyRudpContentTransport(
+                string endpoint,
+                ICultNetSchemaClient client,
+                CultMeshLegacyRudpContentTransportOptions options)
             {
-                deadlineCancellation.Cancel();
-                return await response.ConfigureAwait(false);
+                Endpoint = endpoint;
+                _client = client;
+                _options = options;
+                _client.OnCultNet<CultMeshContentChunkResponseMessage>(OnResponse);
+                _client.OnCultNet<CultNetErrorMessage>(OnError);
             }
-            cancellationToken.ThrowIfCancellationRequested();
-            throw new TimeoutException(
-                "Timed out fetching content from provider '" + ProviderId + "' through endpoint identity '" +
-                _endpointId.Value + "'.");
+
+            public string TransportId => "legacy-rudp-content";
+            public string Endpoint { get; }
+
+            public async Task CopyChunkToAsync(
+                CultMeshCdnChunkRef chunk,
+                Stream destination,
+                CancellationToken cancellationToken = default)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(LegacyRudpContentTransport));
+                if (chunk == null) throw new ArgumentNullException(nameof(chunk));
+                if (destination == null) throw new ArgumentNullException(nameof(destination));
+                var hash = CultMeshCdn.NormalizeHash(chunk.ChunkHash, nameof(chunk.ChunkHash));
+                var messageId = Guid.NewGuid().ToString("N");
+                var completion = new TaskCompletionSource<CultMeshContentChunkResponseMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_pending.TryAdd(messageId, completion))
+                    throw new InvalidOperationException("Duplicate legacy content request identity.");
+                try
+                {
+                    _client.SendCultNet(new CultMeshContentChunkRequestMessage
+                    {
+                        MessageId = messageId,
+                        ChunkHash = hash,
+                        RecordKey = string.IsNullOrWhiteSpace(chunk.RecordKey)
+                            ? CultMeshCdnArtifactChunk.CreateRecordKey(hash).Value
+                            : chunk.RecordKey,
+                        ExpectedSizeBytes = chunk.SizeBytes
+                    });
+                    var response = await WaitForResponseAsync(completion.Task, cancellationToken).ConfigureAwait(false);
+                    if (!response.Found)
+                        throw new FileNotFoundException(
+                            "Legacy RUDP content provider rejected chunk '" + hash + "': " + response.Error,
+                            chunk.RecordKey);
+                    var resolved = new CultMeshCdnArtifactChunk
+                    {
+                        ChunkHash = response.ChunkHash,
+                        SizeBytes = response.SizeBytes,
+                        Payload = response.Payload ?? Array.Empty<byte>()
+                    };
+                    CultMeshCdn.ValidateChunkPayload(chunk, resolved);
+                    await destination.WriteAsync(resolved.Payload, 0, resolved.Payload.Length, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    _pending.TryRemove(messageId, out _);
+                }
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                foreach (var completion in _pending.Values)
+                    completion.TrySetException(new ObjectDisposedException(nameof(LegacyRudpContentTransport)));
+                _pending.Clear();
+                _client.Dispose();
+            }
+
+            private void OnResponse(CultMeshContentChunkResponseMessage response)
+            {
+                if (_pending.TryGetValue(response.MessageId ?? string.Empty, out var completion))
+                    completion.TrySetResult(response);
+            }
+
+            private void OnError(CultNetErrorMessage error)
+            {
+                var exception = new IOException(error.Error);
+                foreach (var completion in _pending.Values) completion.TrySetException(exception);
+            }
+
+            private async Task<CultMeshContentChunkResponseMessage> WaitForResponseAsync(
+                Task<CultMeshContentChunkResponseMessage> response,
+                CancellationToken cancellationToken)
+            {
+                using var deadlineCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var deadline = _options.Clock.DelayAsync(_options.ResponseTimeout, deadlineCancellation.Token);
+                var completed = await Task.WhenAny(response, deadline).ConfigureAwait(false);
+                if (completed == response)
+                {
+                    deadlineCancellation.Cancel();
+                    return await response.ConfigureAwait(false);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TimeoutException("Timed out fetching content through the legacy RUDP connector.");
+            }
         }
     }
 }

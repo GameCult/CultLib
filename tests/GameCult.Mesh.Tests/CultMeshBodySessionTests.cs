@@ -156,6 +156,7 @@ public sealed class CultMeshBodySessionTests
         private readonly ICultNetSchemaClient _client;
         public LoopbackConnector(ICultNetSchemaClient client) => _client = client;
         public string ConnectorId => "loopback";
+        public int Priority => 0;
         public int ConnectCount { get; private set; }
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
         public Task<ICultNetSchemaClient> ConnectAsync(CultMeshTransportCandidate candidate, CultMeshProtocolId protocol,

@@ -20,6 +20,7 @@ Console.WriteLine($"payloadBytes={payloadBytes} quicSupported={QuicListener.IsSu
 Print(MeasureMappedFile(payload));
 var tcp = await MeasureTcpAsync(payload, expectedHash);
 Print(tcp);
+Print(await MeasureCultMeshTcpAsync(payload));
 
 if (QuicListener.IsSupported)
     Print(await MeasureQuicAsync(payload, expectedHash));
@@ -153,7 +154,8 @@ static async Task<Result> MeasureQuicAsync(byte[] payload, string expectedHash)
 
 static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
 {
-    var artifact = CultMesh.PackCdnArtifact("parity/body", payload);
+    var artifact = CultMesh.PackCdnArtifact(
+        "parity/body", payload, new CultMeshCdnPackOptions { ChunkSizeBytes = 1024 * 1024 });
     using var providerCache = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
         typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
     await CultMeshCdn.PublishAsync(providerCache, artifact);
@@ -167,7 +169,7 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
         MaxFragmentBytes = 1024,
         MaxPendingReliablePackets = 8192
     });
-    using var contentServer = new CultMeshContentServer(wireServer, providerCache);
+    using var contentServer = new CultMeshLegacyRudpContentServer(wireServer, providerCache);
     using var pumpCancellation = new CancellationTokenSource();
     var pump = Task.Run(async () =>
     {
@@ -183,10 +185,12 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
     var endpoint = $"rudp://127.0.0.1:{wireServer.LocalEndPoint.Port}";
     using var discovery = new CultMeshDiscoveryService([new RouteSource(endpoint)]);
     using var sessions = new CultMeshSessionManager(
-        discovery, [new CultMeshSchemaTransportConnector()]);
+        discovery,
+        Array.Empty<ICultMeshTransportConnector>(),
+        [new CultMeshLegacyRudpContentTransportConnector(
+            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromMinutes(2) })]);
     var provider = new CultMeshSessionContentProvider(
-        "parity.provider", sessions, CultMeshEndpointId.Parse("service:parity.provider"),
-        new CultMeshSessionContentProviderOptions { ResponseTimeout = TimeSpan.FromMinutes(2) });
+        "parity.provider", sessions, CultMeshEndpointId.Parse("service:parity.provider"));
     var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
     using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
         typeof(CultMeshContentTransferStateDocument)));
@@ -206,6 +210,45 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
     {
         pumpCancellation.Cancel();
         try { await pump; } catch (OperationCanceledException) { }
+        if (Directory.Exists(directory)) Directory.Delete(directory, true);
+    }
+}
+
+static async Task<Result> MeasureCultMeshTcpAsync(byte[] payload)
+{
+    var artifact = CultMesh.PackCdnArtifact(
+        "parity/body", payload, new CultMeshCdnPackOptions { ChunkSizeBytes = 1024 * 1024 });
+    using var providerCache = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
+        typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
+    await CultMeshCdn.PublishAsync(providerCache, artifact);
+
+    using var contentServer = new CultMeshTcpContentServer(
+        new TcpListener(IPAddress.Loopback, 0), providerCache);
+    var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
+    using var discovery = new CultMeshDiscoveryService([new RouteSource(endpoint)]);
+    using var sessions = new CultMeshSessionManager(
+        discovery,
+        Array.Empty<ICultMeshTransportConnector>(),
+        [new CultMeshTcpContentTransportConnector()]);
+    var provider = new CultMeshSessionContentProvider(
+        "parity.provider", sessions, CultMeshEndpointId.Parse("service:parity.provider"));
+    var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
+    using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
+        typeof(CultMeshContentTransferStateDocument)));
+    var transfer = new CultMeshContentTransferService(
+        transferState, [provider], new CultMeshContentTransferOptions(directory));
+
+    var elapsed = Stopwatch.StartNew();
+    try
+    {
+        var path = await transfer.FetchAsync(artifact.Manifest);
+        elapsed.Stop();
+        if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(payload))
+            throw new InvalidDataException("CultMesh TCP payload did not match source.");
+        return Result.Create("cultmesh-tcp-content", payload.LongLength, elapsed.Elapsed);
+    }
+    finally
+    {
         if (Directory.Exists(directory)) Directory.Delete(directory, true);
     }
 }

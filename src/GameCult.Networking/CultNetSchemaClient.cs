@@ -318,6 +318,9 @@ namespace GameCult.Networking
             return new RudpCultNetSchemaClient(runtimeId, connectionId, connectPayload, maxFragmentBytes, resendDelayMs);
         }
 
+        /// <summary>Creates the length-prefixed TCP schema client.</summary>
+        public static ICultNetSchemaClient CreateTcpFramed() => new TcpFramedCultNetSchemaClient();
+
         /// <summary>
         /// Creates the default schema client adapter for an advertised endpoint URI.
         /// </summary>
@@ -341,12 +344,18 @@ namespace GameCult.Networking
                 return CreateRudp();
             }
 
+            if (string.Equals(uri.Scheme, "cultnet+tcp", StringComparison.OrdinalIgnoreCase))
+            {
+                return CreateTcpFramed();
+            }
+
             if (string.Equals(uri.Scheme, "cultnet", StringComparison.OrdinalIgnoreCase))
             {
                 return CreateLiteNetLib(security, configureClient);
             }
 
-            throw new FormatException($"CultNet endpoint '{endpoint}' must use cultnet://host:port or rudp://host:port.");
+            throw new FormatException(
+                $"CultNet endpoint '{endpoint}' must use cultnet+tcp://host:port, cultnet://host:port, or rudp://host:port.");
         }
     }
 }

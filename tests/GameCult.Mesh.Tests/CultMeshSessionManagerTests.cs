@@ -243,6 +243,7 @@ public sealed class CultMeshSessionManagerTests
         private int _connectCount;
         public FakeConnector(Func<CultMeshTransportCandidate, CancellationToken, Task<ICultNetSchemaClient>> connect) { _connect = connect; }
         public string ConnectorId => "fake";
+        public int Priority => 0;
         public int ConnectCount => Volatile.Read(ref _connectCount);
         public bool CanConnect(CultMeshTransportCandidate candidate) => true;
         public Task<ICultNetSchemaClient> ConnectAsync(CultMeshTransportCandidate candidate, CultMeshProtocolId protocol, CancellationToken cancellationToken = default)
