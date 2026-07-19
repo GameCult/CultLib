@@ -185,7 +185,7 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptor networkFallback,
             CultMeshBodyValidationRequest request)
         {
-            return NegotiateReadOnly(null, preferred, networkFallback, request);
+            return NegotiateReadOnly(null, new[] { preferred, networkFallback }, request);
         }
 
         internal CultMeshBodyNegotiationResult NegotiateReadOnly(
@@ -194,12 +194,33 @@ namespace GameCult.Mesh
             CultMeshBodyDescriptor networkFallback,
             CultMeshBodyValidationRequest request)
         {
-            if (preferred == null) throw new ArgumentNullException(nameof(preferred));
-            if (networkFallback == null) throw new ArgumentNullException(nameof(networkFallback));
-            if (!SameLogicalGeneration(preferred, networkFallback))
-                throw new InvalidOperationException("CultMesh local and network representations describe different logical body generations.");
-            CultMeshBodyDescriptorValidator.Validate(preferred, request);
-            CultMeshBodyDescriptorValidator.Validate(networkFallback, request);
+            return NegotiateReadOnly(producerId, new[] { preferred, networkFallback }, request);
+        }
+
+        /// <summary>
+        /// Selects the first representation the consumer can validate and open. Representation order is
+        /// publisher preference; adapter availability and capability validity decide the actual plane.
+        /// </summary>
+        public CultMeshBodyNegotiationResult NegotiateReadOnly(
+            IReadOnlyList<CultMeshBodyDescriptor> representations,
+            CultMeshBodyValidationRequest request) =>
+            NegotiateReadOnly(null, representations, request);
+
+        internal CultMeshBodyNegotiationResult NegotiateReadOnly(
+            string? producerId,
+            IReadOnlyList<CultMeshBodyDescriptor> representations,
+            CultMeshBodyValidationRequest request)
+        {
+            if (representations == null) throw new ArgumentNullException(nameof(representations));
+            if (representations.Count == 0 || representations.Any(value => value == null))
+                throw new ArgumentException("At least one body representation is required.", nameof(representations));
+            var preferred = representations[0];
+            foreach (var representation in representations)
+            {
+                if (!SameLogicalGeneration(preferred, representation))
+                    throw new InvalidOperationException("CultMesh representations describe different logical body generations.");
+                CultMeshBodyDescriptorValidator.Validate(representation, request);
+            }
             var authorized = _authorizeNamedProducer == null
                 ? _authorizeProducer(preferred)
                 : !string.IsNullOrWhiteSpace(producerId) && _authorizeNamedProducer(producerId!, preferred);
@@ -207,24 +228,29 @@ namespace GameCult.Mesh
                 throw new UnauthorizedAccessException("CultMesh body producer is not authorized for this logical body.");
 
             Exception? preferredFailure = null;
-            try
+            foreach (var representation in representations)
             {
-                if (!_adapters.TryGetValue(preferred.TransportKind, out var local))
-                    throw new NotSupportedException($"No CultMesh {preferred.TransportKind} body adapter is available.");
-                if (!local.CanOpen(preferred))
-                    throw new NotSupportedException($"The CultMesh {preferred.TransportKind} body adapter declined the preferred descriptor.");
-                var lease = local.OpenReadOnly(preferred, request);
-                return new CultMeshBodyNegotiationResult(lease, preferred.TransportKind, null);
-            }
-            catch (Exception error) when (!(error is UnauthorizedAccessException))
-            {
-                preferredFailure = error;
+                try
+                {
+                    if (!_adapters.TryGetValue(representation.TransportKind, out var adapter))
+                        throw new NotSupportedException($"No CultMesh {representation.TransportKind} body adapter is available.");
+                    if (!adapter.CanOpen(representation))
+                        throw new NotSupportedException($"The CultMesh {representation.TransportKind} body adapter declined its descriptor.");
+                    var lease = adapter.OpenReadOnly(representation, request);
+                    return new CultMeshBodyNegotiationResult(
+                        lease,
+                        preferred.TransportKind,
+                        preferredFailure);
+                }
+                catch (Exception error) when (!(error is UnauthorizedAccessException))
+                {
+                    preferredFailure ??= error;
+                }
             }
 
-            if (!_adapters.TryGetValue(CultMeshBodyTransportKind.Network, out var network) || !network.CanOpen(networkFallback))
-                throw new NotSupportedException("No CultMesh network body fallback is available.");
-            var fallback = network.OpenReadOnly(networkFallback, request);
-            return new CultMeshBodyNegotiationResult(fallback, preferred.TransportKind, preferredFailure);
+            throw new NotSupportedException(
+                "No advertised CultMesh body representation could be opened by this consumer.",
+                preferredFailure);
         }
 
         private static bool SameLogicalGeneration(CultMeshBodyDescriptor left, CultMeshBodyDescriptor right) =>

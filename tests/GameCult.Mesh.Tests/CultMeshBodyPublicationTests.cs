@@ -49,8 +49,7 @@ public sealed class CultMeshBodyPublicationTests
         var first = Publication(new byte[] { 1, 2, 3, 4 }, now);
         var second = Publication(new byte[] { 5, 6, 7, 8 }, now);
         second.Sequence++;
-        second.PreferredLocal.Sequence++;
-        second.NetworkFallback.Sequence++;
+        foreach (var representation in second.Representations) representation.Sequence++;
         var cache = new CultCache();
 
         await cache.UpsertAsync(first, new CultRecordHandle<CultMeshBodyPublicationDocument>(first.RecordKey));
@@ -70,8 +69,7 @@ public sealed class CultMeshBodyPublicationTests
         var staleLatestKey = CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId);
         var next = Publication(new byte[4], DateTimeOffset.UtcNow);
         next.Sequence++;
-        next.PreferredLocal.Sequence++;
-        next.NetworkFallback.Sequence++;
+        foreach (var representation in next.Representations) representation.Sequence++;
 
         Action staleLatest = () => CultMeshBodyPublicationValidator.Validate(
             publication, publication.BodyId, publication.ProducerEpoch, publication.Sequence, staleLatestKey);
@@ -96,12 +94,29 @@ public sealed class CultMeshBodyPublicationTests
     }
 
     [Test]
+    public void Resolver_AcceptsLocalOnlyPublicationWithoutInventingNetworkWork()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = BitConverter.GetBytes(21.25f);
+        var publication = Publication(bytes, now);
+        publication.Representations = new[] { publication.Representations[0] };
+        var fetched = false;
+        var resolver = Resolver(bytes, (_, _) => true, () => fetched = true);
+
+        using var lease = resolver.ResolveReadOnly(publication, Request(publication, now));
+
+        lease.TransportKind.Should().Be(publication.Representations[0].TransportKind);
+        lease.ReadSingle(0).Should().Be(21.25f);
+        fetched.Should().BeFalse();
+    }
+
+    [Test]
     public void Resolver_FallsBackToEquivalentNetworkRepresentation()
     {
         var now = DateTimeOffset.UtcNow;
         var bytes = new byte[] { 4, 8, 15, 16 };
         var publication = Publication(bytes, now);
-        new CultMeshMappedBodyPublisher(_root).Revoke(publication.PreferredLocal);
+        new CultMeshMappedBodyPublisher(_root).Revoke(publication.Representations[0]);
 
         var result = Resolver(bytes, (_, _) => true).NegotiateReadOnly(publication, Request(publication, now));
         using var lease = result.Lease;
@@ -120,7 +135,7 @@ public sealed class CultMeshBodyPublicationTests
     {
         var now = DateTimeOffset.UtcNow;
         var publication = Publication(new byte[4], now);
-        var descriptor = publication.NetworkFallback;
+        var descriptor = publication.Representations[1];
         if (field == "body") descriptor.BodyId += ":wrong";
         if (field == "schema") descriptor.SchemaId += ".wrong";
         if (field == "capacity") descriptor.Capacity++;
@@ -184,8 +199,7 @@ public sealed class CultMeshBodyPublicationTests
             Sequence = local.Sequence,
             Synchronization = local.Synchronization,
             LivenessExpiresAtUnixMs = local.LeaseExpiresAtUnixMs,
-            PreferredLocal = local,
-            NetworkFallback = Network(local)
+            Representations = new[] { local, Network(local) }
         };
     }
 

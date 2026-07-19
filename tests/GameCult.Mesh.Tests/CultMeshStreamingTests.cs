@@ -724,6 +724,40 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public async Task DocumentHandle_Field_ProjectsTypedReactiveStateWithoutRepublishingSurfaceTrees()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located document slab");
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.current",
+            CultMesh.Verse("starbridge", "unity-pilot", route),
+            _ => Task.FromResult(current),
+            _ => subject,
+            routeHint: route);
+
+        var text = handle.Field(value => value.Text);
+
+        text.PointerId.Should().Be("mesh.note.current#Text");
+        text.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        (await text.ResolveAsync()).Should().Be("initial");
+        string observed = null!;
+        using var subscription = text.Watch().Subscribe(value => observed = value);
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "reactive",
+            Revision = 2
+        });
+        observed.Should().Be("reactive");
+    }
+
+    [Test]
     public void DocumentHandle_RejectsAliasTypesWithDifferentSchemaIdentity()
     {
         var handle = CultMesh.Document(

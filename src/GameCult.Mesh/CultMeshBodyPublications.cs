@@ -13,7 +13,7 @@ namespace GameCult.Mesh
 {
     public static class CultMeshBodyPublicationSchemaVersions
     {
-        public const string Publication = "gamecult.mesh.body_publication.v1";
+        public const string Publication = "gamecult.mesh.body_publication.v2";
         public const string NetworkBody = "gamecult.mesh.network_body.v1";
     }
 
@@ -241,8 +241,7 @@ namespace GameCult.Mesh
         [Key(7)] public long Sequence { get; set; }
         [Key(8)] public CultMeshBodySynchronization Synchronization { get; set; }
         [Key(9)] public long LivenessExpiresAtUnixMs { get; set; }
-        [Key(10)] public CultMeshBodyDescriptor PreferredLocal { get; set; } = new();
-        [Key(11)] public CultMeshBodyDescriptor NetworkFallback { get; set; } = new();
+        [Key(10)] public CultMeshBodyDescriptor[] Representations { get; set; } = Array.Empty<CultMeshBodyDescriptor>();
 
         public static CultRecordKey CreateRecordKey(string bodyId, long producerEpoch, long sequence)
         {
@@ -326,12 +325,13 @@ namespace GameCult.Mesh
                 throw new InvalidOperationException("CultMesh body publication generation values must be non-negative.");
             if (expectedRecordKey.HasValue && !publication.RecordKey.Equals(expectedRecordKey.Value))
                 throw new InvalidOperationException("CultMesh body publication record key disagrees with its generation envelope.");
-            ValidateDescriptor(publication, publication.PreferredLocal, "preferred local");
-            ValidateDescriptor(publication, publication.NetworkFallback, "network fallback");
-            if (publication.PreferredLocal.TransportKind == CultMeshBodyTransportKind.Network)
-                throw new InvalidOperationException("CultMesh preferred local body descriptor must use a local transport.");
-            if (publication.NetworkFallback.TransportKind != CultMeshBodyTransportKind.Network)
-                throw new InvalidOperationException("CultMesh network fallback body descriptor must use network transport.");
+            var representations = publication.Representations ?? Array.Empty<CultMeshBodyDescriptor>();
+            if (representations.Length == 0)
+                throw new InvalidOperationException("CultMesh body publication has no transport representations.");
+            if (representations.Select(value => value?.TransportKind).Distinct().Count() != representations.Length)
+                throw new InvalidOperationException("CultMesh body publication advertises the same transport representation more than once.");
+            foreach (var representation in representations)
+                ValidateDescriptor(publication, representation, representation?.TransportKind.ToString() ?? "missing");
         }
 
         private static void ValidateDescriptor(
@@ -376,8 +376,7 @@ namespace GameCult.Mesh
                 throw new InvalidOperationException("CultMesh body publication is no longer live.");
             return _transport.NegotiateReadOnly(
                 publication.ProducerId,
-                publication.PreferredLocal,
-                publication.NetworkFallback,
+                publication.Representations,
                 request);
         }
     }

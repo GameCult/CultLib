@@ -889,6 +889,42 @@ before fetch, corrupt network bytes never produce a lease, local failure is
 reported, fallback preserves identity, and authorization is evaluated separately
 from content integrity.
 
+### Phase 5 exact-demand body map
+
+**Owner:** `CultMeshBodyDemandTracker` owns the live derivation from retained,
+exact database subscriptions to the transport representations a producer must
+publish. The provider owns body contents. A body adapter owns only access to
+one representation. A renderer owns none of those decisions.
+
+**Inputs:** consumer runtime identity, exact logical body IDs, advertised
+consumer transport capabilities, and server-observed peer locality. A
+same-machine claim selects shared memory only when the transport peer is
+actually loopback and the consumer explicitly supports shared memory.
+
+**Outputs:** a per-body plan requiring shared memory, network, both, or no
+publication. Producers use that plan before allocating, copying, hashing, or
+packaging a representation.
+
+**Derived state:** transport preference and publication work are notification
+state derived from active subscriptions. Heavy database snapshots remain
+bootstrap/recovery state. They are not a frame delivery mechanism.
+
+**Forbidden writers:** providers cannot infer demand from renderer identity;
+renderers cannot choose a provider-specific plane; CDN publication cannot run
+unconditionally beside a local mapped write; body descriptors cannot create
+stream demand merely by existing.
+
+**Shared paths:** subscribe, resubscribe, replacement, explicit unsubscribe,
+and server disposal all update the same typed demand projection. Stable peer
+identity, not per-message wrapper identity, keys subscription lifetime.
+
+**Cut line:** local frame publication writes directly into a mapped write lease
+and commits its descriptor. The compatibility byte-array publisher is copy-in
+only. The current remote frame representation may still use the verified CDN
+body path when remote demand exists; Phase 6 must replace that expiry-sensitive
+traffic with a stream/datagram body plane rather than enlarging snapshot or CDN
+timeouts.
+
 ### Gate
 
 - Two local consumers map one verified CDN artifact without duplicate process

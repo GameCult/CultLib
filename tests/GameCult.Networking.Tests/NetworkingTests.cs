@@ -1426,6 +1426,68 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_ProjectsBodyDemandAndWithdrawalFromExactSubscription()
+        {
+            var database = new CultNetDatabase(new CultCache());
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-body-demand-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var active = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var withdrawn = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (demand.Active) active.TrySetResult(demand);
+                else withdrawn.TrySetResult(demand);
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("database-body-demand-client");
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-body",
+                SubscriptionId = "world-body",
+                RecordKeys = ["world:entities", "mesh:body:world:latest"],
+                ConsumerRuntimeId = "eve-unity",
+                BodyIds = ["world"],
+                SupportedBodyTransports = ["SharedMemory", "Network"],
+                IncludeSnapshot = false
+            });
+
+            var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
+            Assert.That(observed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
+            Assert.That(observed.SubscriptionId, Is.EqualTo("world-body"));
+            Assert.That(observed.BodyIds, Is.EqualTo(new[] { "world" }));
+            Assert.That(observed.SupportedBodyTransports, Is.EqualTo(new[] { "SharedMemory", "Network" }));
+            Assert.That(observed.SameMachine, Is.True);
+
+            client.SendCultNet(new CultNetDatabaseUnsubscribeMessage
+            {
+                MessageId = "unsubscribe-body",
+                SubscriptionId = "world-body"
+            });
+            var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
+            Assert.That(removed.Active, Is.False);
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionClient_ReplicatesInitialAndLiveTypedDocumentsOverRudp()
         {
             var sourceCache = new CultCache();

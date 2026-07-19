@@ -1,10 +1,12 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 #nullable enable
 
@@ -18,6 +20,7 @@ namespace GameCult.Mesh
         private const int HeaderSize = 128;
         private const int SequenceOffset = 8;
         private const int ReaderCountOffset = 32;
+        private const int WriterCountOffset = 48;
         private const int ContractHashOffset = 64;
         private readonly object _gate = new();
         private readonly MemoryMappedFile _mapping;
@@ -27,6 +30,7 @@ namespace GameCult.Mesh
         private readonly string _token;
         private int _cursor;
         private long _nextSequence;
+        private CultMeshFrameBodyWriteLease? _activeWrite;
         private bool _disposed;
 
         public CultMeshFrameBodyPublisher(
@@ -69,41 +73,131 @@ namespace GameCult.Mesh
 
         public bool TryPublish(ReadOnlySpan<byte> body, DateTimeOffset nowUtc, out CultMeshBodyDescriptor descriptor)
         {
+            if (body.Length > SlotByteLength) throw new ArgumentOutOfRangeException(nameof(body));
+            if (!TryAcquireWrite(out var write))
+            {
+                descriptor = null!;
+                return false;
+            }
+            using (write)
+            {
+                body.CopyTo(write.Span);
+                descriptor = write.Commit(body.Length, nowUtc);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Reserves one producer-owned shared-memory slot for direct writes. The caller must commit or dispose the lease.
+        /// </summary>
+        public bool TryAcquireWrite(out CultMeshFrameBodyWriteLease lease)
+        {
             lock (_gate)
             {
                 ThrowIfDisposed();
-                if (body.Length > SlotByteLength) throw new ArgumentOutOfRangeException(nameof(body));
-                var publishedBytes = body.ToArray();
-                CultMeshBodyDescriptor? published = null;
+                if (_activeWrite != null)
+                {
+                    lease = null!;
+                    return false;
+                }
+
+                var slot = -1;
                 WithMutex(() =>
                 {
                     for (var attempt = 0; attempt < CultMeshFrameRegion.SlotCount; attempt++)
                     {
-                        var slot = (_cursor + attempt) % CultMeshFrameRegion.SlotCount;
-                        if (_control.ReadInt32(ReaderCountOffset + slot * sizeof(int)) != 0) continue;
-                        using (var view = _mapping.CreateViewAccessor(SlotOffset(slot, SlotByteLength), SlotByteLength, MemoryMappedFileAccess.Write))
-                            view.WriteArray(0, publishedBytes, 0, publishedBytes.Length);
-                        _control.Write(SequenceOffset + slot * sizeof(long), _nextSequence);
-                        _cursor = (slot + 1) % CultMeshFrameRegion.SlotCount;
-                        published = Descriptor(slot, publishedBytes, nowUtc);
-                        _nextSequence++;
+                        var candidate = (_cursor + attempt) % CultMeshFrameRegion.SlotCount;
+                        if (_control.ReadInt32(ReaderCountOffset + candidate * sizeof(int)) != 0 ||
+                            _control.ReadInt32(WriterCountOffset + candidate * sizeof(int)) != 0)
+                            continue;
+                        _control.Write(WriterCountOffset + candidate * sizeof(int), 1);
+                        slot = candidate;
+                        _cursor = (candidate + 1) % CultMeshFrameRegion.SlotCount;
                         return;
                     }
                 });
-                descriptor = published!;
-                return published != null;
+                if (slot < 0)
+                {
+                    lease = null!;
+                    return false;
+                }
+
+                try
+                {
+                    var view = _mapping.CreateViewAccessor(
+                        SlotOffset(slot, SlotByteLength),
+                        SlotByteLength,
+                        MemoryMappedFileAccess.ReadWrite);
+                    lease = new CultMeshFrameBodyWriteLease(this, view, slot, _nextSequence, SlotByteLength);
+                    _activeWrite = lease;
+                    return true;
+                }
+                catch
+                {
+                    WithMutex(() => _control.Write(WriterCountOffset + slot * sizeof(int), 0));
+                    throw;
+                }
             }
         }
 
-        private CultMeshBodyDescriptor Descriptor(int slot, ReadOnlySpan<byte> body, DateTimeOffset nowUtc) => new()
+        internal CultMeshBodyDescriptor Commit(
+            CultMeshFrameBodyWriteLease lease,
+            int byteLength,
+            DateTimeOffset nowUtc)
         {
-            BodyId = BodyId, SchemaId = SchemaId, LayoutVersion = LayoutVersion, ByteSize = body.Length,
-            Capacity = Capacity, ProducerEpoch = ProducerEpoch, Sequence = _nextSequence,
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                if (!ReferenceEquals(_activeWrite, lease) || lease.Sequence != _nextSequence)
+                    throw new InvalidOperationException("The CultMesh frame write lease is stale or is not owned by this publisher.");
+                if (byteLength < 0 || byteLength > SlotByteLength)
+                    throw new ArgumentOutOfRangeException(nameof(byteLength));
+                var semanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(lease.Span[..byteLength]);
+                WithMutex(() =>
+                {
+                    var writerOffset = WriterCountOffset + lease.SlotIndex * sizeof(int);
+                    if (_control.ReadInt32(writerOffset) != 1 ||
+                        _control.ReadInt32(ReaderCountOffset + lease.SlotIndex * sizeof(int)) != 0)
+                        throw new InvalidOperationException("The CultMesh frame write reservation was lost before commit.");
+                    _control.Write(SequenceOffset + lease.SlotIndex * sizeof(long), lease.Sequence);
+                    _control.Write(writerOffset, 0);
+                });
+                var descriptor = Descriptor(lease.SlotIndex, byteLength, lease.Sequence, semanticHash, nowUtc);
+                _nextSequence++;
+                _activeWrite = null;
+                lease.Complete();
+                return descriptor;
+            }
+        }
+
+        internal void Abandon(CultMeshFrameBodyWriteLease lease)
+        {
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_activeWrite, lease)) return;
+                if (!_disposed)
+                {
+                    WithMutex(() =>
+                        _control.Write(WriterCountOffset + lease.SlotIndex * sizeof(int), 0));
+                }
+                _activeWrite = null;
+            }
+        }
+
+        private CultMeshBodyDescriptor Descriptor(
+            int slot,
+            int byteLength,
+            long sequence,
+            string semanticHash,
+            DateTimeOffset nowUtc) => new()
+        {
+            BodyId = BodyId, SchemaId = SchemaId, LayoutVersion = LayoutVersion, ByteSize = byteLength,
+            Capacity = Capacity, ProducerEpoch = ProducerEpoch, Sequence = sequence,
             AccessMode = CultMeshBodyAccessMode.ReadOnly, Synchronization = CultMeshBodySynchronization.TripleBuffer,
             LeaseExpiresAtUnixMs = nowUtc.Add(_leaseDuration).ToUnixTimeMilliseconds(),
             TransportKind = CultMeshBodyTransportKind.SharedMemory,
             CapabilityToken = _token + "." + slot,
-            SemanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(body)
+            SemanticHash = semanticHash
         };
 
         internal static bool IsFrameCapability(string capability) => capability.StartsWith(CapabilityPrefix, StringComparison.Ordinal);
@@ -178,6 +272,8 @@ namespace GameCult.Mesh
             {
                 if (_disposed) return;
                 _disposed = true;
+                _activeWrite?.Invalidate();
+                _activeWrite = null;
                 _control.Dispose();
                 _mapping.Dispose();
                 _mutex.Dispose();
@@ -212,6 +308,100 @@ namespace GameCult.Mesh
                 Encoding.UTF8.GetBytes($"{bodyId}\n{schemaId}\n{layoutVersion}\n{capacity}\n{epoch}\n{slotByteLength}"));
         private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(CultMeshFrameBodyPublisher)); }
         private static string Require(string value, string name) => string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("Value is required.", name) : value;
+    }
+
+    /// <summary>A bounded producer lease over one directly writable shared-memory frame slot.</summary>
+    public sealed unsafe class CultMeshFrameBodyWriteLease : IDisposable
+    {
+        private CultMeshFrameBodyPublisher? _owner;
+        private readonly MemoryMappedViewAccessor _view;
+        private readonly CultMeshMappedMemoryManager _memory;
+        private bool _completed;
+
+        internal CultMeshFrameBodyWriteLease(
+            CultMeshFrameBodyPublisher owner,
+            MemoryMappedViewAccessor view,
+            int slotIndex,
+            long sequence,
+            int byteLength)
+        {
+            _owner = owner;
+            _view = view;
+            _memory = new CultMeshMappedMemoryManager(view, byteLength);
+            SlotIndex = slotIndex;
+            Sequence = sequence;
+        }
+
+        public int SlotIndex { get; }
+        public long Sequence { get; }
+        public Memory<byte> Memory => _memory.Memory;
+        public Span<byte> Span => Memory.Span;
+
+        public CultMeshBodyDescriptor Commit(int byteLength, DateTimeOffset nowUtc) =>
+            (_owner ?? throw new ObjectDisposedException(nameof(CultMeshFrameBodyWriteLease)))
+            .Commit(this, byteLength, nowUtc);
+
+        internal void Complete()
+        {
+            _completed = true;
+            ReleaseResources();
+        }
+
+        internal void Invalidate()
+        {
+            _owner = null;
+            ReleaseResources();
+        }
+
+        public void Dispose()
+        {
+            var owner = Interlocked.Exchange(ref _owner, null);
+            if (!_completed) owner?.Abandon(this);
+            ReleaseResources();
+        }
+
+        private void ReleaseResources()
+        {
+            ((IDisposable)_memory).Dispose();
+            _view.Dispose();
+            _owner = null;
+        }
+    }
+
+    internal sealed unsafe class CultMeshMappedMemoryManager : MemoryManager<byte>
+    {
+        private SafeMemoryMappedViewHandle? _handle;
+        private byte* _pointer;
+        private readonly int _length;
+
+        public CultMeshMappedMemoryManager(MemoryMappedViewAccessor view, int length)
+        {
+            _handle = view.SafeMemoryMappedViewHandle;
+            _length = length;
+            byte* pointer = null;
+            _handle.AcquirePointer(ref pointer);
+            _pointer = pointer + view.PointerOffset;
+        }
+
+        public override Span<byte> GetSpan() =>
+            _handle == null ? throw new ObjectDisposedException(nameof(CultMeshMappedMemoryManager)) : new Span<byte>(_pointer, _length);
+
+        public override MemoryHandle Pin(int elementIndex = 0)
+        {
+            if ((uint)elementIndex > (uint)_length) throw new ArgumentOutOfRangeException(nameof(elementIndex));
+            if (_handle == null) throw new ObjectDisposedException(nameof(CultMeshMappedMemoryManager));
+            return new MemoryHandle(_pointer + elementIndex);
+        }
+
+        public override void Unpin() { }
+
+        protected override void Dispose(bool disposing)
+        {
+            var handle = Interlocked.Exchange(ref _handle, null);
+            if (handle == null) return;
+            handle.ReleasePointer();
+            _pointer = null;
+        }
     }
 
     public sealed class CultMeshFrameGeneration

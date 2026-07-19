@@ -3,6 +3,7 @@ using System.IO;
 using FluentAssertions;
 using NUnit.Framework;
 using System.IO.MemoryMappedFiles;
+using GameCult.Networking;
 
 namespace GameCult.Mesh.Tests;
 
@@ -263,6 +264,99 @@ public sealed class CultMeshBodyTransportTests
         lease.TransportKind.Should().Be(CultMeshBodyTransportKind.SharedMemory);
     }
 
+    [Test]
+    public void FramePublisher_DirectWriteLeaseCommitsMappedBytesWithoutCompatibilityCopy()
+    {
+        using var publisher = new CultMeshFrameBodyPublisher(
+            "aetheria:entities",
+            "gamecult.eve.entity_soa.body.v2",
+            layoutVersion: 2,
+            capacity: 128,
+            producerEpoch: 7,
+            slotByteLength: 64,
+            leaseDuration: TimeSpan.FromMinutes(1));
+        publisher.TryAcquireWrite(out var write).Should().BeTrue();
+        using (write)
+        {
+            BitConverter.TryWriteBytes(write.Span, 42.5f).Should().BeTrue();
+            var descriptor = write.Commit(sizeof(float), DateTimeOffset.UtcNow);
+            using var read = new CultMeshSharedMemoryBodyAdapter().OpenReadOnly(
+                descriptor,
+                Request(descriptor, DateTimeOffset.UtcNow));
+
+            descriptor.Sequence.Should().Be(0);
+            descriptor.SemanticHash.Should().NotBeNullOrWhiteSpace();
+            read.ReadSingle(0).Should().Be(42.5f);
+        }
+    }
+
+    [Test]
+    public void FramePublisher_AbandonedWriteDoesNotAdvanceGenerationOrHoldSlot()
+    {
+        using var publisher = new CultMeshFrameBodyPublisher(
+            "aetheria:entities",
+            "gamecult.eve.entity_soa.body.v2",
+            layoutVersion: 2,
+            capacity: 128,
+            producerEpoch: 7,
+            slotByteLength: 64);
+        publisher.TryAcquireWrite(out var abandoned).Should().BeTrue();
+        abandoned.Dispose();
+
+        publisher.TryAcquireWrite(out var replacement).Should().BeTrue();
+        using (replacement)
+        {
+            replacement.Span[0] = 23;
+            var descriptor = replacement.Commit(1, DateTimeOffset.UtcNow);
+            descriptor.Sequence.Should().Be(0);
+        }
+    }
+
+    [Test]
+    public void BodyDemand_SelectsSharedMemoryLocallyAndNetworkRemotelyWithoutDuplicateFallbackWork()
+    {
+        using var tracker = new CultMeshBodyDemandTracker();
+        tracker.Observe(Demand("unity-local", "local", sameMachine: true));
+        tracker.Observe(Demand("unity-remote", "remote", sameMachine: false));
+
+        var mixed = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
+
+        mixed.HasConsumers.Should().BeTrue();
+        mixed.RequiresSharedMemory.Should().BeTrue();
+        mixed.RequiresNetwork.Should().BeTrue();
+        mixed.Consumers.Should().ContainSingle(value =>
+            value.ConsumerRuntimeId == "unity-local" &&
+            value.Transport == CultMeshBodyTransportKind.SharedMemory);
+        mixed.Consumers.Should().ContainSingle(value =>
+            value.ConsumerRuntimeId == "unity-remote" &&
+            value.Transport == CultMeshBodyTransportKind.Network);
+
+        tracker.Observe(Demand("unity-remote", "remote", sameMachine: false, active: false));
+        var localOnly = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
+        localOnly.RequiresSharedMemory.Should().BeTrue();
+        localOnly.RequiresNetwork.Should().BeFalse();
+    }
+
+    [Test]
+    public void BodyDemand_UnknownLocalityFailsTowardNetworkAndUnsupportedDemandCreatesNoRoute()
+    {
+        using var tracker = new CultMeshBodyDemandTracker();
+        tracker.Observe(Demand("unknown", "network", sameMachine: false));
+        tracker.Observe(new CultNetDatabaseSubscriptionDemand(
+            "unsupported",
+            "unsupported",
+            new[] { "eve:entity-soa:aetheria.daemon:pilot" },
+            new[] { CultMeshBodyTransportKind.SharedMemory.ToString() },
+            sameMachine: false,
+            active: true));
+
+        var plan = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
+
+        plan.RequiresSharedMemory.Should().BeFalse();
+        plan.RequiresNetwork.Should().BeTrue();
+        plan.Consumers.Should().ContainSingle().Which.ConsumerRuntimeId.Should().Be("unknown");
+    }
+
     private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()
     {
         BodyId = descriptor.BodyId,
@@ -274,6 +368,22 @@ public sealed class CultMeshBodyTransportTests
         AccessMode = CultMeshBodyAccessMode.ReadOnly,
         NowUtc = now
     };
+
+    private static CultNetDatabaseSubscriptionDemand Demand(
+        string runtimeId,
+        string subscriptionId,
+        bool sameMachine,
+        bool active = true) => new(
+        runtimeId,
+        subscriptionId,
+        new[] { "eve:entity-soa:aetheria.daemon:pilot" },
+        new[]
+        {
+            CultMeshBodyTransportKind.SharedMemory.ToString(),
+            CultMeshBodyTransportKind.Network.ToString()
+        },
+        sameMachine,
+        active);
 
     private static CultMeshBodyDescriptor NetworkRepresentation(CultMeshBodyDescriptor descriptor) => new()
     {

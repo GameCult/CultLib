@@ -4,6 +4,7 @@
     <PackageId>GameCult.Mesh</PackageId>
     <PackageTags>game;distributed;realtime;mesh;database;simulation;consensus</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

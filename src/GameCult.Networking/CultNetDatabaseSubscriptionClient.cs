@@ -48,7 +48,10 @@ namespace GameCult.Networking
             IEnumerable<string>? recordKeys = null,
             IEnumerable<string>? schemaIds = null,
             bool includeSnapshot = true,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string? consumerRuntimeId = null,
+            IEnumerable<string>? bodyIds = null,
+            IEnumerable<string>? supportedBodyTransports = null)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
@@ -82,7 +85,13 @@ namespace GameCult.Networking
                     SubscriptionId = subscriptionId,
                     RecordKeys = recordKeys?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
                     SchemaIds = schemaIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
-                    IncludeSnapshot = includeSnapshot
+                    IncludeSnapshot = includeSnapshot,
+                    ConsumerRuntimeId = consumerRuntimeId,
+                    BodyIds = bodyIds?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                    SupportedBodyTransports = supportedBodyTransports?
+                        .Where(value => !string.IsNullOrWhiteSpace(value))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray()
                 });
             }
             catch

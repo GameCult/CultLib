@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Net;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using R3;
@@ -21,6 +22,8 @@ namespace GameCult.Networking
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
+        private readonly ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage> _requests =
+            new ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage>(SubscriptionKeyComparer.Instance);
         private bool _disposed;
 
         /// <summary>Attaches live database subscription handlers to a schema server.</summary>
@@ -34,6 +37,9 @@ namespace GameCult.Networking
             _server.OnCultNet(_unsubscribe);
         }
 
+        /// <summary>Raised when exact document subscriptions add or remove typed hot-body demand.</summary>
+        public event Action<CultNetDatabaseSubscriptionDemand>? DemandChanged;
+
         /// <summary>Detaches handlers and releases all active watches.</summary>
         public void Dispose()
         {
@@ -41,8 +47,14 @@ namespace GameCult.Networking
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribe);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribe);
-            foreach (var subscription in _subscriptions.Values) subscription.Dispose();
+            foreach (var entry in _subscriptions)
+            {
+                entry.Value.Dispose();
+                if (_requests.TryRemove(entry.Key, out var request))
+                    PublishDemand(request, entry.Key, active: false);
+            }
             _subscriptions.Clear();
+            _requests.Clear();
         }
 
         private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage request, ICultNetSchemaServerPeer peer)
@@ -57,6 +69,8 @@ namespace GameCult.Networking
             }
 
             var key = new SubscriptionKey(peer, subscriptionId);
+            if (_requests.TryGetValue(key, out var previous))
+                PublishDemand(previous, key, active: false);
             _subscriptions.AddOrUpdate(
                 key,
                 _ => Watch(request, subscriptionId, peer),
@@ -65,6 +79,8 @@ namespace GameCult.Networking
                     current.Dispose();
                     return Watch(request, subscriptionId, peer);
                 });
+            _requests[key] = request;
+            PublishDemand(request, key, active: true);
             if (request.IncludeSnapshot)
             {
                 peer.SendCultNet(_database.Documents.CreateRawSnapshotResponse(
@@ -93,10 +109,39 @@ namespace GameCult.Networking
             var subscriptionId = string.IsNullOrWhiteSpace(request.SubscriptionId)
                 ? request.MessageId
                 : request.SubscriptionId;
-            if (!string.IsNullOrWhiteSpace(subscriptionId) &&
-                _subscriptions.TryRemove(new SubscriptionKey(peer, subscriptionId), out var subscription))
-                subscription.Dispose();
+            if (!string.IsNullOrWhiteSpace(subscriptionId))
+            {
+                var key = new SubscriptionKey(peer, subscriptionId);
+                if (_subscriptions.TryRemove(key, out var subscription)) subscription.Dispose();
+                if (_requests.TryRemove(key, out var subscribed))
+                    PublishDemand(subscribed, key, active: false);
+            }
             return Task.CompletedTask;
+        }
+
+        private void PublishDemand(
+            CultNetDatabaseSubscribeMessage request,
+            SubscriptionKey key,
+            bool active)
+        {
+            if (request.BodyIds is not { Length: > 0 }) return;
+            DemandChanged?.Invoke(new CultNetDatabaseSubscriptionDemand(
+                string.IsNullOrWhiteSpace(request.ConsumerRuntimeId) ? key.Id : request.ConsumerRuntimeId!,
+                key.Id,
+                request.BodyIds.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray(),
+                (request.SupportedBodyTransports ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                IsSameMachine(key.Peer),
+                active));
+        }
+
+        private static bool IsSameMachine(ICultNetSchemaServerPeer peer)
+        {
+            if (peer is RudpCultNetSchemaServerPeer rudp && rudp.RemoteEndPoint is IPEndPoint ip)
+                return IPAddress.IsLoopback(ip.Address);
+            return peer is CultNetServerPeer liteNet && IPAddress.IsLoopback(liteNet.Peer.Address);
         }
 
         private IDisposable Watch(
@@ -177,9 +222,55 @@ namespace GameCult.Networking
         {
             public static SubscriptionKeyComparer Instance { get; } = new SubscriptionKeyComparer();
             public bool Equals(SubscriptionKey? x, SubscriptionKey? y) =>
-                x != null && y != null && ReferenceEquals(x.Peer, y.Peer) && string.Equals(x.Id, y.Id, StringComparison.Ordinal);
+                x != null && y != null && SamePeer(x.Peer, y.Peer) && string.Equals(x.Id, y.Id, StringComparison.Ordinal);
             public int GetHashCode(SubscriptionKey value) =>
-                (RuntimeHelpers.GetHashCode(value.Peer) * 397) ^ StringComparer.Ordinal.GetHashCode(value.Id);
+                (PeerHash(value.Peer) * 397) ^ StringComparer.Ordinal.GetHashCode(value.Id);
+
+            private static bool SamePeer(ICultNetSchemaServerPeer left, ICultNetSchemaServerPeer right)
+            {
+                if (ReferenceEquals(left, right)) return true;
+                if (left is RudpCultNetSchemaServerPeer leftRudp && right is RudpCultNetSchemaServerPeer rightRudp)
+                    return ReferenceEquals(leftRudp.TransportPeer, rightRudp.TransportPeer);
+                if (left is CultNetServerPeer leftLite && right is CultNetServerPeer rightLite)
+                    return ReferenceEquals(leftLite.Peer, rightLite.Peer);
+                return false;
+            }
+
+            private static int PeerHash(ICultNetSchemaServerPeer peer)
+            {
+                if (peer is RudpCultNetSchemaServerPeer rudp)
+                    return RuntimeHelpers.GetHashCode(rudp.TransportPeer);
+                if (peer is CultNetServerPeer lite)
+                    return RuntimeHelpers.GetHashCode(lite.Peer);
+                return RuntimeHelpers.GetHashCode(peer);
+            }
         }
+    }
+
+    /// <summary>One active or withdrawn consumer demand for logical hot bodies.</summary>
+    public sealed class CultNetDatabaseSubscriptionDemand
+    {
+        public CultNetDatabaseSubscriptionDemand(
+            string consumerRuntimeId,
+            string subscriptionId,
+            IReadOnlyList<string> bodyIds,
+            IReadOnlyList<string> supportedBodyTransports,
+            bool sameMachine,
+            bool active)
+        {
+            ConsumerRuntimeId = consumerRuntimeId;
+            SubscriptionId = subscriptionId;
+            BodyIds = bodyIds;
+            SupportedBodyTransports = supportedBodyTransports;
+            SameMachine = sameMachine;
+            Active = active;
+        }
+
+        public string ConsumerRuntimeId { get; }
+        public string SubscriptionId { get; }
+        public IReadOnlyList<string> BodyIds { get; }
+        public IReadOnlyList<string> SupportedBodyTransports { get; }
+        public bool SameMachine { get; }
+        public bool Active { get; }
     }
 }

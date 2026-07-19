@@ -787,6 +787,18 @@ namespace GameCult.Networking
         /// Gets or sets whether the server should send a matching snapshot before live changes.
         /// </summary>
         [Key("includeSnapshot")] public bool IncludeSnapshot { get; set; } = true;
+        /// <summary>
+        /// Gets or sets the stable consumer runtime identity used for subscription diagnostics and body-plane demand.
+        /// </summary>
+        [Key("consumerRuntimeId")] public string? ConsumerRuntimeId { get; set; }
+        /// <summary>
+        /// Gets or sets logical hot-body identities needed by this exact state subscription.
+        /// </summary>
+        [Key("bodyIds")] public string[]? BodyIds { get; set; }
+        /// <summary>
+        /// Gets or sets body transports the consumer can open, ordered by consumer preference.
+        /// </summary>
+        [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
     }
 
     /// <summary>
