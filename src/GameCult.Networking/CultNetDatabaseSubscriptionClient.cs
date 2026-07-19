@@ -69,7 +69,7 @@ namespace GameCult.Networking
                 throw new ArgumentException("Record key is required.", nameof(recordKey));
             var schemaId = _documents.GetByDocumentType(typeof(TDocument))?.SchemaId ??
                 _cache.Registry.GetRequired<TDocument>().SchemaId;
-            var value = new CultNetLiveValue<TDocument>(this, subscriptionId, recordKey, schemaId);
+            var value = new CultNetLiveValue<TDocument>(this, subscriptionId, recordKey);
             try
             {
                 var initial = await SubscribeAsync(
@@ -80,10 +80,11 @@ namespace GameCult.Networking
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 var documents = initial.OfType<TDocument>().ToArray();
-                if (documents.Length != 1)
+                if (documents.Length > 1)
                     throw new InvalidOperationException(
-                        $"Live value subscription '{subscriptionId}' expected one '{schemaId}' record '{recordKey}' but received {documents.Length}.");
-                value.Initialize(documents[0]);
+                        $"Live value subscription '{subscriptionId}' expected at most one '{schemaId}' record '{recordKey}' but received {documents.Length}.");
+                if (documents.Length == 1)
+                    value.Initialize(documents[0]);
                 return value;
             }
             catch
@@ -294,7 +295,6 @@ namespace GameCult.Networking
         private readonly CultNetDatabaseSubscriptionClient _owner;
         private readonly string _subscriptionId;
         private readonly string _recordKey;
-        private readonly string _schemaId;
         private readonly object _gate = new();
         private TDocument? _current;
         private bool _hasValue;
@@ -303,15 +303,13 @@ namespace GameCult.Networking
         internal CultNetLiveValue(
             CultNetDatabaseSubscriptionClient owner,
             string subscriptionId,
-            string recordKey,
-            string schemaId)
+            string recordKey)
         {
             _owner = owner ?? throw new ArgumentNullException(nameof(owner));
             _subscriptionId = string.IsNullOrWhiteSpace(subscriptionId)
                 ? throw new ArgumentException("Subscription id is required.", nameof(subscriptionId))
                 : subscriptionId;
             _recordKey = recordKey;
-            _schemaId = schemaId;
             _owner.Changed += OnChanged;
         }
 
@@ -364,8 +362,7 @@ namespace GameCult.Networking
         private void OnChanged(CultNetReplicatedDocumentChange change)
         {
             if (!string.Equals(change.SubscriptionId, _subscriptionId, StringComparison.Ordinal) ||
-                !string.Equals(change.RecordKey, _recordKey, StringComparison.Ordinal) ||
-                !string.Equals(change.SchemaId, _schemaId, StringComparison.Ordinal))
+                !string.Equals(change.RecordKey, _recordKey, StringComparison.Ordinal))
                 return;
 
             if (string.Equals(change.ChangeKind, "removed", StringComparison.Ordinal))

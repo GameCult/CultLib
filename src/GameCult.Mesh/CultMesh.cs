@@ -2921,11 +2921,12 @@ namespace GameCult.Mesh
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 var publications = initial.OfType<CultMeshBodyPublicationDocument>().ToArray();
-                if (publications.Length != 1)
+                if (publications.Length > 1)
                     throw new InvalidOperationException(
-                        $"Live body subscription '{subscription.SubscriptionId}' expected one publication for " +
+                        $"Live body subscription '{subscription.SubscriptionId}' expected at most one publication for " +
                         $"'{subscription.BodyId}' but received {publications.Length}.");
-                liveBody.Initialize(publications[0]);
+                if (publications.Length == 1)
+                    liveBody.Initialize(publications[0]);
                 return liveBody;
             }
             catch

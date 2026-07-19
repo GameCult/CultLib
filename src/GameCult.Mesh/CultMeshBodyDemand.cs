@@ -141,8 +141,7 @@ namespace GameCult.Mesh
         private void OnChanged(CultNetReplicatedDocumentChange change)
         {
             if (!string.Equals(change.SubscriptionId, _subscription.SubscriptionId, StringComparison.Ordinal) ||
-                !string.Equals(change.RecordKey, _subscription.PublicationRecordKey, StringComparison.Ordinal) ||
-                !string.Equals(change.SchemaId, CultMeshBodyPublicationSchemaVersions.Publication, StringComparison.Ordinal))
+                !string.Equals(change.RecordKey, _subscription.PublicationRecordKey, StringComparison.Ordinal))
                 return;
 
             if (string.Equals(change.ChangeKind, "removed", StringComparison.Ordinal))

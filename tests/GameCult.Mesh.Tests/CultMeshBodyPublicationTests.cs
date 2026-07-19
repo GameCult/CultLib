@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
@@ -218,6 +221,71 @@ public sealed class CultMeshBodyPublicationTests
         var restored = new byte[bytes.Length];
         opened.CopyTo(0, restored, 0, restored.Length).Should().Be(bytes.Length);
         restored.Should().Equal(bytes);
+    }
+
+    [Test]
+    public async Task LiveBody_SubscriptionCanPrecedeTheFirstProviderPublication()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 2, 7, 1, 8 };
+        var publication = Publication(bytes, now);
+        var sourceCache = new CultCache();
+        var sourceDocuments = CultMesh.CreateBodyPublicationDocumentRegistry(sourceCache.Registry);
+        var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+        {
+            DocumentRegistry = sourceDocuments
+        });
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+        {
+            RuntimeId = "live-body-before-publication-server",
+            Socket = socket
+        });
+        using var serverSubscriptions = new CultNetDatabaseSubscriptionServer(server, sourceDatabase);
+        using var cancellation = new CancellationTokenSource();
+        var serverThread = new Thread(() =>
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                Thread.Sleep(1);
+            }
+        }) { IsBackground = true };
+        serverThread.Start();
+
+        var targetCache = new CultCache();
+        var documents = CultMesh.CreateBodyPublicationDocumentRegistry(targetCache.Registry);
+        var transport = CultNetSchemaClients.CreateRudp("live-body-before-publication-client");
+        using var subscriptions = new CultNetDatabaseSubscriptionClient(transport, targetCache, documents);
+        transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+        var connectedBy = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
+        while (!transport.Connected && DateTimeOffset.UtcNow < connectedBy)
+            await Task.Delay(5);
+        transport.Connected.Should().BeTrue();
+
+        using var body = await CultMesh.SubscribeLiveBodyAsync(
+            subscriptions,
+            Resolver(bytes, (_, _) => true),
+            new CultMeshLiveBodySubscription("pilot-body", "eve-unity", publication.BodyId));
+
+        body.HasValue.Should().BeFalse(
+            "body demand must remain active while the producer has not published frame zero yet");
+        var changed = new TaskCompletionSource<CultMeshBodyPublicationDocument>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        body.Changed += value => changed.TrySetResult(value);
+
+        await sourceDatabase.PutAsync(
+            CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId),
+            publication);
+        var completed = await Task.WhenAny(changed.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+
+        cancellation.Cancel();
+        completed.Should().Be(changed.Task);
+        body.HasValue.Should().BeTrue();
+        body.Current.Should().BeEquivalentTo(publication);
+        using var opened = body.OpenCurrentReadOnly(now).Lease;
+        opened.TransportKind.Should().Be(CultMeshBodyTransportKind.SharedFileMapping);
     }
 
     private CultMeshBodyPublicationDocument Publication(byte[] bytes, DateTimeOffset now)

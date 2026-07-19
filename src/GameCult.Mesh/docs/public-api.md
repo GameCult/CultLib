@@ -525,7 +525,9 @@ and own their unsubscribe lifetime. Hot body state uses
 `CultMesh.SubscribeLiveBodyAsync(...)`: the reactive value is only the current
 body descriptor, while `OpenCurrentReadOnly()` negotiates shared memory,
 shared-file mapping, or network from observed locality and available adapters.
-Body bytes never become subscription snapshot payload.
+Body bytes never become subscription snapshot payload. Either subscription may
+legitimately start with `HasValue == false`; it remains active until the provider
+publishes the exact record, avoiding a startup retry loop or broad snapshot.
 
 ### Client Prediction
 

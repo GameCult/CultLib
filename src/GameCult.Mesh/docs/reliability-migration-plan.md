@@ -926,7 +926,9 @@ subscription lifetime. `CultMeshLiveBody` owns the ephemeral latest-publication
 value and opens the current generation through the fastest valid representation
 the resolver can actually import. Layout and other small state are independent
 exact reactive values, so changing one variable does not redeliver an unrelated
-view document or body.
+view document or body. A subscription may predate frame zero: absence is an
+uninitialized live value, not a failed subscription, and demand remains active
+until the first descriptor arrives.
 
 `CultMesh.SubscribeHotBodyAsync(...)` remains the grouped compatibility path. Its
 `CultMeshHotBodySubscription` keeps the exact view record, the body's stable
@@ -962,7 +964,8 @@ single-record ergonomic path. Its `CultNetLiveValue<T>` owns the exact
 record/schema filter, current value, typed change/removal notifications, and
 unsubscribe lifetime. Consumers no longer need a process-wide change handler,
 an object type switch, or a renderer-local replica cache to model one reactive
-variable.
+variable. The value may start absent and become initialized on its first matching
+change without resubscribing.
 
 **Derived state:** renderer-local presentation and reactive variables are
 derived from live notifications. They are not database records merely because

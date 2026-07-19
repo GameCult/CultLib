@@ -1699,11 +1699,6 @@ namespace GameCult.Networking.Tests
             var sourceCache = new CultCache();
             var sourceDatabase = new CultNetDatabase(sourceCache);
             const string recordKey = "tests:subscription-client:reactive-note";
-            await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
-            {
-                Schema = "tests.networking_note.v1",
-                Text = "initial"
-            });
             using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
             {
                 RuntimeId = "database-live-value-server",
@@ -1732,8 +1727,7 @@ namespace GameCult.Networking.Tests
             using var value = await AwaitWithTimeout(
                 client.SubscribeLiveValueAsync<NetworkSchemaNote>("reactive-note", recordKey),
                 TimeSpan.FromSeconds(2));
-            Assert.That(value.HasValue, Is.True);
-            Assert.That(value.Current.Text, Is.EqualTo("initial"));
+            Assert.That(value.HasValue, Is.False);
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
 
             var changed = new TaskCompletionSource<NetworkSchemaNote>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1741,14 +1735,26 @@ namespace GameCult.Networking.Tests
             await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
-                Text = "updated"
+                Text = "initial"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            Assert.That(update.Text, Is.EqualTo("initial"));
+            Assert.That(value.Current.Text, Is.EqualTo("initial"));
+            Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+
+            var updated = new TaskCompletionSource<NetworkSchemaNote>(TaskCreationOptions.RunContinuationsAsynchronously);
+            value.Changed += document => updated.TrySetResult(document);
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "updated"
+            });
+            update = await AwaitWithTimeout(updated.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
             Assert.That(update.Text, Is.EqualTo("updated"));
             Assert.That(value.Current.Text, Is.EqualTo("updated"));
-            Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
         }
 
         [Test]

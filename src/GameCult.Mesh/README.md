@@ -403,14 +403,20 @@ using var input = await subscriptions.SubscribeLiveValueAsync<EveInputCapability
 
 // Open after each descriptor change. CultMesh chooses shared memory, shared-file
 // mapping, or network from observed locality and the resolver's real adapters.
-using var frame = entities.OpenCurrentReadOnly().Lease;
-Present(frame, input.Current);
+if (entities.HasValue && input.HasValue)
+{
+    using var frame = entities.OpenCurrentReadOnly().Lease;
+    Present(frame, input.Current);
+}
 ```
 
 `CultMeshLiveBody` watches only the small latest-publication record and declares
 the logical body demand. It never routes the body through the subscription
 snapshot. `CultNetLiveValue<T>` does the corresponding job for exact scalar or
-small structured state without creating a renderer-owned replica cache.
+small structured state without creating a renderer-owned replica cache. Both
+subscriptions may begin before the provider's first publication: `HasValue`
+remains false while the retained demand stays active, then the first typed value
+arrives through the normal reactive change path.
 
 Snapshots remain bootstrap and recovery machinery. Reactive document changes
 carry small control state; mapped or negotiated network bodies carry hot data.
