@@ -110,6 +110,8 @@ namespace GameCult.Networking
         private readonly ConcurrentDictionary<Type, Delegate> _handlers = new();
         private readonly ConcurrentDictionary<TcpPeer, byte> _peers = new();
         private readonly CancellationTokenSource _shutdown = new();
+        private readonly TaskCompletionSource<Exception> _backgroundFailure = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _disposed;
 
         public TcpFramedCultNetSchemaServer(TcpListener listener)
@@ -120,7 +122,14 @@ namespace GameCult.Networking
         }
 
         public event Action<ICultNetSchemaServerPeer>? PeerDisconnected;
+        /// <summary>Raised when one peer connection fails without stopping the listener.</summary>
+        public event Action<EndPoint?, Exception>? PeerFailed;
+        /// <summary>Gets the bound TCP endpoint.</summary>
         public IPEndPoint LocalEndPoint => (IPEndPoint)_listener.LocalEndpoint;
+        /// <summary>Gets the number of active TCP peers.</summary>
+        public int PeerCount => _peers.Count;
+        /// <summary>Completes if the background accept loop fails.</summary>
+        public Task<Exception> BackgroundFailure => _backgroundFailure.Task;
 
         public void OnCultNet<TMessage>(Func<TMessage, ICultNetSchemaServerPeer, Task> callback)
             where TMessage : ICultNetSchemaMessage
@@ -162,6 +171,10 @@ namespace GameCult.Networking
             catch (Exception) when (_disposed || cancellationToken.IsCancellationRequested)
             {
             }
+            catch (Exception error)
+            {
+                _backgroundFailure.TrySetResult(error);
+            }
         }
 
         private async Task ServePeerAsync(TcpPeer peer, CancellationToken cancellationToken)
@@ -181,6 +194,10 @@ namespace GameCult.Networking
             }
             catch (Exception) when (_disposed || cancellationToken.IsCancellationRequested || !peer.Connected)
             {
+            }
+            catch (Exception error)
+            {
+                PeerFailed?.Invoke(peer.RemoteEndPoint, error);
             }
             finally
             {
