@@ -1865,6 +1865,84 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task RudpCultNetSchemaServer_SerializesConcurrentFragmentedSendsPerPeer()
+        {
+            const int publisherCount = 4;
+            const int messagesPerPublisher = 4;
+            const int expectedMessages = publisherCount * messagesPerPublisher;
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-rudp-concurrent-publish-host",
+                Socket = BindUdpSocket(),
+                MaxFragmentBytes = 512,
+                MaxPendingReliablePackets = 1024
+            });
+            var receivedIds = new ConcurrentDictionary<string, byte>();
+            var receivedAll = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var serverFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                try
+                {
+                    while (!cancellation.IsCancellationRequested)
+                    {
+                        _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                        Thread.Sleep(1);
+                    }
+                }
+                catch (Exception error) { serverFailure.TrySetResult(error); }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp(
+                runtimeId: "csharp-rudp-concurrent-publish-client",
+                maxFragmentBytes: 512);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(response =>
+            {
+                if (receivedIds.TryAdd(response.MessageId, 0) && receivedIds.Count == expectedMessages)
+                    receivedAll.TrySetResult(true);
+            });
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected && server.Peers.Count == 1, TimeSpan.FromSeconds(2));
+            var peer = server.Peers.Single();
+            using var sendBarrier = new Barrier(publisherCount);
+
+            await Task.WhenAll(Enumerable.Range(0, publisherCount).Select(publisher => Task.Run(() =>
+            {
+                sendBarrier.SignalAndWait();
+                for (var message = 0; message < messagesPerPublisher; message++)
+                {
+                    var messageId = $"publisher-{publisher}-message-{message}";
+                    server.SendCultNet(peer, new CultNetSnapshotResponseRawMessage
+                    {
+                        MessageId = messageId,
+                        Documents =
+                        [
+                            new CultNetRawDocumentRecord
+                            {
+                                SchemaId = "test.concurrent.publish.v1",
+                                RecordKey = $"test:concurrent:{messageId}",
+                                PayloadEncoding = "messagepack",
+                                Payload = Enumerable.Range(0, 4 * 1024)
+                                    .Select(index => (byte)((index + publisher + message) % 251)).ToArray()
+                            }
+                        ]
+                    });
+                }
+            })));
+
+            var completed = await Task.WhenAny(receivedAll.Task, serverFailure.Task, Task.Delay(5000));
+            if (completed == serverFailure.Task) throw await serverFailure.Task;
+            if (completed != receivedAll.Task)
+                Assert.Fail($"Concurrent publish timed out after receiving {receivedIds.Count} of {expectedMessages} logical messages.");
+            cancellation.Cancel();
+
+            Assert.That(receivedIds.Count, Is.EqualTo(expectedMessages));
+        }
+
+        [Test]
         public void RudpSocketTransport_ErgonomicHelpersCarryNamedChannels()
         {
             using var serverSocket = BindUdpSocket();

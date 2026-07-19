@@ -964,6 +964,37 @@ body path when remote demand exists; Phase 6 must replace that expiry-sensitive
 traffic with a stream/datagram body plane rather than enlarging snapshot or CDN
 timeouts.
 
+### RUDP session mutation body map
+
+**Owner:** each socket transport binding serializes access to its own RUDP
+reliability session. The server owns one serialization gate per peer; a client
+connection owns one gate for its session.
+
+**Inputs:** concurrent typed publication, command and receipt sends, inbound
+ACK/data processing, handshake state, timeout checks, and resend polling.
+
+**Outputs:** one coherent packet sequence and fragment stream per peer, with
+reliable-packet bookkeeping updated in the same critical section as packet
+creation and transmission.
+
+**Derived state:** schema messages, database subscriptions, and Eve reactive
+variables are consumers of the reliable control plane. They do not own packet
+ordering and must not serialize their own publication loops.
+
+**Forbidden writers:** daemon schedulers, renderers, and provider sessions
+cannot mutate `CultNetRudpSession` directly or add retries, replacement
+snapshots, and artificial publication delays to compensate for concurrent
+transport calls.
+
+**Shared paths:** application send, receive/ACK, resend, connect, disconnect,
+ping, and timeout inspection all enter through the same per-session gate.
+Fragments belonging to one logical send are emitted before another thread may
+allocate sequence numbers for that peer.
+
+**Cut line:** all socket-backed `CultNetRudpSession` mutation is behind the
+transport-owned gate. Product code no longer has to choose between concurrent
+simulation publication and reliable delivery.
+
 Reliable control messages larger than the RUDP receive mask explicitly
 acknowledge the packet just received. A retransmit older than the rolling
 32-packet summary can therefore always leave the sender queue; the rolling mask
