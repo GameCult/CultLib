@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
+    <ProjectReference Include="..\..\src\GameCult.Mesh.Quic\GameCult.Mesh.Quic.csproj" />
   </ItemGroup>
 </Project>

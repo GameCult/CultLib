@@ -84,3 +84,22 @@ reached 10.7 MiB/s while emitting 18,112,867 wire bytes. CultMesh TCP includes
 chunk hashing, durable checkpoints, final hashing, and atomic promotion, so this
 is not a claim of raw protocol parity. It is a repeatable workload comparison
 and leaves the remaining framework overhead visible.
+
+The same harness now has a state-only workload. On 2026-07-19, 1,000 latest-only
+frames with 16 KiB payloads produced the following loopback result:
+
+| Plane | Offered rate | Delivered | Highest generation | Settled time |
+| --- | ---: | ---: | ---: | ---: |
+| CultMesh QUIC latest-only | 23.8 MiB/s | 989 / 1,000 | 999 | 655.4 ms |
+| CultNet RUDP latest | 45.6 MiB/s | 373 / 1,000 | 516 | 602.7 ms |
+
+Offered rate measures publisher-side enqueue/write completion, not successful
+delivery. RUDP accepted bytes faster but failed to deliver the terminal
+generation after a 250 ms drain; that is a delivery failure, not useful
+throughput. QUIC's reliable independent streams reached the terminal generation
+while the receiver coalesced eleven superseded frames. Reproduce the workload
+with:
+
+```text
+dotnet run --project tools/GameCult.TransportParity -- --state-only --state-bytes 16384 --state-frames 1000
+```
