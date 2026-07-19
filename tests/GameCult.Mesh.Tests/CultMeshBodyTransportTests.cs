@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
 using System.IO.MemoryMappedFiles;
@@ -356,6 +357,48 @@ public sealed class CultMeshBodyTransportTests
         plan.RequiresSharedMemory.Should().BeFalse();
         plan.RequiresNetwork.Should().BeTrue();
         plan.Consumers.Should().ContainSingle().Which.ConsumerRuntimeId.Should().Be("unknown");
+    }
+
+    [Test]
+    public void BodyDemand_UsesSharedFileMappingAsTheSameMachineFallback()
+    {
+        using var tracker = new CultMeshBodyDemandTracker();
+        tracker.Observe(new CultNetDatabaseSubscriptionDemand(
+            "unity-local",
+            "mapped-local",
+            new[] { "eve:entity-soa:aetheria.daemon:pilot" },
+            new[]
+            {
+                CultMeshBodyTransportKind.SharedFileMapping.ToString(),
+                CultMeshBodyTransportKind.Network.ToString()
+            },
+            sameMachine: true,
+            active: true));
+
+        var plan = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
+
+        plan.RequiresSharedMemory.Should().BeFalse();
+        plan.RequiresSharedFileMapping.Should().BeTrue();
+        plan.RequiresNetwork.Should().BeFalse();
+        plan.Consumers.Should().ContainSingle().Which.Transport
+            .Should().Be(CultMeshBodyTransportKind.SharedFileMapping);
+    }
+
+    [Test]
+    public void LiveBodySubscriptionNamesOnlyTheReactiveDescriptorAndLogicalBodyDemand()
+    {
+        var subscription = new CultMeshLiveBodySubscription(
+            "pilot-entities",
+            "eve-unity",
+            "eve:body:pilot");
+
+        subscription.SubscriptionId.Should().Be("pilot-entities");
+        subscription.ConsumerRuntimeId.Should().Be("eve-unity");
+        subscription.BodyId.Should().Be("eve:body:pilot");
+        subscription.PublicationRecordKey.Should().Be(
+            CultMeshBodyPublicationDocument.CreateLatestRecordKey("eve:body:pilot").Value);
+        typeof(CultMesh).GetMethod(nameof(CultMesh.SubscribeLiveBodyAsync))!
+            .ReturnType.Should().Be(typeof(Task<CultMeshLiveBody>));
     }
 
     [Test]

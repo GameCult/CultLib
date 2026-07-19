@@ -389,27 +389,28 @@ through the mapped ring header. Per-frame CultNet documents are neither needed
 nor desirable.
 
 ```csharp
-var initial = await subscriptions.SubscribeAsync(
-    "pilot-world",
-    recordKeys: new[] { entityLayoutRecord, bodyPublicationRecord },
-    schemaIds: new[] { entityLayoutSchema, CultMeshBodyPublicationSchemaVersions.Publication },
-    consumerRuntimeId: "eve-unity",
-    bodyIds: new[] { "eve:entity-soa:aetheria.daemon:pilot" },
-    supportedBodyTransports: new[]
-    {
-        CultMeshBodyTransportKind.SharedMemory.ToString(),
-        CultMeshBodyTransportKind.Network.ToString()
-    });
+using var entities = await CultMesh.SubscribeLiveBodyAsync(
+    subscriptions,
+    bodyResolver,
+    new CultMeshLiveBodySubscription(
+        "pilot-entities",
+        "eve-unity",
+        "eve:entity-soa:aetheria.daemon:pilot"));
 
-var bootstrap = initial.OfType<CultMeshBodyPublicationDocument>().Single();
-var mapped = bootstrap.Representations.Single(CultMeshMappedFrameBodyCursor.CanOpen);
-using var cursor = new CultMeshMappedFrameBodyCursor(mapped);
+using var input = await subscriptions.SubscribeLiveValueAsync<EveInputCapabilityDocument>(
+    "pilot-input",
+    "eve:input:aetheria.daemon:pilot");
 
-// Call from the consumer's normal update loop. The returned lease is read-only
-// and must remain alive until the renderer has finished consuming that frame.
-if (cursor.TryAcquireLatest(out var frame))
-    Present(frame);
+// Open after each descriptor change. CultMesh chooses shared memory, shared-file
+// mapping, or network from observed locality and the resolver's real adapters.
+using var frame = entities.OpenCurrentReadOnly().Lease;
+Present(frame, input.Current);
 ```
+
+`CultMeshLiveBody` watches only the small latest-publication record and declares
+the logical body demand. It never routes the body through the subscription
+snapshot. `CultNetLiveValue<T>` does the corresponding job for exact scalar or
+small structured state without creating a renderer-owned replica cache.
 
 Snapshots remain bootstrap and recovery machinery. Reactive document changes
 carry small control state; mapped or negotiated network bodies carry hot data.

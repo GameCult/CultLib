@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -2887,6 +2888,51 @@ namespace GameCult.Mesh
         {
             if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
             return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription, deliveryMode);
+        }
+
+        /// <summary>
+        /// Subscribes to one logical body's latest descriptor as ephemeral control state and declares
+        /// demand for the body itself. Body bytes are opened separately through the fastest valid plane.
+        /// </summary>
+        public static async Task<CultMeshLiveBody> SubscribeLiveBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            CultMeshBodyPublicationResolver bodyResolver,
+            CultMeshLiveBodySubscription subscription,
+            CancellationToken cancellationToken = default)
+        {
+            if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
+            if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
+            if (subscription == null) throw new ArgumentNullException(nameof(subscription));
+            var transports = bodyResolver.SupportedTransports.Distinct().ToArray();
+            if (transports.Length == 0)
+                throw new InvalidOperationException("The body resolver has no readable transport planes.");
+
+            var liveBody = new CultMeshLiveBody(subscriptions, bodyResolver, subscription);
+            try
+            {
+                var initial = await subscriptions.SubscribeAsync(
+                        subscription.SubscriptionId,
+                        recordKeys: new[] { subscription.PublicationRecordKey },
+                        schemaIds: new[] { CultMeshBodyPublicationSchemaVersions.Publication },
+                        consumerRuntimeId: subscription.ConsumerRuntimeId,
+                        bodyIds: new[] { subscription.BodyId },
+                        supportedBodyTransports: transports.Select(value => value.ToString()),
+                        deliveryMode: CultNetDatabaseSubscriptionDeliveryMode.Live,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                var publications = initial.OfType<CultMeshBodyPublicationDocument>().ToArray();
+                if (publications.Length != 1)
+                    throw new InvalidOperationException(
+                        $"Live body subscription '{subscription.SubscriptionId}' expected one publication for " +
+                        $"'{subscription.BodyId}' but received {publications.Length}.");
+                liveBody.Initialize(publications[0]);
+                return liveBody;
+            }
+            catch
+            {
+                liveBody.Dispose();
+                throw;
+            }
         }
 
         /// <summary>Resolves a CultMesh URI or RUDP endpoint into a concrete RUDP endpoint.</summary>

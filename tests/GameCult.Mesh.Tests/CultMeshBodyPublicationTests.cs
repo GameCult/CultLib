@@ -1,7 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
+using GameCult.Networking;
 using NUnit.Framework;
 
 #nullable enable
@@ -183,6 +187,39 @@ public sealed class CultMeshBodyPublicationTests
         wrongGeneration.Should().Throw<InvalidOperationException>().WithMessage("*epoch*");
     }
 
+    [Test]
+    public async Task LiveBody_SubscriptionKeepsBytesOffTheSnapshotAndOpensTheBestPlane()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 3, 1, 4, 1, 5, 9 };
+        var publication = Publication(bytes, now);
+        var cache = new CultCache();
+        var documents = CultMesh.CreateBodyPublicationDocumentRegistry(cache.Registry);
+        var transport = new BodyPublicationSchemaClient(publication, documents);
+        using var subscriptions = new CultNetDatabaseSubscriptionClient(transport, cache, documents);
+
+        using var body = await CultMesh.SubscribeLiveBodyAsync(
+            subscriptions,
+            Resolver(bytes, (_, _) => true),
+            new CultMeshLiveBodySubscription("pilot-body", "eve-unity", publication.BodyId));
+
+        transport.Subscribe.Should().NotBeNull();
+        transport.Subscribe!.RecordKeys.Should().Equal(
+            CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId).Value);
+        transport.Subscribe.SchemaIds.Should().Equal(CultMeshBodyPublicationSchemaVersions.Publication);
+        transport.Subscribe.BodyIds.Should().Equal(publication.BodyId);
+        transport.Subscribe.ConsumerRuntimeId.Should().Be("eve-unity");
+        cache.Get<CultMeshBodyPublicationDocument>(
+            CultMeshBodyPublicationDocument.CreateLatestRecordKey(publication.BodyId)).Should().BeNull(
+            "live descriptor control state must not become a renderer-owned replica");
+
+        using var opened = body.OpenCurrentReadOnly(now).Lease;
+        opened.TransportKind.Should().Be(CultMeshBodyTransportKind.SharedFileMapping);
+        var restored = new byte[bytes.Length];
+        opened.CopyTo(0, restored, 0, restored.Length).Should().Be(bytes.Length);
+        restored.Should().Equal(bytes);
+    }
+
     private CultMeshBodyPublicationDocument Publication(byte[] bytes, DateTimeOffset now)
     {
         var local = new CultMeshMappedBodyPublisher(_root, TimeSpan.FromMinutes(1))
@@ -248,4 +285,49 @@ public sealed class CultMeshBodyPublicationTests
         CapabilityToken = "cultnet:body:aetheria:entities:7:42",
         SemanticHash = local.SemanticHash
     };
+
+    private sealed class BodyPublicationSchemaClient : ICultNetSchemaClient
+    {
+        private readonly CultMeshBodyPublicationDocument _publication;
+        private readonly CultNetDocumentRegistry _documents;
+        private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
+
+        public BodyPublicationSchemaClient(
+            CultMeshBodyPublicationDocument publication,
+            CultNetDocumentRegistry documents)
+        {
+            _publication = publication;
+            _documents = documents;
+        }
+
+        public bool Connected => true;
+        public CultNetDatabaseSubscribeMessage? Subscribe { get; private set; }
+        public void Connect(string host, int port) { }
+
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (message is not CultNetDatabaseSubscribeMessage subscribe)
+                return;
+            Subscribe = subscribe;
+            var put = _documents.CreateRawDocumentPutMessage(
+                "body-publication",
+                new CultRecordHandle<CultMeshBodyPublicationDocument>(
+                    CultMeshBodyPublicationDocument.CreateLatestRecordKey(_publication.BodyId)),
+                _publication);
+            var response = new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = subscribe.MessageId,
+                Documents = new[] { put.Document }
+            };
+            foreach (var snapshot in _snapshots.ToArray()) snapshot(response);
+        }
+
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultNetSnapshotResponseRawMessage))
+                _snapshots.Add(response => callback((T)(object)response));
+        }
+
+        public void Dispose() { }
+    }
 }

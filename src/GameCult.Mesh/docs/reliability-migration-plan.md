@@ -899,7 +899,9 @@ one representation. A renderer owns none of those decisions.
 **Inputs:** consumer runtime identity, exact logical body IDs, advertised
 consumer transport capabilities, and server-observed peer locality. A
 same-machine claim selects shared memory only when the transport peer is
-actually loopback and the consumer explicitly supports shared memory.
+actually loopback and the consumer explicitly supports shared memory. When
+named shared memory is unavailable but the consumer can map files, the same
+locality proof selects shared-file mapping before network.
 
 **Outputs:** a per-body plan requiring shared memory, network, both, or no
 publication. Producers use that plan before allocating, copying, hashing, or
@@ -918,7 +920,15 @@ stream demand merely by existing.
 and server disposal all update the same typed demand projection. Stable peer
 identity, not per-message wrapper identity, keys subscription lifetime.
 
-`CultMesh.SubscribeHotBodyAsync(...)` is the public construction path. Its
+`CultMesh.SubscribeLiveBodyAsync(...)` is the narrow public construction path.
+Its `CultMeshLiveBodySubscription` names only the logical body, consumer, and
+subscription lifetime. `CultMeshLiveBody` owns the ephemeral latest-publication
+value and opens the current generation through the fastest valid representation
+the resolver can actually import. Layout and other small state are independent
+exact reactive values, so changing one variable does not redeliver an unrelated
+view document or body.
+
+`CultMesh.SubscribeHotBodyAsync(...)` remains the grouped compatibility path. Its
 `CultMeshHotBodySubscription` keeps the exact view record, the body's stable
 latest-publication record, consumer identity, and logical body demand in one
 contract. The local `CultMeshBodyTransportService` contributes only adapters it

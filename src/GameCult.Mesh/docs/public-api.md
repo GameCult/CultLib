@@ -520,6 +520,12 @@ explicitly forwarded. Stale epochs fail loudly.
 
 Consumers subscribe to typed document changes through `CultNetDatabase` watch
 methods. Subscriptions receive domain changes rather than storage envelopes.
+Exact remote values use `SubscribeLiveValueAsync<T>(...)`; they remain ephemeral
+and own their unsubscribe lifetime. Hot body state uses
+`CultMesh.SubscribeLiveBodyAsync(...)`: the reactive value is only the current
+body descriptor, while `OpenCurrentReadOnly()` negotiates shared memory,
+shared-file mapping, or network from observed locality and available adapters.
+Body bytes never become subscription snapshot payload.
 
 ### Client Prediction
 
