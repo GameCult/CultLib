@@ -49,6 +49,10 @@ advertised mapping when it is actually reachable; otherwise it connects to the
 advertised QUIC route. Latest-only receivers must replace pending generations
 per body rather than queueing render debt.
 
+Provider broadcast isolates physical peers. A client disconnect or send failure
+removes that session without failing the publication tick for healthy clients;
+only caller cancellation stops the broadcast operation.
+
 **Derived state:** connector choice, physical endpoint, connection health, and
 transport diagnostics. None of these grant provider authority or become content
 identity.

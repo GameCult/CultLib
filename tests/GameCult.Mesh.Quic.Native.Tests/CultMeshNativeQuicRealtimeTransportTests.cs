@@ -78,6 +78,46 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
             .WithMessage("*certificate*pin*");
     }
 
+    [Test]
+    public async Task NativeClientDepartureCannotBreakProviderBroadcast()
+    {
+        if (!OperatingSystem.IsWindows() || !QuicListener.IsSupported)
+            Assert.Ignore("Native MsQuic integration requires Windows QUIC support.");
+        using var certificate = CreateCertificate();
+        await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+        {
+            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
+            ServerCertificate = certificate
+        });
+        var pin = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+        var endpoint = $"cultmesh-state+quic://127.0.0.1:{server.LocalEndPoint.Port}?cert-sha256={pin}";
+        var connector = new CultMeshNativeQuicRealtimeTransportConnector();
+        var client = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint),
+            CultMeshEndpointId.Parse("aetheria.local"));
+        await WaitUntilAsync(() => server.ConnectionCount == 1);
+        await server.BroadcastAsync(Frame(sequence: 1));
+        using var receiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.ReceiveAsync(receiveTimeout.Token);
+
+        client.Dispose();
+
+        Func<Task> broadcastAfterDeparture = () => server.BroadcastAsync(Frame(sequence: 2));
+        await broadcastAfterDeparture.Should().NotThrowAsync(
+            "a short-lived realtime observer cannot terminate provider publication");
+    }
+
+    private static CultMeshRealtimeFrame Frame(long sequence) => new()
+    {
+        ChannelId = "aetheria.entities",
+        SchemaId = "gamecult.aetheria.entity_soa.v1",
+        BodyId = "aetheria.entities.current-zone",
+        ProducerEpoch = 17,
+        Sequence = sequence,
+        Delivery = CultMeshRealtimeDelivery.LatestOnly,
+        Payload = new byte[] { 1, 3, 3, 7 }
+    };
+
     private static async Task WaitUntilAsync(Func<bool> predicate)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));

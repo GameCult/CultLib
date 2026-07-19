@@ -217,8 +217,28 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         if (frame == null) throw new ArgumentNullException(nameof(frame));
-        var sends = _clients.Keys.Select(client => client.SendAsync(frame, cancellationToken)).ToArray();
+        var sends = _clients.Keys.Select(client => SendToConnectedClientAsync(client, frame, cancellationToken)).ToArray();
         if (sends.Length > 0) await Task.WhenAll(sends).ConfigureAwait(false);
+    }
+
+    private async Task SendToConnectedClientAsync(
+        CultMeshQuicRealtimeTransport client,
+        CultMeshRealtimeFrame frame,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.SendAsync(frame, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            if (_clients.TryRemove(client, out _))
+                client.Dispose();
+        }
     }
 
     /// <summary>Receives the next client-originated state frame.</summary>
