@@ -926,6 +926,37 @@ can actually open, ordered shared-memory first; the server combines those
 capabilities with observed peer locality. Applications do not hand-assemble
 transport-name arrays or request one snapshot per frame.
 
+### Reactive document delivery body map
+
+**Owner:** the subscription declaration owns whether a selected typed document
+is durable replica state or an ephemeral live value. The provider still owns
+the value; the transport and renderer own neither its persistence nor meaning.
+
+**Inputs:** exact record/schema filters and an explicit
+`CultNetDatabaseSubscriptionDeliveryMode`. `ReplicateToCache` materializes
+bootstrap and durable state before notification. `Live` validates and decodes
+the same typed payload, then notifies the subscriber without a replica write.
+
+**Outputs:** both modes produce the same typed initial values and change event.
+Only durable replication mutates the consumer's CultCache.
+
+**Derived state:** renderer-local presentation and reactive variables are
+derived from live notifications. They are not database records merely because
+CultNet carried them.
+
+**Forbidden writers:** renderers and products cannot add polling, keepalive
+writes, or broad snapshots to repair callback latency. Ephemeral receipts,
+input facts, and frame-layout notifications cannot silently become disk-backed
+replica history.
+
+**Shared paths:** exact subscription filters, wire schema validation,
+deserialization, unsubscribe, disconnect cleanup, and body-demand negotiation
+are identical in both modes. Only the final materialization decision differs.
+
+**Cut line:** `CultNetDatabaseSubscriptionClient` no longer requires every
+received document to complete a CultCache write before the consumer may see it.
+Durable documents retain the existing replica path; live values bypass it.
+
 **Cut line:** local frame publication writes directly into a mapped write lease
 and commits its descriptor. The compatibility byte-array publisher is copy-in
 only. The current remote frame representation may still use the verified CDN

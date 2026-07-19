@@ -9,6 +9,15 @@ using GameCult.Caching;
 
 namespace GameCult.Networking
 {
+    /// <summary>Controls whether subscription payloads become replica state or remain ephemeral typed events.</summary>
+    public enum CultNetDatabaseSubscriptionDeliveryMode
+    {
+        /// <summary>Decode each payload and write it into the local CultCache before notifying observers.</summary>
+        ReplicateToCache,
+        /// <summary>Decode each payload and notify observers without writing replica state.</summary>
+        Live
+    }
+
     /// <summary>
     /// Replicates selected remote database records into a local typed CultCache over one retained session.
     /// </summary>
@@ -17,7 +26,9 @@ namespace GameCult.Networking
         private readonly ICultNetSchemaClient _client;
         private readonly CultCache _cache;
         private readonly CultNetDocumentRegistry _documents;
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<IReadOnlyList<object>>> _initialSnapshots = new();
+        private readonly ConcurrentDictionary<string, PendingSubscription> _initialSnapshots = new();
+        private readonly ConcurrentDictionary<string, CultNetDatabaseSubscriptionDeliveryMode> _deliveryModes =
+            new(StringComparer.Ordinal);
         private readonly object _queueLock = new();
         private Task _queue = Task.CompletedTask;
         private bool _disposed;
@@ -55,7 +66,8 @@ namespace GameCult.Networking
             CancellationToken cancellationToken = default,
             string? consumerRuntimeId = null,
             IEnumerable<string>? bodyIds = null,
-            IEnumerable<string>? supportedBodyTransports = null)
+            IEnumerable<string>? supportedBodyTransports = null,
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient));
             if (!_client.Connected) throw new InvalidOperationException("CultNet schema client must be connected before subscribing.");
@@ -63,7 +75,7 @@ namespace GameCult.Networking
 
             var messageId = Guid.NewGuid().ToString("N");
             var completion = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_initialSnapshots.TryAdd(messageId, completion))
+            if (!_initialSnapshots.TryAdd(messageId, new PendingSubscription(subscriptionId, deliveryMode, completion)))
                 throw new InvalidOperationException($"Duplicate database subscription message id '{messageId}'.");
 
             CancellationTokenRegistration cancellation = default;
@@ -72,7 +84,7 @@ namespace GameCult.Networking
                 cancellation = cancellationToken.Register(() =>
                 {
                     if (_initialSnapshots.TryRemove(messageId, out var pending))
-                        pending.TrySetCanceled(cancellationToken);
+                        pending.Completion.TrySetCanceled(cancellationToken);
                 });
                 _ = completion.Task.ContinueWith(
                     _ => cancellation.Dispose(),
@@ -101,7 +113,7 @@ namespace GameCult.Networking
             catch
             {
                 if (_initialSnapshots.TryRemove(messageId, out var pending))
-                    pending.TrySetException(new InvalidOperationException("CultNet subscription request could not be sent."));
+                    pending.Completion.TrySetException(new InvalidOperationException("CultNet subscription request could not be sent."));
                 throw;
             }
             return completion.Task;
@@ -112,6 +124,7 @@ namespace GameCult.Networking
         {
             if (_disposed) return;
             if (string.IsNullOrWhiteSpace(subscriptionId)) throw new ArgumentException("Subscription id is required.", nameof(subscriptionId));
+            _deliveryModes.TryRemove(subscriptionId, out _);
             _client.SendCultNet(new CultNetDatabaseUnsubscribeMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
@@ -123,9 +136,10 @@ namespace GameCult.Networking
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var completion in _initialSnapshots.Values)
-                completion.TrySetException(new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient)));
+            foreach (var pending in _initialSnapshots.Values)
+                pending.Completion.TrySetException(new ObjectDisposedException(nameof(CultNetDatabaseSubscriptionClient)));
             _initialSnapshots.Clear();
+            _deliveryModes.Clear();
             _client.Dispose();
         }
 
@@ -133,15 +147,24 @@ namespace GameCult.Networking
         {
             Enqueue(async () =>
             {
-                if (!_initialSnapshots.TryRemove(message.MessageId, out var completion)) return;
+                if (!_initialSnapshots.TryRemove(message.MessageId, out var pending)) return;
                 try
                 {
-                    var applied = await _documents.ApplyRawSnapshotResponseAsync(_cache, message).ConfigureAwait(false);
-                    completion.TrySetResult(applied);
+                    IReadOnlyList<object> applied;
+                    if (pending.DeliveryMode == CultNetDatabaseSubscriptionDeliveryMode.Live)
+                    {
+                        applied = message.Documents.Select(_documents.DeserializeRawDocument).ToArray();
+                    }
+                    else
+                    {
+                        applied = await _documents.ApplyRawSnapshotResponseAsync(_cache, message).ConfigureAwait(false);
+                    }
+                    _deliveryModes[pending.SubscriptionId] = pending.DeliveryMode;
+                    pending.Completion.TrySetResult(applied);
                 }
                 catch (Exception error)
                 {
-                    completion.TrySetException(error);
+                    pending.Completion.TrySetException(error);
                 }
             });
         }
@@ -150,9 +173,13 @@ namespace GameCult.Networking
         {
             Enqueue(async () =>
             {
+                var deliveryMode = _deliveryModes.TryGetValue(message.SubscriptionId, out var configured)
+                    ? configured
+                    : CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache;
                 if (string.Equals(message.ChangeKind, "removed", StringComparison.Ordinal))
                 {
-                    await DeleteAsync(message).ConfigureAwait(false);
+                    if (deliveryMode == CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
+                        await DeleteAsync(message).ConfigureAwait(false);
                     Changed?.Invoke(new CultNetReplicatedDocumentChange(
                         message.SubscriptionId,
                         "removed",
@@ -163,13 +190,15 @@ namespace GameCult.Networking
                 }
 
                 if (message.Document == null) return;
-                var document = await _documents.ApplyRawDocumentPutMessageAsync(
-                    _cache,
-                    new CultNetDocumentPutRawMessage
-                    {
-                        MessageId = message.MessageId,
-                        Document = message.Document
-                    }).ConfigureAwait(false);
+                var document = deliveryMode == CultNetDatabaseSubscriptionDeliveryMode.Live
+                    ? _documents.DeserializeRawDocument(message.Document)
+                    : await _documents.ApplyRawDocumentPutMessageAsync(
+                        _cache,
+                        new CultNetDocumentPutRawMessage
+                        {
+                            MessageId = message.MessageId,
+                            Document = message.Document
+                        }).ConfigureAwait(false);
                 Changed?.Invoke(new CultNetReplicatedDocumentChange(
                     message.SubscriptionId,
                     message.ChangeKind,
@@ -201,6 +230,23 @@ namespace GameCult.Networking
                     _ => operation(),
                     TaskScheduler.Default).Unwrap();
             }
+        }
+
+        private sealed class PendingSubscription
+        {
+            public PendingSubscription(
+                string subscriptionId,
+                CultNetDatabaseSubscriptionDeliveryMode deliveryMode,
+                TaskCompletionSource<IReadOnlyList<object>> completion)
+            {
+                SubscriptionId = subscriptionId;
+                DeliveryMode = deliveryMode;
+                Completion = completion;
+            }
+
+            public string SubscriptionId { get; }
+            public CultNetDatabaseSubscriptionDeliveryMode DeliveryMode { get; }
+            public TaskCompletionSource<IReadOnlyList<object>> Completion { get; }
         }
     }
 

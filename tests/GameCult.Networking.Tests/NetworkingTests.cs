@@ -1635,6 +1635,65 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionClient_LiveDeliveryDecodesWithoutWritingReplicaState()
+        {
+            var sourceCache = new CultCache();
+            var sourceDatabase = new CultNetDatabase(sourceCache);
+            const string recordKey = "tests:subscription-client:live-note";
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "initial"
+            });
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-live-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, sourceDatabase);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            var targetCache = new CultCache();
+            var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(targetCache.Registry));
+            var transport = CultNetSchemaClients.CreateRudp("database-live-subscription-client");
+            using var client = new CultNetDatabaseSubscriptionClient(transport, targetCache, targetDocuments);
+            transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => transport.Connected, TimeSpan.FromSeconds(2));
+
+            var initial = await AwaitWithTimeout(
+                client.SubscribeAsync(
+                    "live-notes",
+                    recordKeys: new[] { recordKey },
+                    deliveryMode: CultNetDatabaseSubscriptionDeliveryMode.Live),
+                TimeSpan.FromSeconds(2));
+            Assert.That(initial.OfType<NetworkSchemaNote>().Single().Text, Is.EqualTo("initial"));
+            Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+
+            var changed = new TaskCompletionSource<CultNetReplicatedDocumentChange>(TaskCreationOptions.RunContinuationsAsynchronously);
+            client.Changed += change => changed.TrySetResult(change);
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "live"
+            });
+            var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("live"));
+            Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+        }
+
+        [Test]
         public async Task DatabaseSubscription_FiltersLiveChangesByWireSchemaBinding()
         {
             const string recordKey = "tests:subscription-client:wire-note";

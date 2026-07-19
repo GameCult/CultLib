@@ -2859,7 +2859,8 @@ namespace GameCult.Mesh
         public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
             CultNetDatabaseSubscriptionClient subscriptions,
             IEnumerable<CultMeshBodyTransportKind> supportedBodyTransports,
-            CultMeshHotBodySubscription subscription)
+            CultMeshHotBodySubscription subscription,
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
         {
             if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
             if (supportedBodyTransports == null) throw new ArgumentNullException(nameof(supportedBodyTransports));
@@ -2873,17 +2874,19 @@ namespace GameCult.Mesh
                 schemaIds: subscription.SchemaIds,
                 consumerRuntimeId: subscription.ConsumerRuntimeId,
                 bodyIds: new[] { subscription.BodyId },
-                supportedBodyTransports: transports.Select(value => value.ToString()));
+                supportedBodyTransports: transports.Select(value => value.ToString()),
+                deliveryMode: deliveryMode);
         }
 
         /// <summary>Opens an exact hot-body subscription using a resolver's readable planes.</summary>
         public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
             CultNetDatabaseSubscriptionClient subscriptions,
             CultMeshBodyPublicationResolver bodyResolver,
-            CultMeshHotBodySubscription subscription)
+            CultMeshHotBodySubscription subscription,
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
         {
             if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
-            return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription);
+            return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription, deliveryMode);
         }
 
         /// <summary>Resolves a CultMesh URI or RUDP endpoint into a concrete RUDP endpoint.</summary>
