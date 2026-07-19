@@ -1995,7 +1995,7 @@ namespace GameCult.Networking
             {
                 SendPacket(packets[index]);
                 if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
-                    Thread.Sleep(1);
+                    Thread.Yield();
             }
         }
 
@@ -2408,7 +2408,7 @@ namespace GameCult.Networking
             {
                 SendPacket(peer.RemoteEndPoint, packets[index]);
                 if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
-                    Thread.Sleep(1);
+                    Thread.Yield();
             }
         }
 

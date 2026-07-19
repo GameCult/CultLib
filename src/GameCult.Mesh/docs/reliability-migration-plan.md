@@ -653,8 +653,8 @@ managed session, assert zero snapshot requests, assert warm committed reuse
 without another network request, and round-trip both wire messages through the
 schema dispatcher. RUDP schema hosts and managed clients distinguish transport
 progress from dispatched messages and drain bounded available work without
-idle sleeps. Wire sends pace one 32-packet acknowledgement window at a time
-instead of paying a Windows scheduler quantum for every fragment; a real UDP
+idle sleeps. Wire sends cooperatively yield after each 32-packet acknowledgement
+window without sleeping for a Windows scheduler quantum; a real UDP
 content-session test transfers a four-chunk, one-megabyte request window through
 the public transfer owner within its ten-second regression bound.
 The released EveUnity/Aetheria `cold-start-lowering` run now promotes the
