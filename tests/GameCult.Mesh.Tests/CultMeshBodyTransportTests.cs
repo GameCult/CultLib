@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using FluentAssertions;
 using NUnit.Framework;
 using System.IO.MemoryMappedFiles;
@@ -379,6 +380,22 @@ public sealed class CultMeshBodyTransportTests
             "gamecult.eve.fields_splats.v1");
         subscription.BodyId.Should().Be("eve:body:pilot");
         subscription.ConsumerRuntimeId.Should().Be("eve-unity");
+    }
+
+    [Test]
+    public void HotBodySubscriptionsDefaultToEphemeralLiveDelivery()
+    {
+        var overloads = typeof(CultMesh).GetMethods()
+            .Where(method => method.Name == nameof(CultMesh.SubscribeHotBodyAsync))
+            .ToArray();
+
+        overloads.Should().HaveCount(2);
+        foreach (var overload in overloads)
+        {
+            var deliveryMode = overload.GetParameters().Single(parameter =>
+                parameter.ParameterType == typeof(CultNetDatabaseSubscriptionDeliveryMode));
+            deliveryMode.DefaultValue.Should().Be(CultNetDatabaseSubscriptionDeliveryMode.Live);
+        }
     }
 
     private static CultMeshBodyValidationRequest Request(CultMeshBodyDescriptor descriptor, DateTimeOffset now) => new()

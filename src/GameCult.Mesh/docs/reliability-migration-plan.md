@@ -924,7 +924,11 @@ latest-publication record, consumer identity, and logical body demand in one
 contract. The local `CultMeshBodyTransportService` contributes only adapters it
 can actually open, ordered shared-memory first; the server combines those
 capabilities with observed peer locality. Applications do not hand-assemble
-transport-name arrays or request one snapshot per frame.
+transport-name arrays or request one snapshot per frame. Hot-body subscriptions
+default to `Live`: their exact initial metadata is decoded for bootstrap, then
+subsequent layout/publication changes remain ephemeral notifications. Durable
+cache replication is an explicit opt-in for consumers that actually own a
+replica requirement.
 
 ### Reactive document delivery body map
 
@@ -936,6 +940,9 @@ the value; the transport and renderer own neither its persistence nor meaning.
 `CultNetDatabaseSubscriptionDeliveryMode`. `ReplicateToCache` materializes
 bootstrap and durable state before notification. `Live` validates and decodes
 the same typed payload, then notifies the subscriber without a replica write.
+High-rate body subscriptions select `Live` by default; general database
+subscriptions retain the durable default because CultMesh cannot infer their
+ownership contract.
 
 **Outputs:** both modes produce the same typed initial values and change event.
 Only durable replication mutates the consumer's CultCache.

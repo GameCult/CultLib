@@ -2860,7 +2860,7 @@ namespace GameCult.Mesh
             CultNetDatabaseSubscriptionClient subscriptions,
             IEnumerable<CultMeshBodyTransportKind> supportedBodyTransports,
             CultMeshHotBodySubscription subscription,
-            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.Live)
         {
             if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
             if (supportedBodyTransports == null) throw new ArgumentNullException(nameof(supportedBodyTransports));
@@ -2883,7 +2883,7 @@ namespace GameCult.Mesh
             CultNetDatabaseSubscriptionClient subscriptions,
             CultMeshBodyPublicationResolver bodyResolver,
             CultMeshHotBodySubscription subscription,
-            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.ReplicateToCache)
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.Live)
         {
             if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
             return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription, deliveryMode);
