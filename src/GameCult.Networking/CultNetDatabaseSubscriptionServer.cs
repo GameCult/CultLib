@@ -20,6 +20,7 @@ namespace GameCult.Networking
         private readonly CultNetDatabase _database;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, Task> _subscribe;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
+        private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
         private readonly ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage> _requests =
@@ -35,6 +36,9 @@ namespace GameCult.Networking
             _unsubscribe = HandleUnsubscribeAsync;
             _server.OnCultNet(_subscribe);
             _server.OnCultNet(_unsubscribe);
+            _peerLifecycle = server as ICultNetSchemaServerPeerLifecycle;
+            if (_peerLifecycle != null)
+                _peerLifecycle.PeerDisconnected += HandlePeerDisconnected;
         }
 
         /// <summary>Raised when exact document subscriptions add or remove typed hot-body demand.</summary>
@@ -47,6 +51,8 @@ namespace GameCult.Networking
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribe);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribe);
+            if (_peerLifecycle != null)
+                _peerLifecycle.PeerDisconnected -= HandlePeerDisconnected;
             foreach (var entry in _subscriptions)
             {
                 entry.Value.Dispose();
@@ -55,6 +61,18 @@ namespace GameCult.Networking
             }
             _subscriptions.Clear();
             _requests.Clear();
+        }
+
+        private void HandlePeerDisconnected(ICultNetSchemaServerPeer peer)
+        {
+            foreach (var key in _subscriptions.Keys.Where(candidate =>
+                         SubscriptionKeyComparer.SamePeer(candidate.Peer, peer)).ToArray())
+            {
+                if (_subscriptions.TryRemove(key, out var subscription))
+                    subscription.Dispose();
+                if (_requests.TryRemove(key, out var request))
+                    PublishDemand(request, key, active: false);
+            }
         }
 
         private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage request, ICultNetSchemaServerPeer peer)
@@ -245,7 +263,7 @@ namespace GameCult.Networking
             public int GetHashCode(SubscriptionKey value) =>
                 (PeerHash(value.Peer) * 397) ^ StringComparer.Ordinal.GetHashCode(value.Id);
 
-            private static bool SamePeer(ICultNetSchemaServerPeer left, ICultNetSchemaServerPeer right)
+            internal static bool SamePeer(ICultNetSchemaServerPeer left, ICultNetSchemaServerPeer right)
             {
                 if (ReferenceEquals(left, right)) return true;
                 if (left is RudpCultNetSchemaServerPeer leftRudp && right is RudpCultNetSchemaServerPeer rightRudp)

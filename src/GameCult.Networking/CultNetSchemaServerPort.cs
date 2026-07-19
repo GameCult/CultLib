@@ -32,4 +32,15 @@ namespace GameCult.Networking
         void RemoveCultNetMessageListener<TMessage>(Delegate callback)
             where TMessage : ICultNetSchemaMessage;
     }
+
+    /// <summary>
+    /// Optional transport-neutral peer lifetime surface for stateful service bridges.
+    /// </summary>
+    public interface ICultNetSchemaServerPeerLifecycle
+    {
+        /// <summary>
+        /// Raised after a peer session is no longer able to receive service output.
+        /// </summary>
+        event Action<ICultNetSchemaServerPeer> PeerDisconnected;
+    }
 }

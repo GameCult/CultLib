@@ -2200,6 +2200,11 @@ namespace GameCult.Networking
         public IReadOnlyCollection<CultNetRudpSocketServerPeer> Peers => _peers.Values.ToArray();
 
         /// <summary>
+        /// Raised when a tracked peer closes its RUDP session.
+        /// </summary>
+        public event Action<CultNetRudpSocketServerPeer>? PeerDisconnected;
+
+        /// <summary>
         /// Gets a snapshot of the current transfer counters.
         /// </summary>
         public CultNetTransportStats Stats => _stats.Snapshot();
@@ -2339,6 +2344,7 @@ namespace GameCult.Networking
             {
                 existingPeer.DisconnectReason = result.DisconnectReason;
                 _peers.Remove(peerKey);
+                PeerDisconnected?.Invoke(existingPeer);
                 return true;
             }
 

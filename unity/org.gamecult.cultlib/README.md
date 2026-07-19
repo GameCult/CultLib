@@ -7,8 +7,8 @@ CultCache, CultNet, and CultMesh assemblies consumed through NuGet by normal
 Build it with `scripts/build-unity-package.ps1`. Do not edit generated plugin
 assemblies in the package output.
 
-Install version `1.0.23` through Unity Package Manager with:
+Install version `1.0.24` through Unity Package Manager with:
 
 ```text
-https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.23
+https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.24
 ```

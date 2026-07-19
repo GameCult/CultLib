@@ -104,7 +104,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Multi-peer schema-v0 host over the native CultNet RUDP transport.
     /// </summary>
-    public sealed class RudpCultNetSchemaServer : ICultNetSchemaServer, IDisposable
+    public sealed class RudpCultNetSchemaServer : ICultNetSchemaServer, ICultNetSchemaServerPeerLifecycle, IDisposable
     {
         private readonly Socket _socket;
         private readonly CultNetRudpSocketTransportServer _transport;
@@ -138,6 +138,7 @@ namespace GameCult.Networking
                 MaxPendingReliablePackets = options.MaxPendingReliablePackets,
                 AcceptPayload = options.AcceptPayload
             });
+            _transport.PeerDisconnected += OnTransportPeerDisconnected;
         }
 
         /// <summary>
@@ -159,6 +160,9 @@ namespace GameCult.Networking
         /// Gets the currently tracked RUDP peers.
         /// </summary>
         public IReadOnlyCollection<CultNetRudpSocketServerPeer> Peers => _transport.Peers;
+
+        /// <inheritdoc />
+        public event Action<ICultNetSchemaServerPeer>? PeerDisconnected;
 
         /// <summary>
         /// Registers a schema-v0 handler.
@@ -302,7 +306,13 @@ namespace GameCult.Networking
             }
 
             _disposed = true;
+            _transport.PeerDisconnected -= OnTransportPeerDisconnected;
             _transport.Dispose();
+        }
+
+        private void OnTransportPeerDisconnected(CultNetRudpSocketServerPeer peer)
+        {
+            PeerDisconnected?.Invoke(new RudpCultNetSchemaServerPeer(this, peer));
         }
     }
 }

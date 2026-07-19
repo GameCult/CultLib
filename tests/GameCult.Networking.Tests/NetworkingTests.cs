@@ -1525,6 +1525,59 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_WithdrawsDemandWhenPeerDisconnects()
+        {
+            var database = new CultNetDatabase(new CultCache());
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-disconnect-demand-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var active = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var withdrawn = new TaskCompletionSource<CultNetDatabaseSubscriptionDemand>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (demand.Active) active.TrySetResult(demand);
+                else withdrawn.TrySetResult(demand);
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("database-disconnect-demand-client");
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-disconnect-body",
+                SubscriptionId = "disconnect-world-body",
+                ConsumerRuntimeId = "eve-unity",
+                BodyIds = ["world"],
+                SupportedBodyTransports = ["SharedMemory"],
+                IncludeSnapshot = false
+            });
+            await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
+
+            client.Dispose();
+            var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+
+            Assert.That(removed.SubscriptionId, Is.EqualTo("disconnect-world-body"));
+            Assert.That(removed.Active, Is.False);
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionClient_ReplicatesInitialAndLiveTypedDocumentsOverRudp()
         {
             var sourceCache = new CultCache();
