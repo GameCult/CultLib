@@ -192,7 +192,7 @@ public sealed class CultMeshContentTransferTests
     }
 
     [Test]
-    public async Task FetchAsync_ObservesRemainingWindowTasksWhenEarlierFetchFails()
+    public async Task FetchAsync_CheckpointsVerifiedWindowPeersWhenEarlierFetchFails()
     {
         var artifact = Artifact("failed-window", 2);
         using var cache = Cache();
@@ -210,7 +210,8 @@ public sealed class CultMeshContentTransferTests
             .Should().ThrowAsync<InvalidDataException>();
 
         provider.ActiveRequests.Should().Be(0, "the failed window must observe every task before returning");
-        cache.Get<CultMeshContentTransferStateDocument>(StateKey(artifact.Manifest)).Should().BeNull();
+        cache.Get<CultMeshContentTransferStateDocument>(StateKey(artifact.Manifest))!
+            .VerifiedChunkIndexes.Should().Equal(1, 2);
         File.Exists(Path.Combine(_directory, artifact.Manifest.ContentHash + ".body")).Should().BeFalse();
     }
 

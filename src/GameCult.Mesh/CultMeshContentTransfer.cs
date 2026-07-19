@@ -263,16 +263,37 @@ namespace GameCult.Mesh
                     {
                         await pending.Copy.ConfigureAwait(false);
                         verified.Add(pending.Item.Index);
-                        await SaveStateAsync(contentHash, fingerprint, manifest.SizeBytes, verified, stateKey).ConfigureAwait(false);
+                        await SaveStateAsync(
+                            contentHash,
+                            fingerprint,
+                            manifest.SizeBytes,
+                            verified,
+                            stateKey,
+                            flush: false).ConfigureAwait(false);
                     }
+                    await _stateCache.FlushAsync().ConfigureAwait(false);
                 }
                 catch
                 {
                     foreach (var pending in window)
                     {
-                        try { await pending.Copy.ConfigureAwait(false); }
+                        try
+                        {
+                            await pending.Copy.ConfigureAwait(false);
+                            if (verified.Add(pending.Item.Index))
+                            {
+                                await SaveStateAsync(
+                                    contentHash,
+                                    fingerprint,
+                                    manifest.SizeBytes,
+                                    verified,
+                                    stateKey,
+                                    flush: false).ConfigureAwait(false);
+                            }
+                        }
                         catch { }
                     }
+                    await _stateCache.FlushAsync().ConfigureAwait(false);
                     throw;
                 }
             }
@@ -450,7 +471,8 @@ namespace GameCult.Mesh
             string fingerprint,
             long sizeBytes,
             HashSet<int> verified,
-            CultRecordKey stateKey)
+            CultRecordKey stateKey,
+            bool flush)
         {
             var state = new CultMeshContentTransferStateDocument
             {
@@ -461,7 +483,7 @@ namespace GameCult.Mesh
                 UpdatedAtUtc = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
             };
             await _stateCache.UpsertAsync(typeof(CultMeshContentTransferStateDocument), state, stateKey).ConfigureAwait(false);
-            await _stateCache.FlushAsync().ConfigureAwait(false);
+            if (flush) await _stateCache.FlushAsync().ConfigureAwait(false);
         }
 
         private static CultRecordKey StateKey(string contentHash) => new CultRecordKey("mesh:content-transfer:" + contentHash);

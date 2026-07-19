@@ -42,7 +42,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshCdnPackOptions
     {
         /// <summary>Default CDN chunk size.</summary>
-        public const int DefaultChunkSizeBytes = 256 * 1024;
+        public const int DefaultChunkSizeBytes = 4 * 1024 * 1024;
 
         /// <summary>Maximum bytes per content chunk.</summary>
         public int ChunkSizeBytes { get; set; } = DefaultChunkSizeBytes;
