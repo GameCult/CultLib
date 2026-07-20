@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -55,6 +56,18 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PullAll()
     {
+        var traceStartup = string.Equals(
+            Environment.GetEnvironmentVariable("CULTCACHE_TRACE_STARTUP_PHASES"),
+            "1",
+            StringComparison.Ordinal);
+        var startupPhase = Stopwatch.StartNew();
+        void Trace(string phase)
+        {
+            if (traceStartup)
+                Console.WriteLine($"CultCache directory-pull phase {phase} took {startupPhase.Elapsed.TotalMilliseconds:0.###}ms.");
+            startupPhase.Restart();
+        }
+
         _recordDirectory.Refresh();
         if (!File.Exists(_manifestFile.FullName) && !_recordDirectory.Exists)
         {
@@ -64,6 +77,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         var manifest = ReadManifest();
+        Trace($"manifest records={manifest.Records.Length}");
         _durableCatalog = manifest.SchemaCatalog;
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
@@ -77,6 +91,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
 
             LoadIndexedRecords(manifest, loaded, reports);
+            Trace($"indexed-pages loaded={loaded.Count}");
         }
         else
         {
@@ -88,6 +103,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 .Where(record => !string.IsNullOrWhiteSpace(record.Key))
                 .GroupBy(record => record.Key, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => ToIndexRecord(group.Last()), StringComparer.Ordinal);
+            Trace($"legacy-pages loaded={loaded.Count}");
         }
 
         foreach (var pair in loaded)
@@ -124,6 +140,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         SetLastSchemaMigrationReports(reports);
         IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
+        Trace("publish");
     }
 
     /// <inheritdoc />
