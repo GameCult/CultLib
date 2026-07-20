@@ -50,6 +50,12 @@ namespace GameCult.Caching.MessagePack
         public string? DirectoryStorePath { get; set; }
 
         /// <summary>
+        /// Gets or sets the records to hydrate when opening a paged directory store.
+        /// The directory manifest is always read; rejected record payloads are never opened.
+        /// </summary>
+        public Func<CultPersistedRecordMetadata, bool>? DirectoryStoreHydrationFilter { get; set; }
+
+        /// <summary>
         /// Gets or sets an optional callback used to customize the directory backing store before opening.
         /// </summary>
         public Action<DirectoryMessagePackBackingStore>? ConfigureDirectoryStore { get; set; }
@@ -82,7 +88,8 @@ namespace GameCult.Caching.MessagePack
             {
                 var directoryStore = new DirectoryMessagePackBackingStore(filePath, options.DirectoryStorePath)
                 {
-                    FlushOnDispose = options.StoreFlushOnDispose
+                    FlushOnDispose = options.StoreFlushOnDispose,
+                    HydrationFilter = options.DirectoryStoreHydrationFilter
                 };
                 options.ConfigureDirectoryStore?.Invoke(directoryStore);
                 cache.AddBackingStore(directoryStore);

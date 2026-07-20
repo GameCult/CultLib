@@ -47,6 +47,34 @@ usable while endpoints fail or move.
 
 ## Target Authority Map
 
+### Local persistence hydration
+
+**Owner:** the attached CultCache backing store owns durable record discovery;
+the consuming service owns its working-set selector.
+
+**Inputs:** an indexed manifest containing record key, schema identity, and
+commit time; an explicit metadata predicate supplied at open or at a later
+subscription boundary.
+
+**Outputs:** only selected typed documents enter the live cache. Record payload
+pages outside the working set remain durable and unopened. Indexed stores may
+hydrate an additional selection without replaying or evicting the existing hot
+set; non-indexed stores retain the correct full-pull fallback.
+
+**Derived state:** hydrated keys, dirty keys, and migration reports are local
+backing-store state. The manifest index remains the durable catalog even when a
+consumer has only a narrow working set in memory.
+
+**Forbidden writers:** service boot code must not scan page directories or
+deserialize broad snapshots to discover keys. A filtered flush must not delete
+unsubscribed records, and implicit global assembly discovery must not expand an
+explicit service registry.
+
+**Cut line:** directory manifests now carry metadata-only record indexes;
+explicit registries contain exactly the requested document types; selective
+pulls use the same indexed authority instead of reopening the store through a
+second compatibility path.
+
 ### Discovery control plane
 
 **Owner:** `CultMeshDiscoveryService`.

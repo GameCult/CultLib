@@ -322,6 +322,133 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_IndexedFilter_DoesNotOpenOrDeleteColdPayloads()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                CultRecordHandle<NamedTestEntry> hot;
+                CultRecordHandle<NamedTestEntry> cold;
+                using (var seed = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    hot = await seed.UpsertAsync(new NamedTestEntry { Name = "hot", Value = "hydrate-me" });
+                    cold = await seed.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "cold",
+                        Value = new string('c', 1024 * 1024)
+                    });
+                    await seed.FlushAsync();
+                }
+
+                var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
+                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v2.directory-indexed"));
+                Assert.That(manifest.Records, Has.Length.EqualTo(2));
+                Assert.That(manifest.Records.All(record => record.Payload.Length == 0), Is.True);
+
+                var coldPath = Directory.GetFiles(recordsPath, "*.msgpack")
+                    .Single(path => string.Equals(
+                        CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(path)).Key,
+                        cold.Key.Value,
+                        StringComparison.Ordinal));
+
+                using (new FileStream(coldPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                using (var selected = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions
+                           {
+                               UseDirectoryStore = true,
+                               DirectoryStoreHydrationFilter = metadata =>
+                                   string.Equals(metadata.Key, hot.Key.Value, StringComparison.Ordinal)
+                           }))
+                {
+                    Assert.That(selected.Get<NamedTestEntry>(hot.Key)?.Value, Is.EqualTo("hydrate-me"));
+                    Assert.That(selected.Get<NamedTestEntry>(cold.Key), Is.Null);
+                    await selected.UpsertAsync(new NamedTestEntry { Name = "new", Value = "persist-with-cold-page-locked" });
+                    await selected.FlushAsync();
+                }
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(cold.Key)?.Value.Length, Is.EqualTo(1024 * 1024));
+                Assert.That(reopened.GetAll<NamedTestEntry>().Count(), Is.EqualTo(3));
+
+                var finalManifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
+                Assert.That(finalManifest.Records, Has.Length.EqualTo(3));
+                Assert.That(finalManifest.Records.Any(record => record.Key == cold.Key.Value), Is.True);
+                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 0), Is.True);
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+                if (Directory.Exists(recordsPath))
+                    Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_PullSelected_HydratesMatchingColdPagesOnly()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                CultRecordHandle<NamedTestEntry> hot;
+                CultRecordHandle<NamedTestEntry> requested;
+                CultRecordHandle<NamedTestEntry> unrelated;
+                using (var seed = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    hot = await seed.UpsertAsync(new NamedTestEntry { Name = "hot", Value = "already-loaded" });
+                    requested = await seed.UpsertAsync(new NamedTestEntry { Name = "requested", Value = "load-later" });
+                    unrelated = await seed.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "unrelated",
+                        Value = new string('u', 1024 * 1024)
+                    });
+                    await seed.FlushAsync();
+                }
+
+                string PageFor(CultRecordHandle<NamedTestEntry> handle) =>
+                    Directory.GetFiles(recordsPath, "*.msgpack").Single(path => string.Equals(
+                        CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(path)).Key,
+                        handle.Key.Value,
+                        StringComparison.Ordinal));
+
+                using var selected = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions
+                    {
+                        UseDirectoryStore = true,
+                        DirectoryStoreHydrationFilter = metadata => metadata.Key == hot.Key.Value
+                    });
+                Assert.That(selected.Get<NamedTestEntry>(requested.Key), Is.Null);
+
+                using (new FileStream(PageFor(unrelated), FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    await selected.PullBackingStoreRecordsAsync(metadata => metadata.Key == requested.Key.Value);
+                    Assert.That(selected.Get<NamedTestEntry>(requested.Key)?.Value, Is.EqualTo("load-later"));
+                    Assert.That(selected.Get<NamedTestEntry>(hot.Key)?.Value, Is.EqualTo("already-loaded"));
+                    Assert.That(selected.Get<NamedTestEntry>(unrelated.Key), Is.Null);
+                }
+            }
+            finally
+            {
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+                if (Directory.Exists(recordsPath))
+                    Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
         public async Task DirectoryMessagePackBackingStore_Loads_Record_When_Manifest_Misses_Catalog_Entry()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");

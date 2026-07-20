@@ -11,6 +11,18 @@ namespace GameCult.Caching.Tests;
 public sealed class CultDocumentRegistryTests
 {
     [Test]
+    public void ForTypesContainsOnlyExplicitDocuments()
+    {
+        var requested = CreateDocumentType("explicit", "tests.registry.explicit", "v1");
+        var unrelated = CreateDocumentType("unrelated", "tests.registry.unrelated", "v1");
+
+        var registry = CultDocumentRegistry.ForTypes(new[] { requested, requested });
+
+        Assert.That(registry.AllDescriptors.Select(value => value.DocumentType), Is.EqualTo(new[] { requested }));
+        Assert.That(registry.AllDescriptors.Any(value => value.DocumentType == unrelated), Is.False);
+    }
+
+    [Test]
     public void IdenticalTypeRegistrationIsIdempotent()
     {
         var registry = new CultDocumentRegistry();

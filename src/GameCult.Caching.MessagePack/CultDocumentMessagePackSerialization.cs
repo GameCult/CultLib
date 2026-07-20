@@ -75,9 +75,18 @@ public static class CultDocumentMessagePackSerialization
     /// </summary>
     public static byte[] SerializeUntyped(object value, Type type)
     {
+        return SerializeUntyped(value, type, CultDocumentRegistry.Shared);
+    }
+
+    /// <summary>
+    /// Serializes a value through an explicitly owned document registry.
+    /// </summary>
+    public static byte[] SerializeUntyped(object value, Type type, CultDocumentRegistry registry)
+    {
+        if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null)
         {
-            var descriptor = CultDocumentRegistry.Shared.GetRequired(type);
+            var descriptor = registry.GetRequired(type);
             if (descriptor.GeneratedPayloadSerializer != null)
             {
                 return descriptor.GeneratedPayloadSerializer(value);
@@ -92,7 +101,16 @@ public static class CultDocumentMessagePackSerialization
     /// </summary>
     public static object DeserializeUntyped(Type type, byte[] payload)
     {
-        var descriptor = CultDocumentRegistry.Shared.GetRequired(type);
+        return DeserializeUntyped(type, payload, CultDocumentRegistry.Shared);
+    }
+
+    /// <summary>
+    /// Deserializes a value through an explicitly owned document registry.
+    /// </summary>
+    public static object DeserializeUntyped(Type type, byte[] payload, CultDocumentRegistry registry)
+    {
+        if (registry == null) throw new ArgumentNullException(nameof(registry));
+        var descriptor = registry.GetRequired(type);
         if (descriptor.GeneratedPayloadDeserializer != null)
         {
             return descriptor.GeneratedPayloadDeserializer(payload);
@@ -444,7 +462,7 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
     /// </summary>
     protected override byte[] SerializePayload(object document)
     {
-        return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType());
+        return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
     }
 
     /// <summary>
@@ -452,6 +470,6 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
     /// </summary>
     protected override object DeserializePayload(Type documentType, byte[] payload)
     {
-        return CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload);
+        return CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);
     }
 }

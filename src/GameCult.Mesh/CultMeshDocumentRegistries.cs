@@ -26,13 +26,7 @@ namespace GameCult.Mesh
                 throw new ArgumentNullException(nameof(documentTypes));
             }
 
-            var registry = new CultDocumentRegistry();
-            foreach (var documentType in DistinctDocumentTypes(documentTypes))
-            {
-                registry.GetRequired(documentType);
-            }
-
-            return registry;
+            return CultDocumentRegistry.ForTypes(DistinctDocumentTypes(documentTypes));
         }
 
         /// <summary>

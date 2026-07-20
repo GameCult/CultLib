@@ -420,6 +420,28 @@ namespace GameCult.Caching
             Refresh();
         }
 
+        private CultDocumentRegistry(bool discoverLoadedDocuments)
+        {
+            if (discoverLoadedDocuments)
+                Refresh();
+        }
+
+        /// <summary>
+        /// Creates a registry containing exactly the requested document types without scanning loaded assemblies.
+        /// </summary>
+        public static CultDocumentRegistry ForTypes(IEnumerable<Type> documentTypes)
+        {
+            if (documentTypes == null) throw new ArgumentNullException(nameof(documentTypes));
+            var registry = new CultDocumentRegistry(discoverLoadedDocuments: false);
+            foreach (var type in documentTypes.Distinct())
+            {
+                registry.GetRequired(type ?? throw new ArgumentException(
+                    "Document type collections cannot contain null entries.",
+                    nameof(documentTypes)));
+            }
+            return registry;
+        }
+
         /// <summary>
         /// Gets all known document descriptors.
         /// </summary>
@@ -1393,6 +1415,22 @@ namespace GameCult.Caching
         }
 
         /// <summary>
+        /// Pulls persisted records selected by durable metadata from every attached backing store.
+        /// Stores without indexed selection support preserve correctness by performing a full pull.
+        /// </summary>
+        public async Task PullBackingStoreRecordsAsync(Func<CultPersistedRecordMetadata, bool> selector)
+        {
+            if (selector == null) throw new ArgumentNullException(nameof(selector));
+            foreach (var store in _backingStores)
+            {
+                store.PullSelected(selector);
+            }
+
+            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+            await Task.CompletedTask;
+        }
+
+        /// <summary>
         /// Flushes all attached backing stores.
         /// </summary>
         public void FlushAllBackingStores(bool soft = false)
@@ -1893,6 +1931,27 @@ namespace GameCult.Caching
     }
 
     /// <summary>
+    /// Durable metadata available before a backing store hydrates a record payload.
+    /// </summary>
+    public sealed class CultPersistedRecordMetadata
+    {
+        /// <summary>Creates durable record metadata.</summary>
+        public CultPersistedRecordMetadata(string key, string schemaId, string storedAt)
+        {
+            Key = key;
+            SchemaId = schemaId;
+            StoredAt = storedAt;
+        }
+
+        /// <summary>Gets the durable record key.</summary>
+        public string Key { get; }
+        /// <summary>Gets the durable schema identity.</summary>
+        public string SchemaId { get; }
+        /// <summary>Gets the record commit timestamp.</summary>
+        public string StoredAt { get; }
+    }
+
+    /// <summary>
     /// Base class for CultCache persistence adapters.
     /// </summary>
     public abstract class CacheBackingStore : IDisposable
@@ -1969,6 +2028,14 @@ namespace GameCult.Caching
         /// Pulls all persisted records into the backing store.
         /// </summary>
         public abstract void PullAll();
+        /// <summary>
+        /// Pulls records selected by durable metadata. Non-indexed stores fall back to a full pull.
+        /// </summary>
+        public virtual void PullSelected(Func<CultPersistedRecordMetadata, bool> selector)
+        {
+            if (selector == null) throw new ArgumentNullException(nameof(selector));
+            PullAll();
+        }
         /// <summary>
         /// Pushes one stored document into the backing store.
         /// </summary>
