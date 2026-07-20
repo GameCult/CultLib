@@ -34,12 +34,14 @@ public sealed class CultMeshContentSessionTests
     {
         var payload = Enumerable.Range(0, 700_000).Select(value => (byte)(value % 251)).ToArray();
         var artifact = CultMesh.PackCdnArtifact("aetheria/world/windows", payload);
-        using var providerCache = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
-            typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
-        await CultMeshCdn.PublishAsync(providerCache, artifact);
+        var providerChunks = artifact.Chunks.ToDictionary(
+            chunk => (chunk.ChunkHash.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                ? chunk.ChunkHash.Substring("sha256:".Length)
+                : chunk.ChunkHash).Trim().ToLowerInvariant(),
+            StringComparer.Ordinal);
         using var contentServer = new CultMeshTcpContentServer(
             new TcpListener(IPAddress.Loopback, 0),
-            providerCache);
+            hash => providerChunks.TryGetValue(hash, out var chunk) ? chunk : null);
         var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
         var connector = new CultMeshTcpContentTransportConnector();
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });

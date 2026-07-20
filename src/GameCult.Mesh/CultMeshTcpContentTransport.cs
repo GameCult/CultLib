@@ -210,7 +210,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshTcpContentServer : IDisposable
     {
         private readonly TcpListener _listener;
-        private readonly CultCache _content;
+        private readonly Func<string, CultMeshCdnArtifactChunk?> _resolveChunk;
         private readonly Func<string, bool> _canServeHash;
         private readonly CancellationTokenSource _shutdown = new();
         private readonly ConcurrentDictionary<TcpClient, byte> _clients = new();
@@ -222,9 +222,22 @@ namespace GameCult.Mesh
             TcpListener listener,
             CultCache content,
             Func<string, bool>? canServeHash = null)
+            : this(listener, CreateCacheResolver(content), canServeHash)
+        {
+        }
+
+        /// <summary>
+        /// Starts a dedicated TCP content server over provider-owned immutable chunks.
+        /// The resolver receives a normalized SHA-256 hash and may return <see langword="null"/>
+        /// when that chunk is unavailable.
+        /// </summary>
+        public CultMeshTcpContentServer(
+            TcpListener listener,
+            Func<string, CultMeshCdnArtifactChunk?> resolveChunk,
+            Func<string, bool>? canServeHash = null)
         {
             _listener = listener ?? throw new ArgumentNullException(nameof(listener));
-            _content = content ?? throw new ArgumentNullException(nameof(content));
+            _resolveChunk = resolveChunk ?? throw new ArgumentNullException(nameof(resolveChunk));
             _canServeHash = canServeHash ?? (_ => true);
             _listener.Start();
             _acceptLoop = AcceptLoopAsync(_shutdown.Token);
@@ -306,7 +319,7 @@ namespace GameCult.Mesh
                 if (!string.IsNullOrWhiteSpace(request.RecordKey) &&
                     !string.Equals(request.RecordKey, key.Value, StringComparison.Ordinal))
                     throw new InvalidDataException("Content chunk record key disagrees with its content hash.");
-                chunk = _content.Get<CultMeshCdnArtifactChunk>(key)
+                chunk = _resolveChunk(hash)
                     ?? throw new FileNotFoundException("Content chunk is not available.", key.Value);
                 CultMeshCdn.ValidateChunkPayload(new CultMeshCdnChunkRef
                 {
@@ -334,6 +347,12 @@ namespace GameCult.Mesh
                 await stream.WriteAsync(chunk.Payload, 0, chunk.Payload.Length, cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        private static Func<string, CultMeshCdnArtifactChunk?> CreateCacheResolver(CultCache content)
+        {
+            if (content == null) throw new ArgumentNullException(nameof(content));
+            return hash => content.Get<CultMeshCdnArtifactChunk>(CultMeshCdnArtifactChunk.CreateRecordKey(hash));
         }
     }
 
