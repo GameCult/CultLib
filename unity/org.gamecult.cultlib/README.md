@@ -9,10 +9,10 @@ runtime; the Microsoft license is included under `Third Party Notices`.
 Build it with `scripts/build-unity-package.ps1`. Do not edit generated plugin
 assemblies in the package output.
 
-Install version `1.0.40` through Unity Package Manager with:
+Install version `1.0.41` through Unity Package Manager with:
 
 ```text
-https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.40
+https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.41
 ```
 
 CultMesh chooses mapped memory for reachable same-machine bodies and advertised

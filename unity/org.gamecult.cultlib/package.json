@@ -1,7 +1,7 @@
 {
   "name": "org.gamecult.cultlib",
   "displayName": "CultLib",
-  "version": "1.0.40",
+  "version": "1.0.41",
   "unity": "2021.3",
   "description": "CultCache, CultNet, and CultMesh managed runtime assemblies for Unity.",
   "license": "MIT",
