@@ -155,6 +155,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     /// <inheritdoc />
+    public override bool ContainsDurableRecord(CultRecordKey key)
+    {
+        return _durableIndex.ContainsKey(key.Value) || base.ContainsDurableRecord(key);
+    }
+
+    /// <inheritdoc />
     public override void Push(CultStoredDocument entry)
     {
         Entries[entry.Key.Value] = entry;

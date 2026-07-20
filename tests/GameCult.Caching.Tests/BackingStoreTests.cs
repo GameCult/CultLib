@@ -2,6 +2,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -318,6 +319,54 @@ namespace GameCult.Caching.Tests
                 {
                     Directory.Delete(recordsPath, recursive: true);
                 }
+            }
+        }
+
+        [Test]
+        public async Task CultCacheMessagePack_OpenAsync_HydratesPersistedGlobalBeforeDefault()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(GlobalTestEntry) });
+            typeof(CultDocumentDescriptor)
+                .GetField("<IsGlobal>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(registry.GetRequired<GlobalTestEntry>(), true);
+
+            try
+            {
+                using (var seed = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { Registry = registry, UseDirectoryStore = true }))
+                {
+                    var global = seed.GetGlobal<GlobalTestEntry>();
+                    Assert.That(global, Is.Not.Null);
+                    global!.Value = "durable authority";
+                    await seed.UpsertAsync(global);
+                    await seed.FlushAsync();
+                }
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions
+                    {
+                        Registry = registry,
+                        UseDirectoryStore = true,
+                        DirectoryStoreHydrationFilter = _ => false
+                    });
+
+                Assert.That(reopened.GetGlobal<GlobalTestEntry>(), Is.Null,
+                    "the hydration filter owns whether the durable global becomes hot");
+                Assert.That(reopened.IsDirty, Is.False,
+                    "a cold durable global must not stage its schema default as a write");
+
+                var globalKey = "global:" + registry.GetRequired<GlobalTestEntry>().SchemaId;
+                await reopened.PullBackingStoreRecordsAsync(metadata => metadata.Key == globalKey);
+                Assert.That(reopened.GetGlobal<GlobalTestEntry>()?.Value, Is.EqualTo("durable authority"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
             }
         }
 
@@ -987,6 +1036,13 @@ namespace GameCult.Caching.Tests
 
             [Key(1)]
             public string Value = string.Empty;
+        }
+
+        [CultDocument("tests.global_entry", "tests.global_entry.v1")]
+        internal sealed class GlobalTestEntry
+        {
+            [Key(0)]
+            public string Value = "schema default";
         }
 
         [CultDocument("tests.reference_holder", "tests.reference_holder.v1")]

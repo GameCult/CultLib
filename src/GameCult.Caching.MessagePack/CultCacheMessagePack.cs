@@ -71,14 +71,38 @@ namespace GameCult.Caching.MessagePack
         /// </summary>
         public static CultCache Create(string filePath, CultCacheOpenOptions? options = null)
         {
+            options ??= new CultCacheOpenOptions();
+            return CreateCore(filePath, options, initializeGlobals: true);
+        }
+
+        /// <summary>
+        /// Creates a cache with the canonical single-file MessagePack backing store attached and optionally pulls the on-disk snapshot.
+        /// </summary>
+        public static async Task<CultCache> OpenAsync(string filePath, CultCacheOpenOptions? options = null)
+        {
+            options ??= new CultCacheOpenOptions();
+            var cache = CreateCore(filePath, options, initializeGlobals: false);
+            if (options.PullOnOpen)
+            {
+                await cache.PullAllBackingStoresAsync().ConfigureAwait(false);
+            }
+
+            cache.MaterializeMissingGlobals();
+
+            return cache;
+        }
+
+        private static CultCache CreateCore(
+            string filePath,
+            CultCacheOpenOptions options,
+            bool initializeGlobals)
+        {
             if (string.IsNullOrWhiteSpace(filePath))
             {
                 throw new ArgumentException("File path must be non-empty.", nameof(filePath));
             }
 
-            options ??= new CultCacheOpenOptions();
-
-            var cache = new CultCache(options.Registry)
+            var cache = new CultCache(options.Registry, initializeGlobals)
             {
                 FlushAttachedStoresOnDispose = options.FlushOnDispose
             };
@@ -102,21 +126,6 @@ namespace GameCult.Caching.MessagePack
                 };
                 options.ConfigureStore?.Invoke(store);
                 cache.AddBackingStore(store);
-            }
-
-            return cache;
-        }
-
-        /// <summary>
-        /// Creates a cache with the canonical single-file MessagePack backing store attached and optionally pulls the on-disk snapshot.
-        /// </summary>
-        public static async Task<CultCache> OpenAsync(string filePath, CultCacheOpenOptions? options = null)
-        {
-            options ??= new CultCacheOpenOptions();
-            var cache = Create(filePath, options);
-            if (options.PullOnOpen)
-            {
-                await cache.PullAllBackingStoresAsync().ConfigureAwait(false);
             }
 
             return cache;

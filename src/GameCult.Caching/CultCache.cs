@@ -1284,8 +1284,29 @@ namespace GameCult.Caching
         /// Creates a cache using the supplied document registry or the shared registry.
         /// </summary>
         public CultCache(CultDocumentRegistry? registry = null)
+            : this(registry, initializeGlobals: true)
+        {
+        }
+
+        /// <summary>
+        /// Creates a cache using the supplied document registry, optionally deferring global defaults
+        /// until a durable backing store has been hydrated.
+        /// </summary>
+        public CultCache(CultDocumentRegistry? registry, bool initializeGlobals)
         {
             _registry = registry ?? CultDocumentRegistry.Shared;
+            if (initializeGlobals)
+            {
+                MaterializeMissingGlobals();
+            }
+        }
+
+        /// <summary>
+        /// Creates default instances for global document types that do not already have a record.
+        /// Durable open paths call this after hydration so persisted globals remain authoritative.
+        /// </summary>
+        public void MaterializeMissingGlobals()
+        {
             InitializeGlobals();
         }
 
@@ -1800,6 +1821,13 @@ namespace GameCult.Caching
         {
             foreach (var descriptor in _registry.AllDescriptors.Where(candidate => candidate.IsGlobal))
             {
+                var key = new CultRecordKey($"global:{descriptor.SchemaId}");
+                if (_entries.ContainsKey(key.Value) ||
+                    _backingStores.Any(store => store.ContainsDurableRecord(key)))
+                {
+                    continue;
+                }
+
                 if (descriptor.DocumentType.GetConstructor(Type.EmptyTypes) == null)
                 {
                     continue;
@@ -1813,7 +1841,7 @@ namespace GameCult.Caching
 
                 AddStoredDocumentInternal(
                     new CultStoredDocument(
-                        new CultRecordKey($"global:{descriptor.SchemaId}"),
+                        key,
                         DateTimeOffset.UtcNow.ToString("O"),
                         descriptor,
                         instance),
@@ -2035,6 +2063,13 @@ namespace GameCult.Caching
         {
             if (selector == null) throw new ArgumentNullException(nameof(selector));
             PullAll();
+        }
+        /// <summary>
+        /// Returns whether the backing store knows a record is durable, including records left cold by selective hydration.
+        /// </summary>
+        public virtual bool ContainsDurableRecord(CultRecordKey key)
+        {
+            return Entries.ContainsKey(key.Value);
         }
         /// <summary>
         /// Pushes one stored document into the backing store.
