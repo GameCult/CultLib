@@ -175,6 +175,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PushAll(bool soft = false)
     {
+        if (!IsDirty && !_needsIndexUpgrade)
+        {
+            return;
+        }
+
         Directory.CreateDirectory(_manifestFile.DirectoryName!);
         Directory.CreateDirectory(_recordDirectory.FullName);
 

@@ -322,6 +322,46 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_CleanFlush_DoesNotRewriteManifest()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                using (var seed = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    await seed.UpsertAsync(new NamedTestEntry
+                    {
+                        Name = "clean-flush",
+                        Value = "must-remain-durable"
+                    });
+                    await seed.FlushAsync();
+                }
+
+                using var cache = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(cache.IsDirty, Is.False);
+
+                using (new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    Assert.That(async () => await cache.FlushAsync(), Throws.Nothing,
+                        "a clean indexed store must not touch its durable manifest");
+                }
+
+                Assert.That(cache.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
         public async Task DirectoryMessagePackBackingStore_IndexedFilter_DoesNotOpenOrDeleteColdPayloads()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
