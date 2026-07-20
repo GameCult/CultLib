@@ -351,19 +351,27 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Dictionary<string, CultStoredDocument> loaded,
         List<CultSchemaMigrationReport> reports)
     {
+        var tracePages = string.Equals(
+            Environment.GetEnvironmentVariable("CULTCACHE_TRACE_STARTUP_PHASES"),
+            "1",
+            StringComparison.Ordinal);
         var recordReports = new CultSchemaMigrationReport[records.Length];
         var storedRecords = new CultStoredDocument?[records.Length];
+        var pageBytes = tracePages ? new long[records.Length] : Array.Empty<long>();
+        var pageElapsedTicks = tracePages ? new long[records.Length] : Array.Empty<long>();
         Parallel.For(
             0,
             records.Length,
             new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
             index =>
             {
+                var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var path = RecordPath(metadata.Key);
                 if (!File.Exists(path))
                     return;
-                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(ReadAllBytesShared(path));
+                var pagePayload = ReadAllBytesShared(path);
+                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
                 if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
                     throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
                 var catalog = ResolveLegacyUncataloguedRecordCatalog(record, catalogEntries);
@@ -372,7 +380,37 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     record,
                     catalog,
                     (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry));
+                if (tracePages)
+                {
+                    pageBytes[index] = pagePayload.LongLength;
+                    pageElapsedTicks[index] = Stopwatch.GetTimestamp() - started;
+                }
             });
+
+        if (tracePages)
+        {
+            var schemaNames = catalogEntries.ToDictionary(entry => entry.SchemaId, entry => entry.SchemaName, StringComparer.Ordinal);
+            foreach (var group in records
+                         .Select((record, index) => new { record.SchemaId, Index = index })
+                         .Where(item => pageElapsedTicks[item.Index] > 0)
+                         .GroupBy(item => item.SchemaId, StringComparer.Ordinal)
+                         .Select(group => new
+                         {
+                             SchemaId = group.Key,
+                             Count = group.Count(),
+                             Bytes = group.Sum(item => pageBytes[item.Index]),
+                             TotalMs = group.Sum(item => pageElapsedTicks[item.Index]) * 1000d / Stopwatch.Frequency,
+                             MaxMs = group.Max(item => pageElapsedTicks[item.Index]) * 1000d / Stopwatch.Frequency
+                         })
+                         .OrderByDescending(group => group.TotalMs)
+                         .Take(10))
+            {
+                var schemaName = schemaNames.TryGetValue(group.SchemaId, out var name) ? name : group.SchemaId;
+                Console.WriteLine(
+                    $"CultCache directory-page schema={schemaName} count={group.Count} bytes={group.Bytes} " +
+                    $"cumulative={group.TotalMs:0.###}ms max={group.MaxMs:0.###}ms.");
+            }
+        }
 
         for (var index = 0; index < storedRecords.Length; index++)
         {
