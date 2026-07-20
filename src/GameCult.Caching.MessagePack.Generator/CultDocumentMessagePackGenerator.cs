@@ -51,6 +51,14 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
 
             var members = DiscoverMembers(typeSymbol);
             var nameMember = members.FirstOrDefault(member => member.IsName);
+            var canConstructForDeserialization = typeSymbol.TypeKind == TypeKind.Struct ||
+                typeSymbol.InstanceConstructors.Any(constructor =>
+                    constructor.Parameters.Length == 0 &&
+                    constructor.DeclaredAccessibility is Accessibility.Public or Accessibility.Internal);
+            var hasDenseSlots = members
+                .OrderBy(member => member.Slot)
+                .Select((member, index) => member.Slot == index)
+                .All(matches => matches);
             return new DocumentShape(
                 typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                 schemaName,
@@ -61,7 +69,9 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 members.Where(member => member.IndexAlias != null)
                     .Select(member => new IndexAccessorShape(member.IndexAlias!, member.IndexAccessorMethodName!))
                     .ToImmutableArray(),
-                members.ToImmutableArray());
+                members.ToImmutableArray(),
+                canConstructForDeserialization,
+                hasDenseSlots);
         }
 
         private static ImmutableArray<MemberShape> DiscoverMembers(INamedTypeSymbol typeSymbol)
@@ -191,10 +201,10 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 builder.AppendLine(document.NameAccessorMethodName == null
                     ? "                null,"
                     : $"                {document.NameAccessorMethodName},");
-                builder.AppendLine(canEmitPayloadCodecs
+                builder.AppendLine(canEmitPayloadCodecs && document.HasDenseSlots
                     ? $"                {document.PayloadSerializerMethodName},"
                     : "                null,");
-                builder.AppendLine(canEmitPayloadCodecs
+                builder.AppendLine(canEmitPayloadCodecs && document.HasDenseSlots && document.CanConstructForDeserialization
                     ? $"                {document.PayloadDeserializerMethodName},"
                     : "                null,");
                 builder.AppendLine("                new global::GameCult.Caching.CultGeneratedDocumentIndexAccessor[]");
@@ -235,10 +245,13 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
 
             foreach (var document in documents)
             {
-                if (canEmitPayloadCodecs)
+                if (canEmitPayloadCodecs && document.HasDenseSlots)
                 {
                     EmitPayloadSerializer(builder, document);
-                    EmitPayloadDeserializer(builder, document);
+                    if (document.CanConstructForDeserialization)
+                    {
+                        EmitPayloadDeserializer(builder, document);
+                    }
                 }
 
                 foreach (var member in document.Members.Where(member => member.AccessorMethodName != null))
@@ -531,7 +544,9 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 string? nameMember,
                 string? nameAccessorMethodName,
                 ImmutableArray<IndexAccessorShape> indexAccessors,
-                ImmutableArray<MemberShape> members)
+                ImmutableArray<MemberShape> members,
+                bool canConstructForDeserialization,
+                bool hasDenseSlots)
             {
                 DocumentTypeName = documentTypeName;
                 SchemaName = schemaName;
@@ -544,6 +559,8 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 PayloadDeserializerMethodName = $"Deserialize_{safeStem}_Payload";
                 IndexAccessors = indexAccessors;
                 Members = members;
+                CanConstructForDeserialization = canConstructForDeserialization;
+                HasDenseSlots = hasDenseSlots;
             }
 
             public string DocumentTypeName { get; }
@@ -556,6 +573,8 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public string PayloadDeserializerMethodName { get; }
             public ImmutableArray<IndexAccessorShape> IndexAccessors { get; }
             public ImmutableArray<MemberShape> Members { get; }
+            public bool CanConstructForDeserialization { get; }
+            public bool HasDenseSlots { get; }
         }
 
         private sealed class IndexAccessorShape
