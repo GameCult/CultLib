@@ -13,6 +13,26 @@ namespace GameCult.Mesh.Quic.Native.Tests;
 public sealed class CultMeshNativeQuicRealtimeTransportTests
 {
     [Test]
+    public async Task NativeConnectorReceivesFromExternalManagedProvider()
+    {
+        var endpoint = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_ENDPOINT");
+        if (string.IsNullOrWhiteSpace(endpoint))
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process native/managed parity.");
+
+        var connector = new CultMeshNativeQuicRealtimeTransportConnector();
+        using var client = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint!),
+            CultMeshEndpointId.Parse("aetheria.local"));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var frame = await client.ReceiveAsync(timeout.Token);
+
+        client.TransportId.Should().Be("msquic-native-realtime");
+        frame.SchemaId.Should().NotBeNullOrWhiteSpace();
+        frame.BodyId.Should().NotBeNullOrWhiteSpace();
+        frame.Payload.Should().NotBeEmpty();
+    }
+
+    [Test]
     public async Task NativeConnectorAuthenticatesAndReceivesLatestOnlyFrame()
     {
         if (!OperatingSystem.IsWindows() || !QuicListener.IsSupported)

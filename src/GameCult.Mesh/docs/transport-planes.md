@@ -94,8 +94,17 @@ authentication to provider authorization. Test-only trust-all callbacks are not
 a release configuration. A trusted discovery record may carry
 `cert-sha256=<fingerprint>` on its QUIC route; absent a caller validator, the
 connector accepts a self-signed provider certificate only when that pin matches.
+The native client uses MsQuic's deferred-certificate contract: it completes the
+pin decision through `ConnectionCertificateValidationComplete` and returns
+`QUIC_STATUS_PENDING` from the certificate event. Transport failures report the
+MsQuic status, wire error, loaded runtime path, and pre-connect event sequence.
 
 ## Local parity evidence
+
+The native suite can also connect to an independently running managed provider
+by setting `CULTMESH_NATIVE_EXTERNAL_ENDPOINT` to its advertised pinned QUIC
+route. This keeps the managed server and native client in separate processes,
+so one process-local MsQuic DLL cannot counterfeit cross-runtime parity.
 
 On 2026-07-19, the parity harness moved a 13 MiB payload on loopback using
 1 MiB content chunks. Raw TCP reached 127.4 MiB/s, verified CultMesh TCP content

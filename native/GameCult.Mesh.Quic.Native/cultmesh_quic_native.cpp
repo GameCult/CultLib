@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -58,7 +59,21 @@ struct Client {
     std::mutex gate;
     std::deque<std::vector<uint8_t>> received;
     std::string error;
+    std::string trace;
 };
+
+void AppendTrace(Client* client, const std::string& event) {
+    if (client == nullptr || client->state.load() == ClientState::Connected) return;
+    std::lock_guard<std::mutex> lock(client->gate);
+    if (!client->trace.empty()) client->trace += ",";
+    client->trace += event;
+}
+
+std::string TraceSnapshot(Client* client) {
+    if (client == nullptr) return "none";
+    std::lock_guard<std::mutex> lock(client->gate);
+    return client->trace.empty() ? "none" : client->trace;
+}
 
 void SetFailure(Client* client, const std::string& message) {
     if (client == nullptr || client->closing.load()) return;
@@ -184,8 +199,30 @@ bool CertificateMatchesPin(Client* client, QUIC_CERTIFICATE* certificate) {
     return std::memcmp(digest, client->certificate_pin.data(), sizeof(digest)) == 0;
 }
 
+std::string Hex(uint64_t value) {
+    std::ostringstream text;
+    text << "0x" << std::hex << std::uppercase << value;
+    return text.str();
+}
+
+std::string LoadedMsQuicPath() {
+    const auto module = GetModuleHandleW(L"msquic.dll");
+    if (module == nullptr) return "unresolved";
+    std::array<wchar_t, 32768> path{};
+    const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return "unresolved";
+    const auto required = WideCharToMultiByte(
+        CP_UTF8, 0, path.data(), static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    if (required <= 0) return "unresolved";
+    std::string utf8(static_cast<size_t>(required), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, path.data(), static_cast<int>(length), utf8.data(), required, nullptr, nullptr);
+    return utf8;
+}
+
 QUIC_STATUS QUIC_API ConnectionCallback(HQUIC connection, void* context, QUIC_CONNECTION_EVENT* event) {
     auto* client = static_cast<Client*>(context);
+    AppendTrace(client, "event=" + std::to_string(static_cast<int>(event->Type)));
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED:
         client->state.store(ClientState::Connected);
@@ -200,14 +237,40 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC connection, void* context, QUIC_CO
         break;
     }
     case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED:
-        if (!CertificateMatchesPin(client, event->PEER_CERTIFICATE_RECEIVED.Certificate)) {
+    {
+        AppendTrace(
+            client,
+            "certificate-status=" +
+            Hex(static_cast<uint64_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus)));
+        const auto matches = CertificateMatchesPin(
+            client,
+            event->PEER_CERTIFICATE_RECEIVED.Certificate);
+        if (!matches) {
             SetFailure(client, "CultMesh QUIC provider certificate does not match the advertised SHA-256 pin.");
-            return QUIC_STATUS_BAD_CERTIFICATE;
         }
-        return QUIC_STATUS_SUCCESS;
+        const auto completion = client->api->ConnectionCertificateValidationComplete(
+            connection,
+            matches ? TRUE : FALSE,
+            matches ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
+        if (QUIC_FAILED(completion)) {
+            SetFailure(
+                client,
+                "CultMesh QUIC certificate validation completion failed (status=" +
+                Hex(static_cast<uint64_t>(completion)) + ").");
+            return completion;
+        }
+        return QUIC_STATUS_PENDING;
+    }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-        if (!client->closing.load())
-            SetFailure(client, "CultMesh QUIC connection was shut down by the transport.");
+        if (!client->closing.load()) {
+            SetFailure(
+                client,
+                "CultMesh QUIC connection was shut down by the transport "
+                "(status=" + Hex(static_cast<uint64_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) +
+                ", error=" + Hex(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode) +
+                ", msquic=" + LoadedMsQuicPath() +
+                ", events=" + TraceSnapshot(client) + ").");
+        }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         if (!client->closing.load())
