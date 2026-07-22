@@ -56,8 +56,8 @@ Demotions:
 | --- | --- | --- |
 | 0. Freeze and baseline | Complete | Source bodies, contracts, consumers, licenses, fixtures, and focused baselines mapped |
 | 1. Destination/dependency/formatters/SoA | Complete | NuGet and dedicated UPM artifacts prove dependency direction and owned vector integration |
-| 2. Primitive deletion and v2 schemas | In progress | Delete duplicate vectors first, then publish corrected v2 contracts |
-| 3. Planetary transfer | Pending | Requires destination packaging and preserved parity corpus |
+| 2. Primitive deletion and v2 schemas | Complete | C# and Geometry-owned Rust emit identical v2 bytes and record keys for all four roots |
+| 3. Planetary transfer | In progress | Transfer C#/tests first, then shaders and runtime projections; delete CultMath owners in the same stage |
 | 4. Mine `vg-csg` | Pending | Requires v1 fixture capture and target Rust package seam |
 | 5. CultCache/CultNet/CultMesh integration | Pending | Requires current schemas and runtime packages |
 | 6. Consumer cutover/release | Pending | Requires local candidate feed and downstream passes |
@@ -186,11 +186,24 @@ a broader stage gate.
   stream. Domain/chunk round trips preserve record identity, while the checked-
   in flat-mesh v1 payload is retained as negative evidence and rejected by the
   v2 decoder. The Geometry suite passes 19/19 after the cohort cut.
+- `packages/gamecult-geometry-rs` is the Geometry-owned Rust v2 destination.
+  It has no VibeGeometry, `vg-csg`, `bevy_math`, CultCache, or CultNet
+  dependency and preserves the MIT provenance of the mined `vg-csg` contract.
+- C# and Rust pin identical exact MessagePack bytes and record keys for domain,
+  build request, selected cut, and chunk roots. C# decodes the Rust witnesses
+  and re-emits the same bytes. The Geometry suite passes 24/24; Rust passes 4/4,
+  doc tests, rustfmt, and warning-denied clippy.
+- The parity pass exposed an old split identity: C# request scalar floats used
+  round-trip decimal text while `vg-csg` used IEEE-bit hex. v2 deliberately
+  standardizes every float on IEEE bits. The request key therefore changes at
+  the v2 boundary; signed zero, a chosen NaN payload, and infinity are pinned
+  across MessagePack so this cannot quietly diverge again.
 
 ## Next Actions
 
-1. Rewrite Geometry primitives over CultMath and delete `CultVec2`/`CultVec3`
-   without aliases or forwarding types.
-2. Publish v2 geometry documents with typed vectors/quaternion and deliberate
-   stable-key fixtures; keep v1 only as test evidence.
-3. Run repository/package negative searches before beginning planetary transfer.
+1. Establish the Geometry-owned planetary parity harness and move the 13 C#
+   source/test files while deleting the matching CultMath owners and `rect`.
+2. Transfer and rename planetary/erosion HLSL ownership, then remove the
+   implicit geometry includes and bodies from `CultMath.hlsl`.
+3. Transfer the CMPT tool/web decoder, Unity adapters/sample, docs, and license
+   notices; inspect both packages and run the complete negative gate.

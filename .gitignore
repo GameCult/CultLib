@@ -206,6 +206,9 @@ PublishScripts/
 *.snupkg
 # The packages folder can be ignored because of Package Restore
 **/[Pp]ackages/*
+!/packages/gamecult-geometry-rs/
+!/packages/gamecult-geometry-rs/**
+packages/gamecult-geometry-rs/target/
 # except build/, which is used as an MSBuild target.
 !**/[Pp]ackages/build/
 # Uncomment if necessary however generally it will be regenerated when needed
