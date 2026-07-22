@@ -79,7 +79,7 @@ The solution includes:
 - `GameCult.Caching.NewtonsoftJson`: Newtonsoft.Json-backed persistence for the cache
 - `GameCult.Caching.MessagePack.Generator`: source generator for MessagePack formatters for cache models
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
-- `GameCult.Geometry`: CultCache-native geometry domain, selected-cut, and chunk artifact documents for VibeGeometry/Fensalir-style pipelines
+- `GameCult.Geometry`: geometry, planetary mapping, CSG, LOD selection, mesh assembly, and CultCache-native geometry documents built on CultMath primitives
 - `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
 - `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
