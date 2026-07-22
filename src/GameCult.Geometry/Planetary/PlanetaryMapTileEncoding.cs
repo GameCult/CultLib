@@ -55,7 +55,7 @@ public static class PlanetaryMapTileEncoding
         if (stream == null || !stream.CanRead) throw new ArgumentException("A readable stream is required.", nameof(stream));
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen);
         var magic = reader.ReadBytes(Magic.Length);
-        if (magic.Length != Magic.Length || !magic.AsSpan().SequenceEqual(Magic)) throw new InvalidDataException("Not a CultMath planetary tile.");
+        if (magic.Length != Magic.Length || !magic.AsSpan().SequenceEqual(Magic)) throw new InvalidDataException("Not a GameCult.Geometry planetary tile.");
         var version = reader.ReadUInt32();
         if (version != FormatVersion) throw new InvalidDataException($"Unsupported planetary tile version {version}.");
         var fieldVersion = reader.ReadUInt64();

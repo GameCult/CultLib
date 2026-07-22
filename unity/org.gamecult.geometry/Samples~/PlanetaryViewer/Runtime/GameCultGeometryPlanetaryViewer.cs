@@ -57,7 +57,7 @@ public sealed class GameCultGeometryPlanetaryViewer : MonoBehaviour
         ClearGenerated();
         PlanetShader ??= Shader.Find("GameCult.Geometry/Planetary Field Viewer");
         if (PlanetShader == null) return;
-        material = new Material(PlanetShader) { name = "CultMath Planetary Viewer Material", hideFlags = HideFlags.HideAndDontSave };
+        material = new Material(PlanetShader) { name = "GameCult.Geometry Planetary Viewer Material", hideFlags = HideFlags.HideAndDontSave };
         foreach (var face in (PlanetaryCubeFace[])Enum.GetValues(typeof(PlanetaryCubeFace)))
         {
             var mesh = PlanetaryPatchMeshAdapter.CreateFaceMesh(face, CellsPerFace);
