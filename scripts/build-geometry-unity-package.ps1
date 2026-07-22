@@ -22,7 +22,7 @@ $candidateFeed = if ([System.IO.Path]::IsPathRooted($CultMathCandidateFeed)) {
 }
 $pluginRoot = Join-Path $outputRoot "Runtime\Plugins"
 
-if (-not (Test-Path -LiteralPath (Join-Path $candidateFeed "CultMath.0.1.0-geometry-migration.1.nupkg"))) {
+if (-not (Test-Path -LiteralPath (Join-Path $candidateFeed "CultMath.0.1.0-geometry-migration.2.nupkg"))) {
   throw "CultMath migration candidate is missing from $candidateFeed. Pack CultMath before staging Geometry."
 }
 
@@ -47,6 +47,18 @@ New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $templateRoot "package.json") -Destination $outputRoot
 Copy-Item -LiteralPath (Join-Path $templateRoot "README.md") -Destination $outputRoot
 Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.Geometry.asmdef") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.Geometry.Unity.asmdef") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPatchMeshAdapter.cs") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPatchMeshAdapter.cs.meta") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPageUpload.cs") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPageUpload.cs.meta") -Destination (Join-Path $outputRoot "Runtime")
+Copy-Item -LiteralPath (Join-Path $templateRoot "Samples~") -Destination $outputRoot -Recurse
+$shaderOutputRoot = Join-Path $outputRoot "Shaders"
+New-Item -ItemType Directory -Force -Path $shaderOutputRoot | Out-Null
+Copy-Item -Path (Join-Path $repoRoot "src\GameCult.Geometry\Shaders\*.hlsl") -Destination $shaderOutputRoot
+Copy-Item -Path (Join-Path $repoRoot "src\GameCult.Geometry\Shaders\*.hlsl.meta") -Destination $shaderOutputRoot -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath (Join-Path $repoRoot "src\GameCult.Geometry\LICENSES.md") -Destination $outputRoot
+Copy-Item -LiteralPath (Join-Path $repoRoot "src\GameCult.Geometry\THIRD-PARTY-NOTICES.md") -Destination $outputRoot
 
 $geometryAssembly = Join-Path $publishRoot "GameCult.Geometry.dll"
 if (-not (Test-Path -LiteralPath $geometryAssembly)) {

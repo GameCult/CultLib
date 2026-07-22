@@ -7,6 +7,9 @@ depends on `org.gamecult.cultmath` for numeric primitives and
 Build it with `scripts/build-geometry-unity-package.ps1`. Do not edit generated
 plugin assemblies in the package output.
 
-CultLib-authored files are MIT licensed. Geometry sources transferred from
-CultMath retain their MPL-2.0 notices and provenance; those files will be listed
-here as they enter this package. No transferred CultMath source is relicensed.
+CultLib-authored integration files are MIT licensed. The planetary C# compiled
+into `GameCult.Geometry.dll` and the geometry HLSL under `Shaders` are
+MPL-2.0 and retain their source notices and provenance. See `LICENSES.md` and
+`THIRD-PARTY-NOTICES.md` in the staged package. No MPL-covered source is
+relicensed. The package manifest therefore uses `SEE LICENSES IN README.md`
+rather than claiming one license for every file.

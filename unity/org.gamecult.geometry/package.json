@@ -11,5 +11,6 @@
   "dependencies": {
     "org.gamecult.cultmath": "0.1.0",
     "org.gamecult.cultlib": "1.0.7"
-  }
+  },
+  "samples": [{"displayName":"Planetary Field Viewer","description":"Planetary geometry CPU/HLSL parity viewer.","path":"Samples~/PlanetaryViewer"}]
 }

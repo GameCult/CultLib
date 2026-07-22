@@ -57,7 +57,7 @@ Demotions:
 | 0. Freeze and baseline | Complete | Source bodies, contracts, consumers, licenses, fixtures, and focused baselines mapped |
 | 1. Destination/dependency/formatters/SoA | Complete | NuGet and dedicated UPM artifacts prove dependency direction and owned vector integration |
 | 2. Primitive deletion and v2 schemas | Complete | C# and Geometry-owned Rust emit identical v2 bytes and record keys for all four roots |
-| 3. Planetary transfer | In progress | Transfer C#/tests first, then shaders and runtime projections; delete CultMath owners in the same stage |
+| 3. Planetary transfer | Complete | Managed, HLSL, CMPT, Unity, web, tool, docs, tests, and package authority moved; CultMath owners deleted |
 | 4. Mine `vg-csg` | Pending | Requires v1 fixture capture and target Rust package seam |
 | 5. CultCache/CultNet/CultMesh integration | Pending | Requires current schemas and runtime packages |
 | 6. Consumer cutover/release | Pending | Requires local candidate feed and downstream passes |
@@ -199,11 +199,38 @@ a broader stage gate.
   the v2 boundary; signed zero, a chosen NaN payload, and infinity are pinned
   across MessagePack so this cannot quietly diverge again.
 
+### Stage 3 receipts
+
+- Thirteen planetary/erosion C# sources and thirteen xUnit suites now live
+  under GameCult.Geometry; `CultMath.rect`, its factories, and all original
+  planetary sources/tests are deleted. Destination planetary tests pass 41/41;
+  remaining CultMath tests pass 28/28 for both target frameworks.
+- Geometry owns five HLSL files behind `GameCult.Geometry.hlsl`; public geometry
+  symbols use `gamecult_geometry_*`. CultMath's umbrella and NuGet candidate
+  contain only numeric `CultMath.hlsl`. A DXC SPIR-V smoke compiled the joined
+  umbrella successfully to a 1,428-byte module.
+- The CMPT v1 tool and TypeScript decoder moved intact. The end-to-end fixture
+  is exactly 1,221 bytes with SHA-256
+  `8b2bc46e4123b8ac8936b43f8d08a34e3f2e74f38d0bb3f101cf3728cd201962`;
+  the C# emitter and TypeScript decoder pass together.
+- Unity adapters retain their original `.meta` GUIDs; the Planetary Viewer uses
+  the Geometry umbrella and owned shader symbols. The staged UPM artifact has
+  one owned DLL, both adapters, the sample, all five shaders, and explicit
+  MIT/MPL license and provenance documents.
+- Stale candidate cache was made impossible by rotating CultMath and Geometry
+  to `0.1.0-geometry-migration.2`. CultMath's candidate contains only its DLLs,
+  README, and numeric shader. Geometry's candidate declares the exact CultMath
+  `.2` dependency and contains all Geometry shaders/docs/notices under a
+  mixed-license file declaration rather than the inherited blanket MIT claim.
+- Full Geometry tests pass 27/27 after the joined shader/Unity integration;
+  planetary tests pass 41/41. Negative searches find obsolete CultMath geometry
+  names only inside tests that assert their absence or ignored generated output.
+
 ## Next Actions
 
-1. Establish the Geometry-owned planetary parity harness and move the 13 C#
-   source/test files while deleting the matching CultMath owners and `rect`.
-2. Transfer and rename planetary/erosion HLSL ownership, then remove the
-   implicit geometry includes and bodies from `CultMath.hlsl`.
-3. Transfer the CMPT tool/web decoder, Unity adapters/sample, docs, and license
-   notices; inspect both packages and run the complete negative gate.
+1. Mine convex splitting, brush/CSG tree, domain lowering, dirty-frontier,
+   selected-cut, and mesh assembly into `gamecult-geometry-rs` in dependency
+   order, preserving the pinned v1 evidence while emitting v2.
+2. Remove `bevy_math` from the public Rust boundary and port earned correctness
+   and performance fixtures before deleting VibeGeometry build authority.
+3. Connect the completed Rust runtime to the v2 CultCache/CultNet/CultMesh path.

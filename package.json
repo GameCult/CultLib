@@ -4,7 +4,8 @@
   "workspaces": [
     "packages/cultcache-ts",
     "packages/cultnet-ts",
-    "packages/cultmesh-ts"
+    "packages/cultmesh-ts",
+    "packages/gamecult-geometry-ts"
   ],
   "scripts": {
     "build:ts": "npm --workspaces run build",

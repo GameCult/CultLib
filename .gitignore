@@ -209,6 +209,14 @@ PublishScripts/
 !/packages/gamecult-geometry-rs/
 !/packages/gamecult-geometry-rs/**
 packages/gamecult-geometry-rs/target/
+.tools/
+!/packages/gamecult-geometry-ts/
+!/packages/gamecult-geometry-ts/**
+!/unity/org.gamecult.geometry/Samples~/
+!/unity/org.gamecult.geometry/Samples~/**
+!/unity/org.gamecult.geometry/Runtime/PlanetaryPatchMeshAdapter.cs.meta
+!/unity/org.gamecult.geometry/Runtime/PlanetaryPageUpload.cs.meta
+!/src/GameCult.Geometry/Shaders/*.hlsl.meta
 # except build/, which is used as an MSBuild target.
 !**/[Pp]ackages/build/
 # Uncomment if necessary however generally it will be regenerated when needed
@@ -244,6 +252,8 @@ _pkginfo.txt
 ClientBin/
 ~$*
 *~
+!/unity/org.gamecult.geometry/Samples~/
+!/unity/org.gamecult.geometry/Samples~/**
 *.dbmdl
 *.dbproj.schemaview
 *.jfm

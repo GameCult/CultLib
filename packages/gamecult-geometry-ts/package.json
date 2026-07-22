@@ -1,0 +1,10 @@
+{
+  "name": "@gamecult/geometry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --no-warnings --experimental-strip-types --check src/planetary-tile.ts",
+    "test": "node --no-warnings --experimental-strip-types test/planetary-tile.test.mjs"
+  }
+}

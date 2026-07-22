@@ -1,13 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Description>Typed CultCache geometry domain and chunk artifact documents for VibeGeometry and Fensalir</Description>
+    <Description>Spatial values, planetary geometry, queries, and typed geometry state built on CultMath primitives</Description>
     <PackageId>GameCult.Geometry</PackageId>
-    <PackageTags>game;geometry;csg;lod;cultcache;cultmesh;vibegeometry;fensalir</PackageTags>
+    <PackageTags>game;geometry;planetary;csg;lod;cultcache;cultmesh</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSES.md</PackageLicenseFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
-    <CultMathVersion>0.1.0-geometry-migration.1</CultMathVersion>
-    <CultMathCandidateFeed Condition="'$(CultMathCandidateFeed)' == ''">$(MSBuildThisFileDirectory)..\..\..\CultMath\.tools\local-feed</CultMathCandidateFeed>
-    <RestoreAdditionalProjectSources Condition="Exists('$(CultMathCandidateFeed)')">$(RestoreAdditionalProjectSources);$(CultMathCandidateFeed)</RestoreAdditionalProjectSources>
+    <CultMathVersion>0.1.0-geometry-migration.2</CultMathVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,5 +20,9 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="LICENSES.md" Pack="true" PackagePath="\" />
+    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+    <None Include="docs\planetary.md" Pack="true" PackagePath="docs\" />
+    <None Include="Shaders\*.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

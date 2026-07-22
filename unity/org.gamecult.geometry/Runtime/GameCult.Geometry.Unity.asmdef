@@ -1,0 +1,8 @@
+{
+  "name": "GameCult.Geometry.Unity",
+  "rootNamespace": "GameCult.Geometry.Unity",
+  "references": ["CultMath", "GameCult.Geometry"],
+  "includePlatforms": [], "excludePlatforms": [], "allowUnsafeCode": false,
+  "overrideReferences": false, "precompiledReferences": [], "autoReferenced": true,
+  "defineConstraints": [], "versionDefines": [], "noEngineReferences": false
+}

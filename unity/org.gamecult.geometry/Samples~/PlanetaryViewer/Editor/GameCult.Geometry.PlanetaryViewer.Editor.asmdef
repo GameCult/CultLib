@@ -1,0 +1,1 @@
+{"name":"GameCult.Geometry.PlanetaryViewer.Editor","rootNamespace":"GameCult.Geometry.Unity.Samples.Editor","references":["GameCult.Geometry.PlanetaryViewer"],"includePlatforms":["Editor"],"excludePlatforms":[],"allowUnsafeCode":false,"overrideReferences":false,"precompiledReferences":[],"autoReferenced":true,"defineConstraints":[],"versionDefines":[],"noEngineReferences":false}
