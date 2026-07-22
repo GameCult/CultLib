@@ -398,18 +398,30 @@ namespace GameCult.Caching
 
         private static bool IsColumnType(Type type)
         {
-            return type.IsEnum ||
-                   type == typeof(byte) ||
-                   type == typeof(sbyte) ||
-                   type == typeof(short) ||
-                   type == typeof(ushort) ||
-                   type == typeof(int) ||
-                   type == typeof(uint) ||
-                   type == typeof(long) ||
-                   type == typeof(ulong) ||
-                   type == typeof(float) ||
-                   type == typeof(double) ||
-                   type == typeof(bool);
+            return type.IsValueType &&
+                   !type.IsByRefLike &&
+                   !ContainsManagedReferences(type, new HashSet<Type>());
+        }
+
+        private static bool ContainsManagedReferences(Type type, HashSet<Type> visited)
+        {
+            if (type.IsPointer)
+            {
+                return false;
+            }
+
+            if (!type.IsValueType)
+            {
+                return true;
+            }
+
+            if (type.IsPrimitive || type.IsEnum || !visited.Add(type))
+            {
+                return false;
+            }
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            return type.GetFields(flags).Any(field => ContainsManagedReferences(field.FieldType, visited));
         }
     }
 }

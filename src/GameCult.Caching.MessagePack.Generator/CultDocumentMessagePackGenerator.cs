@@ -274,7 +274,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             builder.AppendLine($"        private static byte[] {document.PayloadSerializerMethodName}(object document)");
             builder.AppendLine("        {");
             builder.AppendLine($"            var typed = ({document.DocumentTypeName})document;");
-            builder.AppendLine("            var options = global::GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options;");
+            builder.AppendLine($"            var options = global::GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.OptionsFor(typeof({document.DocumentTypeName}));");
             builder.AppendLine("            var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();");
             builder.AppendLine("            var writer = new global::MessagePack.MessagePackWriter(buffer);");
             builder.AppendLine($"            writer.WriteArrayHeader({document.Members.Length});");
@@ -292,7 +292,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
         {
             builder.AppendLine($"        private static object {document.PayloadDeserializerMethodName}(byte[] payload)");
             builder.AppendLine("        {");
-            builder.AppendLine("            var options = global::GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options;");
+            builder.AppendLine($"            var options = global::GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.OptionsFor(typeof({document.DocumentTypeName}));");
             builder.AppendLine("            var reader = new global::MessagePack.MessagePackReader(payload);");
             builder.AppendLine("            var count = reader.ReadArrayHeader();");
             builder.AppendLine($"            var value = new {document.DocumentTypeName}();");

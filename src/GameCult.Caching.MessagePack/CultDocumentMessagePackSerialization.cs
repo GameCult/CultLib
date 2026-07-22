@@ -1,11 +1,35 @@
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Reflection;
 using GameCult.Caching;
 using MessagePack;
 using MessagePack.Formatters;
 using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
+
+/// <summary>
+/// Declares MessagePack resolvers owned by the assembly that defines a Cult document.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+public sealed class CultDocumentMessagePackResolversAttribute : Attribute
+{
+    /// <summary>Creates a resolver declaration in precedence order.</summary>
+    public CultDocumentMessagePackResolversAttribute(params Type[] resolverTypes)
+    {
+        if (resolverTypes == null || resolverTypes.Length == 0)
+        {
+            throw new ArgumentException("At least one resolver type is required.", nameof(resolverTypes));
+        }
+
+        ResolverTypes = resolverTypes;
+    }
+
+    /// <summary>Gets the declared resolver types in precedence order.</summary>
+    public Type[] ResolverTypes { get; }
+}
 
 /// <summary>
 /// MessagePack resolver for CultCache-specific value types.
@@ -43,6 +67,7 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogEntryFieldCount = 7;
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
+    private static readonly ConcurrentDictionary<Assembly, MessagePackSerializerOptions> DocumentAssemblyOptions = new();
 
     /// <summary>
     /// Gets the shared MessagePack serializer options for CultCache payloads.
@@ -55,11 +80,28 @@ public static class CultDocumentMessagePackSerialization
             .WithSecurity(MessagePackSecurity.UntrustedData);
 
     /// <summary>
+    /// Gets serializer options for documents owned by an assembly. CultCache formatters
+    /// take precedence, followed by assembly-declared resolvers and the standard resolver.
+    /// </summary>
+    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly)
+    {
+        if (documentAssembly == null) throw new ArgumentNullException(nameof(documentAssembly));
+        return DocumentAssemblyOptions.GetOrAdd(documentAssembly, CreateDocumentAssemblyOptions);
+    }
+
+    /// <summary>Gets serializer options for the assembly that owns a document type.</summary>
+    public static MessagePackSerializerOptions OptionsFor(Type documentType)
+    {
+        if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+        return OptionsFor(documentType.Assembly);
+    }
+
+    /// <summary>
     /// Serializes a typed value with the CultCache MessagePack options.
     /// </summary>
     public static byte[] Serialize<T>(T value)
     {
-        return MessagePackSerializer.Serialize(value, Options);
+        return MessagePackSerializer.Serialize(value, OptionsFor(typeof(T)));
     }
 
     /// <summary>
@@ -67,7 +109,7 @@ public static class CultDocumentMessagePackSerialization
     /// </summary>
     public static T Deserialize<T>(byte[] payload)
     {
-        return MessagePackSerializer.Deserialize<T>(payload, Options);
+        return MessagePackSerializer.Deserialize<T>(payload, OptionsFor(typeof(T)));
     }
 
     /// <summary>
@@ -84,7 +126,7 @@ public static class CultDocumentMessagePackSerialization
             }
         }
 
-        return MessagePackSerializer.Serialize(type, value, Options);
+        return MessagePackSerializer.Serialize(type, value, OptionsFor(type));
     }
 
     /// <summary>
@@ -98,8 +140,41 @@ public static class CultDocumentMessagePackSerialization
             return descriptor.GeneratedPayloadDeserializer(payload);
         }
 
-        return MessagePackSerializer.Deserialize(type, payload, Options)
+        return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
+    }
+
+    private static MessagePackSerializerOptions CreateDocumentAssemblyOptions(Assembly documentAssembly)
+    {
+        var ownerResolvers = documentAssembly
+            .GetCustomAttributes<CultDocumentMessagePackResolversAttribute>()
+            .SelectMany(attribute => attribute.ResolverTypes)
+            .Select(CreateOwnerResolver)
+            .ToArray();
+
+        if (ownerResolvers.Length == 0)
+        {
+            return Options;
+        }
+
+        var resolvers = new IFormatterResolver[ownerResolvers.Length + 2];
+        resolvers[0] = CultDocumentResolver.Instance;
+        Array.Copy(ownerResolvers, 0, resolvers, 1, ownerResolvers.Length);
+        resolvers[resolvers.Length - 1] = StandardResolver.Instance;
+        return Options.WithResolver(CompositeResolver.Create(resolvers));
+    }
+
+    private static IFormatterResolver CreateOwnerResolver(Type resolverType)
+    {
+        if (resolverType == null || !typeof(IFormatterResolver).IsAssignableFrom(resolverType))
+        {
+            throw new InvalidOperationException(
+                $"Cult document MessagePack resolver '{resolverType?.FullName ?? "<null>"}' must implement {typeof(IFormatterResolver).FullName}.");
+        }
+
+        return Activator.CreateInstance(resolverType) as IFormatterResolver
+            ?? throw new InvalidOperationException(
+                $"Cult document MessagePack resolver '{resolverType.FullName}' must have a public parameterless constructor.");
     }
 
     /// <summary>

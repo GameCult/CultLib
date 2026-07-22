@@ -92,6 +92,25 @@ a broader stage gate.
   geometry store. Execution therefore uses v2 plus retained test witnesses,
   with no live v1 runtime migrator.
 
+### Stage 1 receipts
+
+- CultCache MessagePack now resolves external member values through a
+  document-owner assembly declaration. Resolver precedence is core CultCache,
+  owner-declared resolvers, then MessagePack standard fallback; the options are
+  cached per owner assembly and generated document codecs use that same path.
+  CultCache does not reference Geometry or CultMath.
+- CultCache SoA discovery now admits direct reference-free value types as one
+  exact typed column. It rejects managed-reference and byref-like values and
+  does not synthesize component columns from nested struct fields.
+- `dotnet test tests/GameCult.Caching.Tests/GameCult.Caching.Tests.csproj
+  --no-restore --filter
+  "FullyQualifiedName~DocumentAssemblyResolverTests|FullyQualifiedName~SoaValueColumnTests"
+  --verbosity minimal -m:1 -nodeReuse:false` passed 4/4 after a full rebuild.
+- The initial SoA reflection probe used `Type.IsFunctionPointer`, which is not
+  available on the library's `netstandard2.1` target. It was removed rather
+  than papered over; structural managed-reference inspection is the owning
+  eligibility rule.
+
 ## Decisions and Deviations
 
 - Licensing: no relicensing is assumed. Moved CultMath files retain MPL-2.0
@@ -108,8 +127,8 @@ a broader stage gate.
 
 ## Next Actions
 
-1. Implement the owner-assembly MessagePack resolver seam and its isolation tests.
-2. Establish the Geometry -> CultMath dependency and exact vector formatter
-   fixtures.
-3. Cut the scalar-only SoA whitelist so intact unmanaged vectors can exist as
-   columns before v2 document fields adopt them.
+1. Establish the Geometry -> CultMath dependency through an explicit candidate
+   package/local-feed workflow rather than an implicit sibling checkout.
+2. Add Geometry-owned exact vector/quaternion formatters and byte fixtures.
+3. Prove actual `Column<float2>` and `Column<float3>` access from Geometry, then
+   inspect the NuGet and UPM artifacts before adopting vectors in v2 schemas.
