@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -2853,6 +2854,128 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Opens one exact hot-body subscription and advertises every body plane this runtime can
+        /// actually open. The provider derives locality and publishes only the selected plane.
+        /// </summary>
+        public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            IEnumerable<CultMeshBodyTransportKind> supportedBodyTransports,
+            CultMeshHotBodySubscription subscription,
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.Live)
+        {
+            if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
+            if (supportedBodyTransports == null) throw new ArgumentNullException(nameof(supportedBodyTransports));
+            if (subscription == null) throw new ArgumentNullException(nameof(subscription));
+            var transports = supportedBodyTransports.Distinct().ToArray();
+            if (transports.Length == 0)
+                throw new ArgumentException("At least one readable body transport is required.", nameof(supportedBodyTransports));
+            return subscriptions.SubscribeAsync(
+                subscription.SubscriptionId,
+                recordKeys: subscription.RecordKeys,
+                schemaIds: subscription.SchemaIds,
+                consumerRuntimeId: subscription.ConsumerRuntimeId,
+                bodyIds: new[] { subscription.BodyId },
+                supportedBodyTransports: transports.Select(value => value.ToString()),
+                deliveryMode: deliveryMode);
+        }
+
+        /// <summary>Opens an exact hot-body subscription using a resolver's readable planes.</summary>
+        public static Task<IReadOnlyList<object>> SubscribeHotBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            CultMeshBodyPublicationResolver bodyResolver,
+            CultMeshHotBodySubscription subscription,
+            CultNetDatabaseSubscriptionDeliveryMode deliveryMode = CultNetDatabaseSubscriptionDeliveryMode.Live)
+        {
+            if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
+            return SubscribeHotBodyAsync(subscriptions, bodyResolver.SupportedTransports, subscription, deliveryMode);
+        }
+
+        /// <summary>
+        /// Subscribes to one logical body's latest descriptor as ephemeral control state and declares
+        /// demand for the body itself. Body bytes are opened separately through the fastest valid plane.
+        /// </summary>
+        public static async Task<CultMeshLiveBody> SubscribeLiveBodyAsync(
+            CultNetDatabaseSubscriptionClient subscriptions,
+            CultMeshBodyPublicationResolver bodyResolver,
+            CultMeshLiveBodySubscription subscription,
+            CancellationToken cancellationToken = default)
+        {
+            if (subscriptions == null) throw new ArgumentNullException(nameof(subscriptions));
+            if (bodyResolver == null) throw new ArgumentNullException(nameof(bodyResolver));
+            if (subscription == null) throw new ArgumentNullException(nameof(subscription));
+            var transports = bodyResolver.SupportedTransports.Distinct().ToArray();
+            if (transports.Length == 0)
+                throw new InvalidOperationException("The body resolver has no readable transport planes.");
+
+            var liveBody = new CultMeshLiveBody(subscriptions, bodyResolver, subscription);
+            try
+            {
+                var initial = await subscriptions.SubscribeAsync(
+                        subscription.SubscriptionId,
+                        recordKeys: new[] { subscription.PublicationRecordKey },
+                        schemaIds: new[] { CultMeshBodyPublicationSchemaVersions.Publication },
+                        consumerRuntimeId: subscription.ConsumerRuntimeId,
+                        bodyIds: new[] { subscription.BodyId },
+                        supportedBodyTransports: transports.Select(value => value.ToString()),
+                        deliveryMode: CultNetDatabaseSubscriptionDeliveryMode.Live,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                var publications = initial.OfType<CultMeshBodyPublicationDocument>().ToArray();
+                if (publications.Length > 1)
+                    throw new InvalidOperationException(
+                        $"Live body subscription '{subscription.SubscriptionId}' expected at most one publication for " +
+                        $"'{subscription.BodyId}' but received {publications.Length}.");
+                if (publications.Length == 1)
+                    liveBody.Initialize(publications[0]);
+                return liveBody;
+            }
+            catch
+            {
+                liveBody.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>Resolves a CultMesh URI or RUDP endpoint into a concrete RUDP endpoint.</summary>
+        public static CultMeshRudpEndpoint ResolveRudpEndpoint(string endpointOrUri)
+        {
+            if (string.IsNullOrWhiteSpace(endpointOrUri))
+                throw new ArgumentException("Value must be non-empty.", nameof(endpointOrUri));
+            if (!Uri.TryCreate(endpointOrUri, UriKind.Absolute, out var uri))
+                return ParseRudpEndpoint(NormalizeBareRudpEndpoint(endpointOrUri));
+            if (string.Equals(uri.Scheme, "rudp", StringComparison.OrdinalIgnoreCase))
+                return ParseRudpEndpoint(endpointOrUri);
+            if (!string.Equals(uri.Scheme, "cultmesh", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("RUDP endpoint must use the cultmesh:// or rudp:// scheme.", nameof(endpointOrUri));
+            if (string.IsNullOrWhiteSpace(uri.Host))
+                throw new ArgumentException("CultMesh URI must include an authority.", nameof(endpointOrUri));
+
+            var authorityKey = MakeCultMeshAuthorityEnvironmentKey(uri.Host);
+            var endpoint = Environment.GetEnvironmentVariable($"CULTMESH_URI_{authorityKey}_RUDP") ??
+                Environment.GetEnvironmentVariable($"{authorityKey}_CULTMESH_RUDP_ENDPOINT");
+            if (string.IsNullOrWhiteSpace(endpoint))
+                throw new InvalidOperationException(
+                    $"CultMesh URI '{endpointOrUri}' is unresolved. Set CULTMESH_URI_{authorityKey}_RUDP to a rudp:// endpoint.");
+            return ParseRudpEndpoint(endpoint);
+        }
+
+        private static string NormalizeBareRudpEndpoint(string endpoint)
+        {
+            var trimmed = endpoint.Trim();
+            return trimmed.Contains("://", StringComparison.Ordinal) ? trimmed : $"rudp://{trimmed}";
+        }
+
+        private static string MakeCultMeshAuthorityEnvironmentKey(string authority)
+        {
+            var chars = authority.Select(static value =>
+                ((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9'))
+                    ? char.ToUpperInvariant(value)
+                    : '_');
+            var key = string.Concat(chars).Trim('_');
+            return string.IsNullOrWhiteSpace(key) ? "ODIN" : key;
+        }
+
+        /// <summary>
         /// Creates a CultNet RUDP server transport with CultMesh-branded defaults.
         /// </summary>
         public static CultNetRudpSocketTransportConnection CreateRudpServer(
@@ -2914,7 +3037,7 @@ namespace GameCult.Mesh
             string endpoint,
             CultMeshRudpSocketOptions? options = null)
         {
-            return CreateRudpClient(runtimeId, connectionId, ParseRudpEndpoint(endpoint), options);
+            return CreateRudpClient(runtimeId, connectionId, ResolveRudpEndpoint(endpoint), options);
         }
 
         /// <summary>
@@ -2939,6 +3062,7 @@ namespace GameCult.Mesh
         /// <summary>
         /// Creates a CultNet RUDP client transport from the first peer authorized for a Verse role.
         /// </summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public static CultNetRudpSocketTransportConnection CreateRudpClientForAuthorizedPeer(
             string runtimeId,
             uint connectionId,
@@ -2952,7 +3076,27 @@ namespace GameCult.Mesh
         {
             if (peers == null) throw new ArgumentNullException(nameof(peers));
             if (leases == null) throw new ArgumentNullException(nameof(leases));
-            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new CultMeshFixedAuthorityClock(at.Value) : null);
+            return CreateRudpClientForAuthorizedPeer(runtimeId, connectionId, peers, resolver, 0, verseId, role, shardId, null, options);
+        }
+
+        /// <summary>Creates a RUDP client from the first contact accepted by the authority resolver.</summary>
+        public static CultNetRudpSocketTransportConnection CreateRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityResolver authority,
+            long authorityEpoch,
+            string verseId,
+            string role,
+            string? shardId = null,
+            string? resourceScope = null,
+            CultMeshRudpSocketOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (authority == null) throw new ArgumentNullException(nameof(authority));
+            var peer = peers.FirstAuthorized(verseId, role, authority, authorityEpoch, shardId, resourceScope);
             if (peer == null)
             {
                 throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
@@ -3015,6 +3159,7 @@ namespace GameCult.Mesh
         /// <summary>
         /// Creates and handshakes a CultNet RUDP client transport from the first peer authorized for a Verse role.
         /// </summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public static CultNetRudpSocketTransportConnection ConnectRudpClientForAuthorizedPeer(
             string runtimeId,
             uint connectionId,
@@ -3028,13 +3173,41 @@ namespace GameCult.Mesh
         {
             if (peers == null) throw new ArgumentNullException(nameof(peers));
             if (leases == null) throw new ArgumentNullException(nameof(leases));
-            var peer = peers.FirstAuthorized(verseId, role, leases, shardId, at);
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new CultMeshFixedAuthorityClock(at.Value) : null);
+            return ConnectRudpClientForAuthorizedPeer(runtimeId, connectionId, peers, resolver, 0, verseId, role, shardId, null, options);
+        }
+
+        /// <summary>Creates and handshakes a RUDP client from the first contact accepted by the authority resolver.</summary>
+        public static CultNetRudpSocketTransportConnection ConnectRudpClientForAuthorizedPeer(
+            string runtimeId,
+            uint connectionId,
+            CultMeshPeerCatalog peers,
+            CultMeshAuthorityResolver authority,
+            long authorityEpoch,
+            string verseId,
+            string role,
+            string? shardId = null,
+            string? resourceScope = null,
+            CultMeshRudpClientOptions? options = null)
+        {
+            if (peers == null) throw new ArgumentNullException(nameof(peers));
+            if (authority == null) throw new ArgumentNullException(nameof(authority));
+            var peer = peers.FirstAuthorized(verseId, role, authority, authorityEpoch, shardId, resourceScope);
             if (peer == null)
             {
                 throw new InvalidOperationException($"No authorized RUDP peer for role {role} in Verse {verseId}.");
             }
 
             return ConnectRudpClientForPeer(runtimeId, connectionId, peer, options);
+        }
+
+        private sealed class CultMeshFixedAuthorityClock : ICultMeshClock
+        {
+            public CultMeshFixedAuthorityClock(DateTimeOffset utcNow) => UtcNow = utcNow;
+            public DateTimeOffset UtcNow { get; }
+            public System.Threading.Tasks.Task DelayAsync(TimeSpan delay, System.Threading.CancellationToken cancellationToken = default) =>
+                System.Threading.Tasks.Task.CompletedTask;
         }
 
         /// <summary>
@@ -3226,9 +3399,16 @@ namespace GameCult.Mesh
         private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)
             where TDocument : class
         {
-            return cache.Get<TDocument>(key)
-                   ?? throw new KeyNotFoundException(
-                       $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
+            var document = cache.Get<TDocument>(key);
+            if (document != null)
+                return document;
+
+            var untyped = cache.Get(key);
+            if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
+                return ConvertUntypedDocument<TDocument>(untyped);
+
+            throw new KeyNotFoundException(
+                $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
         }
 
         private static async Task<TDocument> ReadRequiredAsync<TDocument>(

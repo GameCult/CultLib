@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -58,6 +59,7 @@ namespace GameCult.Mesh
     /// Flat, transport-friendly fields for a CultMesh route hint.
     /// </summary>
     [MessagePackObject]
+    [MessagePackFormatter(typeof(CultMeshRouteRecordFormatter))]
     public sealed class CultMeshRouteRecord
     {
         /// <summary>Creates flat route fields.</summary>
@@ -1001,6 +1003,27 @@ namespace GameCult.Mesh
             return Watch().Subscribe(onNext);
         }
 
+        /// <summary>
+        /// Projects one typed document field into a stable reactive state pointer. The expression is
+        /// structural metadata: only member access and constant collection indices are accepted.
+        /// </summary>
+        public CultMeshStatePointer<TValue> Field<TValue>(Expression<Func<TDocument, TValue>> field)
+        {
+            if (field == null) throw new ArgumentNullException(nameof(field));
+            var path = CultMeshFieldPath.Parse(field.Body, field.Parameters[0]);
+            var read = field.Compile();
+            return new CultMeshStatePointer<TValue>(
+                DocumentId + "#" + path,
+                async context => read(await Feed
+                    .SnapshotAsync(CultMeshDocumentQueryParameters.Empty, context)
+                    .ConfigureAwait(false)),
+                context => Feed
+                    .Watch(CultMeshDocumentQueryParameters.Empty, context)
+                    .Select(read),
+                RouteHint,
+                Sources);
+        }
+
         /// <summary>Replaces the underlying document when this handle is backed by mutable state.</summary>
         public Task ReplaceAsync(TDocument value)
         {
@@ -1119,6 +1142,62 @@ namespace GameCult.Mesh
             return (TDocumentValue)CultDocumentMessagePackSerialization.DeserializeUntyped(
                 typeof(TDocumentValue),
                 payload);
+        }
+
+        private static class CultMeshFieldPath
+        {
+            public static string Parse(Expression expression, ParameterExpression root)
+            {
+                var segments = new Stack<string>();
+                while (expression != root)
+                {
+                    if (expression is MemberExpression member)
+                    {
+                        segments.Push(member.Member.Name);
+                        expression = member.Expression
+                            ?? throw Invalid();
+                        continue;
+                    }
+
+                    if (expression is MethodCallExpression call &&
+                        call.Method.Name == "get_Item" &&
+                        call.Object != null &&
+                        call.Arguments.Count == 1)
+                    {
+                        segments.Push("[" + ConstantIndex(call.Arguments[0]) + "]");
+                        expression = call.Object;
+                        continue;
+                    }
+
+                    if (expression is BinaryExpression binary && binary.NodeType == ExpressionType.ArrayIndex)
+                    {
+                        segments.Push("[" + ConstantIndex(binary.Right) + "]");
+                        expression = binary.Left;
+                        continue;
+                    }
+
+                    throw Invalid();
+                }
+
+                if (segments.Count == 0) throw Invalid();
+                var path = string.Empty;
+                foreach (var segment in segments)
+                    path += segment.StartsWith("[", StringComparison.Ordinal) || path.Length == 0
+                        ? segment
+                        : "." + segment;
+                return path;
+            }
+
+            private static string ConstantIndex(Expression expression)
+            {
+                if (expression is ConstantExpression constant && constant.Value != null)
+                    return Convert.ToString(constant.Value, CultureInfo.InvariantCulture)!;
+                throw Invalid();
+            }
+
+            private static ArgumentException Invalid() => new(
+                "CultMesh field selectors may contain only member access and constant collection indices.",
+                "field");
         }
 
         internal static TTarget ConvertDocument<TSource, TTarget>(TSource document)
@@ -3439,6 +3518,7 @@ namespace GameCult.Mesh
     /// Flat, transport-friendly fields for a concrete CultMesh operation invocation.
     /// </summary>
     [MessagePackObject]
+    [MessagePackFormatter(typeof(CultMeshOperationInvocationRecordFormatter))]
     public sealed class CultMeshOperationInvocationRecord
     {
         /// <summary>Creates flat operation invocation fields.</summary>

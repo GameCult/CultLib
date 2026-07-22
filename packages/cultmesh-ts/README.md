@@ -262,6 +262,71 @@ Schema and shard catalog factories delegate to `cultnet-ts`; the branded
 `CultMesh` entrypoint does not create a second owner for schema discovery or
 topology truth.
 
+## Long-Lived Providers
+
+TypeScript provider daemons use `CultMeshProviderSession` to retain one logical
+provider lifecycle across physical reconnects. The session owns registration,
+lease renewal, desired typed publication replay, command dispatch, receipt
+publication, and withdrawal. Provider code owns domain state and idempotent
+command transactions; the injected transport owns CultNet wire details.
+
+```ts
+import {
+  CultMeshProviderRudpTransport,
+  CultMeshProviderSession,
+} from "cultmesh-ts";
+
+const odinTransport = new CultMeshProviderRudpTransport({
+  endpoint: "rudp://127.0.0.1:17871",
+  runtimeId: "voidbot-worker-7",
+  connectionId: 0x43554c54,
+  sessionToken: process.env.ODIN_PROVIDER_SESSION_TOKEN,
+});
+
+const session = new CultMeshProviderSession({
+  identity: {
+    providerId: "voidbot.swarm",
+    serviceInstanceId: "voidbot-worker-7",
+    endpointId: "odin:voidbot-worker-7",
+    verseId: "voidbot.local",
+  },
+  transport: odinTransport,
+  receiptStore: durableReceiptStore,
+  publications: [advertisementPublication, surfacePublication],
+  commandHandlers: {
+    "swarm.set_heat": applyHeatCommandTransaction,
+  },
+});
+
+await session.start();
+await session.upsertPublication(nextSurfacePublication);
+```
+
+Provider, service-instance, endpoint, and body-producer identities are separate
+contracts. The provider session never infers one from another. A durable
+receipt store is required; `CultMeshMemoryProviderReceiptStore` is intended
+only for tests and disposable tools. The store is a durable outbox: a receipt
+is persisted before transport publication, remains pending across reconnects,
+and is marked published only after the current connection accepts it. Receipt
+store failure degrades command intake without inventing a network outage.
+
+The RUDP provider transport carries lifecycle payloads inside the existing
+`cultnet.operation_request.v0` and `cultnet.operation_response.v0` envelopes.
+RUDP acknowledgements prove byte delivery only. Registration, renewal,
+publication changes, receipts, and withdrawal complete only after the
+provider-session broker returns a correlated application response. The broker
+owns lease fencing and accepted publication membership; the provider owns its
+desired documents and durable receipt outbox.
+
+`CultMeshProviderRudpTransport` is currently a private-development transport.
+Do not advertise it as a public provider boundary until the surrounding
+CultNet session authenticates a claim authorizing the four-part provider
+identity. Source address and successful contact are not authority.
+The adapter carries `sessionToken` in a typed RUDP Connect-evidence map beside
+a fresh `clientSessionId`. Packet retransmits reuse that id; an actual reconnect
+mints another. The receiver must decode and validate the token as authorization
+evidence for the requested provider identity.
+
 ## RUDP Helpers
 
 Node runtimes can build the shared CultNet reliable-UDP transport from the

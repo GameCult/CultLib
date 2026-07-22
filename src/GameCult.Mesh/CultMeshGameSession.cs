@@ -29,6 +29,12 @@ namespace GameCult.Mesh
         public CultMeshAuthorityLeaseCatalog? AuthorityLeases { get; set; }
 
         /// <summary>
+        /// Gets or sets the sole authority resolver used by the session. When omitted, the
+        /// session installs a deny-by-default resolver over <see cref="AuthorityLeases"/>.
+        /// </summary>
+        public CultMeshAuthorityResolver? AuthorityResolver { get; set; }
+
+        /// <summary>
         /// Gets or sets simulation consensus options.
         /// </summary>
         public CultNetSimulationConsensusOptions? ConsensusOptions { get; set; }
@@ -68,6 +74,7 @@ namespace GameCult.Mesh
             VerseCatalog = options.VerseCatalog ?? new CultMeshVerseCatalog();
             PeerCatalog = options.PeerCatalog ?? new CultMeshPeerCatalog();
             AuthorityLeases = options.AuthorityLeases ?? new CultMeshAuthorityLeaseCatalog();
+            AuthorityResolver = options.AuthorityResolver ?? CultMeshAuthorityResolver.CreateDenyByDefault(AuthorityLeases);
             ObservationHub = new CultNetSimulationObservationHub(options.ConsensusOptions);
             FactCommitter = new CultMeshSimulationFactCommitter(Node.Database);
 
@@ -116,6 +123,9 @@ namespace GameCult.Mesh
         /// Gets the session authority lease catalog.
         /// </summary>
         public CultMeshAuthorityLeaseCatalog AuthorityLeases { get; }
+
+        /// <summary>Gets the session authority decision owner.</summary>
+        public CultMeshAuthorityResolver AuthorityResolver { get; }
 
         /// <summary>
         /// Gets the session simulation observation hub.

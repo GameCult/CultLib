@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Networking;
 
@@ -161,6 +162,21 @@ namespace GameCult.Mesh
         /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>Gets or sets the clock that owns discovery deadlines.</summary>
+        public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
+
+        /// <summary>Gets or sets the bounded operational diagnostic sink.</summary>
+        public ICultMeshDiagnosticSink Diagnostics { get; set; } = CultMeshNullDiagnosticSink.Instance;
+
+        /// <summary>Gets or sets the identity of this bootstrap lookup source.</summary>
+        public string SourceId { get; set; } = "configured-bootstrap";
+
+        /// <summary>Gets or sets how long a successful compatibility observation remains fresh.</summary>
+        public TimeSpan ObservationTtl { get; set; } = TimeSpan.FromMinutes(5);
+
+        /// <summary>Gets or sets the persistent last-known-good discovery store.</summary>
+        public ICultMeshDiscoveryStore? DiscoveryStore { get; set; }
     }
 
     /// <summary>
@@ -169,6 +185,7 @@ namespace GameCult.Mesh
     public sealed class CultMeshVerseDiscoveryClient
     {
         private readonly CultMeshVerseDiscoveryClientOptions _options;
+        private long _diagnosticSequence;
 
         /// <summary>
         /// Creates a Verse discovery client.
@@ -176,6 +193,8 @@ namespace GameCult.Mesh
         public CultMeshVerseDiscoveryClient(CultMeshVerseDiscoveryClientOptions? options = null)
         {
             _options = options ?? new CultMeshVerseDiscoveryClientOptions();
+            if (_options.ObservationTtl <= TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(options), "Discovery observation TTL must be greater than zero.");
         }
 
         /// <summary>
@@ -202,17 +221,38 @@ namespace GameCult.Mesh
             client.OnCultNet<CultNetErrorMessage>(error =>
                 completion.TrySetException(new InvalidOperationException(error.Error)));
 
-            client.Connect(host, port);
-            var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
-            await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
-            client.SendCultNet(new CultMeshVerseCatalogRequestMessage
+            Emit(CultMeshDiagnosticKind.ConnectionAttempt, messageId, endpoint, "connecting");
+            try
             {
-                MessageId = messageId,
-                TransportVersion = request?.TransportVersion,
-                VerseIds = request?.VerseIds
-            });
+                client.Connect(host, port);
+                var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
+                await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
+                client.SendCultNet(new CultMeshVerseCatalogRequestMessage
+                {
+                    MessageId = messageId,
+                    TransportVersion = request?.TransportVersion,
+                    VerseIds = request?.VerseIds
+                });
 
-            return await WaitForResponseAsync(completion.Task, endpoint, backgroundFailure).ConfigureAwait(false);
+                var response = await WaitForResponseAsync(completion.Task, endpoint, backgroundFailure).ConfigureAwait(false);
+                Emit(
+                    CultMeshDiagnosticKind.DiscoveryObservation,
+                    messageId,
+                    endpoint,
+                    "fresh",
+                    schemaVersion: response.SchemaVersion);
+                return response;
+            }
+            catch (Exception error) when (!(error is OperationCanceledException))
+            {
+                Emit(
+                    CultMeshDiagnosticKind.CandidateRejected,
+                    messageId,
+                    endpoint,
+                    "unavailable",
+                    ReasonCode(error));
+                throw;
+            }
         }
 
         /// <summary>
@@ -226,18 +266,25 @@ namespace GameCult.Mesh
             if (catalog == null) throw new ArgumentNullException(nameof(catalog));
             if (endpoints == null) throw new ArgumentNullException(nameof(endpoints));
 
-            var count = 0;
-            foreach (var endpoint in endpoints.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal))
-            {
-                var response = await FetchAsync(endpoint, new CultMeshVerseCatalogRequestMessage
+            var eligible = endpoints.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            if (eligible.Length == 0) return 0;
+            var identity = "compatibility:" + (transportVersion ?? "any") + ":" + string.Join("|", eligible);
+            using var service = new CultMeshDiscoveryService(
+                eligible.Select(endpoint => new CompatibilityLookupSource(this, endpoint, transportVersion)),
+                new CultMeshDiscoveryServiceOptions
                 {
-                    TransportVersion = transportVersion
-                }).ConfigureAwait(false);
-                catalog.Upsert(response);
-                count += response.Verses.Length;
+                    Clock = _options.Clock,
+                    Diagnostics = _options.Diagnostics,
+                    Store = _options.DiscoveryStore
+                });
+            var state = await service.ResolveAsync(new CultMeshDiscoveryQuery(identity)).ConfigureAwait(false);
+            foreach (var candidate in state.Candidates)
+            {
+                catalog.Upsert(candidate.Descriptor);
             }
 
-            return count;
+            return state.Candidates.Count;
         }
 
         private ICultNetSchemaClient CreateClient(string endpoint)
@@ -251,7 +298,7 @@ namespace GameCult.Mesh
             string endpoint,
             Task<Exception>? backgroundFailure)
         {
-            var deadline = DateTimeOffset.UtcNow + _options.ConnectTimeout;
+            var deadline = _options.Clock.UtcNow + _options.ConnectTimeout;
             while (!client.Connected)
             {
                 if (backgroundFailure?.IsCompleted == true)
@@ -261,12 +308,12 @@ namespace GameCult.Mesh
                         $"Verse discovery client failed while connecting to {endpoint}.",
                         error);
                 }
-                if (DateTimeOffset.UtcNow >= deadline)
+                if (_options.Clock.UtcNow >= deadline)
                 {
                     throw new TimeoutException($"Timed out connecting to Verse discovery endpoint {endpoint}.");
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
+                await _options.Clock.DelayAsync(TimeSpan.FromMilliseconds(25)).ConfigureAwait(false);
             }
         }
 
@@ -275,7 +322,7 @@ namespace GameCult.Mesh
             string endpoint,
             Task<Exception>? backgroundFailure)
         {
-            var timeoutTask = Task.Delay(_options.ResponseTimeout);
+            var timeoutTask = _options.Clock.DelayAsync(_options.ResponseTimeout);
             var completed = backgroundFailure == null
                 ? await Task.WhenAny(responseTask, timeoutTask).ConfigureAwait(false)
                 : await Task.WhenAny(responseTask, timeoutTask, backgroundFailure).ConfigureAwait(false);
@@ -292,6 +339,69 @@ namespace GameCult.Mesh
             }
 
             return await responseTask.ConfigureAwait(false);
+        }
+
+        private void Emit(
+            CultMeshDiagnosticKind kind,
+            string operationId,
+            string endpoint,
+            string state,
+            string reasonCode = "",
+            string schemaVersion = "")
+        {
+            _options.Diagnostics.Emit(new CultMeshDiagnosticEvent(
+                Interlocked.Increment(ref _diagnosticSequence),
+                _options.Clock.UtcNow,
+                CultMeshReliabilityOrgan.Discovery,
+                kind,
+                operationId,
+                endpoint,
+                state,
+                reasonCode,
+                _options.SourceId,
+                endpoint,
+                schemaVersion));
+        }
+
+        private static string ReasonCode(Exception error)
+        {
+            if (error is TimeoutException) return "timeout";
+            if (error is InvalidOperationException) return "transport_failure";
+            return "lookup_failure";
+        }
+
+        private sealed class CompatibilityLookupSource : ICultMeshLookupSource
+        {
+            private readonly CultMeshVerseDiscoveryClient _owner;
+            private readonly string _endpoint;
+            private readonly string? _transportVersion;
+
+            public CompatibilityLookupSource(CultMeshVerseDiscoveryClient owner, string endpoint, string? transportVersion)
+            {
+                _owner = owner;
+                _endpoint = endpoint;
+                _transportVersion = transportVersion;
+            }
+
+            public string SourceId => _endpoint;
+
+            public async Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(
+                CultMeshDiscoveryQuery query,
+                CancellationToken cancellationToken = default)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var response = await _owner.FetchAsync(
+                    _endpoint,
+                    new CultMeshVerseCatalogRequestMessage { TransportVersion = _transportVersion }).ConfigureAwait(false);
+                var observedAt = _owner._options.Clock.UtcNow;
+                return response.Verses.Select(message => new CultMeshDiscoveryObservation(
+                    message.ToVerseDescriptor(),
+                    SourceId,
+                    observedAt,
+                    observedAt + _owner._options.ObservationTtl,
+                    CultMeshDiscoveryTrust.Unsigned,
+                    response.SchemaVersion)).ToArray();
+            }
         }
     }
 }

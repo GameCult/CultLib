@@ -124,13 +124,7 @@ export interface Belief {
   confidence: number;
   subject_id?: string;
   claim_type?:
-    | 'fact'
-    | 'identity_inference'
-    | 'motive_inference'
-    | 'prediction'
-    | 'norm'
-    | 'value_read'
-    | 'relationship_read';
+    'fact' | 'identity_inference' | 'motive_inference' | 'prediction' | 'norm' | 'value_read' | 'relationship_read';
   evidence_event_ids?: string[];
   visibility?: 'private' | 'shared' | 'public' | 'rumor';
   emotional_charge?: number;

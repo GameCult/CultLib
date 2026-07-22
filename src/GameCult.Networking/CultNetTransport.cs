@@ -893,6 +893,7 @@ namespace GameCult.Networking
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
+        private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Dictionary<string, uint> _orderedNextSequenceByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
         private readonly Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>> _orderedBuffers =
@@ -935,7 +936,16 @@ namespace GameCult.Networking
         /// <summary>
         /// Gets reliable packet sequences awaiting acknowledgement.
         /// </summary>
-        public IReadOnlyList<uint> PendingReliableSequences => _pendingReliable.Keys.OrderBy(value => value).ToArray();
+        public IReadOnlyList<uint> PendingReliableSequences
+        {
+            get
+            {
+                lock (_pendingReliableGate)
+                {
+                    return _pendingReliable.Keys.OrderBy(value => value).ToArray();
+                }
+            }
+        }
 
         /// <summary>
         /// Creates a reliable ordered connect packet.
@@ -1131,9 +1141,14 @@ namespace GameCult.Networking
         /// <summary>
         /// Creates a packet carrying the current acknowledgement state.
         /// </summary>
-        public CultNetRudpPacket CreateAck()
+        public CultNetRudpPacket CreateAck(uint? acknowledgedSequence = null)
         {
             var (ack, ackMask) = AckState();
+            if (acknowledgedSequence.HasValue)
+            {
+                ack = acknowledgedSequence.Value;
+                ackMask = 0;
+            }
             return new CultNetRudpPacket
             {
                 PacketType = CultNetRudpPacketType.Ack,
@@ -1186,12 +1201,15 @@ namespace GameCult.Networking
         public IReadOnlyList<CultNetRudpPacket> DueResends(long nowMs)
         {
             var due = new List<CultNetRudpPacket>();
-            foreach (var pending in _pendingReliable.Values)
+            lock (_pendingReliableGate)
             {
-                if (nowMs - pending.LastSentAtMs >= ResendDelayMs)
+                foreach (var pending in _pendingReliable.Values)
                 {
-                    pending.LastSentAtMs = nowMs;
-                    due.Add(ClonePacket(pending.Packet));
+                    if (nowMs - pending.LastSentAtMs >= ResendDelayMs)
+                    {
+                        pending.LastSentAtMs = nowMs;
+                        due.Add(ClonePacket(pending.Packet));
+                    }
                 }
             }
 
@@ -1243,11 +1261,14 @@ namespace GameCult.Networking
 
         private void TrackReliable(CultNetRudpPacket packet, long nowMs)
         {
-            _pendingReliable[packet.Sequence] = new PendingReliablePacket
+            lock (_pendingReliableGate)
             {
-                Packet = ClonePacket(packet),
-                LastSentAtMs = nowMs
-            };
+                _pendingReliable[packet.Sequence] = new PendingReliablePacket
+                {
+                    Packet = ClonePacket(packet),
+                    LastSentAtMs = nowMs
+                };
+            }
         }
 
         private void EnsureReliableCapacity(int packetCount)
@@ -1257,20 +1278,26 @@ namespace GameCult.Networking
                 return;
             }
 
-            if (_pendingReliable.Count + packetCount > _maxPendingReliablePackets.Value)
+            lock (_pendingReliableGate)
             {
-                throw new InvalidOperationException("RUDP reliable send queue is full.");
+                if (_pendingReliable.Count + packetCount > _maxPendingReliablePackets.Value)
+                {
+                    throw new InvalidOperationException("RUDP reliable send queue is full.");
+                }
             }
         }
 
         private void ApplyAcknowledgements(CultNetRudpPacket packet)
         {
-            _pendingReliable.Remove(packet.Ack);
-            for (var bit = 0; bit < 32; bit++)
+            lock (_pendingReliableGate)
             {
-                if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit)
+                _pendingReliable.Remove(packet.Ack);
+                for (var bit = 0; bit < 32; bit++)
                 {
-                    _pendingReliable.Remove(packet.Ack - (uint)bit - 1);
+                    if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit)
+                    {
+                        _pendingReliable.Remove(packet.Ack - (uint)bit - 1);
+                    }
                 }
             }
         }
@@ -1509,9 +1536,13 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportConnection : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
-        private const int WireBurstPackets = 1;
+        // One acknowledgement carries the preceding 32-packet receive mask.
+        // Pace at that transport window instead of sleeping after every fragment;
+        // a one-millisecond sleep can consume a full scheduler quantum on Windows.
+        private const int WireBurstPackets = 32;
         private readonly Socket _socket;
         private readonly CultNetRudpSession _session;
+        private readonly object _sessionGate = new object();
         private readonly CultNetRudpSocketMode _mode;
         private readonly int? _maxFragmentBytes;
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
@@ -1564,7 +1595,7 @@ namespace GameCult.Networking
         /// <summary>
         /// Gets whether the RUDP handshake has completed.
         /// </summary>
-        public bool Connected => _session.Connected;
+        public bool Connected { get { lock (_sessionGate) return _session.Connected; } }
 
         /// <summary>
         /// Gets a snapshot of the current transfer counters.
@@ -1600,7 +1631,8 @@ namespace GameCult.Networking
                 throw new InvalidOperationException("Only a client RUDP socket transport can initiate connect.");
             }
 
-            SendPacket(_session.CreateConnect(NowMs(), payload ?? Array.Empty<byte>()));
+            lock (_sessionGate)
+                SendPacket(_session.CreateConnect(NowMs(), payload ?? Array.Empty<byte>()));
         }
 
         /// <summary>
@@ -1661,7 +1693,8 @@ namespace GameCult.Networking
         /// </summary>
         public void Send(string channelId, byte[] payload)
         {
-            SendPackets(_session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
+            lock (_sessionGate)
+                SendPackets(_session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
             _stats.FramesSent++;
         }
 
@@ -1814,7 +1847,8 @@ namespace GameCult.Networking
         /// </summary>
         public void Disconnect(byte[]? reason = null)
         {
-            SendPacket(_session.CreateDisconnect(reason ?? Array.Empty<byte>()));
+            lock (_sessionGate)
+                SendPacket(_session.CreateDisconnect(reason ?? Array.Empty<byte>()));
         }
 
         /// <summary>
@@ -1822,7 +1856,8 @@ namespace GameCult.Networking
         /// </summary>
         public void Ping(byte[]? payload = null)
         {
-            SendPacket(_session.CreatePing(payload ?? Array.Empty<byte>()));
+            lock (_sessionGate)
+                SendPacket(_session.CreatePing(payload ?? Array.Empty<byte>()));
         }
 
         /// <summary>
@@ -1830,7 +1865,8 @@ namespace GameCult.Networking
         /// </summary>
         public bool CheckTimeout(long timeoutMs)
         {
-            return _session.CheckTimeout(NowMs(), timeoutMs);
+            lock (_sessionGate)
+                return _session.CheckTimeout(NowMs(), timeoutMs);
         }
 
         /// <summary>
@@ -1838,10 +1874,23 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetTransportFrame? ReceiveOnce()
         {
+            TryReceiveOnce(out var delivered);
+            return delivered;
+        }
+
+        /// <summary>
+        /// Consumes one available transport work item and reports progress independently
+        /// of whether that packet completed an application frame.
+        /// </summary>
+        public bool TryReceiveOnce(out CultNetTransportFrame? delivered)
+        {
             if (_deliveredFrames.Count > 0)
             {
-                return _deliveredFrames.Dequeue();
+                delivered = _deliveredFrames.Dequeue();
+                return true;
             }
+
+            delivered = null;
 
             var buffer = new byte[65535];
             EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
@@ -1850,7 +1899,7 @@ namespace GameCult.Networking
             {
                 if (!_socket.Poll(0, SelectMode.SelectRead))
                 {
-                    return null;
+                    return false;
                 }
 
                 received = _socket.ReceiveFrom(buffer, ref remote);
@@ -1859,7 +1908,7 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.WouldBlock ||
                 error.SocketErrorCode == SocketError.TimedOut)
             {
-                return null;
+                return false;
             }
             catch (SocketException error) when (
                 error.SocketErrorCode == SocketError.ConnectionReset ||
@@ -1867,7 +1916,7 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.Shutdown)
             {
                 DisconnectReason = Array.Empty<byte>();
-                return null;
+                return false;
             }
 
             _stats.BytesReceived += received;
@@ -1877,7 +1926,7 @@ namespace GameCult.Networking
             }
             else if (!_remoteEndPoint.Equals(remote))
             {
-                return null;
+                return true;
             }
 
             var wire = new byte[received];
@@ -1886,14 +1935,21 @@ namespace GameCult.Networking
             TracePacket("rx", packet, received, remote);
             if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
             {
-                SendPacket(_session.AcceptConnect(packet, NowMs()));
-                return null;
+                lock (_sessionGate)
+                    SendPacket(_session.AcceptConnect(packet, NowMs()));
+                return true;
             }
 
-            var result = _session.Receive(packet, NowMs());
-            if (result.Reply != null)
+            CultNetRudpReceiveResult result;
+            CultNetRudpPacket? acknowledgement = null;
+            lock (_sessionGate)
             {
-                SendPacket(result.Reply);
+                result = _session.Receive(packet, NowMs());
+                if (result.Reply != null)
+                    SendPacket(result.Reply);
+                if (packet.PacketType == CultNetRudpPacketType.Accept ||
+                    packet.PacketType == CultNetRudpPacketType.Data)
+                    acknowledgement = _session.CreateAck(packet.Sequence);
             }
             if (result.Pong)
             {
@@ -1902,7 +1958,7 @@ namespace GameCult.Networking
             if (result.Disconnected)
             {
                 DisconnectReason = result.DisconnectReason;
-                return null;
+                return true;
             }
 
             foreach (var frame in result.Delivered)
@@ -1915,15 +1971,11 @@ namespace GameCult.Networking
                 _stats.FramesReceived++;
             }
 
-            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
-            if (packet.PacketType == CultNetRudpPacketType.Accept ||
-                packet.PacketType == CultNetRudpPacketType.Data ||
-                delivered != null)
-            {
-                SendPacket(_session.CreateAck());
-            }
+            delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            if (acknowledgement != null)
+                SendPacket(acknowledgement);
 
-            return delivered;
+            return true;
         }
 
         /// <summary>
@@ -1933,7 +1985,8 @@ namespace GameCult.Networking
         {
             if (_socket.Poll(0, SelectMode.SelectRead))
                 return;
-            SendPackets(_session.DueResends(NowMs()));
+            lock (_sessionGate)
+                SendPackets(_session.DueResends(NowMs()));
         }
 
         private void SendPackets(IReadOnlyList<CultNetRudpPacket> packets)
@@ -1941,8 +1994,8 @@ namespace GameCult.Networking
             for (var index = 0; index < packets.Count; index++)
             {
                 SendPacket(packets[index]);
-                if ((index + 1) % WireBurstPackets == 0)
-                    Thread.Sleep(1);
+                if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
+                    Thread.Yield();
             }
         }
 
@@ -2060,6 +2113,7 @@ namespace GameCult.Networking
         }
 
         internal CultNetRudpSession Session { get; }
+        internal object SessionGate { get; } = new object();
 
         /// <summary>
         /// Gets the UDP endpoint for this peer.
@@ -2068,7 +2122,11 @@ namespace GameCult.Networking
         /// <summary>
         /// Gets whether the peer RUDP handshake has completed.
         /// </summary>
-        public bool Connected => Session.Connected;
+        public bool Connected { get { lock (SessionGate) return Session.Connected; } }
+        /// <summary>
+        /// Gets the number of reliable packets still awaiting acknowledgement.
+        /// </summary>
+        public int PendingReliablePacketCount { get { lock (SessionGate) return Session.PendingReliableSequences.Count; } }
         /// <summary>
         /// Gets the last transport-level remote disconnect reason, if one was received.
         /// </summary>
@@ -2096,7 +2154,9 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportServer : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
-        private const int WireBurstPackets = 1;
+        // Keep server response pacing aligned with the 32-packet ACK mask. Large
+        // content responses otherwise pay one Windows scheduler quantum per 1 KiB.
+        private const int WireBurstPackets = 32;
         private readonly Socket _socket;
         private readonly uint _connectionId;
         private readonly uint _initialSequence;
@@ -2152,6 +2212,11 @@ namespace GameCult.Networking
         public IReadOnlyCollection<CultNetRudpSocketServerPeer> Peers => _peers.Values.ToArray();
 
         /// <summary>
+        /// Raised when a tracked peer closes its RUDP session.
+        /// </summary>
+        public event Action<CultNetRudpSocketServerPeer>? PeerDisconnected;
+
+        /// <summary>
         /// Gets a snapshot of the current transfer counters.
         /// </summary>
         public CultNetTransportStats Stats => _stats.Snapshot();
@@ -2162,7 +2227,8 @@ namespace GameCult.Networking
         public void Send(CultNetRudpSocketServerPeer peer, string channelId, byte[] payload)
         {
             if (peer == null) throw new ArgumentNullException(nameof(peer));
-            SendPackets(peer, peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
+            lock (peer.SessionGate)
+                SendPackets(peer, peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
             _stats.FramesSent++;
         }
 
@@ -2197,10 +2263,23 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpSocketServerFrame? ReceiveOnce()
         {
+            TryReceiveOnce(out var delivered);
+            return delivered;
+        }
+
+        /// <summary>
+        /// Consumes one available transport work item and reports whether transport progress was made,
+        /// independently of whether that work item completed an application frame.
+        /// </summary>
+        public bool TryReceiveOnce(out CultNetRudpSocketServerFrame? delivered)
+        {
             if (_deliveredFrames.Count > 0)
             {
-                return _deliveredFrames.Dequeue();
+                delivered = _deliveredFrames.Dequeue();
+                return true;
             }
+
+            delivered = null;
 
             var buffer = new byte[65535];
             EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
@@ -2209,7 +2288,7 @@ namespace GameCult.Networking
             {
                 if (!_socket.Poll(0, SelectMode.SelectRead))
                 {
-                    return null;
+                    return false;
                 }
 
                 received = _socket.ReceiveFrom(buffer, ref remote);
@@ -2218,14 +2297,14 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.WouldBlock ||
                 error.SocketErrorCode == SocketError.TimedOut)
             {
-                return null;
+                return false;
             }
             catch (SocketException error) when (
                 error.SocketErrorCode == SocketError.ConnectionReset ||
                 error.SocketErrorCode == SocketError.ConnectionAborted ||
                 error.SocketErrorCode == SocketError.Shutdown)
             {
-                return null;
+                return false;
             }
 
             _stats.BytesReceived += received;
@@ -2239,12 +2318,12 @@ namespace GameCult.Networking
             }
             catch (InvalidOperationException)
             {
-                return null;
+                return true;
             }
 
             if (packet.ConnectionId != _connectionId)
             {
-                return null;
+                return true;
             }
 
             var peerKey = RemoteKey(remote);
@@ -2260,25 +2339,32 @@ namespace GameCult.Networking
                         MaxPendingReliablePackets = _maxPendingReliablePackets
                     }));
                 _peers[peerKey] = peer;
-                SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
-                return null;
+                lock (peer.SessionGate)
+                    SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
+                return true;
             }
 
             if (!_peers.TryGetValue(peerKey, out var existingPeer))
             {
-                return null;
+                return true;
             }
 
-            var result = existingPeer.Session.Receive(packet, NowMs());
-            if (result.Reply != null)
+            CultNetRudpReceiveResult result;
+            CultNetRudpPacket? acknowledgement = null;
+            lock (existingPeer.SessionGate)
             {
-                SendPacket(existingPeer.RemoteEndPoint, result.Reply);
+                result = existingPeer.Session.Receive(packet, NowMs());
+                if (result.Reply != null)
+                    SendPacket(existingPeer.RemoteEndPoint, result.Reply);
+                if (packet.PacketType == CultNetRudpPacketType.Data)
+                    acknowledgement = existingPeer.Session.CreateAck(packet.Sequence);
             }
             if (result.Disconnected)
             {
                 existingPeer.DisconnectReason = result.DisconnectReason;
                 _peers.Remove(peerKey);
-                return null;
+                PeerDisconnected?.Invoke(existingPeer);
+                return true;
             }
 
             foreach (var frame in result.Delivered)
@@ -2295,13 +2381,11 @@ namespace GameCult.Networking
                 _stats.FramesReceived++;
             }
 
-            var delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
-            if (packet.PacketType == CultNetRudpPacketType.Data || delivered != null)
-            {
-                SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.CreateAck());
-            }
+            delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
+            if (acknowledgement != null)
+                SendPacket(existingPeer.RemoteEndPoint, acknowledgement);
 
-            return delivered;
+            return true;
         }
 
         /// <summary>
@@ -2313,7 +2397,8 @@ namespace GameCult.Networking
                 return;
             foreach (var peer in _peers.Values.ToArray())
             {
-                SendPackets(peer, peer.Session.DueResends(NowMs()));
+                lock (peer.SessionGate)
+                    SendPackets(peer, peer.Session.DueResends(NowMs()));
             }
         }
 
@@ -2322,8 +2407,8 @@ namespace GameCult.Networking
             for (var index = 0; index < packets.Count; index++)
             {
                 SendPacket(peer.RemoteEndPoint, packets[index]);
-                if ((index + 1) % WireBurstPackets == 0)
-                    Thread.Sleep(1);
+                if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
+                    Thread.Yield();
             }
         }
 

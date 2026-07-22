@@ -404,11 +404,8 @@ namespace GameCult.Caching
         private static readonly Lazy<CultDocumentRegistry> SharedRegistry =
             new(() => new CultDocumentRegistry());
 
-        private readonly ConcurrentDictionary<Type, CultDocumentDescriptor> _byType = new();
-        private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaId =
-            new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, CultDocumentDescriptor> _bySchemaName =
-            new(StringComparer.Ordinal);
+        private volatile RegistryIndexes _indexes = new();
+        private readonly object _registrationGate = new();
 
         /// <summary>
         /// Gets the shared process-wide document registry.
@@ -423,31 +420,56 @@ namespace GameCult.Caching
             Refresh();
         }
 
+        private CultDocumentRegistry(bool discoverLoadedDocuments)
+        {
+            if (discoverLoadedDocuments)
+                Refresh();
+        }
+
+        /// <summary>
+        /// Creates a registry containing exactly the requested document types without scanning loaded assemblies.
+        /// </summary>
+        public static CultDocumentRegistry ForTypes(IEnumerable<Type> documentTypes)
+        {
+            if (documentTypes == null) throw new ArgumentNullException(nameof(documentTypes));
+            var registry = new CultDocumentRegistry(discoverLoadedDocuments: false);
+            foreach (var type in documentTypes.Distinct())
+            {
+                registry.GetRequired(type ?? throw new ArgumentException(
+                    "Document type collections cannot contain null entries.",
+                    nameof(documentTypes)));
+            }
+            return registry;
+        }
+
         /// <summary>
         /// Gets all known document descriptors.
         /// </summary>
-        public IEnumerable<CultDocumentDescriptor> AllDescriptors => _byType.Values.OrderBy(d => d.SchemaName, StringComparer.Ordinal);
+        public IEnumerable<CultDocumentDescriptor> AllDescriptors =>
+            _indexes.ByType.Values.OrderBy(d => d.SchemaName, StringComparer.Ordinal);
 
         /// <summary>
         /// Rebuilds the registry from generated metadata and reflected document attributes.
         /// </summary>
         public void Refresh()
         {
-            _byType.Clear();
-            _bySchemaId.Clear();
-            _bySchemaName.Clear();
-
-            var generatedTypes = new HashSet<Type>();
-            foreach (var definition in CultGeneratedDocumentMetadataLoader.LoadDefinitions())
+            lock (_registrationGate)
             {
-                var descriptor = BuildDescriptor(definition);
-                RegisterDescriptor(descriptor);
-                generatedTypes.Add(descriptor.DocumentType);
-            }
+                var rebuilt = new RegistryIndexes();
+                var generatedTypes = new HashSet<Type>();
+                foreach (var definition in CultGeneratedDocumentMetadataLoader.LoadDefinitions())
+                {
+                    var descriptor = BuildDescriptor(definition);
+                    RegisterDescriptor(rebuilt, descriptor);
+                    generatedTypes.Add(descriptor.DocumentType);
+                }
 
-            foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes().Where(type => !generatedTypes.Contains(type)))
-            {
-                RegisterDescriptor(BuildDescriptor(type));
+                foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes().Where(type => !generatedTypes.Contains(type)))
+                {
+                    RegisterDescriptor(rebuilt, BuildDescriptor(type));
+                }
+
+                _indexes = rebuilt;
             }
         }
 
@@ -456,7 +478,7 @@ namespace GameCult.Caching
         /// </summary>
         public CultDocumentDescriptor GetRequired(Type type)
         {
-            if (_byType.TryGetValue(type, out var descriptor))
+            if (_indexes.ByType.TryGetValue(type, out var descriptor))
             {
                 return descriptor;
             }
@@ -464,8 +486,7 @@ namespace GameCult.Caching
             descriptor = TryBuildGeneratedDescriptor(type);
             if (descriptor != null)
             {
-                RegisterDescriptor(descriptor);
-                return descriptor;
+                return RegisterDescriptor(descriptor);
             }
 
             var attribute = type.GetCustomAttribute<CultDocumentAttribute>();
@@ -476,8 +497,7 @@ namespace GameCult.Caching
             }
 
             descriptor = BuildDescriptor(type);
-            RegisterDescriptor(descriptor);
-            return descriptor;
+            return RegisterDescriptor(descriptor);
         }
 
         /// <summary>
@@ -493,7 +513,7 @@ namespace GameCult.Caching
         /// </summary>
         public CultDocumentDescriptor GetRequiredBySchemaId(string schemaId)
         {
-            if (_bySchemaId.TryGetValue(schemaId, out var descriptor))
+            if (_indexes.BySchemaId.TryGetValue(schemaId, out var descriptor))
             {
                 return descriptor;
             }
@@ -519,7 +539,8 @@ namespace GameCult.Caching
 
         internal CultSchemaResolutionResult ResolvePersistedSchemaDetailed(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
-            if (_bySchemaId.TryGetValue(schemaId, out var exact))
+            var indexes = _indexes;
+            if (indexes.BySchemaId.TryGetValue(schemaId, out var exact))
             {
                 return new CultSchemaResolutionResult(
                     exact,
@@ -541,26 +562,121 @@ namespace GameCult.Caching
 
             foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
             {
-                if (_bySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
+                if (indexes.BySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
                 {
                     return BuildCompatibleResolutionResult(persisted, compatibleLocal);
                 }
             }
 
-            if (_bySchemaName.TryGetValue(persisted.SchemaName, out var local))
+            if (indexes.BySchemaName.TryGetValue(persisted.SchemaName, out var localVersions))
             {
-                return BuildCompatibleResolutionResult(persisted, local);
+                if (localVersions.Length == 1)
+                {
+                    return BuildCompatibleResolutionResult(persisted, localVersions[0]);
+                }
+
+                throw new InvalidOperationException(
+                    $"CultCache schema name '{persisted.SchemaName}' is ambiguous across local versions " +
+                    $"[{string.Join(", ", localVersions.Select(candidate => candidate.SchemaVersion).OrderBy(version => version, StringComparer.Ordinal))}]. " +
+                    "Persisted schema compatibility must identify an explicit schema id.");
             }
 
             throw new InvalidOperationException(
                 $"No local CultCache schema matches persisted schema '{persisted.SchemaName}' ({schemaId}).");
         }
 
-        private void RegisterDescriptor(CultDocumentDescriptor descriptor)
+        private CultDocumentDescriptor RegisterDescriptor(CultDocumentDescriptor descriptor)
         {
-            _byType[descriptor.DocumentType] = descriptor;
-            _bySchemaId[descriptor.SchemaId] = descriptor;
-            _bySchemaName[descriptor.SchemaName] = descriptor;
+            lock (_registrationGate)
+            {
+                var current = _indexes;
+                if (current.ByType.TryGetValue(descriptor.DocumentType, out var registered))
+                    return registered;
+
+                var updated = new RegistryIndexes(current);
+                registered = RegisterDescriptor(updated, descriptor);
+                _indexes = updated;
+                return registered;
+            }
+        }
+
+        private static CultDocumentDescriptor RegisterDescriptor(
+            RegistryIndexes indexes,
+            CultDocumentDescriptor descriptor)
+        {
+            if (indexes.ByType.TryGetValue(descriptor.DocumentType, out var registered))
+                return registered;
+
+            indexes.BySchemaName.TryGetValue(descriptor.SchemaName, out var schemaNameVersions);
+            var schemaVersionOwner = schemaNameVersions?.FirstOrDefault(candidate =>
+                string.Equals(candidate.SchemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal));
+            if (schemaVersionOwner != null)
+            {
+                if (IsExactWireAlias(schemaVersionOwner, descriptor))
+                {
+                    indexes.ByType[descriptor.DocumentType] = descriptor;
+                    return descriptor;
+                }
+
+                throw DuplicateSchemaRegistration(
+                    $"schema name '{descriptor.SchemaName}' version '{descriptor.SchemaVersion}'",
+                    schemaVersionOwner.DocumentType,
+                    descriptor.DocumentType);
+            }
+
+            if (indexes.BySchemaId.TryGetValue(descriptor.SchemaId, out var schemaIdOwner))
+            {
+                throw DuplicateSchemaRegistration(
+                    $"schema id '{descriptor.SchemaId}'",
+                    schemaIdOwner.DocumentType,
+                    descriptor.DocumentType);
+            }
+
+            indexes.ByType[descriptor.DocumentType] = descriptor;
+            indexes.BySchemaId[descriptor.SchemaId] = descriptor;
+            indexes.BySchemaName[descriptor.SchemaName] = schemaNameVersions == null
+                ? [descriptor]
+                : [.. schemaNameVersions, descriptor];
+            return descriptor;
+        }
+
+        private static bool IsExactWireAlias(
+            CultDocumentDescriptor canonical,
+            CultDocumentDescriptor candidate) =>
+            string.Equals(canonical.SchemaName, candidate.SchemaName, StringComparison.Ordinal) &&
+            string.Equals(canonical.SchemaVersion, candidate.SchemaVersion, StringComparison.Ordinal) &&
+            string.Equals(canonical.SchemaId, candidate.SchemaId, StringComparison.Ordinal) &&
+            string.Equals(canonical.ContentHash, candidate.ContentHash, StringComparison.Ordinal) &&
+            string.Equals(canonical.CanonicalSchemaJson, candidate.CanonicalSchemaJson, StringComparison.Ordinal);
+
+        private static InvalidOperationException DuplicateSchemaRegistration(
+            string identity,
+            Type existingType,
+            Type claimedType) =>
+            new(
+                $"CultCache {identity} is already registered to CLR type " +
+                $"'{existingType.FullName}' and cannot also be claimed by '{claimedType.FullName}'. " +
+                "Schema compatibility must be declared through explicit persisted-schema alias metadata.");
+
+        private sealed class RegistryIndexes
+        {
+            public RegistryIndexes()
+            {
+                ByType = new Dictionary<Type, CultDocumentDescriptor>();
+                BySchemaId = new Dictionary<string, CultDocumentDescriptor>(StringComparer.Ordinal);
+                BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(StringComparer.Ordinal);
+            }
+
+            public RegistryIndexes(RegistryIndexes source)
+            {
+                ByType = new Dictionary<Type, CultDocumentDescriptor>(source.ByType);
+                BySchemaId = new Dictionary<string, CultDocumentDescriptor>(source.BySchemaId, StringComparer.Ordinal);
+                BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(source.BySchemaName, StringComparer.Ordinal);
+            }
+
+            public Dictionary<Type, CultDocumentDescriptor> ByType { get; }
+            public Dictionary<string, CultDocumentDescriptor> BySchemaId { get; }
+            public Dictionary<string, CultDocumentDescriptor[]> BySchemaName { get; }
         }
 
         private static CultDocumentDescriptor? TryBuildGeneratedDescriptor(Type type)
@@ -1168,8 +1284,29 @@ namespace GameCult.Caching
         /// Creates a cache using the supplied document registry or the shared registry.
         /// </summary>
         public CultCache(CultDocumentRegistry? registry = null)
+            : this(registry, initializeGlobals: true)
+        {
+        }
+
+        /// <summary>
+        /// Creates a cache using the supplied document registry, optionally deferring global defaults
+        /// until a durable backing store has been hydrated.
+        /// </summary>
+        public CultCache(CultDocumentRegistry? registry, bool initializeGlobals)
         {
             _registry = registry ?? CultDocumentRegistry.Shared;
+            if (initializeGlobals)
+            {
+                MaterializeMissingGlobals();
+            }
+        }
+
+        /// <summary>
+        /// Creates default instances for global document types that do not already have a record.
+        /// Durable open paths call this after hydration so persisted globals remain authoritative.
+        /// </summary>
+        public void MaterializeMissingGlobals()
+        {
             InitializeGlobals();
         }
 
@@ -1292,6 +1429,22 @@ namespace GameCult.Caching
             foreach (var store in _backingStores)
             {
                 store.PullAll();
+            }
+
+            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+            await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Pulls persisted records selected by durable metadata from every attached backing store.
+        /// Stores without indexed selection support preserve correctness by performing a full pull.
+        /// </summary>
+        public async Task PullBackingStoreRecordsAsync(Func<CultPersistedRecordMetadata, bool> selector)
+        {
+            if (selector == null) throw new ArgumentNullException(nameof(selector));
+            foreach (var store in _backingStores)
+            {
+                store.PullSelected(selector);
             }
 
             _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
@@ -1668,6 +1821,13 @@ namespace GameCult.Caching
         {
             foreach (var descriptor in _registry.AllDescriptors.Where(candidate => candidate.IsGlobal))
             {
+                var key = new CultRecordKey($"global:{descriptor.SchemaId}");
+                if (_entries.ContainsKey(key.Value) ||
+                    _backingStores.Any(store => store.ContainsDurableRecord(key)))
+                {
+                    continue;
+                }
+
                 if (descriptor.DocumentType.GetConstructor(Type.EmptyTypes) == null)
                 {
                     continue;
@@ -1681,7 +1841,7 @@ namespace GameCult.Caching
 
                 AddStoredDocumentInternal(
                     new CultStoredDocument(
-                        new CultRecordKey($"global:{descriptor.SchemaId}"),
+                        key,
                         DateTimeOffset.UtcNow.ToString("O"),
                         descriptor,
                         instance),
@@ -1799,6 +1959,27 @@ namespace GameCult.Caching
     }
 
     /// <summary>
+    /// Durable metadata available before a backing store hydrates a record payload.
+    /// </summary>
+    public sealed class CultPersistedRecordMetadata
+    {
+        /// <summary>Creates durable record metadata.</summary>
+        public CultPersistedRecordMetadata(string key, string schemaId, string storedAt)
+        {
+            Key = key;
+            SchemaId = schemaId;
+            StoredAt = storedAt;
+        }
+
+        /// <summary>Gets the durable record key.</summary>
+        public string Key { get; }
+        /// <summary>Gets the durable schema identity.</summary>
+        public string SchemaId { get; }
+        /// <summary>Gets the record commit timestamp.</summary>
+        public string StoredAt { get; }
+    }
+
+    /// <summary>
     /// Base class for CultCache persistence adapters.
     /// </summary>
     public abstract class CacheBackingStore : IDisposable
@@ -1875,6 +2056,21 @@ namespace GameCult.Caching
         /// Pulls all persisted records into the backing store.
         /// </summary>
         public abstract void PullAll();
+        /// <summary>
+        /// Pulls records selected by durable metadata. Non-indexed stores fall back to a full pull.
+        /// </summary>
+        public virtual void PullSelected(Func<CultPersistedRecordMetadata, bool> selector)
+        {
+            if (selector == null) throw new ArgumentNullException(nameof(selector));
+            PullAll();
+        }
+        /// <summary>
+        /// Returns whether the backing store knows a record is durable, including records left cold by selective hydration.
+        /// </summary>
+        public virtual bool ContainsDurableRecord(CultRecordKey key)
+        {
+            return Entries.ContainsKey(key.Value);
+        }
         /// <summary>
         /// Pushes one stored document into the backing store.
         /// </summary>
@@ -1990,6 +2186,7 @@ namespace GameCult.Caching
         /// </summary>
         public override void PullAll()
         {
+            FileInfo.Refresh();
             if (!FileInfo.Exists)
             {
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
@@ -1997,14 +2194,49 @@ namespace GameCult.Caching
                 return;
             }
 
-            var snapshot = DeserializeSnapshot(File.ReadAllBytes(FileInfo.FullName));
+            // A single-file snapshot cannot distinguish local dirty keys from clean keys.
+            // Pulling while local mutations are staged would let an older disk snapshot
+            // erase those mutations before the next flush. Flush first; clean readers can
+            // still poll external snapshots incrementally.
+            if (IsDirty)
+                return;
+
+            CultPersistedStoreSnapshot snapshot;
+            try
+            {
+                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+            }
+            catch (FileNotFoundException)
+            {
+                FileInfo.Refresh();
+                if (!FileInfo.Exists)
+                    return;
+                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+            }
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
+            var persistedKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
+                persistedKeys.Add(record.Key);
                 reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, snapshot.SchemaCatalog));
                 var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload);
+                if (Entries.TryGetValue(stored.Key.Value, out var existing) &&
+                    string.Equals(existing.StoredAt, stored.StoredAt, StringComparison.Ordinal) &&
+                    string.Equals(existing.Descriptor.SchemaId, stored.Descriptor.SchemaId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
                 Entries[stored.Key.Value] = stored;
-                EntryAdded.OnNext(stored);
+                if (existing == null)
+                    EntryAdded.OnNext(stored);
+                else
+                    EntryUpdated.OnNext(stored);
+            }
+
+            foreach (var removedKey in Entries.Keys.Where(key => !persistedKeys.Contains(key)).ToArray())
+            {
+                if (Entries.TryRemove(removedKey, out var removed))
+                    EntryDeleted.OnNext(removed);
             }
 
             SetLastSchemaMigrationReports(reports);
@@ -2088,6 +2320,14 @@ namespace GameCult.Caching
                     File.Delete(tempPath);
                 }
             }
+        }
+
+        private static byte[] ReadAllBytesShared(string path)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return buffer.ToArray();
         }
     }
 }

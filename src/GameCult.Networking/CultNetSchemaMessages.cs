@@ -143,6 +143,22 @@ namespace GameCult.Networking
         /// CultMesh peer exchange response contract identifier.
         /// </summary>
         public const string PeerExchangeResponse = "cultmesh.peer_exchange_response.v0";
+        /// <summary>
+        /// CultMesh content chunk request contract identifier.
+        /// </summary>
+        public const string ContentChunkRequest = "cultmesh.content_chunk_request.v1";
+        /// <summary>
+        /// CultMesh content chunk response contract identifier.
+        /// </summary>
+        public const string ContentChunkResponse = "cultmesh.content_chunk_response.v1";
+        /// <summary>
+        /// CultMesh ephemeral body read request contract identifier.
+        /// </summary>
+        public const string BodyReadRequest = "cultmesh.body_read_request.v1";
+        /// <summary>
+        /// CultMesh ephemeral body read response contract identifier.
+        /// </summary>
+        public const string BodyReadResponse = "cultmesh.body_read_response.v1";
     }
 
     /// <summary>
@@ -779,6 +795,18 @@ namespace GameCult.Networking
         /// Gets or sets whether the server should send a matching snapshot before live changes.
         /// </summary>
         [Key("includeSnapshot")] public bool IncludeSnapshot { get; set; } = true;
+        /// <summary>
+        /// Gets or sets the stable consumer runtime identity used for subscription diagnostics and body-plane demand.
+        /// </summary>
+        [Key("consumerRuntimeId")] public string? ConsumerRuntimeId { get; set; }
+        /// <summary>
+        /// Gets or sets logical hot-body identities needed by this exact state subscription.
+        /// </summary>
+        [Key("bodyIds")] public string[]? BodyIds { get; set; }
+        /// <summary>
+        /// Gets or sets body transports the consumer can open, ordered by consumer preference.
+        /// </summary>
+        [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
     }
 
     /// <summary>
@@ -1301,6 +1329,82 @@ namespace GameCult.Networking
         /// Gets or sets peer cards.
         /// </summary>
         [Key("peers")] public CultMeshPeerCardMessage[] Peers { get; set; } = Array.Empty<CultMeshPeerCardMessage>();
+    }
+
+    /// <summary>
+    /// Requests one bounded content-addressed chunk over a managed CultMesh content session.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshContentChunkRequestMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema identity.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ContentChunkRequest;
+        /// <summary>Gets or sets the request correlation identity.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the canonical SHA-256 chunk identity.</summary>
+        [Key("chunkHash")] public string ChunkHash { get; set; } = string.Empty;
+        /// <summary>Gets or sets the optional canonical CultCache record key.</summary>
+        [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;
+        /// <summary>Gets or sets the manifest-bound expected payload size.</summary>
+        [Key("expectedSizeBytes")] public int ExpectedSizeBytes { get; set; }
+    }
+
+    /// <summary>
+    /// Returns one bounded content-addressed chunk without publishing it as snapshot state.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshContentChunkResponseMessage : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the wire schema identity.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.ContentChunkResponse;
+        /// <summary>Gets or sets the matching request correlation identity.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets whether a validated chunk is present.</summary>
+        [Key("found")] public bool Found { get; set; }
+        /// <summary>Gets or sets the canonical SHA-256 chunk identity.</summary>
+        [Key("chunkHash")] public string ChunkHash { get; set; } = string.Empty;
+        /// <summary>Gets or sets the payload byte count.</summary>
+        [Key("sizeBytes")] public int SizeBytes { get; set; }
+        /// <summary>Gets or sets the bounded content payload.</summary>
+        [Key("payload")] public byte[] Payload { get; set; } = Array.Empty<byte>();
+        /// <summary>Gets or sets a typed-boundary failure description when the chunk is unavailable.</summary>
+        [Key("error")] public string Error { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Requests one immutable body generation from its capability owner. Body bytes travel on this
+    /// dedicated plane; they are never database snapshot records.
+    /// </summary>
+    [MessagePackObject]
+    public class CultMeshBodyReadRequestMessage : ICultNetSchemaMessage
+    {
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.BodyReadRequest;
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        [Key("capabilityToken")] public string CapabilityToken { get; set; } = string.Empty;
+        [Key("bodyId")] public string BodyId { get; set; } = string.Empty;
+        [Key("bodySchemaId")] public string BodySchemaId { get; set; } = string.Empty;
+        [Key("layoutVersion")] public int LayoutVersion { get; set; }
+        [Key("producerEpoch")] public long ProducerEpoch { get; set; }
+        [Key("sequence")] public long Sequence { get; set; }
+        [Key("expectedSizeBytes")] public long ExpectedSizeBytes { get; set; }
+        [Key("semanticHash")] public string SemanticHash { get; set; } = string.Empty;
+    }
+
+    /// <summary>Returns one bounded immutable body generation directly to its subscriber.</summary>
+    [MessagePackObject]
+    public class CultMeshBodyReadResponseMessage : ICultNetSchemaMessage
+    {
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.BodyReadResponse;
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        [Key("found")] public bool Found { get; set; }
+        [Key("capabilityToken")] public string CapabilityToken { get; set; } = string.Empty;
+        [Key("bodyId")] public string BodyId { get; set; } = string.Empty;
+        [Key("producerEpoch")] public long ProducerEpoch { get; set; }
+        [Key("sequence")] public long Sequence { get; set; }
+        [Key("sizeBytes")] public long SizeBytes { get; set; }
+        [Key("semanticHash")] public string SemanticHash { get; set; } = string.Empty;
+        [Key("payload")] public byte[] Payload { get; set; } = Array.Empty<byte>();
+        [Key("error")] public string Error { get; set; } = string.Empty;
     }
 
     /// <summary>

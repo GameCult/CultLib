@@ -1,10 +1,10 @@
 # Distributed CDN Documents
 
-CultMesh CDN artifacts are typed CultCache documents, not a separate asset
-transport. The same manifest and chunk records can be written by an asset
-pipeline daemon, replicated through CultNet raw snapshots or shard logs, and
-read by Unity, TypeScript, or another runtime that implements the CultCache
-document contract.
+CultMesh CDN artifacts use typed CultCache storage and a separate managed
+content-delivery session. Manifests may travel through snapshots or shard logs;
+artifact payload chunks remain in provider storage and cross the network through
+`cultmesh.content.v1`. Unity, TypeScript, and other runtimes consume the same
+manifest and verification contract without making snapshots a bulk byte lane.
 
 This is the canonical path for moving Aetheria assets into CultLib. Starbridge
 Unity and Starbridge Electron should consume the same records so UI textures,
@@ -67,11 +67,11 @@ updates.
 Clients should:
 
 1. Fetch or receive a manifest by record key, tag, or index.
-2. Fetch every chunk record referenced by `manifest.Chunks`.
-3. Verify each chunk hash before copying bytes.
-4. Reassemble chunks by `Offset`.
-5. Verify the full `ContentHash`.
-6. Interpret bytes according to `MimeType` plus domain metadata.
+2. Give it to `CultMeshContentTransferService` with one or more content providers.
+3. Let that owner request missing chunks through managed content sessions.
+4. Use only the atomically promoted `<content-hash>.body` returned after chunk
+   and full-body verification.
+5. Interpret bytes according to `MimeType` plus domain metadata.
 
 Single-channel data stays single-channel. For example, a gravity map can use
 raw bytes with metadata such as `channels=r32` instead of pretending to be an
@@ -147,27 +147,20 @@ await CultMesh.PublishCdnArtifactAsync(node.Cache, artifact);
 For build distribution, use the same API with `Kind = CultMeshCdnArtifactKinds.Build`
 and metadata such as `platform=windows-x64` or `channel=internal`.
 
-## CultNet Replication
+## CultNet Publication And Delivery
 
-CDN documents use the regular raw document lane:
+Publish manifests and chunks into the provider cache:
 
 ```csharp
-var registry = CultMesh.CreateCdnDocumentRegistry(node.Cache.Registry);
-var request = registry.CreateSnapshotRequest(
-    "cdn-request",
-    schemaIds:
-    [
-        node.Cache.Registry.GetRequired<CultMeshCdnArtifactManifest>().SchemaId,
-        node.Cache.Registry.GetRequired<CultMeshCdnArtifactChunk>().SchemaId
-    ],
-    recordKeys: artifact.RecordKeys.Select(key => key.Value));
-
-var response = registry.CreateRawSnapshotResponse(node.Cache, "cdn-response", request);
+await CultMesh.PublishCdnArtifactAsync(providerCache, artifact);
+using var contentServer = new CultMeshContentServer(schemaServer, providerCache);
 ```
 
-The TypeScript client should mirror the C# schema names, schema versions,
-record-key rules, chunk hashing, and verification order. C# remains the
-reference implementation.
+Snapshots may publish the manifest record, catalog, and body-control documents.
+They must not publish `CultMeshCdnArtifactChunk` payload records for bulk
+delivery. Consumers use `CultMeshSessionContentProvider` and
+`CultMeshContentTransferService`; C# remains the reference implementation for
+record keys, hashing, resumability, and atomic promotion.
 
 ## Entity Prefabs
 
@@ -187,7 +180,8 @@ the same package graph into their native entity/component model.
 Unity and TypeScript clients should implement the same rules:
 
 - Fetch prefab packages by record key, tag, or version catalog.
-- Fetch every referenced artifact manifest and chunk.
+- Fetch every referenced artifact manifest, then delegate payload transfer to
+  the generic content-transfer owner.
 - Verify signed manifests before trusting package membership.
 - Verify chunk hashes and full artifact hashes before import.
 - Cache artifacts locally by content hash.

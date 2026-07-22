@@ -352,17 +352,8 @@ namespace GameCult.Networking
                 throw new ArgumentException("CultNet raw document message is missing its document payload.", nameof(message));
             }
 
-            ValidateRawDocumentRecord(message.Document);
-            var binding = GetBySchemaId(message.Document.SchemaId);
-            var descriptor = binding != null
-                ? _documents.GetRequired(binding.DocumentType)
-                : ResolveDescriptorForRawDocument(message.Document);
-            binding ??= new CultNetDocumentBinding(
-                descriptor.DocumentType,
-                descriptor.SchemaId,
-                value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
-                payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload));
-            var document = binding.PayloadDeserializer(message.Document.Payload);
+            var document = DeserializeRawDocument(message.Document);
+            var descriptor = ResolveDescriptorForRawDocument(message.Document);
 
             var addMethod = typeof(CultCache).GetMethod(nameof(CultCache.AddAsync))!
                 .MakeGenericMethod(descriptor.DocumentType);
@@ -371,6 +362,26 @@ namespace GameCult.Networking
             var task = (Task)addMethod.Invoke(cache, [document, optionalHandle])!;
             await task.ConfigureAwait(false);
             return document;
+        }
+
+        /// <summary>
+        /// Decodes one validated raw document without materializing it in a CultCache replica.
+        /// Use this for ephemeral reactive subscriptions whose callback is the consumer.
+        /// </summary>
+        public object DeserializeRawDocument(CultNetRawDocumentRecord document)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            ValidateRawDocumentRecord(document);
+            var binding = GetBySchemaId(document.SchemaId);
+            var descriptor = binding != null
+                ? _documents.GetRequired(binding.DocumentType)
+                : ResolveDescriptorForRawDocument(document);
+            binding ??= new CultNetDocumentBinding(
+                descriptor.DocumentType,
+                descriptor.SchemaId,
+                value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
+                payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload));
+            return binding.PayloadDeserializer(document.Payload);
         }
 
         /// <summary>

@@ -1,5 +1,9 @@
 # CultMesh Reliability Migration Plan
 
+Incident record: [CultMesh bulk content over custom RUDP, July 2026](postmortem-2026-07-cultmesh-bulk-rudp.md).
+
+Physical-plane authority: [CultMesh transport planes](transport-planes.md).
+
 ## Objective
 
 CultMesh should give an application one typed, watchable route to a Verse,
@@ -9,13 +13,14 @@ transfer recovery.
 
 The migration preserves CultCache as the typed persistence substrate and
 CultNet as the transport substrate. It moves reliability policy out of callers
-and the broad `CultMesh` convenience facade into five explicit organs:
+and the broad `CultMesh` convenience facade into six explicit organs:
 
 1. discovery control plane
 2. connection and session manager
 3. authority resolver
 4. content transfer scheduler
 5. stream control plane
+6. negotiated body transport
 
 This is an ownership migration, not a new layer wrapped around the existing
 caller-driven machinery. Each phase cuts an obsolete decision path before its
@@ -41,6 +46,34 @@ the missing control plane that keeps discovery results, sessions, and transfers
 usable while endpoints fail or move.
 
 ## Target Authority Map
+
+### Local persistence hydration
+
+**Owner:** the attached CultCache backing store owns durable record discovery;
+the consuming service owns its working-set selector.
+
+**Inputs:** an indexed manifest containing record key, schema identity, and
+commit time; an explicit metadata predicate supplied at open or at a later
+subscription boundary.
+
+**Outputs:** only selected typed documents enter the live cache. Record payload
+pages outside the working set remain durable and unopened. Indexed stores may
+hydrate an additional selection without replaying or evicting the existing hot
+set; non-indexed stores retain the correct full-pull fallback.
+
+**Derived state:** hydrated keys, dirty keys, and migration reports are local
+backing-store state. The manifest index remains the durable catalog even when a
+consumer has only a narrow working set in memory.
+
+**Forbidden writers:** service boot code must not scan page directories or
+deserialize broad snapshots to discover keys. A filtered flush must not delete
+unsubscribed records, and implicit global assembly discovery must not expand an
+explicit service registry.
+
+**Cut line:** directory manifests now carry metadata-only record indexes;
+explicit registries contain exactly the requested document types; selective
+pulls use the same indexed authority instead of reopening the store through a
+second compatibility path.
 
 ### Discovery control plane
 
@@ -103,6 +136,45 @@ must never confer authority.
 **Demotion:** an advertised peer card is only contact evidence. It is never an
 authorization result.
 
+#### Phase 3 body map
+
+**Owner:** `CultMeshAuthorityResolver` is the only component that decides
+whether a peer may act. Decisions are evaluated on demand and are never cached
+as grants.
+
+**Inputs:** `CultMeshAuthorityRequest`, an `ICultMeshAuthorityLeaseSource`, an
+`ICultMeshAuthoritySignatureVerifier`, an
+`ICultMeshAuthorityRevocationSource`, the current authority epoch, and an
+injected `ICultMeshClock`.
+
+**Outputs:** `CultMeshAuthorityDecision`, carrying either the accepted lease
+evidence identifiers or one typed denial reason. Authority diagnostics carry
+lease, peer, and issuer identifiers but never signature material.
+
+**Derived state:** peer selection is a projection over contact candidates and
+fresh resolver decisions. The lease catalog is only a mutable evidence source;
+the peer catalog is only a contact source.
+
+**Forbidden writers:** lease replacement, peer-card publication, successful
+transport connection, cached presence, and wall-clock defaults cannot grant or
+restore authority. Revocation and epoch policy remain outside both catalogs.
+
+**Shared paths:** gameplay sessions expose their resolver; peer selection and
+both privileged RUDP creation paths call that resolver. Compatibility overloads
+delegate to the same resolver with deny-by-default signature policy.
+
+**Cut line:** `CultMeshAuthorityLease.Covers`,
+`CultMeshAuthorityLeaseCatalog.IsAuthorized`, and catalog-owned
+`FindAuthorized`/`FirstAuthorized` no longer contain authorization logic.
+Version-zero or unsigned leases are not reinterpreted as trusted epoch-zero
+leases. Callers must supply a version-one lease, explicit epoch, signature
+verifier, and revocation source.
+
+**Compatibility inventory:** the old lease/catalog peer-selection and RUDP
+overloads remain source-compatible for migration, but cannot authorize because
+they have no signature-verification authority. They delegate to a
+deny-by-default resolver and should be replaced by resolver-taking overloads.
+
 ### Content transfer scheduler
 
 **Owner:** `CultMeshContentTransferService`.
@@ -143,6 +215,33 @@ latest-frame cache must not own stream identity or publisher liveness.
 
 **Demotion:** the current in-process stream catalog becomes a local projection
 and body adapter. It is not the distributed stream registry.
+
+### Negotiated body transport
+
+**Owner:** `CultMeshBodyTransportService` owns representation negotiation and
+the lifetime of transport-specific body access. It does not own body identity,
+publisher authority, content integrity, or application semantics.
+
+**Inputs:** a typed body descriptor, authorized producer lease, consumer
+capabilities, locality evidence, schema/layout support, transport adapters,
+clock, and access policy.
+
+**Outputs:** a read-only body lease by default, bound to one logical body
+identity, schema/layout version, producer epoch, sequence, and negotiated
+transport. Local peers may receive an OS-handle capability token; remote peers
+receive the same typed body through the network representation.
+
+**Derived state:** transport preference, local/remote eligibility, mapped
+region or file-handle lifetime, slot availability, and lease expiry.
+
+**Forbidden writers:** process IDs, virtual addresses, mapping names, OS
+handles, and transport endpoints cannot become logical identity. A successful
+mapping cannot authorize a producer, extend a lease, bless content, or permit a
+consumer to mutate the body.
+
+**Demotion:** shared-memory regions and file mappings are body adapters. They
+do not become a local message bus, alternate discovery plane, or source of
+authority.
 
 ## Shared Public Shape
 
@@ -201,6 +300,36 @@ failure.
 - Tests can observe the public session/document state, not only internal
   counters.
 - Diagnostics have bounded cost and can be disabled or sampled on hot paths.
+
+### Phase 0 Body Map
+
+**Owner:** reliability organs own their clocks and emit typed observations;
+`CultMeshDiagnosticBuffer` owns only a bounded inspection projection.
+
+**Inputs:** injected `ICultMeshClock`, organ state transitions, endpoint and
+source identity, reason code, and served schema/library version.
+
+**Outputs:** ordered `CultMeshDiagnosticEvent` observations. The deterministic
+test network emits scheduled packet deliveries under loss, duplication,
+reordering, latency, partition, endpoint rotation, corruption, and restart.
+
+**Derived state:** diagnostic sequence and the bounded recent-event window.
+Neither confers reachability, authority, or retry policy.
+
+**Forbidden writers:** diagnostic sinks and fault harnesses cannot choose a
+route, mutate discovery candidates, authorize a peer, or repair a session.
+
+**Shared paths:** the existing Verse discovery client now uses the injected
+clock for connection and response deadlines and emits the same typed timeline
+for success, timeout, and transport failure.
+
+**Cut line:** wall-clock reads and unobservable timeout delays have been removed
+from Verse discovery. Caller-owned catalog mutation and endpoint sequencing
+remain compatibility authority until Phase 1 replaces and demotes them.
+
+**Verification layer:** tests observe the emitted discovery timeline and served
+version, while the deterministic network harness proves exact replay of every
+required hostile-network action.
 
 ## Phase Closure Contract
 
@@ -265,6 +394,55 @@ retain an independent endpoint loop or catalog opinion.
 - A poisoned or unsigned observation cannot override an accepted signed
   candidate.
 
+### Phase 1 Body Map
+
+**Owner:** `CultMeshDiscoveryService` owns current candidate observations,
+freshness, source failures, positive/negative expiry, and shared in-flight
+lookup work for a stable identity plus constraints.
+
+**Inputs:** `ICultMeshLookupSource` observations, injected clock, optional
+`ICultMeshDiscoveryStore`, query identity/Verse constraints, and caller-local
+cancellation.
+
+**Outputs:** watchable `CultMeshDiscoveryState` projections with fresh,
+degraded, stale, or unavailable status; persisted
+`gamecult.mesh.discovery_state.v1` last-known-good documents; typed diagnostic
+events.
+
+**Derived state:** failed-source lists, retry-after time, candidate ordering,
+and legacy `CultMeshVerseCatalog` contents. The catalog is no longer a lookup
+writer.
+
+**Forbidden writers:** lookup sources cannot replace the candidate set, caller
+cancellation cannot cancel shared lookup work, and rejected observations cannot
+override accepted candidates.
+
+**Shared paths:** direct service callers and compatibility `DiscoverAsync`
+both use concurrent source lookup and the same freshness merge. Compatibility
+projects the service result into the old catalog only after resolution.
+
+**Cut line:** sequential fail-fast endpoint lookup and per-response catalog
+mutation have been removed from Verse discovery. Physical endpoint lookup
+remains available only as a compatibility source observation.
+
+**State transition:** restart loads the typed CultCache discovery document.
+Expired candidates remain inspectable as stale; unavailable results retain a
+bounded negative expiry before sources are queried again.
+
+**Compatibility inventory:** `AetheriaRuntimeVerseDiscovery` remains the only
+known caller of `DiscoverAsync(catalog, endpoints)`. It receives the service
+projection now and should migrate to watching `CultMeshDiscoveryState` during
+the Phase 2 Aetheria session migration.
+
+**Rollback:** revert the service, store document, and compatibility delegation
+as one unit. Do not run sequential catalog mutation alongside service-owned
+resolution.
+
+**Proof:** Mesh tests cover concurrent good/dead sources, shared in-flight work,
+caller-local cancellation, negative expiry, signed precedence, stale-on-error,
+public state watches, and CultCache restart reconstruction. Networking tests
+prove the compatibility method retains a good concurrent source.
+
 ## Phase 2: Long-Lived Sessions
 
 ### Cut first
@@ -303,6 +481,101 @@ transient outage, or hand-assemble snapshot options from physical topology.
   unsupported-path result.
 - The legacy request path cannot open a second competing session.
 
+### Phase 2 Body Map
+
+**Owner:** `CultMeshSessionManager` owns physical path selection, replacement,
+and reconnect. A live document or collection binding owns only its logical
+subscription intent and readiness promise.
+
+**Inputs:** stable endpoint and protocol identity, discovery candidates,
+connector results, session state transitions, typed schema and record filters,
+and client disposal.
+
+**Outputs:** one reusable logical session, subscription replay on each new
+online physical incarnation, cache-backed typed handles, and readiness after
+the first successful snapshot from any incarnation.
+
+**Derived state:** physical client identity and generation, attempt count,
+cached snapshots, and online/reconnecting/offline projections. The session
+increments the generation only after replacing its physical channel. A binding
+may coalesce duplicate subscription attempts within that generation, but a
+pending request from an older generation cannot suppress replay. No individual
+request owns the logical handle. Within one healthy generation, an unanswered
+subscribe request expires on the client policy deadline and the binding
+replays the same idempotent subscription intent; the caller does not own this
+retry loop.
+
+**Forbidden writers:** bindings and schema clients cannot choose endpoints,
+replace channels, reconnect, or declare session state. An abandoned initial
+subscribe request cannot block a replacement request from satisfying logical
+readiness.
+
+**Shared paths:** initial open and reconnect both use session-manager path
+resolution. Document and collection activation both replay the same binding
+intent once per physical generation when the logical session returns online.
+
+**Cut line:** the initial subscribe no longer runs before reconnect observation,
+and a per-binding semaphore no longer lets an unanswered physical request hold
+all later replay attempts. Bindings become client-owned resources before
+waiting for readiness, so disposal terminates pending opens.
+
+**Verification layer:** Mesh tests lose the first document and collection
+snapshot, fail the physical client, and prove the replacement snapshot opens
+the same logical handle exactly once. A disposal test proves a pending open
+cannot survive its owning client. Another test drops a subscription response
+without dropping the physical path and proves the same binding becomes ready
+after bounded replay. The Aetheria/EveUnity witness proves provider
+discovery, live SoA state, commands, receipts, and assets through the migrated
+session path.
+
+### Phase 2 TypeScript provider-lifecycle slice
+
+**Owner:** `CultMeshProviderSession` owns one TypeScript provider's discovery
+registration, lease renewal, physical reconnect, desired typed publication
+replay, command dispatch, receipt publication, and explicit withdrawal. It is
+keyed by provider, service-instance, endpoint, and Verse identity; those
+identities are never collapsed.
+
+**Inputs:** an injected `CultMeshProviderTransport`, stable provider identity,
+lease/reconnect policy, desired typed publications, domain command handlers, a
+required durable receipt store, and an injected scheduler.
+
+**Outputs:** watchable connecting/active/reconnecting/withdrawing/stopped
+state, current lease evidence, ordered document publication, a durable typed
+receipt outbox, and withdrawal of the lease plus remaining publications.
+
+**Derived state:** reconnect attempt, backoff, current physical connection, and
+the in-flight duplicate-command set. Pending receipt delivery is derived from
+the durable receipt store, not volatile session memory. Provider state, Eve surface semantics,
+command effects, endpoint discovery evidence, and body-producer identity are
+not derived by the session.
+
+**Forbidden writers:** renderers, HTML exporters, and scheduled projection
+scripts may not register providers, renew leases, reconnect, publish receipts,
+or withdraw provider state. A transport connection cannot mutate provider
+domain state or treat successful delivery as authorization.
+
+**Shared paths:** initial connect and reconnect both register, subscribe, and
+replay the same desired publication set. Live publication updates use one
+serialized lane, so an older update cannot arrive after a newer one. Duplicate
+command deliveries share one in-flight transaction and later deliveries reuse
+the durable receipt. A receipt is stored before publication and marked only
+after acceptance; reconnect drains pending receipts before command intake.
+
+**Cut line:** TypeScript one-shot RUDP publication helpers remain low-level
+compatibility surfaces, not provider lifecycle owners. VoidBot's swarm renderer
+is the first identified obsolete owner; its provider catalog mutation,
+publication, reconnect, and receipt paths must be deleted when it adopts this
+session. That consumer migration is still open and must not run both owners.
+
+**Verification layer:** deterministic TypeScript tests prove initial
+registration, renewal, stable publication order, reconnect and replay,
+duplicate receipt reuse, explicit withdrawal, and the negative stop-during-
+registration timeline, durable receipt replay, observer isolation, conflicting
+command IDs, and exception-safe shutdown. The empty-consumer tarball smoke proves the session is
+present in the installable `cultmesh-ts` package. A live Odin transport adapter
+and the VoidBot migration remain required for the production proof.
+
 ## Phase 3: Authority as a Mandatory Boundary
 
 ### Cut first
@@ -327,6 +600,197 @@ transient outage, or hand-assemble snapshot options from physical topology.
 - Manual and programmatic operations use the same authority primitive.
 
 ## Phase 4: Verified Content Transfer
+
+### Phase 4 first-slice body map
+
+**Owner:** `CultMeshContentTransferService` owns verified partial state and the
+only promotion path into the completed content cache. Work is serialized and
+shared by normalized content hash; provider identity is never part of content
+identity or the destination name.
+
+**Inputs:** a validated CDN manifest, ordered `ICultMeshContentProvider`
+observations, a typed CultCache checkpoint store, a canonical cache directory,
+and caller cancellation.
+
+**Outputs:** a complete read-only-by-convention body path named by SHA-256, or
+a failure with no completed body. `gamecult.mesh.content_transfer_state.v1`
+records verified chunk indexes keyed by content hash.
+
+**Derived state:** missing chunks, provider failover order, deterministic
+partial-file path, manifest fingerprint, and completed cache path. A provider
+success is evidence only for the returned chunk; it does not confer publisher
+authority.
+
+**Forbidden writers:** callers, renderers, providers, manifests, and the legacy
+async CDN reader cannot publish a final body or mark a range verified. CultCache
+checkpoint claims are rehashed against the partial body before reuse.
+
+**Shared paths:** direct transfers and the legacy distributed-database reader
+both pass through the same chunk verification, full-hash verification, and
+atomic promotion primitive. Concurrent requests for one hash share the same
+per-content transfer lock and verified work.
+
+**Cut line:** the legacy distributed reader no longer owns a sequential chunk
+loop or whole-artifact allocation. The transfer owner now opens a bounded
+per-content request window while preserving one ordered writer/checkpointer.
+Adaptive scheduling, quotas, pinning, signer policy, arbitrary streaming
+destinations, and cleanup scheduling remain later Phase 4 work.
+
+**State transition:** each verified chunk flushes a typed checkpoint. Restart
+rehydrates that record, rehashes every claimed range, and fetches corrupt or
+unclaimed chunks again. Completion verifies the entire partial file, atomically
+promotes it, and removes the checkpoint. Cancellation leaves only re-verifiable
+partial state.
+
+**Verification layer:** focused tests cover durable cancellation/restart,
+provider corruption and failover, forged checkpoint rejection, final-hash
+failure, atomic visibility, concurrent request coalescing, bounded concurrent
+fetch, ordered checkpointing under out-of-order completion, and observation of
+the whole request window after an early failure. Existing CDN tests cover the
+compatibility reader.
+
+### Phase 4 managed content-session slice
+
+**Owner:** `CultMeshContentTransferService` still owns verification, resumable
+state, provider failover, and atomic promotion. `CultMeshSessionContentProvider`
+owns only one bounded request/response projection over a reusable
+`cultmesh.content.v1` session; `CultMeshContentServer` owns only serving
+canonical content-addressed chunks from provider storage.
+
+**Inputs:** stable provider endpoint identity, the shared session manager, a
+validated manifest chunk reference, provider CultCache content, response
+deadline, and caller cancellation.
+
+**Outputs:** one manifest-bound chunk response to the transfer service. The
+session manager retains connection/reconnect/path authority, and the transfer
+service decides whether the response becomes verified partial state.
+
+**Derived state:** request correlation identities and content-session physical
+channels. Neither is content identity, authority evidence, or cache truth.
+
+**Forbidden writers:** snapshot servers cannot embed artifact payloads in raw
+document responses; the session provider cannot write partial/final files,
+mark ranges verified, choose a replacement endpoint, or authorize a producer.
+
+**Shared paths:** every cold network chunk enters the same incremental and
+final verification path used by database and test providers. Concurrent chunks
+borrow the same logical content session.
+
+**Cut line:** bulk CDN bytes no longer require
+`CultNetSnapshotResponseRawMessage` records. Snapshots retain manifests and
+descriptors; the managed content protocol carries bounded payload responses.
+
+**Verification layer:** Mesh tests transfer a multi-chunk body through one
+managed session, assert zero snapshot requests, assert warm committed reuse
+without another network request, and round-trip both wire messages through the
+schema dispatcher. RUDP schema hosts and managed clients distinguish transport
+progress from dispatched messages and drain bounded available work without
+idle sleeps. Wire sends cooperatively yield after each 32-packet acknowledgement
+window without sleeping for a Windows scheduler quantum; a real UDP
+content-session test transfers a four-chunk, one-megabyte request window through
+the public transfer owner within its ten-second regression bound.
+The released EveUnity/Aetheria `cold-start-lowering` run now promotes the
+46,412,384-byte bundle to its exact SHA-256 `.body` under the unchanged
+300-second deadline with no partial left behind. It starts with zero bodies,
+lowers the provider-owned world after promotion, and proves pilot/map camera
+separation. The separate `full-session-gameplay` profile starts a fresh warm
+daemon session and proves combat, destruction-created canonical loot, Ymir
+contact collection, and exactly-once cargo mutation. This split is deliberate:
+cold download latency does not own the lifetime of transient gameplay objects.
+Content-session delivery and product lifecycle are proven without claiming a
+mapped/zero-copy transfer; the managed session still copies and fragments the
+body in process.
+
+### Phase 4 transport parity and body-plane cut
+
+**Owner:** CultMesh negotiation selects a body transport from provider-owned
+capabilities and consumer demand. The selected transport owns byte movement;
+`CultMeshContentTransferService` continues to own content identity, resumable
+verification, and atomic cache promotion. TCP owns remote immutable content;
+CultNet RUDP does not own bulk-body performance.
+
+**Inputs:** content hash and size, provider-advertised transport candidates,
+consumer-supported transports, same-machine evidence, and platform support.
+
+**Outputs:** an authorized mapped body for same-machine deployments, or a
+dedicated TCP byte stream feeding the existing verification/promotion owner.
+Schemas, commands, receipts, and manifests use framed TCP CultNet messages.
+Realtime state uses a separately negotiated QUIC stream or datagram and is not
+smuggled through either snapshots or the immutable-content stream.
+
+**Derived state:** selected plane, physical endpoint, mapped-file descriptor,
+stream progress, and transport telemetry. None can change content identity,
+provider authority, or the final verified cache record.
+
+**Forbidden writers:** applications and renderers cannot choose an unadvertised
+path or turn a local filesystem path into authority. Snapshot and schema-message
+helpers cannot regain ownership of immutable body bytes. A remote stream cannot
+publish a completed body without the transfer owner's hash verification and
+atomic promotion.
+
+**Shared paths:** every remote plane terminates in the same partial-file,
+checkpoint, final-hash, and promotion primitives. Same-machine mapping uses the
+same advertised content hash and provider authorization but does not copy the
+body merely to prove that two processes inhabit one machine.
+
+**Cut line:** request-window and scheduler-yield tuning is not the bulk-content
+roadmap. RUDP remains a compatibility fallback while dedicated stream and local
+mapping planes are integrated. The old fallback stays unable to become the
+preferred same-machine or remote bulk plane through timing tweaks.
+
+**Parity evidence:** `tools/GameCult.TransportParity` measures the public
+CultMesh RUDP content path against file mapping, TCP, and .NET's MsQuic-backed
+QUIC stream with the Aetheria 56,204,750-byte body size. On the 2026-07-19
+Windows development host, a representative released-source run opened the
+existing mapped body in 10.9 ms, moved and verified it over TCP in 213.8 ms
+(250.7 MiB/s), moved and verified it over QUIC in 753.4 ms (71.1 MiB/s), and
+moved it through CultMesh RUDP in 5,322.9 ms (10.1 MiB/s) while emitting
+129,241,066 server bytes. Repeated QUIC runs reached 87.0-107.4 MiB/s; repeated
+RUDP runs reached 10.1-13.0 MiB/s. This is a plane-selection result, not a case
+for a more elaborate home-grown congestion controller.
+
+**Dedicated references:** .NET's stable `System.Net.Quic` API delegates to
+MsQuic on supported platforms:
+https://learn.microsoft.com/dotnet/fundamentals/networking/quic/quic-overview.
+MsQuic publishes its performance methodology and dashboard at
+https://microsoft.github.io/msquic/. Valve GameNetworkingSockets remains a
+candidate for the cross-platform realtime message plane because it provides
+reliable/unreliable messages, acknowledgement vectors, fragmentation,
+congestion behavior, encryption, and priority lanes:
+https://github.com/ValveSoftware/GameNetworkingSockets.
+
+### Phase 5 verified CDN mapped-body slice
+
+**Owner:** `CultMeshContentTransferService` remains the sole writer and promoter
+of completed CDN bodies. `CultMeshVerifiedBodyMappingBroker` owns only ephemeral,
+opaque capability-to-file grants for those completed bodies. Body negotiation
+and producer authorization remain owned by `CultMeshBodyTransportService`.
+
+**Inputs:** the atomically committed `<sha256>.body` path returned by transfer,
+the equivalent network body descriptor, and a bounded lease.
+
+**Outputs:** a read-only file-mapping descriptor for the same logical generation.
+Multiple consumers map the same completed cache file and therefore share the OS
+page cache; no process-sized byte array or republished body file is created.
+`CultMeshMappedContent` binds that descriptor to the exact final path returned
+by the transfer owner, so runtime lowerers never reconstruct cache layout.
+
+**Derived state:** opaque capability tokens and their expiry. Tokens are neither
+content hashes nor paths and do not confer producer authority or content trust.
+
+**Forbidden writers:** the mapping broker and adapter cannot create, promote,
+rename, repair, or map partial/checkpoint files. `CultMeshMappedBodyPublisher`
+is not used for verified CDN content.
+
+**Shared paths:** local and network descriptors preserve body identity,
+schema/layout, capacity, producer epoch, sequence, and byte size. Local open
+failure is observed by body negotiation and falls back to that network
+representation.
+
+**Cut line:** there is no second CDN publication path. Mapping is granted only
+after the transfer owner returns its verified final file. The compatibility
+descriptor-only method delegates to the path-and-descriptor result rather than
+repeating transfer or cache-path policy.
 
 ### Cut first
 
@@ -356,7 +820,331 @@ transient outage, or hand-assemble snapshot options from physical topology.
   state.
 - The old renderer-owned downloader can no longer write the final cache entry.
 
-## Phase 5: Distributed Stream Control
+## Phase 5: Negotiated Zero-Copy Data Plane
+
+CultNet/CultMesh remains the control plane for identity, discovery, schemas,
+capabilities, leases, epochs, liveness, receipts, and body-transport
+negotiation. The existing network representation remains the remote path and
+the fallback whenever local negotiation, handle transfer, schema validation,
+or lease validation fails.
+
+### Cut first
+
+- Stop embedding process-local mapping names, process IDs, virtual addresses,
+  or native handles in logical body identity.
+- Stop local body adapters from interpreting transport access as producer
+  authority or content validity.
+- Do not create a general shared-memory message bus for reactive documents,
+  commands, advertisements, or receipts.
+
+### Body contract
+
+Define one typed shared-body descriptor containing:
+
+- logical body identity
+- schema identity and layout version
+- byte size and logical capacity
+- producer epoch and body sequence
+- access mode
+- synchronization method
+- lease expiry
+- transport kind
+- an opaque OS-handle capability token when negotiated locally
+
+The capability token is scoped, expiring transport material. It is never
+serialized as durable identity. The same descriptor semantics must bind a
+local shared-memory body and its remote network representation.
+
+### Build order
+
+1. Define the transport-neutral typed body descriptor, lease, adapter ports,
+   and validation rules.
+2. Negotiate shared-memory capability and exchange OS handles through an
+   authenticated platform adapter; retain network fallback.
+3. Map immutable CultMesh CDN artifacts as content-addressed, file-backed,
+   read-only bodies keyed by verified hash so processes share OS page cache.
+4. Map fixed-capacity, schema-versioned SoA frame regions using triple
+   buffering or an epoch/sequence protocol. Consumers receive read-only views,
+   detect stale epochs, and never receive raw pointers.
+5. Add local/remote equivalence, fallback, reconnect, crash, corruption, and
+   conformance tests.
+6. Profile copy volume, latency, memory pressure, page-cache reuse, frame
+   drops, and lease contention under real EveUnity/Aetheria workloads.
+7. Decide from measurements whether ordinary local control traffic merits a
+   separate shared-memory lane. Do not build that lane as part of this phase.
+
+### Frame-region authority
+
+**Owner:** `CultMeshFrameRegion` is the sole owner of one fixed-capacity,
+schema/layout-versioned, producer-epoch-bound triple buffer. It owns slot
+storage, write reservations, reader protection, publication metadata, latest
+generation selection, sequence advancement, and contention statistics.
+
+**Inputs:** logical body identity, schema identity, layout version, logical
+capacity, producer epoch, slot byte length, frame bytes, and commit metadata.
+The bounded producer contract permits at most one outstanding write reservation
+for the region, so sequence assignment and slot reservation cannot diverge.
+
+**Outputs:** bounded write leases, immutable generation descriptors, read-only
+consumer leases, and owner-derived statistics. Publication installs bytes and
+metadata as one locked commit and advances sequence exactly once.
+
+**Derived state:** `CultMeshSharedMemoryFrameRing` handles and statistics are
+compatibility projections of region generations. Capability tokens remain
+transport material and do not participate in frame identity or generation
+validation.
+
+**Forbidden writers:** the compatibility ring has no slot buffers, cursors,
+reader counts, latest-slot state, frame-handle catalog, sequence counter, or
+independent commit path.
+
+**Shared paths:** direct SoA writes, compatibility zero-copy writes, and
+compatibility copy publication all reserve and commit through
+`CultMeshFrameRegion`. Direct and compatibility reads acquire the same owner
+lease and release the same reader count.
+
+**Cut line:** the former ring-owned arrays and counters are removed. A frame
+region always has exactly three slots; construction with another slot count is
+rejected rather than creating a second buffering model.
+
+### Required invariants
+
+- Only an explicitly authorized producer may publish or advance a body.
+- Consumers are read-only unless a distinct contract explicitly grants write
+  authority.
+- Producer or broker death invalidates leases without requiring cooperative
+  cleanup from the dead process.
+- A producer cannot overwrite a slot while any valid consumer lease protects
+  it.
+- Schema/layout, producer epoch, and sequence mismatches are rejected before
+  bytes are interpreted.
+- Reconnect creates a new validated lease and cannot reinterpret stale mapped
+  memory from an earlier producer epoch.
+- Content hash integrity remains distinct from publisher identity and
+  authority.
+- Negotiation failure is observable and falls back to the network body without
+  changing logical body identity.
+
+### Phase 5 local/remote conformance slice
+
+**Owner:** `CultMeshBodyTransportService` owns representation selection for one
+validated logical generation. Each transport adapter owns only acquisition and
+pre-interpretation validation of its representation. Producer authorization is
+an independent input to negotiation; a valid digest never grants authority.
+
+**Inputs:** equivalent local and network descriptors, the consumer's expected
+body identity/schema/layout/capacity/epoch/sequence, an authorized-producer
+decision, registered transport adapters, and network bytes carrying the
+descriptor-bound semantic digest.
+
+**Outputs:** one read-only lease for the selected representation plus a typed
+negotiation result that records the selected transport and any rejected local
+attempt. Local and network leases expose the same logical descriptor fields and
+semantic bytes.
+
+**Derived state:** local preference, adapter availability, and fallback reason
+are negotiation state only. Capability tokens and network fetch details remain
+transport material and cannot alter logical body identity.
+
+**Invariants:** both descriptors must agree on body identity, schema, layout,
+byte size, capacity, producer epoch, sequence, synchronization, access mode,
+and semantic digest before either representation is opened. Lease expiry is
+representation lifetime, validated independently for each descriptor; it is
+not logical generation identity because a local broker may issue a shorter
+capability lease than the network representation.
+Expected schema, layout, capacity, epoch, and sequence are validated before a
+network fetch. Fetched network bytes are digest-verified before a lease is
+created or any typed read is possible. Digest integrity does not authorize the
+publisher.
+
+**Forbidden writers:** adapters, fallback handling, capability material,
+network payloads, and integrity checks cannot rewrite logical identity or grant
+producer authority. A failed local adapter cannot repair, mutate, or reinterpret
+the network descriptor.
+
+**Shared paths:** successful local open and network fallback use the same
+logical-generation equivalence check and consumer validation request. Direct
+network consumption uses the same pre-interpretation descriptor and digest
+validation as fallback consumption.
+
+**Cut line:** replace exception-only fallback reporting with a typed negotiation
+result while retaining the existing overload as a delegating compatibility
+surface. Add only descriptor-bound semantic integrity; do not add a shared-memory
+control bus, content-authority inference, reconnect policy, or profiling hooks.
+
+**Verification layer:** conformance tests compare descriptor semantics and full
+bytes across file mapping, shared memory where supported, direct network, and
+network fallback. Negative tests prove stale schema/epoch/sequence are rejected
+before fetch, corrupt network bytes never produce a lease, local failure is
+reported, fallback preserves identity, and authorization is evaluated separately
+from content integrity.
+
+### Phase 5 exact-demand body map
+
+**Owner:** `CultMeshBodyDemandTracker` owns the live derivation from retained,
+exact database subscriptions to the transport representations a producer must
+publish. The provider owns body contents. A body adapter owns only access to
+one representation. A renderer owns none of those decisions.
+
+**Inputs:** consumer runtime identity, exact logical body IDs, advertised
+consumer transport capabilities, and server-observed peer locality. A
+same-machine claim selects shared memory only when the transport peer is
+actually loopback and the consumer explicitly supports shared memory. When
+named shared memory is unavailable but the consumer can map files, the same
+locality proof selects shared-file mapping before network.
+
+**Outputs:** a per-body plan requiring shared memory, network, both, or no
+publication. Producers use that plan before allocating, copying, hashing, or
+packaging a representation.
+
+**Derived state:** transport preference and publication work are notification
+state derived from active subscriptions. Heavy database snapshots remain
+bootstrap/recovery state. They are not a frame delivery mechanism.
+
+**Forbidden writers:** providers cannot infer demand from renderer identity;
+renderers cannot choose a provider-specific plane; CDN publication cannot run
+unconditionally beside a local mapped write; body descriptors cannot create
+stream demand merely by existing.
+
+**Shared paths:** subscribe, resubscribe, replacement, explicit unsubscribe,
+and server disposal all update the same typed demand projection. Stable peer
+identity, not per-message wrapper identity, keys subscription lifetime.
+
+Exact reactive document demand carries the requested record and schema set even
+when no hot body is involved. Providers may use that demand to materialize
+computed documents lazily; the subscription watch exists before activation is
+reported, so frame zero is delivered on the live path. Dynamic state is not
+forced back through a broad snapshot merely because the record did not exist at
+subscribe time.
+
+The client installs the declared delivery mode before sending the subscription.
+A provider may publish synchronously from demand activation, so a live change
+can correctly precede the empty bootstrap acknowledgement without briefly
+becoming durable replica state.
+
+`CultMesh.SubscribeLiveBodyAsync(...)` is the narrow public construction path.
+Its `CultMeshLiveBodySubscription` names only the logical body, consumer, and
+subscription lifetime. `CultMeshLiveBody` owns the ephemeral latest-publication
+value and opens the current generation through the fastest valid representation
+the resolver can actually import. Layout and other small state are independent
+exact reactive values, so changing one variable does not redeliver an unrelated
+view document or body. A subscription may predate frame zero: absence is an
+uninitialized live value, not a failed subscription, and demand remains active
+until the first descriptor arrives.
+
+`CultMesh.SubscribeHotBodyAsync(...)` remains the grouped compatibility path. Its
+`CultMeshHotBodySubscription` keeps the exact view record, the body's stable
+latest-publication record, consumer identity, and logical body demand in one
+contract. The local `CultMeshBodyTransportService` contributes only adapters it
+can actually open, ordered shared-memory first; the server combines those
+capabilities with observed peer locality. Applications do not hand-assemble
+transport-name arrays or request one snapshot per frame. Hot-body subscriptions
+default to `Live`: their exact initial metadata is decoded for bootstrap, then
+subsequent layout/publication changes remain ephemeral notifications. Durable
+cache replication is an explicit opt-in for consumers that actually own a
+replica requirement.
+
+### Reactive document delivery body map
+
+**Owner:** the subscription declaration owns whether a selected typed document
+is durable replica state or an ephemeral live value. The provider still owns
+the value; the transport and renderer own neither its persistence nor meaning.
+
+**Inputs:** exact record/schema filters and an explicit
+`CultNetDatabaseSubscriptionDeliveryMode`. `ReplicateToCache` materializes
+bootstrap and durable state before notification. `Live` validates and decodes
+the same typed payload, then notifies the subscriber without a replica write.
+High-rate body subscriptions select `Live` by default; general database
+subscriptions retain the durable default because CultMesh cannot infer their
+ownership contract.
+
+**Outputs:** both modes produce the same typed initial values and change event.
+Only durable replication mutates the consumer's CultCache.
+
+`CultNetDatabaseSubscriptionClient.SubscribeLiveValueAsync<T>(...)` is the
+single-record ergonomic path. Its `CultNetLiveValue<T>` owns the exact
+record/schema filter, current value, typed change/removal notifications, and
+unsubscribe lifetime. Consumers no longer need a process-wide change handler,
+an object type switch, or a renderer-local replica cache to model one reactive
+variable. The value may start absent and become initialized on its first matching
+change without resubscribing.
+
+**Derived state:** renderer-local presentation and reactive variables are
+derived from live notifications. They are not database records merely because
+CultNet carried them.
+
+**Forbidden writers:** renderers and products cannot add polling, keepalive
+writes, or broad snapshots to repair callback latency. Ephemeral receipts,
+input facts, and frame-layout notifications cannot silently become disk-backed
+replica history.
+
+**Shared paths:** exact subscription filters, wire schema validation,
+deserialization, unsubscribe, disconnect cleanup, and body-demand negotiation
+are identical in both modes. Only the final materialization decision differs.
+
+**Cut line:** `CultNetDatabaseSubscriptionClient` no longer requires every
+received document to complete a CultCache write before the consumer may see it.
+Durable documents retain the existing replica path; live values bypass it.
+
+**Cut line:** local frame publication writes directly into a mapped write lease
+and commits its descriptor. The compatibility byte-array publisher is copy-in
+only. The current remote frame representation may still use the verified CDN
+body path when remote demand exists; Phase 6 must replace that expiry-sensitive
+traffic with a stream/datagram body plane rather than enlarging snapshot or CDN
+timeouts.
+
+### RUDP session mutation body map
+
+**Owner:** each socket transport binding serializes access to its own RUDP
+reliability session. The server owns one serialization gate per peer; a client
+connection owns one gate for its session.
+
+**Inputs:** concurrent typed publication, command and receipt sends, inbound
+ACK/data processing, handshake state, timeout checks, and resend polling.
+
+**Outputs:** one coherent packet sequence and fragment stream per peer, with
+reliable-packet bookkeeping updated in the same critical section as packet
+creation and transmission.
+
+**Derived state:** schema messages, database subscriptions, and Eve reactive
+variables are consumers of the reliable control plane. They do not own packet
+ordering and must not serialize their own publication loops.
+
+**Forbidden writers:** daemon schedulers, renderers, and provider sessions
+cannot mutate `CultNetRudpSession` directly or add retries, replacement
+snapshots, and artificial publication delays to compensate for concurrent
+transport calls.
+
+**Shared paths:** application send, receive/ACK, resend, connect, disconnect,
+ping, and timeout inspection all enter through the same per-session gate.
+Fragments belonging to one logical send are emitted before another thread may
+allocate sequence numbers for that peer.
+
+**Cut line:** all socket-backed `CultNetRudpSession` mutation is behind the
+transport-owned gate. Product code no longer has to choose between concurrent
+simulation publication and reliable delivery.
+
+Reliable control messages larger than the RUDP receive mask explicitly
+acknowledge the packet just received. A retransmit older than the rolling
+32-packet summary can therefore always leave the sender queue; the rolling mask
+remains useful for piggyback acknowledgements but is not allowed to strand a
+fragment indefinitely.
+
+### Gate
+
+- Two local consumers map one verified CDN artifact without duplicate process
+  copies and observe identical content identity through the network fallback.
+- An EveUnity consumer reads successive SoA generations without torn frames,
+  raw pointers, or overwrite of a leased slot.
+- Producer crash, lease expiry, schema upgrade, epoch rollover, and reconnect
+  all reject stale mappings before interpretation.
+- A forged handle token, unauthorized producer, writable consumer request, or
+  valid hash from an unauthorized publisher cannot cross its respective
+  authority boundary.
+- Local and remote conformance packs expose the same typed body lifecycle and
+  semantic payload.
+
+## Phase 6: Distributed Stream Control
 
 ### Cut first
 
@@ -386,7 +1174,7 @@ transient outage, or hand-assemble snapshot options from physical topology.
 - Local zero-copy and remote fallback paths expose the same stream identity and
   lifecycle.
 
-## Phase 6: Consumer Convergence and API Reduction
+## Phase 7: Consumer Convergence and API Reduction
 
 Migrate consumers in increasing order of operational risk:
 
@@ -422,6 +1210,8 @@ cover:
 - typed failure reasons
 - authority decision evidence
 - content transfer progress and verified ranges
+- shared-body identity, schema/layout, epoch/sequence, access, lease, and
+  transport negotiation
 - stream descriptor, publisher epoch, subscription, and gap state
 
 These are typed CultNet/CultMesh documents. JSON is permitted only for schema
@@ -455,6 +1245,8 @@ The migration is complete only when:
 - one owner supervises connection reuse, reconnect, failover, and path state
 - peer contact cannot confer authority
 - CDN consumers request verified content instead of implementing chunk loops
+- local CDN and SoA consumers negotiate zero-copy bodies without changing
+  logical identity, authority, or remote behavior
 - stream identity and liveness survive changes in body transport
 - old discovery, session, transfer, and stream decision paths cannot override
   the new owners

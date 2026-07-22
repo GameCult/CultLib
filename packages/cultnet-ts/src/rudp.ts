@@ -207,10 +207,18 @@ export class CultNetRudpSession {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
-    const wasConnected = this.#connected;
-    if (!wasConnected) {
-      this.#ensureReliableCapacity(1);
+    const pendingAccept = [...this.#pendingReliable.values()]
+      .find(pending => pending.packet.packetType === "accept");
+    if (pendingAccept) {
+      this.#rememberReceived(packet.sequence);
+      this.#lastReceivedAtMs = nowMs;
+      pendingAccept.lastSentAtMs = nowMs;
+      return {
+        ...pendingAccept.packet,
+        payload: new Uint8Array(pendingAccept.packet.payload ?? new Uint8Array()),
+      };
     }
+    this.#ensureReliableCapacity(1);
     this.#rememberReceived(packet.sequence);
     this.#lastReceivedAtMs = nowMs;
     this.#connected = true;
@@ -221,9 +229,7 @@ export class CultNetRudpSession {
       ordered: true,
       payload,
     });
-    if (!wasConnected) {
-      this.#trackReliable(response, nowMs);
-    }
+    this.#trackReliable(response, nowMs);
     return response;
   }
 
@@ -375,6 +381,24 @@ export class CultNetRudpSession {
       sequence: 0,
       ack,
       ackMask,
+      channelId: "control",
+      reliable: false,
+      ordered: false,
+      sequenced: false,
+      fragmentId: 0,
+      fragmentIndex: 0,
+      fragmentCount: 0,
+      payload: new Uint8Array(),
+    };
+  }
+
+  createAckFor(sequence: number): CultNetRudpPacket {
+    return {
+      packetType: "ack",
+      connectionId: this.connectionId,
+      sequence: 0,
+      ack: toUint32(sequence, "ack sequence"),
+      ackMask: 0,
       channelId: "control",
       reliable: false,
       ordered: false,

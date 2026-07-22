@@ -247,15 +247,16 @@ namespace GameCult.Networking
                         return;
                     }
 
-                    var message = transport.ReceiveSchemaMessageOnce();
-                    transport.PollResends();
-
-                    if (message != null)
+                    var consumed = 0;
+                    while (consumed < 256 && transport.TryReceiveOnce(out var frame))
                     {
-                        Dispatch(message);
+                        consumed++;
+                        if (frame != null && string.Equals(frame.ChannelId, "schema", StringComparison.Ordinal))
+                            Dispatch(CultNetSchemaMessageSerialization.Deserialize(frame.Payload));
                     }
-
-                    Thread.Sleep(1);
+                    transport.PollResends();
+                    if (consumed == 0)
+                        Thread.Sleep(1);
                 }
             }
             catch (ObjectDisposedException) when (_disposed)
@@ -317,6 +318,9 @@ namespace GameCult.Networking
             return new RudpCultNetSchemaClient(runtimeId, connectionId, connectPayload, maxFragmentBytes, resendDelayMs);
         }
 
+        /// <summary>Creates the length-prefixed TCP schema client.</summary>
+        public static ICultNetSchemaClient CreateTcpFramed() => new TcpFramedCultNetSchemaClient();
+
         /// <summary>
         /// Creates the default schema client adapter for an advertised endpoint URI.
         /// </summary>
@@ -340,12 +344,18 @@ namespace GameCult.Networking
                 return CreateRudp();
             }
 
+            if (string.Equals(uri.Scheme, "cultnet+tcp", StringComparison.OrdinalIgnoreCase))
+            {
+                return CreateTcpFramed();
+            }
+
             if (string.Equals(uri.Scheme, "cultnet", StringComparison.OrdinalIgnoreCase))
             {
                 return CreateLiteNetLib(security, configureClient);
             }
 
-            throw new FormatException($"CultNet endpoint '{endpoint}' must use cultnet://host:port or rudp://host:port.");
+            throw new FormatException(
+                $"CultNet endpoint '{endpoint}' must use cultnet+tcp://host:port, cultnet://host:port, or rudp://host:port.");
         }
     }
 }

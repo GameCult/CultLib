@@ -25,12 +25,19 @@ import {
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
   type CultNetMessage,
+  type CultNetOperationRequestMessage,
+  type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
   type CultNetSchemaCatalogOptions,
   type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
 } from "cultnet-ts";
+
+export * from "./provider-session";
+export * from "./provider-session-wire";
+export * from "./provider-rudp-transport";
+export * from "./provider-session-broker";
 
 export interface CultMeshVec2 {
   readonly x: number;
@@ -68,6 +75,20 @@ export interface CultMeshRouteRecord {
   readonly description: string;
 }
 
+/**
+ * Consumer view of provider-session publications. The provider-session client
+ * owns ordering, replay, and reconnect; document handles only project that
+ * live publication state into typed latest/watch semantics.
+ */
+export interface CultMeshLivePublicationSource {
+  latest(schemaId: string, recordKey: string): Promise<unknown>;
+  watch(
+    schemaId: string,
+    recordKey: string,
+    callback: (value: unknown) => void,
+  ): CultMeshUnsubscribe;
+}
+
 export type CultMeshDocumentPublicationSource =
   | {
       readonly kind: "single-file";
@@ -80,6 +101,11 @@ export type CultMeshDocumentPublicationSource =
   | {
       readonly kind: "peer-snapshot";
       readonly peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>);
+      readonly endpoint?: string;
+    }
+  | {
+      readonly kind: "live-publication";
+      readonly source: CultMeshLivePublicationSource;
       readonly endpoint?: string;
     };
 
@@ -2705,6 +2731,33 @@ export function cultMeshDocumentFromPublication(
   requireNonEmpty(recordKey, "recordKey");
 
   switch (source.kind) {
+    case "live-publication": {
+      const schema = typeof schemaOrDefinition === "string"
+        ? { schemaId: schemaOrDefinition }
+        : cultMeshSchemaFromDefinition(schemaOrDefinition);
+      const schemaId = schema.schemaId ?? schema.type;
+      if (!schemaId) {
+        throw new Error("CultMesh live publication document requires a schema id or document type.");
+      }
+      const parse = (value: unknown) => parseCultMeshDocumentValue(schemaOrDefinition, value);
+      return cultMeshDocument(
+        options.documentId ?? recordKey,
+        schema,
+        async () => parse(await source.source.latest(schemaId, recordKey)),
+        {
+          routeHint: options.routeHint ?? cultMeshRouteHint(
+            "network",
+            source.endpoint ?? "CultMesh provider-session publication",
+          ),
+          sources: [cultMeshProjectionSource(options.sourceId ?? recordKey, { schemaId })],
+          watchDocument: (_context, callback) => source.source.watch(
+            schemaId,
+            recordKey,
+            value => callback(parse(value)),
+          ),
+        },
+      );
+    }
     case "single-file":
       return typeof schemaOrDefinition === "string"
         ? cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
@@ -4107,8 +4160,20 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
     | CultMeshRudpDocumentReceipt
     | void
     | Promise<CultMeshRudpDocumentReceipt | void>;
+  onOperationRequest?: (
+    request: CultNetOperationRequestMessage,
+    session: CultMeshRudpServerSession,
+  ) => CultNetOperationResponseMessage | Promise<CultNetOperationResponseMessage>;
+  onSessionClosed?: (session: CultMeshRudpServerSession) => void | Promise<void>;
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
+}
+
+export interface CultMeshRudpServerSession {
+  readonly sessionId: string;
+  readonly remote: { address: string; family: string; port: number };
+  readonly connectPayload?: Uint8Array;
+  send(message: CultNetMessage): void;
 }
 
 export interface CultMeshRudpDocumentServer {
@@ -5558,9 +5623,14 @@ export class CultMesh {
     const bind = { host, port };
     const socket = options.socket ?? createSocket(host.includes(":") ? "udp6" : "udp4");
     const sessions = new Map<string, {
+      sessionId: string;
       remote: { address: string; family: string; port: number };
       session: CultNetRudpSession;
+      connectPayload: Uint8Array;
+      closed: boolean;
+      work: Promise<void>;
     }>();
+    let sessionSequence = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
@@ -5583,14 +5653,28 @@ export class CultMesh {
         let record = sessions.get(key);
 
         if (packet.packetType === "connect") {
+          const connectPayload = Uint8Array.from(packet.payload ?? []);
+          if (record && byteArraysEqual(record.connectPayload, connectPayload)) {
+            socket.send(
+              encodeRudpPacket(record.session.acceptConnect(packet, nowMs)),
+              remote.port,
+              remote.address,
+            );
+            return;
+          }
+          if (record) closeSession(record);
           record = {
+            sessionId: `${runtimeId}:${++sessionSequence}`,
             remote: { address: remote.address, family: remote.family, port: remote.port },
+            connectPayload,
+            closed: false,
             session: new CultNetRudpSession({
               connectionId,
               initialSequence: options.initialSequence,
               resendDelayMs: options.resendDelayMs,
               maxPendingReliablePackets: options.maxPendingReliablePackets,
             }),
+            work: Promise.resolve(),
           };
           sessions.set(key, record);
           socket.send(encodeRudpPacket(record.session.acceptConnect(packet, nowMs)), remote.port, remote.address);
@@ -5609,16 +5693,21 @@ export class CultMesh {
           if (frame.channelId !== "schema") {
             continue;
           }
-          handleDocumentServerFrame(record, frame.payload).catch((error) => {
-            reportError(error);
-          });
+          record.work = record.work
+            .then(() => handleDocumentServerFrame(record, frame.payload))
+            .catch(reportError);
         }
         if (result.disconnected) {
           sessions.delete(key);
+          closeSession(record);
           return;
         }
-        if (packet.packetType === "accept" || result.delivered.length > 0) {
-          socket.send(encodeRudpPacket(record.session.createAck()), record.remote.port, record.remote.address);
+        if (packet.reliable) {
+          socket.send(
+            encodeRudpPacket(record.session.createAckFor(packet.sequence)),
+            record.remote.port,
+            record.remote.address,
+          );
         }
       } catch (error) {
         reportError(error);
@@ -5627,9 +5716,10 @@ export class CultMesh {
     socket.on("error", reportError);
 
     async function handleDocumentServerFrame(
-      record: { remote: { address: string; family: string; port: number }; session: CultNetRudpSession },
+      record: { sessionId: string; remote: { address: string; family: string; port: number }; session: CultNetRudpSession; connectPayload: Uint8Array; closed: boolean },
       payload: Uint8Array,
     ): Promise<void> {
+      if (record.closed) return;
       const message = parseCultNetMessage(decode(payload), wireContract);
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
@@ -5670,6 +5760,16 @@ export class CultMesh {
             }
           }
           return;
+        case "cultnet.operation_request.v0":
+          if (!options.onOperationRequest) {
+            sendSchemaMessage(record, {
+              schemaVersion: "cultnet.error.v0",
+              error: "CultMesh RUDP document server has no operation handler.",
+            });
+            return;
+          }
+          sendSchemaMessage(record, await options.onOperationRequest(message, publicSession(record)));
+          return;
         default:
           sendSchemaMessage(record, {
             schemaVersion: "cultnet.error.v0",
@@ -5678,10 +5778,52 @@ export class CultMesh {
       }
     }
 
+    function publicSession(record: {
+      sessionId: string;
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+      connectPayload: Uint8Array;
+      closed: boolean;
+    }): CultMeshRudpServerSession {
+      return {
+        sessionId: record.sessionId,
+        remote: { ...record.remote },
+        connectPayload: Uint8Array.from(record.connectPayload),
+        send: message => {
+          if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
+          sendSchemaMessage(record, message);
+        },
+      };
+    }
+
+    function notifySessionClosed(record: {
+      sessionId: string;
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+      connectPayload: Uint8Array;
+      closed: boolean;
+    }): void {
+      if (!options.onSessionClosed) return;
+      void Promise.resolve(options.onSessionClosed(publicSession(record))).catch(reportError);
+    }
+
+    function closeSession(record: {
+      sessionId: string;
+      remote: { address: string; family: string; port: number };
+      session: CultNetRudpSession;
+      connectPayload: Uint8Array;
+      closed: boolean;
+    }): void {
+      if (record.closed) return;
+      record.closed = true;
+      notifySessionClosed(record);
+    }
+
     function sendSchemaMessage(
-      record: { remote: { address: string; port: number }; session: CultNetRudpSession },
+      record: { sessionId: string; remote: { address: string; port: number }; session: CultNetRudpSession; closed: boolean },
       message: CultNetMessage,
     ): void {
+      if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
       const payload = encode(encodeCultNetMessageForWire(message, wireContract));
       for (const packet of record.session.sendMany("schema", payload, {
         reliable: true,
@@ -5711,6 +5853,7 @@ export class CultMesh {
           for (const [key, record] of sessions) {
             if (record.session.checkTimeout(nowMs, sessionTimeoutMs)) {
               sessions.delete(key);
+              closeSession(record);
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
@@ -5725,6 +5868,7 @@ export class CultMesh {
           clearInterval(resendTimer);
           resendTimer = undefined;
         }
+        for (const record of sessions.values()) closeSession(record);
         sessions.clear();
         socket.close();
       },
@@ -6330,6 +6474,14 @@ function copyBudgetFor(
 
 function nonBlankOr(value?: string, fallback = ""): string {
   return value && value.trim() ? value : fallback;
+}
+
+function byteArraysEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function parseCultMeshLocalityKind(

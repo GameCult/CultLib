@@ -303,6 +303,14 @@ namespace GameCult.Networking
                     RecordKeys = message.RecordKeys
                 }));
             }
+            else
+            {
+                peer.SendCultNet(new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = message.MessageId,
+                    Documents = Array.Empty<CultNetRawDocumentRecord>()
+                });
+            }
 
             return Task.CompletedTask;
         }

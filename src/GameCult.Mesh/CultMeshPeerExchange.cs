@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Networking;
 using R3;
@@ -191,6 +192,7 @@ namespace GameCult.Mesh
         }
 
         /// <summary>Finds peers that advertise a Verse role and are authorized by the supplied lease catalog.</summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public IReadOnlyList<CultMeshPeerCard> FindAuthorized(
             string verseId,
             string role,
@@ -198,16 +200,32 @@ namespace GameCult.Mesh
             string? shardId = null,
             DateTimeOffset? at = null)
         {
+            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            var resolver = CultMeshAuthorityResolver.CreateDenyByDefault(leases,
+                at.HasValue ? new PeerCatalogFixedClock(at.Value) : null);
+            return FindAuthorized(verseId, role, resolver, 0, shardId);
+        }
+
+        /// <summary>Finds contact candidates accepted by the authority resolver.</summary>
+        public IReadOnlyList<CultMeshPeerCard> FindAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityResolver resolver,
+            long authorityEpoch,
+            string? shardId = null,
+            string? resourceScope = null)
+        {
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(verseId)) throw new ArgumentException("Value must be non-empty.", nameof(verseId));
             if (string.IsNullOrWhiteSpace(role)) throw new ArgumentException("Value must be non-empty.", nameof(role));
-            if (leases == null) throw new ArgumentNullException(nameof(leases));
+            if (resolver == null) throw new ArgumentNullException(nameof(resolver));
             return Find(verseId, role)
-                .Where(peer => leases.IsAuthorized(peer, role, shardId, at))
+                .Where(peer => resolver.Resolve(new CultMeshAuthorityRequest(peer, role, shardId, authorityEpoch, resourceScope)).IsAuthorized)
                 .ToArray();
         }
 
         /// <summary>Returns the first peer that advertises a Verse role and is authorized by the supplied lease catalog.</summary>
+        [Obsolete("Supply CultMeshAuthorityResolver and an explicit authority epoch. This compatibility path denies unverifiable leases.")]
         public CultMeshPeerCard? FirstAuthorized(
             string verseId,
             string role,
@@ -216,6 +234,18 @@ namespace GameCult.Mesh
             DateTimeOffset? at = null)
         {
             return FindAuthorized(verseId, role, leases, shardId, at).FirstOrDefault();
+        }
+
+        /// <summary>Returns the first contact candidate accepted by the authority resolver.</summary>
+        public CultMeshPeerCard? FirstAuthorized(
+            string verseId,
+            string role,
+            CultMeshAuthorityResolver resolver,
+            long authorityEpoch,
+            string? shardId = null,
+            string? resourceScope = null)
+        {
+            return FindAuthorized(verseId, role, resolver, authorityEpoch, shardId, resourceScope).FirstOrDefault();
         }
 
         /// <inheritdoc />
@@ -237,6 +267,13 @@ namespace GameCult.Mesh
             {
                 throw new ObjectDisposedException(nameof(CultMeshPeerCatalog));
             }
+        }
+
+        private sealed class PeerCatalogFixedClock : ICultMeshClock
+        {
+            public PeerCatalogFixedClock(DateTimeOffset utcNow) => UtcNow = utcNow;
+            public DateTimeOffset UtcNow { get; }
+            public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default) => Task.CompletedTask;
         }
     }
 
@@ -343,6 +380,12 @@ namespace GameCult.Mesh
         /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>Gets or sets the shared CultMesh session owner.</summary>
+        public CultMeshSessionManager? Sessions { get; set; }
+
+        /// <summary>Gets or sets the clock used by managed response deadlines.</summary>
+        public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
     }
 
     /// <summary>
@@ -399,6 +442,36 @@ namespace GameCult.Mesh
             });
 
             return await WaitForResponseAsync(completion.Task, endpoint).ConfigureAwait(false);
+        }
+
+        /// <summary>Fetches peer cards through the shared session owner.</summary>
+        public async Task<CultMeshPeerExchangeResponseMessage> FetchAsync(
+            CultMeshEndpointId endpointId,
+            CultMeshPeerExchangeRequestMessage request,
+            CancellationToken cancellationToken = default)
+        {
+            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(request.VerseId)) throw new ArgumentException("Peer exchange requires a verseId.", nameof(request));
+            var sessions = _options.Sessions ?? throw new InvalidOperationException("Managed peer exchange requires a CultMeshSessionManager.");
+            var session = await sessions.ConnectAsync(endpointId, CultMeshProtocols.PeerExchange, cancellationToken).ConfigureAwait(false);
+            var messageId = Guid.NewGuid().ToString("N");
+            var completion = new TaskCompletionSource<CultMeshPeerExchangeResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var responseSubscription = session.OnCultNet<CultMeshPeerExchangeResponseMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal)) completion.TrySetResult(response);
+            });
+            using var errorSubscription = session.OnCultNet<CultNetErrorMessage>(error =>
+                completion.TrySetException(new InvalidOperationException(error.Error)));
+            session.SendCultNet(new CultMeshPeerExchangeRequestMessage
+            {
+                MessageId = messageId,
+                VerseId = request.VerseId,
+                Roles = request.Roles,
+                KnownPeerIds = request.KnownPeerIds,
+                Limit = request.Limit
+            });
+            return await WaitForManagedResponseAsync(completion.Task, endpointId, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -463,6 +536,21 @@ namespace GameCult.Mesh
                 throw new TimeoutException($"Timed out waiting for peer exchange response from {endpoint}.");
             }
 
+            return await responseTask.ConfigureAwait(false);
+        }
+
+        private async Task<CultMeshPeerExchangeResponseMessage> WaitForManagedResponseAsync(
+            Task<CultMeshPeerExchangeResponseMessage> responseTask,
+            CultMeshEndpointId endpointId,
+            CancellationToken cancellationToken)
+        {
+            var timeout = _options.Clock.DelayAsync(_options.ResponseTimeout, cancellationToken);
+            var completed = await Task.WhenAny(responseTask, timeout).ConfigureAwait(false);
+            if (completed != responseTask)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TimeoutException($"Timed out waiting for peer exchange response from {endpointId}.");
+            }
             return await responseTask.ConfigureAwait(false);
         }
     }

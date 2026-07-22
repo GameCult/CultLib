@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using GameCult.Caching;
@@ -130,12 +131,28 @@ namespace GameCult.Networking
             }
 
             options ??= new CultNetHostOptions();
+            var traceStartup = string.Equals(
+                Environment.GetEnvironmentVariable("CULTMESH_TRACE_STARTUP_PHASES"),
+                "1",
+                StringComparison.Ordinal);
+            var startupPhase = Stopwatch.StartNew();
+            void Trace(string phase)
+            {
+                if (traceStartup)
+                    Console.WriteLine($"CultMesh local-host phase {phase} took {startupPhase.Elapsed.TotalMilliseconds:0.###}ms.");
+                startupPhase.Restart();
+            }
+
             var cache = await CultCacheMessagePack.OpenAsync(cachePath, options.CacheOptions).ConfigureAwait(false);
+            Trace("cache-open");
             var store = cache.BackingStores.OfType<SingleFileMessagePackBackingStore>().FirstOrDefault();
             var server = new Server(cache, options.Security ?? ServerSecurityOptions.Development());
+            Trace("server");
             var databaseOptions = options.DatabaseOptions ?? new CultNetDatabaseOptions();
             var database = new CultNetDatabase(cache, databaseOptions);
+            Trace("database");
             var databaseServer = new CultNetDatabaseServer(server, database, options.DatabaseServerOptions);
+            Trace("database-server");
             options.ConfigureServer?.Invoke(server);
 
             var host = new CultNetHost(cache, store, server, database, databaseServer);
@@ -143,6 +160,7 @@ namespace GameCult.Networking
             {
                 host.Start();
             }
+            Trace("server-start");
 
             return host;
         }

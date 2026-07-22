@@ -449,6 +449,48 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public void OperationInvocationRecord_ReadsLegacyStringAndWritesStructuredRecord()
+    {
+        var legacyPayload = MessagePackSerializer.Serialize(
+            "aetheria.entity.pilot.move",
+            CultDocumentMessagePackSerialization.Options);
+        var restored = MessagePackSerializer.Deserialize<CultMeshOperationInvocationRecord>(
+            legacyPayload,
+            CultDocumentMessagePackSerialization.Options);
+        var currentPayload = MessagePackSerializer.Serialize(
+            restored,
+            CultDocumentMessagePackSerialization.Options);
+        var reader = new MessagePackReader(currentPayload);
+
+        restored.OperationId.Should().Be("aetheria.entity.pilot.move");
+        restored.SchemaId.Should().BeEmpty();
+        restored.RouteKind.Should().BeEmpty();
+        restored.IdempotencyKey.Should().BeEmpty();
+        reader.ReadArrayHeader().Should().Be(5);
+        reader.ReadString().Should().Be("aetheria.entity.pilot.move");
+    }
+
+    [Test]
+    public void RouteRecord_ReadsLegacyStringAndWritesStructuredRecord()
+    {
+        var legacyPayload = MessagePackSerializer.Serialize(
+            "SharedMemory",
+            CultDocumentMessagePackSerialization.Options);
+        var restored = MessagePackSerializer.Deserialize<CultMeshRouteRecord>(
+            legacyPayload,
+            CultDocumentMessagePackSerialization.Options);
+        var currentPayload = MessagePackSerializer.Serialize(
+            restored,
+            CultDocumentMessagePackSerialization.Options);
+        var reader = new MessagePackReader(currentPayload);
+
+        restored.Kind.Should().Be("SharedMemory");
+        restored.Description.Should().BeEmpty();
+        reader.ReadArrayHeader().Should().Be(2);
+        reader.ReadString().Should().Be("SharedMemory");
+    }
+
+    [Test]
     public void RouteRecord_FlattensAndParsesCrossRuntimeRouteKinds()
     {
         var record = CultMesh.RouteRecord(new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located slab"));
@@ -679,6 +721,40 @@ public sealed class CultMeshStreamingTests
 
         observed.Text.Should().Be("reactive");
         observed.Revision.Should().Be(2);
+    }
+
+    [Test]
+    public async Task DocumentHandle_Field_ProjectsTypedReactiveStateWithoutRepublishingSurfaceTrees()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located document slab");
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.current",
+            CultMesh.Verse("starbridge", "unity-pilot", route),
+            _ => Task.FromResult(current),
+            _ => subject,
+            routeHint: route);
+
+        var text = handle.Field(value => value.Text);
+
+        text.PointerId.Should().Be("mesh.note.current#Text");
+        text.RouteHint.Kind.Should().Be(CultMeshLocalityKind.SharedMemory);
+        (await text.ResolveAsync()).Should().Be("initial");
+        string observed = null!;
+        using var subscription = text.Watch().Subscribe(value => observed = value);
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "reactive",
+            Revision = 2
+        });
+        observed.Should().Be("reactive");
     }
 
     [Test]
@@ -3440,7 +3516,7 @@ public sealed class CultMeshStreamingTests
     public void SharedMemoryRingPublishesWritableSlotsWithoutInternalCopies()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 2, slotByteLength: 16);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 16);
 
         ring.TryAcquireWriteSlot(out var write).Should().BeTrue();
         ReadOnlySpan<byte> seed = stackalloc byte[] { 1, 2, 3, 4 };
@@ -3467,7 +3543,7 @@ public sealed class CultMeshStreamingTests
     public void SharedMemoryRingDoesNotOverwriteSlotsHeldByReaders()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 1, slotByteLength: 8);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 8);
 
         ring.TryAcquireWriteSlot(out var firstWrite).Should().BeTrue();
         firstWrite.Span[0] = 11;
@@ -3475,26 +3551,36 @@ public sealed class CultMeshStreamingTests
 
         ring.TryAcquireLatestRead(out var read).Should().BeTrue();
 
+        ring.TryAcquireWriteSlot(out var secondWrite).Should().BeTrue();
+        ring.CommitWriteSlot(secondWrite, timestampNs: 2, byteLength: 1);
+        ring.TryAcquireWriteSlot(out var thirdWrite).Should().BeTrue();
+        ring.CommitWriteSlot(thirdWrite, timestampNs: 3, byteLength: 1);
+        ring.TryAcquireLatestRead(out var thirdRead).Should().BeTrue();
+        ring.TryAcquireWriteSlot(out var overwriteSecond).Should().BeTrue();
+        ring.CommitWriteSlot(overwriteSecond, timestampNs: 4, byteLength: 1);
+        ring.TryAcquireLatestRead(out var secondRead).Should().BeTrue();
         ring.TryAcquireWriteSlot(out _).Should().BeFalse();
         ring.Stats().BlockedWrites.Should().Be(1);
 
         read.Dispose();
+        thirdRead.Dispose();
+        secondRead.Dispose();
 
-        ring.TryAcquireWriteSlot(out var secondWrite).Should().BeTrue();
-        secondWrite.Span[0] = 12;
-        ring.CommitWriteSlot(secondWrite, timestampNs: 2, byteLength: 1);
+        ring.TryAcquireWriteSlot(out var fifthWrite).Should().BeTrue();
+        fifthWrite.Span[0] = 12;
+        ring.CommitWriteSlot(fifthWrite, timestampNs: 5, byteLength: 1);
 
         var stats = ring.Stats();
-        stats.PublishedFrames.Should().Be(2);
-        stats.DroppedFrames.Should().Be(1);
-        stats.LatestSequence.Should().Be(1);
+        stats.PublishedFrames.Should().Be(5);
+        stats.DroppedFrames.Should().Be(2);
+        stats.LatestSequence.Should().Be(4);
     }
 
     [Test]
     public void CopyPublishMarksFallbackCopiesExplicitly()
     {
         var catalog = CatalogWithByteStream();
-        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 2, slotByteLength: 8);
+        using var ring = catalog.CreateSharedMemoryRing("mimir:leap:depth", slotCount: 3, slotByteLength: 8);
 
         ring.TryPublishCopy(stackalloc byte[] { 5, 6, 7 }, timestampNs: 10, durationNs: 2, out var handle)
             .Should()

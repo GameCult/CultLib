@@ -74,6 +74,10 @@ namespace GameCult.Networking
                 CultNetSchemaVersions.VerseCatalogResponse => Deserialize<CultMeshVerseCatalogResponseMessage>(payload),
                 CultNetSchemaVersions.PeerExchangeRequest => Deserialize<CultMeshPeerExchangeRequestMessage>(payload),
                 CultNetSchemaVersions.PeerExchangeResponse => Deserialize<CultMeshPeerExchangeResponseMessage>(payload),
+                CultNetSchemaVersions.ContentChunkRequest => Deserialize<CultMeshContentChunkRequestMessage>(payload),
+                CultNetSchemaVersions.ContentChunkResponse => Deserialize<CultMeshContentChunkResponseMessage>(payload),
+                CultNetSchemaVersions.BodyReadRequest => Deserialize<CultMeshBodyReadRequestMessage>(payload),
+                CultNetSchemaVersions.BodyReadResponse => Deserialize<CultMeshBodyReadResponseMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogRequest => Deserialize<CultNetSchemaCatalogRequestMessage>(payload),
                 CultNetSchemaVersions.SchemaCatalogResponse => Deserialize<CultNetSchemaCatalogResponseMessage>(payload),
                 _ => throw new MessagePackSerializationException(

@@ -520,6 +520,23 @@ explicitly forwarded. Stale epochs fail loudly.
 
 Consumers subscribe to typed document changes through `CultNetDatabase` watch
 methods. Subscriptions receive domain changes rather than storage envelopes.
+Exact remote values use `SubscribeLiveValueAsync<T>(...)`; they remain ephemeral
+and own their unsubscribe lifetime. Hot body state uses
+`CultMesh.SubscribeLiveBodyAsync(...)`: the reactive value is only the current
+body descriptor, while `OpenCurrentReadOnly()` negotiates shared memory,
+shared-file mapping, or network from observed locality and available adapters.
+Same-machine bodies are opened from the mapped producer slab. Remote live bodies
+are capability-bound and read through one reusable `cultmesh.bodies.v1` session;
+they are not packed into CultCache or CDN records. `CultMeshClient.BodyProvider(...)`
+creates that verified network adapter without exposing session machinery to the
+consumer. Body bytes never become subscription snapshot payload. Either subscription may
+legitimately start with `HasValue == false`; it remains active until the provider
+publishes the exact record, avoiding a startup retry loop or broad snapshot.
+`CultNetDatabaseSubscriptionServer.DemandChanged` exposes the exact requested
+record and schema set as well as optional body negotiation. A provider can
+therefore materialize a computed record only while it has consumers. The watch
+is installed before demand is announced, so the first publication travels as a
+normal live change and does not require a bootstrap snapshot.
 
 ### Client Prediction
 

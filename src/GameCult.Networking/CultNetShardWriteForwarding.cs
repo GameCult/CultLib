@@ -112,7 +112,8 @@ namespace GameCult.Networking
                 !IsSupportedSchemaEndpointScheme(uri.Scheme) ||
                 string.IsNullOrWhiteSpace(uri.Host))
             {
-                throw new FormatException($"CultNet endpoint '{endpoint}' must use cultnet://host:port or rudp://host:port.");
+                throw new FormatException(
+                    $"CultNet endpoint '{endpoint}' must use cultnet+tcp://host:port, cultnet://host:port, or rudp://host:port.");
             }
 
             return (uri.Host, uri.IsDefaultPort ? 3075 : uri.Port);
@@ -135,7 +136,8 @@ namespace GameCult.Networking
 
         private static bool IsSupportedSchemaEndpointScheme(string scheme)
         {
-            return string.Equals(scheme, "cultnet", StringComparison.OrdinalIgnoreCase) ||
+            return string.Equals(scheme, "cultnet+tcp", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(scheme, "cultnet", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(scheme, "rudp", StringComparison.OrdinalIgnoreCase);
         }
 

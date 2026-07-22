@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <NativeQuicOutput>$(MSBuildThisFileDirectory)..\..\artifacts\quic-native-test</NativeQuicOutput>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GameCult.Mesh.Quic\GameCult.Mesh.Quic.csproj" />
+    <ProjectReference Include="..\..\src\GameCult.Mesh.Quic.Native\GameCult.Mesh.Quic.Native.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NUnit" Version="4.*" />
+    <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.4.0" />
+    <PackageReference Include="FluentAssertions" Version="8.9.0" />
+  </ItemGroup>
+  <Target Name="BuildNativeQuicTestRuntime" BeforeTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\scripts\build-quic-native.ps1&quot; -Configuration Debug -OutputDirectory &quot;$(NativeQuicOutput)&quot;" />
+  </Target>
+  <Target Name="CopyNativeQuicTestRuntime" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <ItemGroup>
+      <NativeQuicRuntime Include="$(NativeQuicOutput)\gamecult_mesh_quic_native.dll" />
+      <NativeQuicRuntime Include="$(NativeQuicOutput)\msquic.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeQuicRuntime)" DestinationFolder="$(OutDir)" />
+  </Target>
+</Project>

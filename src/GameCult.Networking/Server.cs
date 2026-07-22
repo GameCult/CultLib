@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using GameCult.Caching;
@@ -17,7 +18,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Hosts the server-side authentication, session, and message dispatch pipeline.
     /// </summary>
-    public class Server : ICultNetSchemaServer, IDisposable
+    public class Server : ICultNetSchemaServer, ICultNetSchemaServerPeerLifecycle, IDisposable
     {
         private const string EmailPattern =
             @"^([0-9a-zA-Z]([\+\-_\.][0-9a-zA-Z]+)*)+@(([0-9a-zA-Z][-\w]*[0-9a-zA-Z]*\.)+[a-zA-Z0-9]{2,17})$";
@@ -44,6 +45,9 @@ namespace GameCult.Networking
         private Stopwatch? _timer;
         private ILogger _logger = new NullLogger();
         private bool _disposed;
+
+        /// <inheritdoc />
+        public event Action<ICultNetSchemaServerPeer>? PeerDisconnected;
 
         /// <summary>
         /// Gets or sets the logger used by the server.
@@ -378,7 +382,9 @@ namespace GameCult.Networking
             listener.PeerDisconnectedEvent += (peer, info) =>
             {
                 Logger.LogInfo($"User Disconnected: {peer.Address}");
+                var context = GetPeerContext(peer);
                 _users.TryRemove(peer.Id, out _);
+                PeerDisconnected?.Invoke(context);
             };
 
             listener.NetworkLatencyUpdateEvent += (peer, latency) =>
@@ -815,7 +821,7 @@ namespace GameCult.Networking
     /// <summary>
     /// Transport-aware server peer context for built-in CultNet service bodies.
     /// </summary>
-    public sealed class CultNetServerPeer : ICultNetSchemaServerPeer
+    public sealed class CultNetServerPeer : ICultNetSchemaServerPeer, ICultNetSchemaServerPeerLocation
     {
         internal CultNetServerPeer(NetPeer peer, LiteNetLibTransportConnection transport)
         {
@@ -827,6 +833,9 @@ namespace GameCult.Networking
         /// Gets the underlying LiteNetLib peer identity.
         /// </summary>
         public NetPeer Peer { get; }
+
+        /// <inheritdoc />
+        public EndPoint RemoteEndPoint => new IPEndPoint(Peer.Address, Peer.Port);
 
         /// <summary>
         /// Gets the channel-aware LiteNetLib transport adapter for this peer.

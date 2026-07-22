@@ -380,6 +380,47 @@ runtime-native storage: shared D3D12 textures, shared memory rings, platform GPU
 handles, DMA buffers, or paged CultCache fallbacks when a zero-copy transport is
 not available.
 
+For entity SoA and other CPU-visible hot state, subscribe to the exact control
+records and logical bodies the lowerer consumes. The subscription advertises
+the transports the runtime can import; the provider's demand tracker selects
+the cheapest mutually usable representation. A same-machine consumer normally
+receives one shared-memory bootstrap descriptor, then observes later commits
+through the mapped ring header. Per-frame CultNet documents are neither needed
+nor desirable.
+
+```csharp
+using var entities = await CultMesh.SubscribeLiveBodyAsync(
+    subscriptions,
+    bodyResolver,
+    new CultMeshLiveBodySubscription(
+        "pilot-entities",
+        "eve-unity",
+        "eve:entity-soa:aetheria.daemon:pilot"));
+
+using var input = await subscriptions.SubscribeLiveValueAsync<EveInputCapabilityDocument>(
+    "pilot-input",
+    "eve:input:aetheria.daemon:pilot");
+
+// Open after each descriptor change. CultMesh chooses shared memory, shared-file
+// mapping, or network from observed locality and the resolver's real adapters.
+if (entities.HasValue && input.HasValue)
+{
+    using var frame = entities.OpenCurrentReadOnly().Lease;
+    Present(frame, input.Current);
+}
+```
+
+`CultMeshLiveBody` watches only the small latest-publication record and declares
+the logical body demand. It never routes the body through the subscription
+snapshot. `CultNetLiveValue<T>` does the corresponding job for exact scalar or
+small structured state without creating a renderer-owned replica cache. Both
+subscriptions may begin before the provider's first publication: `HasValue`
+remains false while the retained demand stays active, then the first typed value
+arrives through the normal reactive change path.
+
+Snapshots remain bootstrap and recovery machinery. Reactive document changes
+carry small control state; mapped or negotiated network bodies carry hot data.
+
 ```csharp
 using GameCult.Mesh;
 
