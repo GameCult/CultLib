@@ -1,0 +1,15 @@
+{
+  "name": "org.gamecult.geometry",
+  "displayName": "GameCult.Geometry",
+  "version": "0.1.0",
+  "unity": "2021.3",
+  "description": "GameCult geometry values, typed state contracts, and runtime algorithms built on CultMath primitives.",
+  "license": "SEE LICENSES IN README.md",
+  "author": {
+    "name": "GameCult"
+  },
+  "dependencies": {
+    "org.gamecult.cultmath": "0.1.0",
+    "org.gamecult.cultlib": "1.0.7"
+  }
+}

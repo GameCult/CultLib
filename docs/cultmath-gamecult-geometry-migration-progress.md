@@ -4,7 +4,7 @@ Plan: `docs/cultmath-gamecult-geometry-migration-plan.md` (locked)
 
 Started: 2026-07-22
 
-Status: Stage 0 complete; Stage 1 in progress
+Status: Stages 0-1 complete; Stage 2 in progress
 
 ## Objective
 
@@ -55,8 +55,8 @@ Demotions:
 | Stage | State | Evidence / next gate |
 | --- | --- | --- |
 | 0. Freeze and baseline | Complete | Source bodies, contracts, consumers, licenses, fixtures, and focused baselines mapped |
-| 1. Destination/dependency/formatters/SoA | In progress | Resolver ownership and exact unmanaged-column support are the first cuts |
-| 2. Primitive deletion and v2 schemas | Pending | Requires intact CultMath vector serialization and SoA |
+| 1. Destination/dependency/formatters/SoA | Complete | NuGet and dedicated UPM artifacts prove dependency direction and owned vector integration |
+| 2. Primitive deletion and v2 schemas | In progress | Delete duplicate vectors first, then publish corrected v2 contracts |
 | 3. Planetary transfer | Pending | Requires destination packaging and preserved parity corpus |
 | 4. Mine `vg-csg` | Pending | Requires v1 fixture capture and target Rust package seam |
 | 5. CultCache/CultNet/CultMesh integration | Pending | Requires current schemas and runtime packages |
@@ -135,6 +135,12 @@ a broader stage gate.
   selected-cut, and chunk record keys. Focused Rust tests passed 4/4; formatting
   and clippy passed. VibeGeometry commit `82b56db` advances its submodule to
   that witness commit. Both migration branches are pushed.
+- `scripts/build-geometry-unity-package.ps1` staged
+  `org.gamecult.geometry@0.1.0` successfully. Its manifest depends explicitly
+  on `org.gamecult.cultmath@0.1.0` and `org.gamecult.cultlib@1.0.7`; the package
+  contains only its owned `GameCult.Geometry.dll`/symbols plus its asmdef and
+  documentation. It neither duplicates CultMath nor buries Geometry inside the
+  CultLib Unity package.
 
 ## Decisions and Deviations
 
@@ -152,5 +158,8 @@ a broader stage gate.
 
 ## Next Actions
 
-1. Establish and inspect the dedicated `org.gamecult.geometry` UPM artifact.
-2. Begin Stage 2 only after the Unity dependency/layout gate is proven.
+1. Rewrite Geometry primitives over CultMath and delete `CultVec2`/`CultVec3`
+   without aliases or forwarding types.
+2. Publish v2 geometry documents with typed vectors/quaternion and deliberate
+   stable-key fixtures; keep v1 only as test evidence.
+3. Run repository/package negative searches before beginning planetary transfer.
