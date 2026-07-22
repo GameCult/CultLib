@@ -2,15 +2,16 @@
   "name": "GameCult.Geometry.Tests.Editor",
   "rootNamespace": "GameCult.Geometry.Tests.Editor",
   "references": [
-    "CultMath",
-    "GameCult.Geometry",
     "GameCult.Geometry.Unity"
   ],
   "includePlatforms": ["Editor"],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
-  "overrideReferences": false,
-  "precompiledReferences": [],
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "CultMath.dll",
+    "GameCult.Geometry.dll"
+  ],
   "autoReferenced": false,
   "defineConstraints": [],
   "versionDefines": [],
