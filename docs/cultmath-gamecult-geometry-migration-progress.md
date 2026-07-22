@@ -4,8 +4,9 @@ Plan: `docs/cultmath-gamecult-geometry-migration-plan.md` (locked)
 
 Started: 2026-07-22
 
-Status: Stages 0-5 complete; Stage 6 consumer cutover implemented with two
-external verification/publication gates; Stage 7 source-authority cut complete
+Status: Stages 0-7 complete for source ownership, immutable Git/UPM delivery,
+consumer cutover, and verification. NuGet and Cargo registry mirrors remain an
+explicit credential-bound publication follow-up; release artifacts are public.
 
 ## Objective
 
@@ -61,7 +62,7 @@ Demotions:
 | 3. Planetary transfer | Complete | Managed, HLSL, CMPT, Unity, web, tool, docs, tests, and package authority moved; CultMath owners deleted |
 | 4. Mine `vg-csg` | Complete | Geometry-owned Rust kernel passes correctness, parity, performance, formatting, and warning-denied lint gates |
 | 5. CultCache/CultNet/CultMesh integration | Complete | One provider commit path persists, watches, replicates, and probes typed geometry state |
-| 6. Consumer cutover/release | Gate pending | Fensalir green; Aetheria source cut pushed but full build/Unity regeneration await external dependency/editor state and immutable UPM tag |
+| 6. Consumer cutover/release | Complete | Fensalir and Aetheria green; immutable Git/UPM tags and public release artifacts verified |
 | 7. Delete obsolete authorities/audit | Complete | VibeGeometry workspace authority archived; tracked negative audit is clean apart from retained provenance/witnesses |
 
 ## Verification Receipts
@@ -280,19 +281,43 @@ a broader stage gate.
   while retaining CultMath for numeric primitives. The solution builds with no
   warnings/errors; fractal tests pass 170/170, erosion parity 1/1, topology
   parity 19/19, and planetary page tests 16/16.
-- Aetheria cutover commits `26948f81` and `557bc71f` replace `CultVec*` fixtures
-  with CultMath vectors under an exact legacy MessagePack byte witness, move
-  spatial rectangles to `GameCult.Geometry.CultRect`, add the real .NET/Unity
-  Geometry dependencies, and remove stale ownership guidance.
-- Aetheria's geometry compiler errors are gone. Its full build is presently
-  blocked by concurrent CultMesh API drift (`CultMeshBody*` and persisted-record
-  types), outside this migration. Unity regeneration is also deferred while an
-  active Unity editor owns the project. The coordinated local file dependency
-  must become an immutable Geometry Unity tag before publication.
+- Aetheria's coordinated cutover ends at commit `3ec6222f`. It replaces
+  `CultVec*` fixtures with CultMath vectors under an exact legacy MessagePack
+  byte witness, moves spatial rectangles to `GameCult.Geometry.CultRect`, and
+  pins CultMath, CultLib, and Geometry to immutable Git/UPM tags. Geometry is an
+  explicit Unity testable dependency. The Freeze build and State verifier pass;
+  the verifier fingerprint is
+  `664afd7e...48b`, and the legacy float2/float3 bytes remain exact.
+- A disposable Aetheria import using only the published tags passed the owned
+  EditMode suite 3/3: primitive ownership, CultMath visibility, and planetary
+  Unity mesh projection. The resolved commits are CultMath `b43cf49`, Geometry
+  and CultLib `b65619ff`, and Eve `e5556c3`. No compatibility compiler errors
+  remain. Normal Unity project generation confirmed the core packages are
+  precompiled and require no generated CultMath or Geometry core project.
+  Aetheria commit `9c983a5e` deletes the stale generated `CultMath.csproj` and
+  its solution/project references; generated project metadata contains no
+  deleted `rect.cs` or planetary source paths.
 - Legacy D3DCompiler exposed that macro-expanded HLSL includes were not
   portable. CultLib commit `cdeea474` gives the Geometry umbrella direct default
   and Unity include branches; Geometry shader ownership tests pass 3/3 and the
   downstream D3D12 corpus passes.
+- The coordinated release body is CultLib commit `b65619ff`, merging Geometry
+  ownership with the CultMesh reliability line. Caching passes 36/36, Mesh
+  210/210, and Geometry 31/31. Its Unity package contains 24 managed assemblies,
+  owned binaries at file version `1.0.44.0`, the resolver declaration and body
+  read-lease API, and the native QUIC payload.
+- CultMath `0.1.0` and Geometry `0.1.0` are published as immutable Git/UPM tags.
+  Public GitHub releases carry the NuGet and Cargo artifacts at
+  `https://github.com/GameCult/CultMath/releases/tag/cultmath-v0.1.0` and
+  `https://github.com/GameCult/CultLib/releases/tag/gamecult-geometry-v0.1.0`.
+  The CultMath NuGet SHA-256 is `90dc30c0...d070`; Geometry NuGet is
+  `fdce63a3...6835`; the Rust crates are `a346dca1...d68` and
+  `ac0c45cb...9e0e` respectively.
+- NuGet and Cargo registry mirroring was not attempted: the authenticated GitHub
+  token lacks package scopes, no NuGet API key or Cargo registry token exists,
+  and GitHub Packages is not a Cargo registry. This is a distribution mirror,
+  not surviving source or package authority; the exact public artifacts and
+  immutable consumer paths above are the completed release contract.
 
 ### Stage 7 receipts
 
@@ -309,12 +334,11 @@ a broader stage gate.
   update the root package map. Generated CultDocument metadata remains the only
   registration owner.
 
-## Next Actions
+## Publication Follow-up
 
-1. Resolve Aetheria's concurrent CultMesh API/worktree drift, then rerun its
-   State/Freeze verifier and daemon smoke against this migration branch.
-2. Close the active Unity editor/import workers, regenerate Aetheria Unity
-   project/lock files through Unity, and run the canonical EditMode suite.
-3. Publish an immutable `org.gamecult.geometry` Unity package tag in the
-   coordinated release window, replace Aetheria's local candidate reference,
-   and repeat package/version inspection before declaring Stage 6 complete.
+- Mirror the already-published NuGet artifacts to the chosen package feed when
+  a credential with package write scope is available.
+- Mirror the two Rust crates to crates.io or another real Cargo registry when a
+  registry token and registry choice are available.
+- These mirrors must publish the recorded bytes. Rebuilding them would create a
+  different release and requires a new version.
