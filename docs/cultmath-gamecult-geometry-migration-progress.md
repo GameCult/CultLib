@@ -4,7 +4,8 @@ Plan: `docs/cultmath-gamecult-geometry-migration-plan.md` (locked)
 
 Started: 2026-07-22
 
-Status: Stages 0-5 complete; Stage 6 in progress
+Status: Stages 0-5 complete; Stage 6 consumer cutover implemented with two
+external verification/publication gates; Stage 7 source-authority cut complete
 
 ## Objective
 
@@ -60,8 +61,8 @@ Demotions:
 | 3. Planetary transfer | Complete | Managed, HLSL, CMPT, Unity, web, tool, docs, tests, and package authority moved; CultMath owners deleted |
 | 4. Mine `vg-csg` | Complete | Geometry-owned Rust kernel passes correctness, parity, performance, formatting, and warning-denied lint gates |
 | 5. CultCache/CultNet/CultMesh integration | Complete | One provider commit path persists, watches, replicates, and probes typed geometry state |
-| 6. Consumer cutover/release | In progress | Fensalir/Aetheria exact cutover surfaces mapped; consumer edits and release receipts remain |
-| 7. Delete obsolete authorities/audit | Pending | Requires every prior stage gate |
+| 6. Consumer cutover/release | Gate pending | Fensalir green; Aetheria source cut pushed but full build/Unity regeneration await external dependency/editor state and immutable UPM tag |
+| 7. Delete obsolete authorities/audit | Complete | VibeGeometry workspace authority archived; tracked negative audit is clean apart from retained provenance/witnesses |
 
 ## Verification Receipts
 
@@ -265,11 +266,55 @@ a broader stage gate.
   protocol. Existing C#/Rust exact v2 document bytes and record keys remain the
   cross-runtime geometry witness.
 
+### Stage 6 receipts
+
+- Coordinated local candidates use
+  `scripts/build-geometry-candidate.ps1`. CultMath `.2` is primitives-only;
+  Geometry `.2` contains its managed assembly, notices/docs, and all five owned
+  shaders with exact support-package and CultMath candidate dependencies. A
+  clean net10 consumer restored and built; the Unity package staged one owned
+  assembly plus adapters, sample, and shaders. The Rust crate passed an
+  independent `cargo package --allow-dirty --no-verify` dry run.
+- Fensalir cutover commit `42778c1` adds direct Geometry dependencies, migrates
+  planetary C# consumers, compiler include roots, shaders, and parity harnesses
+  while retaining CultMath for numeric primitives. The solution builds with no
+  warnings/errors; fractal tests pass 170/170, erosion parity 1/1, topology
+  parity 19/19, and planetary page tests 16/16.
+- Aetheria cutover commits `26948f81` and `557bc71f` replace `CultVec*` fixtures
+  with CultMath vectors under an exact legacy MessagePack byte witness, move
+  spatial rectangles to `GameCult.Geometry.CultRect`, add the real .NET/Unity
+  Geometry dependencies, and remove stale ownership guidance.
+- Aetheria's geometry compiler errors are gone. Its full build is presently
+  blocked by concurrent CultMesh API drift (`CultMeshBody*` and persisted-record
+  types), outside this migration. Unity regeneration is also deferred while an
+  active Unity editor owns the project. The coordinated local file dependency
+  must become an immutable Geometry Unity tag before publication.
+- Legacy D3DCompiler exposed that macro-expanded HLSL includes were not
+  portable. CultLib commit `cdeea474` gives the Geometry umbrella direct default
+  and Unity include branches; Geometry shader ownership tests pass 3/3 and the
+  downstream D3D12 corpus passes.
+
+### Stage 7 receipts
+
+- Tracked negative audits across CultLib, CultMath, Fensalir, Aetheria, and
+  VibeGeometry find no live `CultVec*`, `CultMath.rect`, CultMath planetary
+  implementation, old planetary shader vocabulary, geometry v1 writer, or
+  VibeGeometry/`vg-csg` build dependency. Frozen fixtures, source attribution,
+  and negative ownership tests remain deliberately.
+- VibeGeometry commit `bc9604a` removes its tracked Cargo workspace, lockfile,
+  submodule declaration/gitlink, scratch/build wiring, and live mission claims.
+  Its remaining documents point to source witness `8f070f4f` and Geometry
+  absorption commit `6b44f969`; repository history preserves provenance.
+- CultLib commits `8a7eee71` and `b9f20a64` remove manual-registry guidance and
+  update the root package map. Generated CultDocument metadata remains the only
+  registration owner.
+
 ## Next Actions
 
-1. Cut Fensalir's C# and HLSL planetary surfaces atomically to
-   GameCult.Geometry, including shader resolver and parity harnesses.
-2. Replace Aetheria Freeze's remaining `CultVec*` fixtures with CultMath values
-   under an exact serialization witness, then regenerate Unity project files.
-3. Rebuild coordinated CultMath and Geometry candidates and run the named
-   downstream parity corpus before publication.
+1. Resolve Aetheria's concurrent CultMesh API/worktree drift, then rerun its
+   State/Freeze verifier and daemon smoke against this migration branch.
+2. Close the active Unity editor/import workers, regenerate Aetheria Unity
+   project/lock files through Unity, and run the canonical EditMode suite.
+3. Publish an immutable `org.gamecult.geometry` Unity package tag in the
+   coordinated release window, replace Aetheria's local candidate reference,
+   and repeat package/version inspection before declaring Stage 6 complete.
