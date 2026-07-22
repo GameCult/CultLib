@@ -4,6 +4,8 @@
     <PackageId>GameCult.Geometry</PackageId>
     <Version>0.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <EnableSourceLink>false</EnableSourceLink>
+    <EmbedUntrackedSources>false</EmbedUntrackedSources>
     <PackageTags>game;geometry;planetary;csg;lod;cultcache;cultmesh</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression></PackageLicenseExpression>
