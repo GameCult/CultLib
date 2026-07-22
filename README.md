@@ -73,21 +73,24 @@ dotnet build CultMath.slnx
 dotnet test CultMath.slnx
 cargo test --manifest-path native/cultmath-core/Cargo.toml
 cargo build --release --manifest-path native/cultmath-core/Cargo.toml
+.\scripts\build-unity-package.ps1
 ```
 
-## Unity compiler
+## Unity package
 
-CultMath uses C# 10 record structs and file-scoped namespaces. Unity projects
-must select the compiler's latest language mode with an `Assets/csc.rsp` file:
+CultMath's Unity 2021.3 surface is the tracked precompiled package at
+`unity/org.gamecult.cultmath`. Unity consumes `CultMath.dll` and the numeric
+`CultMath.hlsl`; it does not compile the repository's current-language C# source
+tree and does not require a consumer `csc.rsp` workaround.
 
-```text
--langversion:latest
+```json
+"org.gamecult.cultmath": "https://github.com/GameCult/CultMath.git?path=/unity/org.gamecult.cultmath"
 ```
 
-The package's Unity smoke project verifies this contract against Unity 6. The
-setting is already present in current GameCult Unity clients; it belongs to the
-consumer project because Unity only reads compiler response files from its
-`Assets` root.
+The repository root is not a Unity package. Build the tracked package with
+`scripts/build-unity-package.ps1`; the script fresh-builds the netstandard2.1
+assembly and rejects stale binaries, missing metadata, unexpected assemblies,
+or leaked C# source.
 
 ## Shader Tooling
 
