@@ -10,12 +10,5 @@
     "Simulation"
   ],
   "license": "MPL-2.0",
-  "category": "Scripting",
-  "samples": [
-    {
-      "displayName": "Planetary Field Viewer",
-      "description": "Runnable Unity viewer using the canonical CultMath CPU and HLSL planetary field.",
-      "path": "Samples~/PlanetaryViewer"
-    }
-  ]
+  "category": "Scripting"
 }

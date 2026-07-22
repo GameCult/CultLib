@@ -33,19 +33,6 @@ public sealed class MathTests
     }
 
     [Fact]
-    public void RectNormalizesBoundsAndContainsPoints()
-    {
-        var viewport = math.rect(10.0f, 20.0f, -5.0f, -2.0f);
-
-        Assert.Equal(new float2(-5.0f, -2.0f), viewport.min);
-        Assert.Equal(new float2(10.0f, 20.0f), viewport.max);
-        Assert.Equal(new float2(15.0f, 22.0f), viewport.size);
-        Assert.Equal(new float2(2.5f, 9.0f), viewport.center);
-        Assert.True(viewport.Contains(new float2(0.0f, 0.0f)));
-        Assert.False(viewport.Contains(new float2(11.0f, 0.0f)));
-    }
-
-    [Fact]
     public void VectorsExposeCommonReadOnlySwizzles()
     {
         Assert.Equal(new float3(2.0f, 3.0f, 1.0f), new float3(1.0f, 2.0f, 3.0f).yzx);

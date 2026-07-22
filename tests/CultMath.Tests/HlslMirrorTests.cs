@@ -5,22 +5,13 @@ namespace CultMath.Tests;
 public sealed class HlslMirrorTests
 {
     [Fact]
-    public void HlslMirrorPublishesSphericalErosionKernel()
+    public void HlslMirrorDoesNotPublishGeometryKernels()
     {
         var source = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "shaders", "CultMath.hlsl"));
-        Assert.Contains("cultmath_spherical_erosion", source);
-        Assert.Contains("CultMathSphericalErosionParameters", source);
-    }
-
-    [Fact]
-    public void HlslMirrorPublishesFaithfulAdvancedErosionKernel()
-    {
-        var mirror = Path.Combine(GetRepositoryRoot(), "shaders", "CultMath.hlsl");
-        var source = File.ReadAllText(mirror);
-        Assert.Contains("AdvancedErosionFilter.hlsl", source);
-        var advanced = File.ReadAllText(Path.Combine(Path.GetDirectoryName(mirror)!, "AdvancedErosionFilter.hlsl"));
-        Assert.Contains("cultmath_phacelle_noise", advanced);
-        Assert.Contains("cultmath_advanced_erosion_filter", advanced);
+        Assert.DoesNotContain("AdvancedErosionFilter.hlsl", source);
+        Assert.DoesNotContain("Planetary.hlsl", source);
+        Assert.DoesNotContain("spherical_erosion", source);
+        Assert.DoesNotContain("planetary_radial_refinement", source);
     }
 
     [Fact]
@@ -64,24 +55,6 @@ public sealed class HlslMirrorTests
 
         Assert.Contains("CULTMATH_NORMALIZE_EPSILON", include);
         Assert.Contains("max(length(value), CULTMATH_NORMALIZE_EPSILON)", include);
-    }
-
-    [Fact]
-    public void HlslMirrorPublishesPlanetaryTopologyAndField()
-    {
-        var root = GetRepositoryRoot();
-        var include = File.ReadAllText(Path.Combine(root, "shaders", "CultMath.hlsl"));
-        var planetary = File.ReadAllText(Path.Combine(root, "shaders", "Planetary.hlsl"));
-        Assert.Contains("Planetary.hlsl", include);
-        Assert.Contains("cultmath_planetary_face_direction", planetary);
-        Assert.Contains("cultmath_planetary_face_coordinate", planetary);
-        Assert.Contains("cultmath_planetary_page_local", planetary);
-        Assert.Contains("cultmath_planetary_field_sample", planetary);
-        Assert.Contains("cultmath_planetary_equirectangular_forward", planetary);
-        Assert.Contains("cultmath_planetary_equal_earth_forward", planetary);
-        Assert.Contains("cultmath_planetary_projection_forward", planetary);
-        Assert.Contains("cultmath_planetary_projection_inverse", planetary);
-        Assert.Contains("CultMathPlanetarySurfaceSample", planetary);
     }
 
     private static string GetRepositoryRoot()

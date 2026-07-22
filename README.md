@@ -30,12 +30,6 @@ shader semantics.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
-- `PlanetaryField`, a scale-aware CPU/HLSL spherical field contract with
-  deterministic identity, cube-sphere topology, residual pages, LOD residency,
-  ray/path/region queries, coarse patches, and projected map-tile baking. See
-  `docs/planetary.md`.
-- `CultMath.Unity`, an engine-facing assembly containing only Unity mesh and
-  page-upload adapters for the canonical planetary contracts.
 
 ## Native Core
 
@@ -71,11 +65,6 @@ The small spline, damping, and pursuit helpers were promoted from Aetheria's
 local `AetheriaMath` surface. The value-noise family follows public shader
 literature from Inigo Quilez's noise and mini-spline articles, expressed in
 CultMath names with tests instead of copied project-local helper drift.
-
-The advanced erosion filter is an MPL-2.0 adaptation of Rune Skovbo Johansen's
-published filter. Its faithful planar core is isolated in
-`AdvancedErosionFilter.cs` and `AdvancedErosionFilter.hlsl`; spherical mapping
-is a separate CultMath concern. See `THIRD-PARTY-NOTICES.md`.
 
 ## Build
 

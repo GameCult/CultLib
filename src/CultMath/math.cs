@@ -22,9 +22,6 @@ public static class math
     public static float4 float4(float3 xyz, float w) => new(xyz, w);
     public static float4 float4(float x, float3 yzw) => new(x, yzw);
     public static float4 float4(float value) => new(value, value, value, value);
-    public static rect rect(float2 min, float2 max) => new(min, max);
-    public static rect rect(float minX, float minY, float maxX, float maxY) => new(minX, minY, maxX, maxY);
-
     public static float radians(float degrees) => degrees * (PI / 180.0f);
     public static float degrees(float radians) => radians * (180.0f / PI);
     public static float sin(float value) => MathF.Sin(value);
