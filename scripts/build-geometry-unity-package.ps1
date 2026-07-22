@@ -21,6 +21,7 @@ $candidateFeed = if ([System.IO.Path]::IsPathRooted($CultMathCandidateFeed)) {
   Join-Path $repoRoot $CultMathCandidateFeed
 }
 $pluginRoot = Join-Path $outputRoot "Runtime\Plugins"
+$templatePluginRoot = Join-Path $templateRoot "Runtime\Plugins"
 
 if (-not (Test-Path -LiteralPath (Join-Path $candidateFeed "CultMath.0.1.0-geometry-migration.2.nupkg"))) {
   throw "CultMath migration candidate is missing from $candidateFeed. Pack CultMath before staging Geometry."
@@ -43,32 +44,58 @@ if ($LASTEXITCODE -ne 0) {
   throw "GameCult.Geometry publish failed with exit code $LASTEXITCODE"
 }
 
-New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $templateRoot "package.json") -Destination $outputRoot
-Copy-Item -LiteralPath (Join-Path $templateRoot "README.md") -Destination $outputRoot
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.Geometry.asmdef") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.Geometry.Unity.asmdef") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPatchMeshAdapter.cs") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPatchMeshAdapter.cs.meta") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPageUpload.cs") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\PlanetaryPageUpload.cs.meta") -Destination (Join-Path $outputRoot "Runtime")
-Copy-Item -LiteralPath (Join-Path $templateRoot "Samples~") -Destination $outputRoot -Recurse
-$shaderOutputRoot = Join-Path $outputRoot "Shaders"
-New-Item -ItemType Directory -Force -Path $shaderOutputRoot | Out-Null
-Copy-Item -Path (Join-Path $repoRoot "src\GameCult.Geometry\Shaders\*.hlsl") -Destination $shaderOutputRoot
-Copy-Item -Path (Join-Path $repoRoot "src\GameCult.Geometry\Shaders\*.hlsl.meta") -Destination $shaderOutputRoot -ErrorAction SilentlyContinue
-Copy-Item -LiteralPath (Join-Path $repoRoot "src\GameCult.Geometry\LICENSES.md") -Destination $outputRoot
-Copy-Item -LiteralPath (Join-Path $repoRoot "src\GameCult.Geometry\THIRD-PARTY-NOTICES.md") -Destination $outputRoot
-
 $geometryAssembly = Join-Path $publishRoot "GameCult.Geometry.dll"
 if (-not (Test-Path -LiteralPath $geometryAssembly)) {
   throw "Geometry Unity package is missing GameCult.Geometry.dll"
 }
-Copy-Item -LiteralPath $geometryAssembly -Destination $pluginRoot
 $geometrySymbols = [System.IO.Path]::ChangeExtension($geometryAssembly, ".pdb")
-if (Test-Path -LiteralPath $geometrySymbols) {
-  Copy-Item -LiteralPath $geometrySymbols -Destination $pluginRoot
+
+$requiredTemplateFiles = @(
+  "LICENSES.md",
+  "THIRD-PARTY-NOTICES.md",
+  "Runtime\Plugins\GameCult.Geometry.dll",
+  "Runtime\Plugins\GameCult.Geometry.dll.meta",
+  "Runtime\Plugins\GameCult.Geometry.pdb",
+  "Runtime\Plugins\GameCult.Geometry.pdb.meta",
+  "Shaders\AdvancedErosionFilter.hlsl",
+  "Shaders\GameCult.Geometry.hlsl",
+  "Shaders\Planetary.hlsl",
+  "Shaders\PlanetaryRadialRefinement.hlsl",
+  "Shaders\SphericalErosion.hlsl"
+)
+foreach ($relativePath in $requiredTemplateFiles) {
+  if (-not (Test-Path -LiteralPath (Join-Path $templateRoot $relativePath))) {
+    throw "Tracked Geometry Unity package is incomplete: missing $relativePath"
+  }
 }
+
+$unityAssetFiles = @(Get-ChildItem -LiteralPath $templateRoot -Recurse -File | Where-Object {
+  $_.Extension -in @(".asmdef", ".cs", ".dll", ".pdb", ".shader", ".hlsl")
+})
+$missingAssetMetas = @($unityAssetFiles | Where-Object { -not (Test-Path -LiteralPath ($_.FullName + ".meta")) })
+$missingDirectoryMetas = @(Get-ChildItem -LiteralPath $templateRoot -Recurse -Directory | Where-Object {
+  -not (Test-Path -LiteralPath ($_.FullName + ".meta"))
+})
+if ($missingAssetMetas.Count -ne 0 -or $missingDirectoryMetas.Count -ne 0) {
+  $missing = @($missingAssetMetas.FullName) + @($missingDirectoryMetas.FullName)
+  throw "Tracked Geometry Unity package has assets without stable .meta files: $($missing -join ', ')"
+}
+
+$trackedAssembly = Join-Path $templatePluginRoot "GameCult.Geometry.dll"
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackedAssembly).Hash -ne
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $geometryAssembly).Hash) {
+  throw "Tracked GameCult.Geometry.dll does not match the current Release publish output. Sync the tracked Git-UPM package before tagging."
+}
+if (Test-Path -LiteralPath $geometrySymbols) {
+  $trackedSymbols = Join-Path $templatePluginRoot "GameCult.Geometry.pdb"
+  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackedSymbols).Hash -ne
+      (Get-FileHash -Algorithm SHA256 -LiteralPath $geometrySymbols).Hash) {
+    throw "Tracked GameCult.Geometry.pdb does not match the current Release publish output. Sync the tracked Git-UPM package before tagging."
+  }
+}
+
+New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
+Copy-Item -Path (Join-Path $templateRoot "*") -Destination $outputRoot -Recurse -Force
 
 $manifest = Get-Content -LiteralPath (Join-Path $outputRoot "package.json") -Raw | ConvertFrom-Json
 $stagedAssemblies = @(Get-ChildItem -LiteralPath $pluginRoot -Filter "*.dll")
