@@ -4,7 +4,7 @@ Plan: `docs/cultmath-gamecult-geometry-migration-plan.md` (locked)
 
 Started: 2026-07-22
 
-Status: Stages 0-4 complete; Stage 5 in progress
+Status: Stages 0-5 complete; Stage 6 in progress
 
 ## Objective
 
@@ -59,8 +59,8 @@ Demotions:
 | 2. Primitive deletion and v2 schemas | Complete | C# and Geometry-owned Rust emit identical v2 bytes and record keys for all four roots |
 | 3. Planetary transfer | Complete | Managed, HLSL, CMPT, Unity, web, tool, docs, tests, and package authority moved; CultMath owners deleted |
 | 4. Mine `vg-csg` | Complete | Geometry-owned Rust kernel passes correctness, parity, performance, formatting, and warning-denied lint gates |
-| 5. CultCache/CultNet/CultMesh integration | In progress | Provider/dataflow mapped; typed commit-path smoke remains |
-| 6. Consumer cutover/release | Pending | Requires local candidate feed and downstream passes |
+| 5. CultCache/CultNet/CultMesh integration | Complete | One provider commit path persists, watches, replicates, and probes typed geometry state |
+| 6. Consumer cutover/release | In progress | Fensalir/Aetheria exact cutover surfaces mapped; consumer edits and release receipts remain |
 | 7. Delete obsolete authorities/audit | Pending | Requires every prior stage gate |
 
 ## Verification Receipts
@@ -244,13 +244,32 @@ a broader stage gate.
   passes 67/67 plus doc tests; rustfmt and warning-denied Clippy pass.
 - The authority transfer commits are CultLib `756f5a33`, CultMath `6a16260`,
   and the post-transfer label cleanup `99c893bd`. The Rust absorption commit is
-  recorded after this progress update is committed.
+  CultLib `6b44f969`.
+
+### Stage 5 receipts
+
+- `CultGeometryWorkerProvider` owns the build invocation and output commit
+  sequence. Direct calls and the `gamecult.geometry.worker.build` CultMesh
+  operation share `BuildAsync`; compute is injected through the persistence-free
+  `ICultGeometryBuildPipeline` port.
+- Domain/request reads and selected-cut, artifact, and observational worker-state
+  writes use `CultNetDatabase` typed APIs. Watches and raw MessagePack envelopes
+  are consequences of that commit path rather than parallel publishers.
+- The development probe derives owner, v2 schema, request/cut keys, selected
+  nodes, artifact identities, content hashes, and served assembly version from
+  persisted documents. Mutating worker display state cannot overwrite geometry
+  outputs or forge the served version.
+- Worker state registers through the generated CultDocument registry. Focused
+  provider tests pass 4/4 and the full GameCult.Geometry suite passes 31/31.
+- Rust raw-envelope duplication was deliberately omitted: CultNet owns that
+  protocol. Existing C#/Rust exact v2 document bytes and record keys remain the
+  cross-runtime geometry witness.
 
 ## Next Actions
 
-1. Add the Geometry-owned worker provider with `CultNetDatabase.PutAsync` as
-   the single commit/publication primitive for direct and operation-handle use.
-2. Prove domain/request to selected-cut/artifact persistence, raw envelope
-   replication, worker-state observation, and typed dev-probe agreement.
-3. Add exact C#/Rust raw-envelope parity without growing a second networking
-   stack or a load-bearing JSON projection.
+1. Cut Fensalir's C# and HLSL planetary surfaces atomically to
+   GameCult.Geometry, including shader resolver and parity harnesses.
+2. Replace Aetheria Freeze's remaining `CultVec*` fixtures with CultMath values
+   under an exact serialization witness, then regenerate Unity project files.
+3. Rebuild coordinated CultMath and Geometry candidates and run the named
+   downstream parity corpus before publication.
