@@ -61,6 +61,8 @@ $requiredTemplateFiles = @(
   "Runtime\Unity\GameCult.Geometry.Unity.asmdef",
   "Runtime\Unity\PlanetaryPatchMeshAdapter.cs",
   "Runtime\Unity\PlanetaryPageUpload.cs",
+  "Tests\Editor\GameCult.Geometry.Tests.Editor.asmdef",
+  "Tests\Editor\GeometryPackageTests.cs",
   "Shaders\AdvancedErosionFilter.hlsl",
   "Shaders\GameCult.Geometry.hlsl",
   "Shaders\Planetary.hlsl",
@@ -83,6 +85,12 @@ $missingDirectoryMetas = @(Get-ChildItem -LiteralPath $templateRoot -Recurse -Di
 if ($missingAssetMetas.Count -ne 0 -or $missingDirectoryMetas.Count -ne 0) {
   $missing = @($missingAssetMetas.FullName) + @($missingDirectoryMetas.FullName)
   throw "Tracked Geometry Unity package has assets without stable .meta files: $($missing -join ', ')"
+}
+
+$assemblyDirectories = @($unityAssetFiles | Where-Object { $_.Extension -eq ".asmdef" } | Group-Object DirectoryName)
+$duplicateAssemblyDirectories = @($assemblyDirectories | Where-Object { $_.Count -ne 1 })
+if ($duplicateAssemblyDirectories.Count -ne 0) {
+  throw "Each Geometry Unity assembly directory must contain exactly one asmdef: $($duplicateAssemblyDirectories.Name -join ', ')"
 }
 
 $templateManifest = Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json
