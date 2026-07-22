@@ -175,6 +175,17 @@ a broader stage gate.
 - CultMesh native-slice metadata fixtures now name `CultMath.float2` and
   `CultMath.float3` while retaining 8/12-byte element widths. Only those three
   overlapping lines were staged from the already-dirty TypeScript test file.
+- All four root geometry schemas now form a v2 cohort with their original slot
+  numbers. Semantic single vectors use `float3`/`quaternion`; mesh vertices,
+  normals, and UVs use `float3[]`/`float2[]`. The runtime contains no v1 DTO,
+  reader, writer, or conversion authority.
+- Live v2 semantic SchemaIds are pinned as domain `sha256:e335...421d`, build
+  request `sha256:2de3...21d3`, selected cut `sha256:8644...9ff8`, and chunk
+  artifact `sha256:2d28...6156`. Full values live in the executable tests.
+- Typed stable fingerprints flatten components into the prior ordered IEEE-bit
+  stream. Domain/chunk round trips preserve record identity, while the checked-
+  in flat-mesh v1 payload is retained as negative evidence and rejected by the
+  v2 decoder. The Geometry suite passes 19/19 after the cohort cut.
 
 ## Next Actions
 

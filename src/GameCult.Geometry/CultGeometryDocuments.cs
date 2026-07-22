@@ -4,6 +4,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using GameCult.Caching;
+using CultMath;
 using MessagePack;
 using static GameCult.Geometry.CultGeometryDocuments;
 
@@ -14,10 +15,10 @@ namespace GameCult.Geometry
     /// </summary>
     public static class CultGeometrySchemaVersions
     {
-        public const string Domain = "gamecult.geometry.domain.v1";
-        public const string BuildRequest = "gamecult.geometry.build_request.v1";
-        public const string SelectedCut = "gamecult.geometry.selected_cut.v1";
-        public const string ChunkArtifact = "gamecult.geometry.chunk_artifact.v1";
+        public const string Domain = "gamecult.geometry.domain.v2";
+        public const string BuildRequest = "gamecult.geometry.build_request.v2";
+        public const string SelectedCut = "gamecult.geometry.selected_cut.v2";
+        public const string ChunkArtifact = "gamecult.geometry.chunk_artifact.v2";
     }
 
     /// <summary>
@@ -67,10 +68,10 @@ namespace GameCult.Geometry
         public string Kind { get; set; } = string.Empty;
 
         [Key(2)]
-        public float[] Translation { get; set; } = Array.Empty<float>();
+        public float3 Translation { get; set; }
 
         [Key(3)]
-        public float[] RotationXyzw { get; set; } = Array.Empty<float>();
+        public quaternion Rotation { get; set; } = quaternion.identity;
 
         [Key(4)]
         public ulong Seed { get; set; }
@@ -88,7 +89,7 @@ namespace GameCult.Geometry
                 Name,
                 Kind,
                 StableVector(Translation),
-                StableVector(RotationXyzw),
+                StableVector(Rotation),
                 Seed.ToString(CultureInfo.InvariantCulture)
             }
                 .Concat(Claims.Select(claim => claim.StableFingerprint()))
@@ -109,16 +110,16 @@ namespace GameCult.Geometry
         public string Name { get; set; } = string.Empty;
 
         [Key(1)]
-        public float[] Translation { get; set; } = Array.Empty<float>();
+        public float3 Translation { get; set; }
 
         [Key(2)]
-        public float[] RotationXyzw { get; set; } = Array.Empty<float>();
+        public quaternion Rotation { get; set; } = quaternion.identity;
 
         [Key(3)]
-        public float[] SupportCenter { get; set; } = Array.Empty<float>();
+        public float3 SupportCenter { get; set; }
 
         [Key(4)]
-        public float[] SupportSize { get; set; } = Array.Empty<float>();
+        public float3 SupportSize { get; set; }
 
         [Key(5)]
         public string Kind { get; set; } = string.Empty;
@@ -132,7 +133,7 @@ namespace GameCult.Geometry
         public string StableFingerprint() => StableArray([
             Name,
             StableVector(Translation),
-            StableVector(RotationXyzw),
+            StableVector(Rotation),
             StableVector(SupportCenter),
             StableVector(SupportSize),
             Kind,
@@ -161,13 +162,13 @@ namespace GameCult.Geometry
         public string WorkerGroup { get; set; } = string.Empty;
 
         [Key(3)]
-        public float[] CameraPosition { get; set; } = Array.Empty<float>();
+        public float3 CameraPosition { get; set; }
 
         [Key(4)]
-        public float[] FrustumMin { get; set; } = Array.Empty<float>();
+        public float3 FrustumMin { get; set; }
 
         [Key(5)]
-        public float[] FrustumMax { get; set; } = Array.Empty<float>();
+        public float3 FrustumMax { get; set; }
 
         [Key(6)]
         public float ViewportHeightPixels { get; set; }
@@ -321,10 +322,10 @@ namespace GameCult.Geometry
         public string SelectedCutId { get; set; } = string.Empty;
 
         [Key(3)]
-        public float[] BoundsMin { get; set; } = Array.Empty<float>();
+        public float3 BoundsMin { get; set; }
 
         [Key(4)]
-        public float[] BoundsMax { get; set; } = Array.Empty<float>();
+        public float3 BoundsMax { get; set; }
 
         [Key(5)]
         public string[] SourceDomainKeys { get; set; } = Array.Empty<string>();
@@ -374,13 +375,13 @@ namespace GameCult.Geometry
     public sealed class CultGeometryTriangleMesh
     {
         [Key(0)]
-        public float[] Positions { get; set; } = Array.Empty<float>();
+        public float3[] Positions { get; set; } = Array.Empty<float3>();
 
         [Key(1)]
-        public float[] Normals { get; set; } = Array.Empty<float>();
+        public float3[] Normals { get; set; } = Array.Empty<float3>();
 
         [Key(2)]
-        public float[] Uvs { get; set; } = Array.Empty<float>();
+        public float2[] Uvs { get; set; } = Array.Empty<float2>();
 
         [Key(3)]
         public uint[] Indices { get; set; } = Array.Empty<uint>();
@@ -409,10 +410,20 @@ namespace GameCult.Geometry
             return string.Concat(bytes.Select(value => value.ToString("x2")));
         }
 
-        public static string StableVector(float[] values)
-        {
-            return string.Join(",", values.Select(StableFloat));
-        }
+        public static string StableVector(float2 value) =>
+            string.Join(",", StableFloat(value.x), StableFloat(value.y));
+
+        public static string StableVector(float3 value) =>
+            string.Join(",", StableFloat(value.x), StableFloat(value.y), StableFloat(value.z));
+
+        public static string StableVector(quaternion value) =>
+            string.Join(",", StableFloat(value.x), StableFloat(value.y), StableFloat(value.z), StableFloat(value.w));
+
+        public static string StableVector(float2[] values) =>
+            string.Join(",", values.SelectMany(value => new[] { value.x, value.y }).Select(StableFloat));
+
+        public static string StableVector(float3[] values) =>
+            string.Join(",", values.SelectMany(value => new[] { value.x, value.y, value.z }).Select(StableFloat));
 
         public static string StableFloat(float value)
         {

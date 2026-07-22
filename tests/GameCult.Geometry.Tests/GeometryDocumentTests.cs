@@ -87,6 +87,15 @@ namespace GameCult.Geometry.Tests
                 .Should().Be(CultGeometrySchemaVersions.SelectedCut);
             cache.Registry.GetRequired<CultGeometryChunkArtifact>().SchemaVersion
                 .Should().Be(CultGeometrySchemaVersions.ChunkArtifact);
+
+            cache.Registry.GetRequired<CultGeometryDomainDocument>().SchemaId
+                .Should().Be("sha256:e3358436f8a07c84cc66b5196380cdfcd6920fa15f15d052d30b42b73762421d");
+            cache.Registry.GetRequired<CultGeometryBuildRequest>().SchemaId
+                .Should().Be("sha256:2de3162db128fc2c5cc2ea3dae46d0196110a9e5f969997002309e636a3721d3");
+            cache.Registry.GetRequired<CultGeometrySelectedCutManifest>().SchemaId
+                .Should().Be("sha256:864412d3cf0f6b079ceb0bbd3b36232f11380e63cdf0bfd64d505a710fb49ff8");
+            cache.Registry.GetRequired<CultGeometryChunkArtifact>().SchemaId
+                .Should().Be("sha256:2d28046b7c76244ced70ee6de09bcbb5c64d364aa578e5a4c903d397a7a56156");
         }
 
         [Test]
@@ -98,9 +107,9 @@ namespace GameCult.Geometry.Tests
             {
                 DomainKey = domainKey.Value,
                 WorkerGroup = "ragnarok-column-workers",
-                CameraPosition = [36f, -42f, 30f],
-                FrustumMin = [-75f, -75f, -30f],
-                FrustumMax = [75f, 75f, 120f],
+                CameraPosition = new float3(36f, -42f, 30f),
+                FrustumMin = new float3(-75f, -75f, -30f),
+                FrustumMax = new float3(75f, 75f, 120f),
                 ViewportHeightPixels = 1080f,
                 VerticalFovRadians = 1.0471976f,
                 TargetError = 0.01f,
@@ -131,6 +140,11 @@ namespace GameCult.Geometry.Tests
 
             decoded.ChunkId.Should().Be(chunk.ChunkId);
             decoded.RenderMesh.TriangleCount.Should().Be(1);
+            decoded.BoundsMin.Should().Be(new float3(-1f, -1f, 0f));
+            decoded.RenderMesh.Positions.Should().Equal(chunk.RenderMesh.Positions);
+            decoded.RenderMesh.Normals.Should().HaveCount(decoded.RenderMesh.Positions.Length);
+            decoded.RenderMesh.Uvs.Should().HaveCount(decoded.RenderMesh.Positions.Length);
+            decoded.RenderMesh.Indices.Length.Should().Be(decoded.RenderMesh.TriangleMaterials.Length * 3);
             CultGeometryChunkArtifact.CreateRecordKey(decoded)
                 .Should().Be(CultGeometryChunkArtifact.CreateRecordKey(chunk));
         }
@@ -152,29 +166,26 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
-        public void RustExportedDomainDocument_DecodesWithStableCultCacheKey()
+        public void TypedV2Domain_RoundTripsAndPreservesTheV1RecordKey()
         {
-            var payload = File.ReadAllBytes(FixturePath("ragnarok-domain.msgpack"));
-            var domain = CultDocumentMessagePackSerialization.Deserialize<CultGeometryDomainDocument>(payload);
+            var domain = SampleDomain();
+            var payload = CultDocumentMessagePackSerialization.Serialize(domain);
+            var decoded = CultDocumentMessagePackSerialization.Deserialize<CultGeometryDomainDocument>(payload);
 
-            domain.DomainId.Should().Be("ragnarok-column");
-            domain.Root.Children.Should().NotBeEmpty();
-            domain.Root.Children[0].Name.Should().Be("stellarator-column-00");
-            CultGeometryDomainDocument.CreateRecordKey(domain).Value
-                .Should().Be("geometry:domain:02c9b5810977406b0c206f3a3494327a423abb9448192be1b9a1863cd0f2ed95");
+            decoded.Root.Rotation.Should().Be(quaternion.identity);
+            decoded.Root.Children[0].Claims[0].SupportCenter.Should().Be(new float3(0f, 0f, 45f));
+            CultGeometryDomainDocument.CreateRecordKey(decoded).Value.Should().Be(
+                "geometry:domain:175899ea97548da0599e12bcaccd07fa1d6009ed450fadb3de229d47bab04431");
         }
 
         [Test]
-        public void RustExportedChunkArtifact_DecodesWithStableCultCacheKey()
+        public void V2Chunk_DoesNotAcceptTheLegacyFlatMeshPayload()
         {
             var payload = File.ReadAllBytes(FixturePath("ragnarok-first-chunk.msgpack"));
-            var chunk = CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload);
 
-            chunk.ChunkId.Should().StartWith("chunk/");
-            chunk.RenderMesh.TriangleCount.Should().BeGreaterThan(0);
-            chunk.SourceDomainKeys.Should().NotBeEmpty();
-            CultGeometryChunkArtifact.CreateRecordKey(chunk).Value
-                .Should().Be("geometry:chunk:b94dcd7d6776df15d0fa5fcf7f4b24f1384876b13b2d38cc57c4468136521af5");
+            FluentActions.Invoking(() =>
+                    CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload))
+                .Should().Throw<MessagePackSerializationException>();
         }
 
         [Test]
@@ -325,8 +336,8 @@ namespace GameCult.Geometry.Tests
                 {
                     Name = "ragnarok-column",
                     Kind = "Root",
-                    Translation = [0f, 0f, 0f],
-                    RotationXyzw = [0f, 0f, 0f, 1f],
+                    Translation = float3.zero,
+                    Rotation = quaternion.identity,
                     Seed = 0x5EED,
                     Claims = [],
                     Children =
@@ -335,18 +346,18 @@ namespace GameCult.Geometry.Tests
                         {
                             Name = "stellarator-column-00",
                             Kind = "Column",
-                            Translation = [0f, 0f, 0f],
-                            RotationXyzw = [0f, 0f, 0f, 1f],
+                            Translation = float3.zero,
+                            Rotation = quaternion.identity,
                             Seed = 0xC0110000,
                             Claims =
                             [
                                 new CultGeometryFeatureClaim
                                 {
                                     Name = "column-support-shell",
-                                    Translation = [0f, 0f, 0f],
-                                    RotationXyzw = [0f, 0f, 0f, 1f],
-                                    SupportCenter = [0f, 0f, 45f],
-                                    SupportSize = [18f, 18f, 96f],
+                                    Translation = float3.zero,
+                                    Rotation = quaternion.identity,
+                                    SupportCenter = new float3(0f, 0f, 45f),
+                                    SupportSize = new float3(18f, 18f, 96f),
                                     Kind = "SupportShell",
                                     Material = 10,
                                     LoweringPolicy = "RenderAndCollider"
@@ -359,15 +370,6 @@ namespace GameCult.Geometry.Tests
             };
         }
 
-        private static string FixturePath(string fileName)
-        {
-            return Path.Combine(
-                TestContext.CurrentContext.TestDirectory,
-                "Fixtures",
-                "vg-csg-ragnarok",
-                fileName);
-        }
-
         private static CultGeometryChunkArtifact SampleChunk()
         {
             return new CultGeometryChunkArtifact
@@ -375,15 +377,15 @@ namespace GameCult.Geometry.Tests
                 ChunkId = "chunk/ragnarok-column/column-00",
                 CutKey = "geometry:cut:test",
                 SelectedCutId = "cut-test",
-                BoundsMin = [-1f, -1f, 0f],
-                BoundsMax = [1f, 1f, 1f],
+                BoundsMin = new float3(-1f, -1f, 0f),
+                BoundsMax = new float3(1f, 1f, 1f),
                 SourceDomainKeys = ["ragnarok-column/stellarator-column-00"],
                 SourceClaimKeys = ["ragnarok-column/stellarator-column-00/claim/support"],
                 RenderMesh = new CultGeometryTriangleMesh
                 {
-                    Positions = [0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f],
-                    Normals = [0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f, 1f],
-                    Uvs = [0f, 0f, 1f, 0f, 0f, 1f],
+                    Positions = [new float3(0f, 0f, 0f), new float3(1f, 0f, 0f), new float3(0f, 1f, 0f)],
+                    Normals = [new float3(0f, 0f, 1f), new float3(0f, 0f, 1f), new float3(0f, 0f, 1f)],
+                    Uvs = [new float2(0f, 0f), new float2(1f, 0f), new float2(0f, 1f)],
                     Indices = [0u, 1u, 2u],
                     TriangleMaterials = [20u]
                 },
@@ -392,6 +394,15 @@ namespace GameCult.Geometry.Tests
                 StableClipSeed = 1234,
                 SupportsParentChildCoexistence = true
             };
+        }
+
+        private static string FixturePath(string fileName)
+        {
+            return Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "Fixtures",
+                "vg-csg-ragnarok",
+                fileName);
         }
     }
 }
