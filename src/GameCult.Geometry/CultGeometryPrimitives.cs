@@ -1,126 +1,10 @@
 using System;
 using System.Text.Json.Serialization;
+using CultMath;
 using MessagePack;
 
 namespace GameCult.Geometry
 {
-    /// <summary>
-    /// Deterministic two-dimensional float vector for cross-runtime geometry and query contracts.
-    /// </summary>
-    [MessagePackObject]
-    public readonly struct CultVec2 : IEquatable<CultVec2>
-    {
-        /// <summary>Creates a two-dimensional vector.</summary>
-        public CultVec2(float x, float y)
-        {
-            X = x;
-            Y = y;
-        }
-
-        /// <summary>Gets the x component.</summary>
-        [Key(0)]
-        public float X { get; }
-
-        /// <summary>Gets the y component.</summary>
-        [Key(1)]
-        public float Y { get; }
-
-        /// <summary>Gets the zero vector.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public static CultVec2 Zero => new(0f, 0f);
-
-        /// <summary>Gets the squared vector length.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public float LengthSquared => (X * X) + (Y * Y);
-
-        /// <summary>Returns whether this vector is equal to another vector.</summary>
-        public bool Equals(CultVec2 other) => X.Equals(other.X) && Y.Equals(other.Y);
-
-        /// <inheritdoc />
-        public override bool Equals(object? obj) => obj is CultVec2 other && Equals(other);
-
-        /// <inheritdoc />
-        public override int GetHashCode() => HashCode.Combine(X, Y);
-
-        /// <inheritdoc />
-        public override string ToString() => $"({X}, {Y})";
-
-        public static CultVec2 operator +(CultVec2 left, CultVec2 right) => new(left.X + right.X, left.Y + right.Y);
-        public static CultVec2 operator -(CultVec2 left, CultVec2 right) => new(left.X - right.X, left.Y - right.Y);
-        public static CultVec2 operator *(CultVec2 value, float scalar) => new(value.X * scalar, value.Y * scalar);
-        public static CultVec2 operator /(CultVec2 value, float scalar) => new(value.X / scalar, value.Y / scalar);
-        public static bool operator ==(CultVec2 left, CultVec2 right) => left.Equals(right);
-        public static bool operator !=(CultVec2 left, CultVec2 right) => !left.Equals(right);
-    }
-
-    /// <summary>
-    /// Deterministic three-dimensional float vector for cross-runtime geometry and query contracts.
-    /// </summary>
-    [MessagePackObject]
-    public readonly struct CultVec3 : IEquatable<CultVec3>
-    {
-        /// <summary>Creates a three-dimensional vector.</summary>
-        public CultVec3(float x, float y, float z)
-        {
-            X = x;
-            Y = y;
-            Z = z;
-        }
-
-        /// <summary>Gets the x component.</summary>
-        [Key(0)]
-        public float X { get; }
-
-        /// <summary>Gets the y component.</summary>
-        [Key(1)]
-        public float Y { get; }
-
-        /// <summary>Gets the z component.</summary>
-        [Key(2)]
-        public float Z { get; }
-
-        /// <summary>Gets the zero vector.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public static CultVec3 Zero => new(0f, 0f, 0f);
-
-        /// <summary>Gets the XY plane projection.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public CultVec2 Xy => new(X, Y);
-
-        /// <summary>Gets the XZ plane projection for Unity compatibility adapters.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public CultVec2 Xz => new(X, Z);
-
-        /// <summary>Gets the squared vector length.</summary>
-        [IgnoreMember]
-        [JsonIgnore]
-        public float LengthSquared => (X * X) + (Y * Y) + (Z * Z);
-
-        /// <summary>Returns whether this vector is equal to another vector.</summary>
-        public bool Equals(CultVec3 other) => X.Equals(other.X) && Y.Equals(other.Y) && Z.Equals(other.Z);
-
-        /// <inheritdoc />
-        public override bool Equals(object? obj) => obj is CultVec3 other && Equals(other);
-
-        /// <inheritdoc />
-        public override int GetHashCode() => HashCode.Combine(X, Y, Z);
-
-        /// <inheritdoc />
-        public override string ToString() => $"({X}, {Y}, {Z})";
-
-        public static CultVec3 operator +(CultVec3 left, CultVec3 right) => new(left.X + right.X, left.Y + right.Y, left.Z + right.Z);
-        public static CultVec3 operator -(CultVec3 left, CultVec3 right) => new(left.X - right.X, left.Y - right.Y, left.Z - right.Z);
-        public static CultVec3 operator *(CultVec3 value, float scalar) => new(value.X * scalar, value.Y * scalar, value.Z * scalar);
-        public static CultVec3 operator /(CultVec3 value, float scalar) => new(value.X / scalar, value.Y / scalar, value.Z / scalar);
-        public static bool operator ==(CultVec3 left, CultVec3 right) => left.Equals(right);
-        public static bool operator !=(CultVec3 left, CultVec3 right) => !left.Equals(right);
-    }
-
     /// <summary>
     /// Axis-aligned two-dimensional rectangle represented by canonical min and max corners.
     /// </summary>
@@ -128,52 +12,52 @@ namespace GameCult.Geometry
     public readonly struct CultRect : IEquatable<CultRect>
     {
         /// <summary>Creates a rectangle and canonicalizes min/max corners.</summary>
-        public CultRect(CultVec2 min, CultVec2 max)
+        public CultRect(float2 min, float2 max)
         {
-            Min = new CultVec2(Math.Min(min.X, max.X), Math.Min(min.Y, max.Y));
-            Max = new CultVec2(Math.Max(min.X, max.X), Math.Max(min.Y, max.Y));
+            Min = new float2(Math.Min(min.x, max.x), Math.Min(min.y, max.y));
+            Max = new float2(Math.Max(min.x, max.x), Math.Max(min.y, max.y));
         }
 
         /// <summary>Creates a rectangle and canonicalizes min/max corners.</summary>
         public CultRect(float minX, float minY, float maxX, float maxY)
-            : this(new CultVec2(minX, minY), new CultVec2(maxX, maxY))
+            : this(new float2(minX, minY), new float2(maxX, maxY))
         {
         }
 
         /// <summary>Gets the canonical minimum corner.</summary>
         [Key(0)]
-        public CultVec2 Min { get; }
+        public float2 Min { get; }
 
         /// <summary>Gets the canonical maximum corner.</summary>
         [Key(1)]
-        public CultVec2 Max { get; }
+        public float2 Max { get; }
 
         /// <summary>Gets the rectangle size.</summary>
         [IgnoreMember]
         [JsonIgnore]
-        public CultVec2 Size => Max - Min;
+        public float2 Size => Max - Min;
 
         /// <summary>Gets the rectangle center.</summary>
         [IgnoreMember]
         [JsonIgnore]
-        public CultVec2 Center => (Min + Max) * 0.5f;
+        public float2 Center => (Min + Max) * 0.5f;
 
         /// <summary>Returns whether the point lies inside or on the rectangle edge.</summary>
-        public bool Contains(CultVec2 point)
+        public bool Contains(float2 point)
         {
-            return point.X >= Min.X &&
-                   point.X <= Max.X &&
-                   point.Y >= Min.Y &&
-                   point.Y <= Max.Y;
+            return point.x >= Min.x &&
+                   point.x <= Max.x &&
+                   point.y >= Min.y &&
+                   point.y <= Max.y;
         }
 
         /// <summary>Returns whether this rectangle intersects another rectangle.</summary>
         public bool Intersects(CultRect other)
         {
-            return Min.X <= other.Max.X &&
-                   Max.X >= other.Min.X &&
-                   Min.Y <= other.Max.Y &&
-                   Max.Y >= other.Min.Y;
+            return Min.x <= other.Max.x &&
+                   Max.x >= other.Min.x &&
+                   Min.y <= other.Max.y &&
+                   Max.y >= other.Min.y;
         }
 
         /// <summary>Returns whether this rectangle is equal to another rectangle.</summary>
@@ -199,7 +83,7 @@ namespace GameCult.Geometry
     public readonly struct CultCircle : IEquatable<CultCircle>
     {
         /// <summary>Creates a circle.</summary>
-        public CultCircle(CultVec2 center, float radius)
+        public CultCircle(float2 center, float radius)
         {
             if (radius < 0f)
             {
@@ -212,7 +96,7 @@ namespace GameCult.Geometry
 
         /// <summary>Gets the circle center.</summary>
         [Key(0)]
-        public CultVec2 Center { get; }
+        public float2 Center { get; }
 
         /// <summary>Gets the circle radius.</summary>
         [Key(1)]
@@ -222,24 +106,24 @@ namespace GameCult.Geometry
         [IgnoreMember]
         [JsonIgnore]
         public CultRect Bounds => new(
-            Center.X - Radius,
-            Center.Y - Radius,
-            Center.X + Radius,
-            Center.Y + Radius);
+            Center.x - Radius,
+            Center.y - Radius,
+            Center.x + Radius,
+            Center.y + Radius);
 
         /// <summary>Returns whether the point lies inside or on the circle edge.</summary>
-        public bool Contains(CultVec2 point)
+        public bool Contains(float2 point)
         {
             var delta = point - Center;
-            return delta.LengthSquared <= Radius * Radius;
+            return ((delta.x * delta.x) + (delta.y * delta.y)) <= Radius * Radius;
         }
 
         /// <summary>Returns whether this circle intersects a rectangle.</summary>
         public bool Intersects(CultRect rect)
         {
-            var clampedX = Math.Max(rect.Min.X, Math.Min(Center.X, rect.Max.X));
-            var clampedY = Math.Max(rect.Min.Y, Math.Min(Center.Y, rect.Max.Y));
-            return Contains(new CultVec2(clampedX, clampedY));
+            var clampedX = Math.Max(rect.Min.x, Math.Min(Center.x, rect.Max.x));
+            var clampedY = Math.Max(rect.Min.y, Math.Min(Center.y, rect.Max.y));
+            return Contains(new float2(clampedX, clampedY));
         }
 
         /// <summary>Returns whether this circle is equal to another circle.</summary>
@@ -262,7 +146,7 @@ namespace GameCult.Geometry
     public readonly struct CultSphere : IEquatable<CultSphere>
     {
         /// <summary>Creates a sphere.</summary>
-        public CultSphere(CultVec3 center, float radius)
+        public CultSphere(float3 center, float radius)
         {
             if (radius < 0f)
             {
@@ -275,7 +159,7 @@ namespace GameCult.Geometry
 
         /// <summary>Gets the sphere center.</summary>
         [Key(0)]
-        public CultVec3 Center { get; }
+        public float3 Center { get; }
 
         /// <summary>Gets the sphere radius.</summary>
         [Key(1)]
@@ -284,13 +168,13 @@ namespace GameCult.Geometry
         /// <summary>Gets the XY circle projection.</summary>
         [IgnoreMember]
         [JsonIgnore]
-        public CultCircle XyCircle => new(Center.Xy, Radius);
+        public CultCircle XyCircle => new(Center.xy, Radius);
 
         /// <summary>Returns whether the point lies inside or on the sphere surface.</summary>
-        public bool Contains(CultVec3 point)
+        public bool Contains(float3 point)
         {
             var delta = point - Center;
-            return delta.LengthSquared <= Radius * Radius;
+            return ((delta.x * delta.x) + (delta.y * delta.y) + (delta.z * delta.z)) <= Radius * Radius;
         }
 
         /// <summary>Returns whether this sphere is equal to another sphere.</summary>

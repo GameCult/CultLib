@@ -3,6 +3,7 @@ using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using GameCult.Mesh;
 using GameCult.Networking;
+using CultMath;
 using MessagePack;
 using NUnit.Framework;
 using R3;
@@ -21,52 +22,56 @@ namespace GameCult.Geometry.Tests
         {
             var viewport = new CultRect(8f, 4f, -8f, -4f);
 
-            viewport.Min.Should().Be(new CultVec2(-8f, -4f));
-            viewport.Max.Should().Be(new CultVec2(8f, 4f));
-            viewport.Center.Should().Be(CultVec2.Zero);
-            viewport.Contains(new CultVec2(2f, 3f)).Should().BeTrue();
+            viewport.Min.Should().Be(new float2(-8f, -4f));
+            viewport.Max.Should().Be(new float2(8f, 4f));
+            viewport.Center.Should().Be(float2.zero);
+            viewport.Contains(new float2(2f, 3f)).Should().BeTrue();
             viewport.Intersects(new CultRect(7f, 3f, 10f, 5f)).Should().BeTrue();
             viewport.Intersects(new CultRect(9f, 5f, 10f, 6f)).Should().BeFalse();
 
-            var gravityBrush = new CultCircle(new CultVec2(10f, 0f), 3f);
+            var gravityBrush = new CultCircle(new float2(10f, 0f), 3f);
             gravityBrush.Intersects(viewport).Should().BeTrue();
-            gravityBrush.Contains(new CultVec2(12f, 0f)).Should().BeTrue();
-            gravityBrush.Contains(new CultVec2(14f, 0f)).Should().BeFalse();
+            gravityBrush.Contains(new float2(12f, 0f)).Should().BeTrue();
+            gravityBrush.Contains(new float2(14f, 0f)).Should().BeFalse();
         }
 
         [Test]
         public void GeometryPrimitives_PreserveWholeVectorsForSoaAndPhysicsQueries()
         {
-            var sphere = new CultSphere(new CultVec3(1f, 2f, 3f), 5f);
+            var sphere = new CultSphere(new float3(1f, 2f, 3f), 5f);
 
-            sphere.Contains(new CultVec3(1f, 6f, 3f)).Should().BeTrue();
-            sphere.Contains(new CultVec3(1f, 8f, 3f)).Should().BeFalse();
-            sphere.Center.Xy.Should().Be(new CultVec2(1f, 2f));
-            sphere.Center.Xz.Should().Be(new CultVec2(1f, 3f));
+            sphere.Contains(new float3(1f, 6f, 3f)).Should().BeTrue();
+            sphere.Contains(new float3(1f, 8f, 3f)).Should().BeFalse();
+            sphere.Center.xy.Should().Be(new float2(1f, 2f));
+            sphere.Center.xz.Should().Be(new float2(1f, 3f));
             sphere.XyCircle.Bounds.Should().Be(new CultRect(-4f, -3f, 6f, 7f));
         }
 
         [Test]
         public void GeometryPrimitives_RoundTripThroughMessagePack()
         {
-            var rect = new CultRect(new CultVec2(5f, -2f), new CultVec2(-1f, 7f));
-            var payload = MessagePackSerializer.Serialize(rect);
-            var decoded = MessagePackSerializer.Deserialize<CultRect>(payload);
+            var rect = new CultRect(new float2(5f, -2f), new float2(-1f, 7f));
+            var options = CultDocumentMessagePackSerialization.OptionsFor(typeof(CultRect));
+            var payload = MessagePackSerializer.Serialize(rect, options);
+            var decoded = MessagePackSerializer.Deserialize<CultRect>(payload, options);
 
             decoded.Should().Be(rect);
-            decoded.Min.Should().Be(new CultVec2(-1f, -2f));
-            decoded.Max.Should().Be(new CultVec2(5f, 7f));
+            decoded.Min.Should().Be(new float2(-1f, -2f));
+            decoded.Max.Should().Be(new float2(5f, 7f));
         }
 
         [Test]
-        public void GeometryPrimitives_JsonOmitsComputedConvenienceProperties()
+        public void GeometryPrimitive_JsonInspectionProjection_UsesLowercaseComponents()
         {
-            var json = JsonSerializer.Serialize(new CultVec3(1f, 2f, 3f));
+            var value = new float3(1f, 2f, 3f);
+            var json = JsonSerializer.Serialize(new { value.x, value.y, value.z });
 
-            json.Should().Be("""{"X":1,"Y":2,"Z":3}""");
-            json.Should().NotContain("LengthSquared");
-            json.Should().NotContain("Xy");
-            json.Should().NotContain("Xz");
+            json.Should().Contain("\"x\":1");
+            json.Should().Contain("\"y\":2");
+            json.Should().Contain("\"z\":3");
+            json.Should().NotContain("\"X\"");
+            json.Should().NotContain("\"Y\"");
+            json.Should().NotContain("\"Z\"");
         }
 
         [Test]

@@ -155,6 +155,26 @@ a broader stage gate.
   artifacts. v1 remains fixture evidence only; it will not survive as a runtime
   writer or general compatibility model.
 - No deviations from the locked target architecture.
+- Stage 2 versions all four root geometry documents as one v2 cohort. Domain's
+  nested CLR layout changes are invisible to the current root-only schema
+  fingerprint, and leaving SelectedCut as the lone live v1 writer would retain
+  a split cohort even though its direct fields are unchanged.
+- Typed vectors preserve existing record keys by flattening components in the
+  same authored order into the existing IEEE-754 bit canonicalization. Wire
+  payloads still change—especially typed mesh arrays—so byte fixtures and v2
+  identities remain mandatory.
+
+### Stage 2 receipts
+
+- `CultVec2` and `CultVec3` definitions were deleted; `CultRect`, `CultCircle`,
+  and `CultSphere` now expose CultMath `float2`/`float3` directly. No alias or
+  conversion owner remains.
+- `dotnet test tests/GameCult.Geometry.Tests/GameCult.Geometry.Tests.csproj
+  --no-restore --verbosity minimal --disable-build-servers
+  -p:UseSharedCompilation=false -m:1` passed 19/19 for the primitive cut.
+- CultMesh native-slice metadata fixtures now name `CultMath.float2` and
+  `CultMath.float3` while retaining 8/12-byte element widths. Only those three
+  overlapping lines were staged from the already-dirty TypeScript test file.
 
 ## Next Actions
 

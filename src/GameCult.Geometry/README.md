@@ -20,7 +20,7 @@ The package is deliberately substrate-shaped:
 The small value layer is for cross-runtime query contracts, physics probes,
 native slices, and UI surfaces:
 
-- `CultVec2` and `CultVec3`: whole-vector values for positions, velocities,
+- `CultMath.float2` and `CultMath.float3`: whole-vector values for positions, velocities,
   accelerations, and query inputs. SoA layouts may store them efficiently, but
   the semantic API does not force callers to split x/y/z into unrelated fields.
 - `CultRect`: canonical XY viewport/query rectangle stored as min/max corners.
@@ -72,7 +72,7 @@ cache miss; that is split-brain geometry.
 
 ## Documents
 
-- `CultVec2`, `CultVec3`, `CultRect`, `CultCircle`, `CultSphere`: shared value
+- `CultMath.float2`, `CultMath.float3`, `CultRect`, `CultCircle`, `CultSphere`: shared value
   primitives for query and view contracts.
 - `CultGeometryDomainDocument`: one hierarchical domain tree, suitable for
   Ragnarok/Fensalir-style feature DSL output.

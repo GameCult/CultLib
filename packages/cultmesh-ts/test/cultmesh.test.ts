@@ -1454,7 +1454,7 @@ test("CultMesh TS describes typed surface catalogs for tools and generated bindi
     "aetheria.zone.render",
     "gamecult.aetheria.render_body.v1",
     128,
-    [CultMesh.nativeSliceColumn("position", "CultVec2", 8)],
+    [CultMesh.nativeSliceColumn("position", "CultMath.float2", 8)],
     { route: routeHint },
   );
 
@@ -2150,7 +2150,7 @@ test("CultMesh TS exposes native slice descriptors", () => {
     "gamecult.aetheria.zone_render.v1",
     12,
     [
-      CultMesh.nativeSliceColumn("position", "CultVec3", 12),
+      CultMesh.nativeSliceColumn("position", "CultMath.float3", 12),
       CultMesh.nativeSliceColumn("rotationRadians", "float32", 4),
       CultMesh.nativeSliceColumn("renderGroupId", "uint32", 4),
     ],
@@ -2163,7 +2163,7 @@ test("CultMesh TS exposes native slice descriptors", () => {
   assert.equal(CultMesh.denseRowStrideBytes(view), 20);
   assert.deepEqual(CultMesh.findNativeSliceColumn(view, "position"), {
     name: "position",
-    valueType: "CultVec3",
+    valueType: "CultMath.float3",
     elementSizeBytes: 12,
   });
   assert.equal(CultMesh.findNativeSliceColumn(view, "missing"), undefined);

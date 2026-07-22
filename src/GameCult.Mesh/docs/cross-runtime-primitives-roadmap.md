@@ -121,7 +121,7 @@ var viewport = await aetheria.Zone(zoneId)
 
 await aetheria.Entity(ravenId)
     .Pilot()
-    .MoveAsync(CultVec2.Right, claim: "pilot-control");
+    .MoveAsync(new CultMath.float2(1f, 0f), claim: "pilot-control");
 ```
 
 Current seed:
@@ -134,7 +134,7 @@ var verse = await CultMesh.ConnectVerseAsync(
     new[] { new CultMeshAuthorityClaim("pilot-control", shardId: "zone:raven") });
 
 var aetheria = verse.Use(context => new AetheriaGeneratedFacade(context));
-await aetheria.Entity(ravenId).Pilot.MoveAsync(CultVec2.Right);
+await aetheria.Entity(ravenId).Pilot.MoveAsync(new CultMath.float2(1f, 0f));
 ```
 
 ```ts
