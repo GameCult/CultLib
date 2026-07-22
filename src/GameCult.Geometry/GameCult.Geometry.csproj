@@ -5,10 +5,15 @@
     <PackageTags>game;geometry;csg;lod;cultcache;cultmesh;vibegeometry;fensalir</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
+    <CultMathVersion>0.1.0-geometry-migration.1</CultMathVersion>
+    <CultMathCandidateFeed Condition="'$(CultMathCandidateFeed)' == ''">$(MSBuildThisFileDirectory)..\..\..\CultMath\.tools\local-feed</CultMathCandidateFeed>
+    <RestoreAdditionalProjectSources Condition="Exists('$(CultMathCandidateFeed)')">$(RestoreAdditionalProjectSources);$(CultMathCandidateFeed)</RestoreAdditionalProjectSources>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
+    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
+    <PackageReference Include="CultMath" Version="$(CultMathVersion)" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="System.Text.Json" Version="9.0.10" />
   </ItemGroup>

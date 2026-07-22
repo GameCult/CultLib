@@ -110,6 +110,26 @@ a broader stage gate.
   available on the library's `netstandard2.1` target. It was removed rather
   than papered over; structural managed-reference inspection is the owning
   eligibility rule.
+- CultMath candidate `0.1.0-geometry-migration.1` was packed from commit
+  `cb481b4c75444426a693781a0e5b35ade08a8938` with build servers disabled. The
+  123,307-byte package SHA-256 is
+  `07C0CE79453AF9BA29910809F8779916E7B8F92DCA7ACEB5E2B8F9D3EBED3E93`;
+  a local-feed consumer restored, compiled, and executed `CultMath.float3`.
+- GameCult.Geometry consumes that candidate as an explicit NuGet dependency;
+  its sibling `.tools/local-feed` is only an optional restore source, not a
+  project-reference authority. Geometry owns strict positional formatters for
+  `float2`, `float3`, `float4`, and `quaternion`.
+- `dotnet test tests/GameCult.Geometry.Tests/GameCult.Geometry.Tests.csproj
+  --no-restore --filter FullyQualifiedName~CultMathValueIntegrationTests
+  --verbosity minimal --disable-build-servers -p:UseSharedCompilation=false
+  -m:1`
+  passed 6/6. Evidence covers exact bytes, round trips, malformed-width
+  rejection, actual `Column<float2>`/`Column<float3>` access, and absence of
+  synthetic component columns.
+- GameCult.Geometry candidate `0.1.0-geometry-migration.1` packed successfully;
+  its nuspec declares exact candidate dependencies on CultMath, CultCache, and
+  CultCache.MessagePack. The dedicated UPM artifact remains the open Stage 1
+  gate.
 
 ## Decisions and Deviations
 
@@ -127,8 +147,7 @@ a broader stage gate.
 
 ## Next Actions
 
-1. Establish the Geometry -> CultMath dependency through an explicit candidate
-   package/local-feed workflow rather than an implicit sibling checkout.
-2. Add Geometry-owned exact vector/quaternion formatters and byte fixtures.
-3. Prove actual `Column<float2>` and `Column<float3>` access from Geometry, then
-   inspect the NuGet and UPM artifacts before adopting vectors in v2 schemas.
+1. Establish and inspect the dedicated `org.gamecult.geometry` UPM artifact.
+2. Record the newly pinned Rust v1 byte/key witnesses and commit their
+   authoritative submodule change.
+3. Begin Stage 2 only after the Unity dependency/layout gate is proven.
