@@ -18,7 +18,7 @@ Shader "GameCult.Geometry/Planetary Field Viewer"
             #pragma vertex vert
             #pragma fragment frag
             #include "UnityCG.cginc"
-            #define GAMECULT_GEOMETRY_CULTMATH_INCLUDE "Packages/org.gamecult.cultmath/shaders/CultMath.hlsl"
+            #define GAMECULT_GEOMETRY_UNITY_PACKAGE 1
             #include "Packages/org.gamecult.geometry/Shaders/GameCult.Geometry.hlsl"
 
             float _Radius;

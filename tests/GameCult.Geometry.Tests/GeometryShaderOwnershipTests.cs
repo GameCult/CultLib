@@ -16,8 +16,8 @@ public sealed class GeometryShaderOwnershipTests
         var spherical = File.ReadAllText(Path.Combine(shaders, "SphericalErosion.hlsl"));
         var refinement = File.ReadAllText(Path.Combine(shaders, "PlanetaryRadialRefinement.hlsl"));
 
-        Assert.That(umbrella, Does.Contain("#define GAMECULT_GEOMETRY_CULTMATH_INCLUDE \"CultMath.hlsl\"")
-            .And.Contain("#include GAMECULT_GEOMETRY_CULTMATH_INCLUDE")
+        Assert.That(umbrella, Does.Contain("#include \"CultMath/CultMath.hlsl\"")
+            .And.Contain("#include \"Packages/org.gamecult.cultmath/shaders/CultMath.hlsl\"")
             .And.Contain("#include \"AdvancedErosionFilter.hlsl\"")
             .And.Contain("#include \"Planetary.hlsl\"")
             .And.Contain("#include \"SphericalErosion.hlsl\"")
@@ -54,7 +54,7 @@ public sealed class GeometryShaderOwnershipTests
             "GameCultGeometryPlanetaryViewer.shader"));
 
         Assert.That(shader, Does.Contain(
-                "#define GAMECULT_GEOMETRY_CULTMATH_INCLUDE \"Packages/org.gamecult.cultmath/shaders/CultMath.hlsl\"")
+                "#define GAMECULT_GEOMETRY_UNITY_PACKAGE 1")
             .And.Contain("#include \"Packages/org.gamecult.geometry/Shaders/GameCult.Geometry.hlsl\"")
             .And.Contain("gamecult_geometry_planetary_field_sample")
             .And.Not.Contain("cultmath_planetary_")
