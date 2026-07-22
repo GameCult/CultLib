@@ -8,7 +8,10 @@ repository = "https://github.com/GameCult/CultLib"
 readme = "README.md"
 
 [dependencies]
+bevy_math = "0.17"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 
+[dev-dependencies]
+approx = "0.5"

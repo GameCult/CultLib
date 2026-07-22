@@ -4,7 +4,7 @@ Plan: `docs/cultmath-gamecult-geometry-migration-plan.md` (locked)
 
 Started: 2026-07-22
 
-Status: Stages 0-1 complete; Stage 2 in progress
+Status: Stages 0-4 complete; Stage 5 in progress
 
 ## Objective
 
@@ -58,8 +58,8 @@ Demotions:
 | 1. Destination/dependency/formatters/SoA | Complete | NuGet and dedicated UPM artifacts prove dependency direction and owned vector integration |
 | 2. Primitive deletion and v2 schemas | Complete | C# and Geometry-owned Rust emit identical v2 bytes and record keys for all four roots |
 | 3. Planetary transfer | Complete | Managed, HLSL, CMPT, Unity, web, tool, docs, tests, and package authority moved; CultMath owners deleted |
-| 4. Mine `vg-csg` | Pending | Requires v1 fixture capture and target Rust package seam |
-| 5. CultCache/CultNet/CultMesh integration | Pending | Requires current schemas and runtime packages |
+| 4. Mine `vg-csg` | Complete | Geometry-owned Rust kernel passes correctness, parity, performance, formatting, and warning-denied lint gates |
+| 5. CultCache/CultNet/CultMesh integration | In progress | Provider/dataflow mapped; typed commit-path smoke remains |
 | 6. Consumer cutover/release | Pending | Requires local candidate feed and downstream passes |
 | 7. Delete obsolete authorities/audit | Pending | Requires every prior stage gate |
 
@@ -226,11 +226,31 @@ a broader stage gate.
   planetary tests pass 41/41. Negative searches find obsolete CultMath geometry
   names only inside tests that assert their absence or ignored generated output.
 
+### Stage 4 receipts
+
+- `packages/gamecult-geometry-rs` now owns the mined convex splitting, ordered
+  brush CSG, tree lowering, dirty frontiers, prefix checkpoints, domain/LOD
+  selection, feature lowering, and triangle/collider assembly kernels. No build
+  or runtime dependency points at VibeGeometry or `vg-csg`.
+- The public `GeometryBrushAssembler` facade accepts Geometry-owned
+  `Float3` values and returns `GeometryTriangleMesh`; `bevy_math` remains a
+  private implementation dependency and is not re-exported.
+- The duplicate quarry persistence authority (`DomainSpecDocument`,
+  `DomainNodeDocument`, `FeatureClaimDocument`, and its local schema version)
+  was deleted. Private specs are in-memory builders; the v2 `Geometry*`
+  documents remain the sole wire authority.
+- Nine RealtimeCSG behavioral fixtures and a bounded 512-distant-cutter
+  performance fixture moved under Geometry ownership. `cargo test --locked`
+  passes 67/67 plus doc tests; rustfmt and warning-denied Clippy pass.
+- The authority transfer commits are CultLib `756f5a33`, CultMath `6a16260`,
+  and the post-transfer label cleanup `99c893bd`. The Rust absorption commit is
+  recorded after this progress update is committed.
+
 ## Next Actions
 
-1. Mine convex splitting, brush/CSG tree, domain lowering, dirty-frontier,
-   selected-cut, and mesh assembly into `gamecult-geometry-rs` in dependency
-   order, preserving the pinned v1 evidence while emitting v2.
-2. Remove `bevy_math` from the public Rust boundary and port earned correctness
-   and performance fixtures before deleting VibeGeometry build authority.
-3. Connect the completed Rust runtime to the v2 CultCache/CultNet/CultMesh path.
+1. Add the Geometry-owned worker provider with `CultNetDatabase.PutAsync` as
+   the single commit/publication primitive for direct and operation-handle use.
+2. Prove domain/request to selected-cut/artifact persistence, raw envelope
+   replication, worker-state observation, and typed dev-probe agreement.
+3. Add exact C#/Rust raw-envelope parity without growing a second networking
+   stack or a load-bearing JSON projection.

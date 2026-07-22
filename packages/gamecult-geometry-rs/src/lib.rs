@@ -4,6 +4,50 @@
 //! commit `8f070f4`, then rewritten around typed vector values. This crate has
 //! no runtime or build dependency on VibeGeometry or `vg-csg`.
 
+mod assembler;
+mod brush;
+mod convex;
+mod domain;
+mod dsl;
+mod frontier;
+mod mesh;
+mod primitives;
+#[cfg(test)]
+mod realtime_csg_parity;
+mod tree;
+
+#[allow(unused_imports)]
+pub(crate) use assembler::{Assembler, BuildOutput, BuildReport, BuildWarning};
+#[allow(unused_imports)]
+pub(crate) use brush::{Aabb, Brush, BrushId, BrushOp, MaterialId, PolygonCategory, Primitive};
+#[allow(unused_imports)]
+pub(crate) use convex::{
+    CategorizedPolygons, ConvexPolygon, ConvexSolid, Plane, PolygonRouteScratch,
+};
+#[allow(unused_imports)]
+pub(crate) use domain::{
+    ClaimLoweringTarget, ContributionManifest, ContributionRow, CsgClaimLowering, DomainChunkBuild,
+    DomainFrame, DomainKey, DomainKind, DomainNode, DomainNodeSpec, DomainQuery, DomainSummary,
+    FeatureClaim, FeatureClaimKind, FeatureClaimSpec, FeatureLoweringPolicy, FieldEncoding,
+    FieldLayer, SelectedCut, SelectedCutManifest, TriangleChunk, TriangleChunkManifest,
+    build_domain_chunks, lower_feature_claims_to_csg_tree, lower_selected_cut,
+    lower_selected_cut_chunks, ragnarok_column_fixture, ragnarok_column_spec, select_domain_cut,
+};
+#[allow(unused_imports)]
+pub(crate) use dsl::LevelDsl;
+#[allow(unused_imports)]
+pub(crate) use frontier::{DemandFrontier, DemandPair, DirtyDemandFrontier};
+pub(crate) use mesh::TriangleMesh;
+#[allow(unused_imports)]
+pub(crate) use primitives::{
+    DomeCapZSpec, FloretArmSpec, append_cylinder_z, append_dome_cap_z, append_floret_arm,
+};
+#[allow(unused_imports)]
+pub(crate) use tree::{
+    CsgBranchOp, CsgNode, CsgNodeId, CsgOperationType, CsgTree, CsgTreeArena, CsgTreeBranch,
+    CsgTreeBrush,
+};
+
 use std::fmt::Write;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -38,6 +82,54 @@ pub trait GeometryDocument: Serialize + DeserializeOwned + Sized {
     fn from_msgpack(payload: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
         rmp_serde::from_slice(payload)
     }
+}
+
+/// Geometry-owned CSG facade. The implementation uses an internal math kernel,
+/// but no `bevy_math` type crosses this public boundary.
+#[derive(Default)]
+pub struct GeometryBrushAssembler(Assembler);
+
+impl GeometryBrushAssembler {
+    pub fn new() -> Self {
+        Self(Assembler::new())
+    }
+    pub fn add_box(
+        &mut self,
+        name: impl Into<String>,
+        center: Float3,
+        size: Float3,
+        material: u32,
+    ) {
+        self.0
+            .solid_box(name, internal_aabb(center, size), MaterialId(material));
+    }
+    pub fn subtract_box(&mut self, name: impl Into<String>, center: Float3, size: Float3) {
+        self.0.cut_box(name, internal_aabb(center, size));
+    }
+    pub fn build(&self) -> GeometryTriangleMesh {
+        internal_mesh(&self.0.build().mesh)
+    }
+}
+
+fn internal_aabb(center: Float3, size: Float3) -> Aabb {
+    use bevy_math::Vec3;
+    Aabb::from_center_size(
+        Vec3::new(center.0, center.1, center.2),
+        Vec3::new(size.0, size.1, size.2),
+    )
+}
+
+fn internal_mesh(mesh: &TriangleMesh) -> GeometryTriangleMesh {
+    GeometryTriangleMesh(
+        mesh.positions
+            .iter()
+            .map(|v| Float3(v.x, v.y, v.z))
+            .collect(),
+        mesh.normals.iter().map(|v| Float3(v.x, v.y, v.z)).collect(),
+        mesh.uvs.iter().map(|v| Float2(v.x, v.y)).collect(),
+        mesh.indices.clone(),
+        mesh.triangle_materials.iter().map(|v| v.0).collect(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -461,6 +553,31 @@ mod tests {
             document.record_key(),
             "geometry:domain:175899ea97548da0599e12bcaccd07fa1d6009ed450fadb3de229d47bab04431"
         );
+    }
+
+    #[test]
+    fn mined_csg_performance_fixture_keeps_large_distant_cutters_bounded() {
+        use bevy_math::Vec3;
+        use std::time::{Duration, Instant};
+
+        let mut assembler = Assembler::new();
+        assembler.solid_box(
+            "source",
+            Aabb::from_center_size(Vec3::ZERO, Vec3::splat(4.0)),
+            MaterialId(1),
+        );
+        for index in 0..512 {
+            assembler.cut_box(
+                format!("distant-{index}"),
+                Aabb::from_center_size(Vec3::new(100.0 + index as f32 * 2.0, 0.0, 0.0), Vec3::ONE),
+            );
+        }
+        let started = Instant::now();
+        let output = assembler.build();
+        assert_eq!(output.mesh.triangle_count(), 12);
+        assert_eq!(output.report.candidate_pairs, 0);
+        assert_eq!(output.report.rejected_pairs, 512);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
