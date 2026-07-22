@@ -2,7 +2,8 @@ using UnityEditor;
 using UnityEngine;
 using GameCult.Geometry.Unity.Samples;
 
-namespace GameCult.Geometry.Unity.Samples.Editor;
+namespace GameCult.Geometry.Unity.Samples.Editor
+{
 
 public static class GameCultGeometryPlanetaryViewerMenu
 {
@@ -24,4 +25,5 @@ public static class GameCultGeometryPlanetaryViewerMenu
         camera.nearClipPlane = 0.01f;
         camera.farClipPlane = 1000;
     }
+}
 }

@@ -4,7 +4,8 @@ using CultMath;
 using GameCult.Geometry;
 using UnityEngine;
 
-namespace GameCult.Geometry.Unity.Samples;
+namespace GameCult.Geometry.Unity.Samples
+{
 
 [ExecuteAlways]
 public sealed class GameCultGeometryPlanetaryViewer : MonoBehaviour
@@ -138,4 +139,5 @@ public sealed class GameCultGeometryPlanetaryViewer : MonoBehaviour
             return new(radialDisplacement, radialGradient, value, fieldGradient, math.clamp(value, -1, 1));
         }
     }
+}
 }

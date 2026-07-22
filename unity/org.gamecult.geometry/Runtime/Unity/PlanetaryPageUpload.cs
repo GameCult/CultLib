@@ -5,7 +5,8 @@ using System.Runtime.InteropServices;
 using CultMath;
 using UnityEngine;
 
-namespace GameCult.Geometry.Unity;
+namespace GameCult.Geometry.Unity
+{
 
 [StructLayout(LayoutKind.Sequential)] public readonly struct PlanetaryPageInputGpu { public PlanetaryPageInputGpu(Vector4 directionRadius, Vector4 sampling) { DirectionRadius = directionRadius; Sampling = sampling; } public readonly Vector4 DirectionRadius; public readonly Vector4 Sampling; }
 [StructLayout(LayoutKind.Sequential)] public readonly struct PlanetaryPageMetadataGpu { public PlanetaryPageMetadataGpu(Vector4 address, Vector4 layout, Vector4 bounds, Vector4 state) { Address = address; Layout = layout; Bounds = bounds; State = state; } public readonly Vector4 Address; public readonly Vector4 Layout; public readonly Vector4 Bounds; public readonly Vector4 State; }
@@ -26,4 +27,5 @@ public static class PlanetaryPageUploadBuilder
         return new(inputs.ToArray(), metadata, inputs.Count, snapshot.ContentVersion, snapshot.PresentationVersion);
     }
     private static Vector4 ToUnity(float4 value) => new(value.x, value.y, value.z, value.w);
+}
 }

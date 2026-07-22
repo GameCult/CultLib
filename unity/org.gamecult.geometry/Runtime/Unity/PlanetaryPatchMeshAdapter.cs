@@ -3,7 +3,8 @@ using CultMath;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace GameCult.Geometry.Unity;
+namespace GameCult.Geometry.Unity
+{
 
 public static class PlanetaryPatchMeshAdapter
 {
@@ -24,4 +25,5 @@ public static class PlanetaryPatchMeshAdapter
         var mesh = new Mesh { name = $"GameCult.Geometry Planetary {face} {cellsPerAxis}x{cellsPerAxis}", indexFormat = vertices.Length > ushort.MaxValue ? IndexFormat.UInt32 : IndexFormat.UInt16, vertices = vertices, normals = normals, uv = uv, triangles = source.Indices };
         mesh.RecalculateBounds(); return mesh;
     }
+}
 }
