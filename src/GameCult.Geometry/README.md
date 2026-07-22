@@ -44,11 +44,7 @@ using GameCult.Geometry;
 using GameCult.Mesh;
 using GameCult.Networking;
 
-var geometryDocuments = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
-    .Register(CultNetDocumentBinding.ForDocument<CultGeometryDomainDocument>())
-    .Register(CultNetDocumentBinding.ForDocument<CultGeometryBuildRequest>())
-    .Register(CultNetDocumentBinding.ForDocument<CultGeometrySelectedCutManifest>())
-    .Register(CultNetDocumentBinding.ForDocument<CultGeometryChunkArtifact>());
+var geometryDocuments = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
 
 using var node = await CultMesh.CreateNodeAsync("ragnarok-geometry.ccmp", new CultMeshNodeOptions
 {
@@ -63,6 +59,10 @@ using var chunks = node.Database
     .Watch<CultGeometryChunkArtifact>()
     .Subscribe(change => ApplyChunk(change.Document));
 ```
+
+The generated CultDocument metadata owns geometry registration. Consumers pass
+the shared registry into CultNet; they do not maintain a second manual binding
+list that can drift when the schema cohort changes.
 
 The record key is part of the contract. Rust and C# must compute the same key
 for the same geometry record, so stable fingerprints use the Rust canonical
