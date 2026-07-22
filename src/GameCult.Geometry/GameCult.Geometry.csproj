@@ -2,19 +2,22 @@
   <PropertyGroup>
     <Description>Spatial values, planetary geometry, queries, and typed geometry state built on CultMath primitives</Description>
     <PackageId>GameCult.Geometry</PackageId>
+    <Version>0.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <PackageTags>game;geometry;planetary;csg;lod;cultcache;cultmesh</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression></PackageLicenseExpression>
     <PackageLicenseFile>LICENSES.md</PackageLicenseFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
-    <CultMathVersion>0.1.0-geometry-migration.2</CultMathVersion>
+    <CultMathVersion>0.1.0</CultMathVersion>
+    <CultLibSupportVersion>1.0.3</CultLibSupportVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
-    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
-    <ProjectReference Include="..\GameCult.Mesh\GameCult.Mesh.csproj" />
-    <ProjectReference Include="..\GameCult.Networking\GameCult.Networking.csproj" />
+    <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" AdditionalProperties="Version=$(CultLibSupportVersion);PackageVersion=$(CultLibSupportVersion)" />
+    <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" AdditionalProperties="Version=$(CultLibSupportVersion);PackageVersion=$(CultLibSupportVersion)" />
+    <ProjectReference Include="..\GameCult.Mesh\GameCult.Mesh.csproj" AdditionalProperties="Version=$(CultLibSupportVersion);PackageVersion=$(CultLibSupportVersion)" />
+    <ProjectReference Include="..\GameCult.Networking\GameCult.Networking.csproj" AdditionalProperties="Version=$(CultLibSupportVersion);PackageVersion=$(CultLibSupportVersion)" />
     <PackageReference Include="CultMath" Version="$(CultMathVersion)" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="System.Text.Json" Version="9.0.10" />

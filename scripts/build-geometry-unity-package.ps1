@@ -1,7 +1,8 @@
 param(
   [string] $Configuration = "Release",
   [string] $OutputDirectory = "artifacts\unity\org.gamecult.geometry",
-  [string] $CultMathCandidateFeed = "..\CultMath\.tools\local-feed"
+  [string] $CultMathCandidateFeed = "..\CultMath\.tools\local-feed",
+  [string] $CultMathVersion = "0.1.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +24,8 @@ $candidateFeed = if ([System.IO.Path]::IsPathRooted($CultMathCandidateFeed)) {
 $pluginRoot = Join-Path $outputRoot "Runtime\Plugins"
 $templatePluginRoot = Join-Path $templateRoot "Runtime\Plugins"
 
-if (-not (Test-Path -LiteralPath (Join-Path $candidateFeed "CultMath.0.1.0-geometry-migration.2.nupkg"))) {
-  throw "CultMath migration candidate is missing from $candidateFeed. Pack CultMath before staging Geometry."
+if (-not (Test-Path -LiteralPath (Join-Path $candidateFeed "CultMath.$CultMathVersion.nupkg"))) {
+  throw "CultMath $CultMathVersion is missing from $candidateFeed. Pack CultMath before staging Geometry."
 }
 
 if (Test-Path -LiteralPath $publishRoot) {
@@ -34,7 +35,7 @@ if (Test-Path -LiteralPath $outputRoot) {
   Remove-Item -LiteralPath $outputRoot -Recurse -Force
 }
 
-dotnet restore $projectPath --disable-build-servers -p:CultMathCandidateFeed=$candidateFeed -p:UseSharedCompilation=false -m:1
+dotnet restore $projectPath --disable-build-servers -p:CultMathCandidateFeed=$candidateFeed -p:CultMathVersion=$CultMathVersion -p:UseSharedCompilation=false -m:1
 if ($LASTEXITCODE -ne 0) {
   throw "GameCult.Geometry restore failed with exit code $LASTEXITCODE"
 }
@@ -57,6 +58,9 @@ $requiredTemplateFiles = @(
   "Runtime\Plugins\GameCult.Geometry.dll.meta",
   "Runtime\Plugins\GameCult.Geometry.pdb",
   "Runtime\Plugins\GameCult.Geometry.pdb.meta",
+  "Runtime\Unity\GameCult.Geometry.Unity.asmdef",
+  "Runtime\Unity\PlanetaryPatchMeshAdapter.cs",
+  "Runtime\Unity\PlanetaryPageUpload.cs",
   "Shaders\AdvancedErosionFilter.hlsl",
   "Shaders\GameCult.Geometry.hlsl",
   "Shaders\Planetary.hlsl",
