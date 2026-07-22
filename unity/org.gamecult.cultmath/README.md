@@ -6,8 +6,8 @@ precompiled `CultMath.dll`, portable symbols, and the numeric
 
 Unity does not compile CultMath's repository source tree. That source uses the
 current C# language and remains owned by the normal .NET project. The package
-facade references only the tracked precompiled assembly, so consumers do not
-need `csc.rsp` language overrides.
+imports only the tracked auto-referenced precompiled assembly, so consumers do
+not need `csc.rsp` language overrides or an asmdef propagation shim.
 
 Build and inspect the package from the repository root:
 

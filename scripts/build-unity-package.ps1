@@ -41,11 +41,13 @@ foreach ($path in @($freshAssembly, $freshSymbols)) {
 
 $requiredTemplateFiles = @(
   "LICENSE.md",
+  "LICENSE.md.meta",
   "README.md",
+  "README.md.meta",
   "THIRD-PARTY-NOTICES.md",
+  "THIRD-PARTY-NOTICES.md.meta",
   "package.json",
-  "Runtime\CultMath.asmdef",
-  "Runtime\CultMath.asmdef.meta",
+  "package.json.meta",
   "Runtime\Plugins\CultMath.dll",
   "Runtime\Plugins\CultMath.dll.meta",
   "Runtime\Plugins\CultMath.pdb",
@@ -72,6 +74,14 @@ if ($missingAssetMetas.Count -ne 0 -or $missingDirectoryMetas.Count -ne 0) {
 }
 
 $manifest = Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json
+$pluginMeta = Get-Content -LiteralPath ($trackedAssembly + ".meta") -Raw
+if ($pluginMeta -notmatch '(?m)^\s*isExplicitlyReferenced:\s*0\s*$') {
+  throw "CultMath.dll must be auto-referenced; explicit-only plugins do not reach dependent Unity asmdefs"
+}
+$facadeDefinitions = @(Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Filter "*.asmdef")
+if ($facadeDefinitions.Count -ne 0) {
+  throw "CultMath's precompiled DLL is the Unity assembly authority; empty asmdef facades are forbidden"
+}
 $expectedFileVersion = "$($manifest.version).0"
 $trackedFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($trackedAssembly).FileVersion
 $freshFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($freshAssembly).FileVersion
@@ -97,11 +107,13 @@ Copy-Item -Path (Join-Path $templateRoot "*") -Destination $outputRoot -Recurse 
 
 $stagedAssemblies = @(Get-ChildItem -LiteralPath (Join-Path $outputRoot "Runtime\Plugins") -Filter "*.dll")
 $stagedSources = @(Get-ChildItem -LiteralPath $outputRoot -Recurse -File -Filter "*.cs")
-if ($stagedAssemblies.Count -ne 1 -or $stagedAssemblies[0].Name -ne "CultMath.dll" -or $stagedSources.Count -ne 0) {
-  throw "CultMath package must contain one owned DLL and no C# source files"
+$stagedFacades = @(Get-ChildItem -LiteralPath $outputRoot -Recurse -File -Filter "*.asmdef")
+if ($stagedAssemblies.Count -ne 1 -or $stagedAssemblies[0].Name -ne "CultMath.dll" -or $stagedSources.Count -ne 0 -or $stagedFacades.Count -ne 0) {
+  throw "CultMath package must contain one owned auto-referenced DLL, no C# source files, and no asmdef facade"
 }
 
 Write-Host "CultMath Unity package: $outputRoot"
 Write-Host "Package: $($manifest.name)@$($manifest.version)"
 Write-Host "Managed assemblies: $($stagedAssemblies.Count)"
 Write-Host "C# source files: $($stagedSources.Count)"
+Write-Host "Asmdef facades: $($stagedFacades.Count)"
