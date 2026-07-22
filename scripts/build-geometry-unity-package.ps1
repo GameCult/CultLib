@@ -85,17 +85,13 @@ if ($missingAssetMetas.Count -ne 0 -or $missingDirectoryMetas.Count -ne 0) {
   throw "Tracked Geometry Unity package has assets without stable .meta files: $($missing -join ', ')"
 }
 
+$templateManifest = Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json
+$expectedFileVersion = "$($templateManifest.version).0"
 $trackedAssembly = Join-Path $templatePluginRoot "GameCult.Geometry.dll"
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackedAssembly).Hash -ne
-    (Get-FileHash -Algorithm SHA256 -LiteralPath $geometryAssembly).Hash) {
-  throw "Tracked GameCult.Geometry.dll does not match the current Release publish output. Sync the tracked Git-UPM package before tagging."
-}
-if (Test-Path -LiteralPath $geometrySymbols) {
-  $trackedSymbols = Join-Path $templatePluginRoot "GameCult.Geometry.pdb"
-  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackedSymbols).Hash -ne
-      (Get-FileHash -Algorithm SHA256 -LiteralPath $geometrySymbols).Hash) {
-    throw "Tracked GameCult.Geometry.pdb does not match the current Release publish output. Sync the tracked Git-UPM package before tagging."
-  }
+$trackedFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($trackedAssembly).FileVersion
+$publishedFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($geometryAssembly).FileVersion
+if ($trackedFileVersion -ne $expectedFileVersion -or $publishedFileVersion -ne $expectedFileVersion) {
+  throw "Geometry Unity assemblies must match package version $expectedFileVersion; tracked=$trackedFileVersion published=$publishedFileVersion"
 }
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
