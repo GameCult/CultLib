@@ -130,6 +130,11 @@ a broader stage gate.
   its nuspec declares exact candidate dependencies on CultMath, CultCache, and
   CultCache.MessagePack. The dedicated UPM artifact remains the open Stage 1
   gate.
+- Authoritative `vg-csg` commit `8f070f4` now pins exact v1 MessagePack bytes
+  for representative domain/chunk tuples plus complete domain, request,
+  selected-cut, and chunk record keys. Focused Rust tests passed 4/4; formatting
+  and clippy passed. VibeGeometry commit `82b56db` advances its submodule to
+  that witness commit. Both migration branches are pushed.
 
 ## Decisions and Deviations
 
@@ -148,6 +153,4 @@ a broader stage gate.
 ## Next Actions
 
 1. Establish and inspect the dedicated `org.gamecult.geometry` UPM artifact.
-2. Record the newly pinned Rust v1 byte/key witnesses and commit their
-   authoritative submodule change.
-3. Begin Stage 2 only after the Unity dependency/layout gate is proven.
+2. Begin Stage 2 only after the Unity dependency/layout gate is proven.
