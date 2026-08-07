@@ -1,7 +1,7 @@
 {
   "name": "org.gamecult.cultmath",
   "displayName": "CultMath",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "unity": "2021.3",
   "description": "Precompiled CultMath numeric primitives and matching HLSL semantics for GameCult Unity runtimes.",
   "license": "MPL-2.0",

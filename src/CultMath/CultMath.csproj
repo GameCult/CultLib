@@ -8,7 +8,7 @@
     <RootNamespace>CultMath</RootNamespace>
     <AssemblyName>CultMath</AssemblyName>
     <PackageId>CultMath</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Description>Clean-room C# math shaped for HLSL-style renderer code.</Description>
     <Authors>GameCult</Authors>
     <RepositoryUrl>https://github.com/GameCult/CultMath</RepositoryUrl>

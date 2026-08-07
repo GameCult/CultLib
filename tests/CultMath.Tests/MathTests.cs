@@ -200,6 +200,41 @@ public sealed class MathTests
     }
 
     [Fact]
+    public void RectNormalizesAndDerivesFromMinMax()
+    {
+        var bounds = new rect(8.0f, 6.0f, 2.0f, -2.0f);
+
+        Assert.Equal(new float2(2.0f, -2.0f), bounds.min);
+        Assert.Equal(new float2(8.0f, 6.0f), bounds.max);
+        Assert.Equal(new float2(6.0f, 8.0f), bounds.size);
+        Assert.Equal(new float2(5.0f, 2.0f), bounds.center);
+        Assert.Equal(48.0f, bounds.area);
+    }
+
+    [Fact]
+    public void RectContainmentIncludesBoundary()
+    {
+        var bounds = new rect(-2.0f, -1.0f, 4.0f, 3.0f);
+
+        Assert.True(bounds.Contains(new float2(-2.0f, -1.0f)));
+        Assert.True(bounds.Contains(new float2(4.0f, 3.0f)));
+        Assert.True(bounds.Contains(new rect(-1.0f, 0.0f, 1.0f, 2.0f)));
+        Assert.False(bounds.Contains(new float2(4.001f, 3.0f)));
+    }
+
+    [Fact]
+    public void RectIntersectionTreatsTouchingEdgesAsContact()
+    {
+        var left = new rect(0.0f, 0.0f, 4.0f, 4.0f);
+        var touching = new rect(4.0f, 1.0f, 8.0f, 3.0f);
+        var separate = new rect(4.001f, 1.0f, 8.0f, 3.0f);
+
+        Assert.True(left.Intersects(touching));
+        Assert.Equal(0.0f, left.Intersection(touching).area);
+        Assert.False(left.Intersects(separate));
+    }
+
+    [Fact]
     public void FirstOrderInterceptSolvesSimpleClosingTarget()
     {
         var time = math.first_order_intercept_time(
