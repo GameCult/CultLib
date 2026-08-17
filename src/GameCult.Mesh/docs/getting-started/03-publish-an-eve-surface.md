@@ -68,10 +68,12 @@ cross-language command execution. Do not cite it as evidence for those layers.
 
 The next executable checkpoint is
 [`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
-It runs a durable C# provider, a real Chromium Eve lowerer, and an independent
-C# headless observer over the same authenticated binary CultNet WebSocket lane.
-It proves command idempotency and provider restart. Live Odin discovery and
-route rotation remain separate gates. Their owner map and full acceptance
-contract are recorded in
+It runs a durable C# provider, a separate local Odin fixture, a real Chromium
+Eve lowerer, and an independent C# headless observer over authenticated binary
+CultNet WebSocket lanes. The still-open browser resolves stable identity through
+the canonical Verse catalog, survives a provider restart on a different
+physical route, resubscribes, and commits another canonical receipt. A smoke
+against the deployed Odin daemon and retained C# lease reconnection remain
+separate infrastructure gates. Their owner map and full acceptance contract are recorded in
 [`browser-verse-transport.md`](../browser-verse-transport.md).
 

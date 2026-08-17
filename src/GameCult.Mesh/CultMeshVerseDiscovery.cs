@@ -65,6 +65,33 @@ namespace GameCult.Mesh
                 message.ParentVerseId,
                 message.Description);
         }
+
+        /// <summary>Creates the canonical filtered Verse catalog response for any CultNet transport adapter.</summary>
+        public static CultMeshVerseCatalogResponseMessage CreateCatalogResponse(
+            CultMeshVerseCatalog catalog,
+            CultMeshVerseCatalogRequestMessage request)
+        {
+            if (catalog == null) throw new ArgumentNullException(nameof(catalog));
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            var verseIds = request.VerseIds == null || request.VerseIds.Length == 0
+                ? null
+                : new HashSet<string>(request.VerseIds, StringComparer.Ordinal);
+            return new CultMeshVerseCatalogResponseMessage
+            {
+                MessageId = string.IsNullOrWhiteSpace(request.MessageId)
+                    ? Guid.NewGuid().ToString("N")
+                    : request.MessageId,
+                Verses = catalog.Verses
+                    .Where(verse => verseIds == null || verseIds.Contains(verse.VerseId))
+                    .Where(verse => string.IsNullOrWhiteSpace(request.TransportVersion) ||
+                                    string.Equals(
+                                        verse.Compatibility.TransportVersion,
+                                        request.TransportVersion,
+                                        StringComparison.Ordinal))
+                    .Select(verse => verse.ToMessage())
+                    .ToArray()
+            };
+        }
     }
 
     /// <summary>
@@ -93,24 +120,7 @@ namespace GameCult.Mesh
         /// </summary>
         public CultMeshVerseCatalogResponseMessage CreateResponse(CultMeshVerseCatalogRequestMessage request)
         {
-            if (request == null) throw new ArgumentNullException(nameof(request));
-            var verseIds = request.VerseIds == null || request.VerseIds.Length == 0
-                ? null
-                : new HashSet<string>(request.VerseIds, StringComparer.Ordinal);
-            var verses = _catalog.Verses
-                .Where(verse => verseIds == null || verseIds.Contains(verse.VerseId))
-                .Where(verse => string.IsNullOrWhiteSpace(request.TransportVersion) ||
-                                string.Equals(verse.Compatibility.TransportVersion, request.TransportVersion, StringComparison.Ordinal))
-                .Select(verse => verse.ToMessage())
-                .ToArray();
-
-            return new CultMeshVerseCatalogResponseMessage
-            {
-                MessageId = string.IsNullOrWhiteSpace(request.MessageId)
-                    ? Guid.NewGuid().ToString("N")
-                    : request.MessageId,
-                Verses = verses
-            };
+            return CultMeshVerseMessages.CreateCatalogResponse(_catalog, request);
         }
 
         /// <inheritdoc />

@@ -10,13 +10,16 @@ writes. A renderer watches provider-owned records and invokes provider-owned
 operations.
 
 ```ts
+const odin = new CultMeshBrowserOdinRendezvous({
+  endpoints: ["wss://odin.example/verse"],
+  runtimeId: "counter-browser.discovery",
+});
+
 const mesh = await CultMeshBrowserClient.connect({
   verseId: "sample.counter",
   providerId: "sample.counter-provider",
   runtimeId: "counter-browser",
-  rendezvous: {
-    resolve: async identity => discoverWebSocketRoute(identity),
-  },
+  rendezvous: odin,
 });
 
 const counter = await mesh.leaseRawDocument({
@@ -27,8 +30,10 @@ const counter = await mesh.leaseRawDocument({
 counter.watch(record => renderCounter(decodeCultNetPayload(record)));
 ```
 
-The rendezvous port may call Odin, but application code does not own reconnect
-or resubscription. The physical socket endpoint is a replaceable route, not the
+`CultMeshBrowserOdinRendezvous` speaks the canonical CultNet Verse-catalog
+messages to one or more configured Odin WebSocket endpoints. Application code
+supplies stable identity; it does not own endpoint selection, reconnect, or
+resubscription. The physical provider socket is a replaceable route, not the
 provider identity.
 
 The browser handshake carries authentication through the host application's

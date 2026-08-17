@@ -28,6 +28,8 @@ import shardCatalogRequestSchema from "../contracts/cultnet.shard-catalog-reques
 import shardCatalogResponseSchema from "../contracts/cultnet.shard-catalog-response.schema.json";
 import operationRequestSchema from "../contracts/cultnet.operation-request.schema.json";
 import operationResponseSchema from "../contracts/cultnet.operation-response.schema.json";
+import verseCatalogRequestSchema from "../contracts/cultmesh.verse-catalog-request.schema.json";
+import verseCatalogResponseSchema from "../contracts/cultmesh.verse-catalog-response.schema.json";
 import ghostlightAgentStateSchema from "../contracts/ghostlight.agent-state.schema.json";
 
 export type CultNetWireContract = "cultnet.schema.v0" | "gamecult.networking.v0";
@@ -55,7 +57,9 @@ export type CultNetSchemaVersion =
   | "cultnet.shard_catalog_request.v0"
   | "cultnet.shard_catalog_response.v0"
   | "cultnet.operation_request.v0"
-  | "cultnet.operation_response.v0";
+  | "cultnet.operation_response.v0"
+  | "cultmesh.verse_catalog_request.v0"
+  | "cultmesh.verse_catalog_response.v0";
 
 export type CultNetSchemaKind = "wire_message" | "document_payload" | "shared_contract";
 export type CultNetRawPayloadEncoding = "messagepack";
@@ -328,6 +332,38 @@ export interface CultNetOperationResponseMessage {
   sourceRuntimeId?: string;
 }
 
+export interface CultMeshVerseCompatibilityMessage {
+  transportVersion: string;
+  rulesHash: string;
+  compatibleVerseIds: string[];
+  requiredPluginIds: string[];
+  optionalPluginIds: string[];
+}
+
+export interface CultMeshVerseDescriptorMessage {
+  verseId: string;
+  displayName: string;
+  authorityModel: string;
+  compatibility: CultMeshVerseCompatibilityMessage;
+  discoveryEndpoints: string[];
+  authorityRuntimeIds: string[];
+  parentVerseId?: string;
+  description?: string;
+}
+
+export interface CultMeshVerseCatalogRequestMessage {
+  schemaVersion: "cultmesh.verse_catalog_request.v0";
+  messageId: string;
+  verseIds?: string[];
+  transportVersion?: string;
+}
+
+export interface CultMeshVerseCatalogResponseMessage {
+  schemaVersion: "cultmesh.verse_catalog_response.v0";
+  messageId: string;
+  verses: CultMeshVerseDescriptorMessage[];
+}
+
 export interface GhostlightPressure {
   pressure_id: string;
   label: string;
@@ -577,7 +613,9 @@ export type CultNetMessage =
   | CultNetShardCatalogRequestMessage
   | CultNetShardCatalogResponseMessage
   | CultNetOperationRequestMessage
-  | CultNetOperationResponseMessage;
+  | CultNetOperationResponseMessage
+  | CultMeshVerseCatalogRequestMessage
+  | CultMeshVerseCatalogResponseMessage;
 
 const ajv = new Ajv2020({
   allErrors: true,
@@ -608,6 +646,8 @@ const CULTNET_MESSAGE_SCHEMAS = [
   shardCatalogResponseSchema,
   operationRequestSchema,
   operationResponseSchema,
+  verseCatalogRequestSchema,
+  verseCatalogResponseSchema,
 ] as const;
 
 const cultNetValidators = new Map<CultNetSchemaVersion, ValidateFunction>();
@@ -1141,6 +1181,16 @@ function normalizeCultNetOptionalNulls(
       return;
     case "cultnet.operation_response.v0":
       stripNullProperties(candidate, ["payloadEncoding", "diagnostics", "sourceRuntimeId"]);
+      return;
+    case "cultmesh.verse_catalog_request.v0":
+      stripNullProperties(candidate, ["verseIds", "transportVersion"]);
+      return;
+    case "cultmesh.verse_catalog_response.v0":
+      for (const verse of Array.isArray(candidate.verses) ? candidate.verses : []) {
+        if (verse && typeof verse === "object") {
+          stripNullProperties(verse as Record<string, unknown>, ["parentVerseId", "description"]);
+        }
+      }
       return;
     case "cultnet.schema_catalog_request.v0":
       stripNullProperties(candidate, ["schemaIds", "kinds"]);

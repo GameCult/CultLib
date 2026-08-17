@@ -7,9 +7,11 @@ Date: 2026-08-17
 This is the implementation map for the browser Verse boundary.
 `samples/eve-two-runtime` remains the clean package-consumer/jsdom checkpoint.
 `samples/eve-browser-network` runs a durable C# provider, a real Chromium Eve
-lowerer, and an independent C# headless observer over the same authenticated
-binary CultNet WebSocket route. It proves one canonical command effect,
-idempotent retry, shared observation, and provider restart.
+lowerer, an independent C# headless observer, and a separate local Odin fixture
+over authenticated binary CultNet WebSocket routes. It proves one canonical
+command effect, idempotent retry, shared observation, provider restart on a new
+physical route, browser rediscovery, retained lease resubscription, and a second
+canonical command after reconnection.
 
 The current substrate has a browser client boundary and local live proof, but
 not a complete public Verse proof:
@@ -23,14 +25,18 @@ not a complete public Verse proof:
   `cultmesh-browser` consumes those messages as explicit document leases;
 - `cultmesh-browser` owns stable identity, route refresh, resubscription, and
   typed operation correlation without exposing direct document writes;
+- `CultMeshBrowserOdinRendezvous` resolves stable Verse/provider identity with
+  `cultmesh.verse_catalog_request.v0` and
+  `cultmesh.verse_catalog_response.v0`; application callbacks no longer need to
+  smuggle provider URLs into the browser client;
 - Kotlin has a channel-aware WebSocket transport adapter, TypeScript has the
   browser client, and `GameCult.Networking.WebSockets` provides the bounded C#
   schema server host adapter;
 - Hermodr can lower Odin state into a browser, but it is an infrastructure
   runtime, not the clean-consumer game API;
-- the sample rendezvous port currently returns one configured local route;
-  discovery from a live Odin and automatic route rotation are not yet in the
-  executable cross-runtime gate.
+- the sample's separate local Odin fixture serves the production Verse-catalog
+  contract and is restarted with a changed provider route; the same Chromium
+  client automatically rediscovers that route.
 - the sample validates its surface against Eve's canonical TypeScript contract,
   but its provider still carries a minimal local C# DTO mirror. The
   released-artifact gate requires the renderer-neutral C# Eve surface contract
@@ -152,6 +158,8 @@ implementation must support:
   `cultnet.database_change_raw.v0`;
 - `cultnet.operation_request.v0` and
   `cultnet.operation_response.v0`;
+- `cultmesh.verse_catalog_request.v0` and
+  `cultmesh.verse_catalog_response.v0` on the Odin route;
 - `cultnet.error.v0`.
 
 The WebSocket frame is a transport body, not a second message schema. Payload
@@ -163,16 +171,19 @@ identity, authority, and idempotency validation happen before provider code.
 Current executable coverage from `scripts/verify-eve-browser-network.mjs`:
 
 - authenticated binary C# WebSocket provider;
+- separate local Odin fixture using the canonical Verse-catalog messages;
 - real Chromium and independent C# headless consumers;
 - shared surface and counter document leases;
 - Eve button to typed operation to provider receipt to shared state;
 - duplicate idempotency key produces one effect;
-- provider restart rehydrates the `.cc` state;
+- provider restart on a different physical port rehydrates the `.cc` state;
+- the retained browser lease rediscovers through Odin, resubscribes, and
+  commits a second provider-authored receipt;
 - generated browser bundle contains no `node:` builtin import.
 
-The full public Verse gate still requires live Odin discovery, physical route
-rotation during retained leases, released-artifact-only .NET consumption, and
-Windows/Linux CI.
+The full public Verse gate still requires the deployed Odin daemon rather than
+the local contract fixture, retained C# lease reconnection through the same
+identity path, released-artifact-only .NET consumption, and Windows/Linux CI.
 
 From an empty temporary consumer using packed/released artifacts only:
 

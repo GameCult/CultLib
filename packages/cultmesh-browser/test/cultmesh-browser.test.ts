@@ -13,11 +13,39 @@ import {
 
 import {
   CultMeshBrowserClient,
+  CultMeshBrowserOdinRendezvous,
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
   type CultMeshBrowserRoute,
   type CultMeshBrowserSocket,
 } from "../src/index.js";
+
+test("Odin rendezvous resolves stable provider identity and observes route rotation", async () => {
+  const odin = new FakeOdin("ws://127.0.0.1:4050/mesh");
+  let id = 0;
+  const rendezvous = new CultMeshBrowserOdinRendezvous({
+    endpoints: ["ws://127.0.0.1:4040/odin"],
+    runtimeId: "browser-odin-test",
+    createId: () => `odin-${++id}`,
+    socketFactory: () => odin.open(),
+  });
+
+  assert.equal((await rendezvous.resolve({
+    verseId: "sample.counter",
+    providerId: "sample.counter-provider",
+  })).endpoint, "ws://127.0.0.1:4050/mesh");
+
+  odin.providerEndpoint = "ws://127.0.0.1:4060/mesh";
+  assert.equal((await rendezvous.resolve({
+    verseId: "sample.counter",
+    providerId: "sample.counter-provider",
+  })).endpoint, "ws://127.0.0.1:4060/mesh");
+
+  await assert.rejects(
+    rendezvous.resolve({ verseId: "sample.counter", providerId: "other-provider" }),
+    /could not resolve/,
+  );
+});
 
 test("browser client leases provider state, invokes an operation, and follows route replacement", async () => {
   const first = new FakeProvider("ws://127.0.0.1:4101/mesh", 4);
@@ -249,6 +277,40 @@ class FakeProvider {
       payload: encode({ count: this.#count }),
       sourceRuntimeId: "sample.counter-provider",
     };
+  }
+}
+
+class FakeOdin {
+  providerEndpoint: string;
+
+  constructor(providerEndpoint: string) {
+    this.providerEndpoint = providerEndpoint;
+  }
+
+  open(): FakeSocket {
+    const socket = new FakeSocket(wire => {
+      const message = parseCultNetMessage(decode(wire));
+      if (message.schemaVersion !== "cultmesh.verse_catalog_request.v0") return;
+      socket.deliver({
+        schemaVersion: "cultmesh.verse_catalog_response.v0",
+        messageId: message.messageId,
+        verses: [{
+          verseId: "sample.counter",
+          displayName: "Counter",
+          authorityModel: "ServerAuthoritative",
+          compatibility: {
+            transportVersion: "cultmesh.v1",
+            rulesHash: "counter-v1",
+            compatibleVerseIds: [],
+            requiredPluginIds: [],
+            optionalPluginIds: [],
+          },
+          discoveryEndpoints: [this.providerEndpoint],
+          authorityRuntimeIds: ["sample.counter-provider"],
+        }],
+      });
+    }, () => undefined);
+    return socket;
   }
 }
 

@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj" />
+    <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
   </ItemGroup>
 </Project>

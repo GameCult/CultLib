@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Mesh;
 using GameCult.Networking;
 using GameCult.Networking.WebSockets;
 using MessagePack;
@@ -22,7 +23,50 @@ if (arguments.Mode == "headless")
     await RunHeadlessAsync(arguments);
     return;
 }
-throw new InvalidOperationException("Use 'provider' or 'headless'.");
+if (arguments.Mode == "odin")
+{
+    await RunOdinAsync(arguments);
+    return;
+}
+throw new InvalidOperationException("Use 'provider', 'headless', or 'odin'.");
+
+static async Task RunOdinAsync(Args arguments)
+{
+    if (string.IsNullOrWhiteSpace(arguments.ProviderEndpoint))
+        throw new ArgumentException("The Odin fixture requires --provider-endpoint.");
+    using var catalog = new CultMeshVerseCatalog();
+    catalog.Upsert(new CultMeshVerseDescriptor(
+        "sample.counter",
+        "CultMesh browser counter",
+        CultMeshVerseAuthorityModel.OperatorCluster,
+        new CultMeshVerseCompatibility("cultmesh.v1", "sample-counter-v1"),
+        discoveryEndpoints: [arguments.ProviderEndpoint],
+        authorityRuntimeIds: ["sample.counter-provider"],
+        description: "Local executable Odin fixture for the browser/network onboarding witness."));
+
+    await using var schemaServer = new CultNetWebSocketSchemaServer();
+    schemaServer.OnCultNet<CultMeshVerseCatalogRequestMessage>((request, peer) =>
+    {
+        peer.SendCultNet(CultMeshVerseMessages.CreateCatalogResponse(catalog, request));
+        return Task.CompletedTask;
+    });
+    var builder = WebApplication.CreateSlimBuilder();
+    builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, arguments.Port));
+    var app = builder.Build();
+    app.UseWebSockets();
+    app.MapCultNetWebSocket("/odin", schemaServer, new CultNetWebSocketEndpointOptions
+    {
+        AuthorizeAsync = context => ValueTask.FromResult(
+            context.Request.Cookies.TryGetValue("cultnet_session", out var token) &&
+            string.Equals(token, arguments.Token, StringComparison.Ordinal))
+    });
+    await app.StartAsync();
+    var address = app.Services.GetRequiredService<IServer>()
+        .Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+    Console.WriteLine("ODIN_READY " + address.Replace("http://", "ws://", StringComparison.Ordinal) + "/odin");
+    await app.WaitForShutdownAsync();
+    await app.DisposeAsync();
+}
 
 static async Task RunProviderAsync(Args arguments)
 {
@@ -146,6 +190,7 @@ sealed class Args
     public int Port { get; private init; }
     public string StatePath { get; private init; } = "sample-counter.cc";
     public string Endpoint { get; private init; } = "";
+    public string ProviderEndpoint { get; private init; } = "";
     public string Token { get; private init; } = "sample-session";
 
     public static Args Parse(string[] values)
@@ -160,6 +205,7 @@ sealed class Args
             Port = named.TryGetValue("--port", out var port) ? int.Parse(port) : 0,
             StatePath = named.GetValueOrDefault("--state", "sample-counter.cc"),
             Endpoint = named.GetValueOrDefault("--endpoint", ""),
+            ProviderEndpoint = named.GetValueOrDefault("--provider-endpoint", ""),
             Token = named.GetValueOrDefault("--token", "sample-session")
         };
     }

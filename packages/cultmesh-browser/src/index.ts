@@ -10,6 +10,8 @@ import {
   type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
   type CultNetSnapshotResponseRawMessage,
+  type CultMeshVerseCatalogRequestMessage,
+  type CultMeshVerseCatalogResponseMessage,
 } from "cultnet-ts/contracts";
 
 export interface CultMeshBrowserIdentity {
@@ -26,6 +28,16 @@ export interface CultMeshBrowserRendezvous {
   resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute>;
 }
 
+export interface CultMeshBrowserOdinRendezvousOptions {
+  endpoints: readonly string[];
+  runtimeId: string;
+  transportVersion?: string;
+  timeoutMs?: number;
+  maxFrameBytes?: number;
+  createId?: () => string;
+  socketFactory?: (endpoint: string) => CultMeshBrowserSocket;
+}
+
 export interface CultMeshBrowserSocket {
   binaryType: BinaryType;
   readonly readyState: number;
@@ -35,6 +47,107 @@ export interface CultMeshBrowserSocket {
   onclose: ((event: CloseEvent) => void) | null;
   send(data: ArrayBuffer | ArrayBufferView): void;
   close(code?: number, reason?: string): void;
+}
+
+/** Resolves stable Verse/provider identity through Odin's canonical CultNet Verse catalog. */
+export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous {
+  #options: Required<Omit<CultMeshBrowserOdinRendezvousOptions, "transportVersion" | "socketFactory">> & {
+    transportVersion?: string;
+    socketFactory: (endpoint: string) => CultMeshBrowserSocket;
+  };
+
+  constructor(options: CultMeshBrowserOdinRendezvousOptions) {
+    requireText(options.runtimeId, "runtimeId");
+    const endpoints = [...new Set(options.endpoints.map(value => value.trim()).filter(Boolean))];
+    if (endpoints.length === 0) throw new Error("At least one Odin WebSocket endpoint is required.");
+    for (const endpoint of endpoints) requireWebSocketEndpoint(endpoint, "Odin rendezvous endpoint");
+    this.#options = {
+      ...options,
+      endpoints,
+      timeoutMs: options.timeoutMs ?? 10_000,
+      maxFrameBytes: options.maxFrameBytes ?? 4 * 1024 * 1024,
+      createId: options.createId ?? (() => crypto.randomUUID()),
+      socketFactory: options.socketFactory ?? (endpoint => new WebSocket(endpoint)),
+    };
+    if (this.#options.timeoutMs <= 0) throw new Error("Odin rendezvous timeoutMs must be positive.");
+    if (this.#options.maxFrameBytes <= 0) throw new Error("Odin rendezvous maxFrameBytes must be positive.");
+  }
+
+  async resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+    requireText(identity.verseId, "verseId");
+    requireText(identity.providerId, "providerId");
+    const failures: Error[] = [];
+    for (const endpoint of this.#options.endpoints) {
+      try {
+        return await this.resolveFrom(endpoint, identity);
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    throw new AggregateError(
+      failures,
+      `Odin could not resolve Verse '${identity.verseId}' provider '${identity.providerId}'.`,
+    );
+  }
+
+  private resolveFrom(endpoint: string, identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+    const socket = this.#options.socketFactory(endpoint);
+    socket.binaryType = "arraybuffer";
+    const messageId = this.#options.createId();
+    const request: CultMeshVerseCatalogRequestMessage = {
+      schemaVersion: "cultmesh.verse_catalog_request.v0",
+      messageId,
+      verseIds: [identity.verseId],
+      ...(this.#options.transportVersion ? { transportVersion: this.#options.transportVersion } : {}),
+    };
+    return new Promise<CultMeshBrowserRoute>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error, route?: CultMeshBrowserRoute) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close(1000, error ? "Odin resolution failed" : "Odin resolution complete");
+        if (error) reject(error);
+        else resolve(route!);
+      };
+      const timer = setTimeout(
+        () => finish(new Error(`Odin resolution timed out at '${endpoint}'.`)),
+        this.#options.timeoutMs,
+      );
+      socket.onopen = () => {
+        try {
+          sendSocketMessage(socket, {
+            schemaVersion: "cultnet.hello.v0",
+            runtimeId: this.#options.runtimeId,
+            runtimeKind: "browser",
+            supportedMessageVersions: [
+              "cultmesh.verse_catalog_request.v0",
+              "cultmesh.verse_catalog_response.v0",
+            ],
+          }, this.#options.maxFrameBytes);
+          sendSocketMessage(socket, request, this.#options.maxFrameBytes);
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+        }
+      };
+      socket.onmessage = event => {
+        void decodeSocketMessage(event, this.#options.maxFrameBytes).then(message => {
+          if (message.schemaVersion === "cultnet.error.v0") {
+            finish(new Error(message.error));
+            return;
+          }
+          if (message.schemaVersion !== "cultmesh.verse_catalog_response.v0" || message.messageId !== messageId) return;
+          finish(undefined, selectOdinRoute(message, identity));
+        }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+      };
+      socket.onerror = () => finish(new Error(`Odin WebSocket could not open '${endpoint}'.`));
+      socket.onclose = () => finish(new Error(`Odin WebSocket closed before resolving '${identity.verseId}'.`));
+    });
+  }
 }
 
 export interface CultMeshBrowserClientOptions extends CultMeshBrowserIdentity {
@@ -418,22 +531,17 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 
   private async receive(event: MessageEvent, generation: number): Promise<void> {
     if (this.#disposed || generation !== this.#socketGeneration) return;
-    let payload: Uint8Array;
-    if (event.data instanceof ArrayBuffer) {
-      payload = new Uint8Array(event.data);
-    } else if (ArrayBuffer.isView(event.data)) {
-      payload = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
-    } else if (event.data instanceof Blob) {
-      payload = new Uint8Array(await event.data.arrayBuffer());
-    } else {
-      this.#socket?.close(1003, "CultNet requires binary WebSocket frames");
+    let message: CultNetMessage;
+    try {
+      message = await decodeSocketMessage(event, this.#options.maxFrameBytes);
+    } catch (error) {
+      const oversized = error instanceof Error && error.message.includes("exceeds");
+      this.#socket?.close(
+        oversized ? 1009 : 1003,
+        oversized ? "CultNet frame exceeds configured maximum" : "CultNet requires binary WebSocket frames",
+      );
       return;
     }
-    if (payload.byteLength > this.#options.maxFrameBytes) {
-      this.#socket?.close(1009, "CultNet frame exceeds configured maximum");
-      return;
-    }
-    const message = parseCultNetMessage(decode(payload));
     switch (message.schemaVersion) {
       case "cultnet.snapshot_response_raw.v0":
         this.applySnapshot(message);
@@ -538,6 +646,74 @@ function bytesToBase64(bytes: Uint8Array): string {
 function base64ToBytes(value: string): Uint8Array {
   const binary = atob(value);
   return Uint8Array.from(binary, character => character.charCodeAt(0));
+}
+
+function requireWebSocketEndpoint(value: string, field: string): URL {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    throw new Error(`${field} '${value}' is not a valid URL.`);
+  }
+  if (endpoint.protocol !== "ws:" && endpoint.protocol !== "wss:") {
+    throw new Error(`${field} must use ws:// or wss://, got '${value}'.`);
+  }
+  return endpoint;
+}
+
+function sendSocketMessage(socket: CultMeshBrowserSocket, message: CultNetMessage, maxFrameBytes: number): void {
+  const payload = encode(encodeCultNetMessageForWire(message));
+  if (payload.byteLength > maxFrameBytes) {
+    throw new Error(`CultNet message exceeds the ${maxFrameBytes}-byte limit.`);
+  }
+  socket.send(payload);
+}
+
+async function decodeSocketMessage(event: MessageEvent, maxFrameBytes: number): Promise<CultNetMessage> {
+  let payload: Uint8Array;
+  if (event.data instanceof ArrayBuffer) {
+    payload = new Uint8Array(event.data);
+  } else if (ArrayBuffer.isView(event.data)) {
+    payload = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
+  } else if (event.data instanceof Blob) {
+    payload = new Uint8Array(await event.data.arrayBuffer());
+  } else {
+    throw new Error("CultNet requires binary WebSocket frames.");
+  }
+  if (payload.byteLength > maxFrameBytes) {
+    throw new Error(`CultNet frame exceeds the ${maxFrameBytes}-byte limit.`);
+  }
+  return parseCultNetMessage(decode(payload));
+}
+
+function selectOdinRoute(
+  response: CultMeshVerseCatalogResponseMessage,
+  identity: CultMeshBrowserIdentity,
+): CultMeshBrowserRoute {
+  const matchingVerses = response.verses.filter(verse =>
+    verse.verseId === identity.verseId && verse.authorityRuntimeIds.includes(identity.providerId));
+  if (matchingVerses.length !== 1) {
+    throw new Error(
+      `Odin returned ${matchingVerses.length} routes for Verse '${identity.verseId}' provider '${identity.providerId}'.`,
+    );
+  }
+  const verse = matchingVerses[0];
+  const endpoints = verse.discoveryEndpoints.filter(endpoint => {
+    try {
+      requireWebSocketEndpoint(endpoint, "Odin provider route");
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (endpoints.length === 0) {
+    throw new Error(`Odin advertised no browser-compatible route for '${identity.providerId}'.`);
+  }
+  return {
+    ...identity,
+    endpoint: endpoints[0],
+    generation: [verse.compatibility.transportVersion, verse.compatibility.rulesHash, endpoints[0]].join(":"),
+  };
 }
 
 function requireText(value: string, field: string): void {

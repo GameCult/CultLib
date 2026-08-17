@@ -19,6 +19,7 @@ const statePath = join(workRoot, "counter.cc");
 const bundlePath = join(workRoot, "bundle.js");
 const token = "sample-session";
 let provider;
+let odin;
 let headless;
 let httpServer;
 let browser;
@@ -46,9 +47,13 @@ try {
 
   await run("dotnet", ["build", join(sampleRoot, "EveBrowserNetworkSample.csproj"), "--verbosity", "quiet"]);
   const providerPort = await freePort();
+  const replacementProviderPort = await freePort();
+  const odinPort = await freePort();
   const httpPort = await freePort();
   provider = await startProvider(providerPort);
   const endpoint = await provider.waitFor("PROVIDER_READY ");
+  odin = await startOdin(odinPort, endpoint);
+  const odinEndpoint = await odin.waitFor("ODIN_READY ");
   headless = startDotnet(["headless", "--endpoint", endpoint, "--token", token]);
   await headless.waitFor("HEADLESS_READY ");
   httpServer = await serve(httpPort, sampleRoot, bundlePath);
@@ -56,7 +61,7 @@ try {
   const executablePath = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
   browser = await chromium.launch({ executablePath, headless: true });
   let page = await browser.newPage();
-  const url = `http://127.0.0.1:${httpPort}/?endpoint=${encodeURIComponent(endpoint)}&token=${token}`;
+  const url = `http://127.0.0.1:${httpPort}/?odin=${encodeURIComponent(odinEndpoint)}&token=${token}`;
   await page.goto(url);
   await page.waitForFunction(() => window.__sampleReady || window.__sampleError);
   assert.equal(await page.evaluate(() => window.__sampleError), undefined);
@@ -69,35 +74,55 @@ try {
   await page.waitForFunction(receipt => window.__sampleReceipt?.receiptId === receipt, firstReceipt);
   assert.equal(await page.evaluate(() => window.__sampleCount), 1, "duplicate idempotency key changed canonical state");
 
-  await page.close();
   await stop(provider.process);
-  provider = await startProvider(providerPort);
+  await stop(odin.process);
+  provider = await startProvider(replacementProviderPort);
   const restartedEndpoint = await provider.waitFor("PROVIDER_READY ");
-  assert.equal(restartedEndpoint, endpoint);
-  page = await browser.newPage();
-  await page.goto(url);
-  await page.waitForFunction(() => window.__sampleReady || window.__sampleError);
-  assert.equal(await page.evaluate(() => window.__sampleError), undefined);
-  assert.equal(await page.evaluate(() => window.__sampleCount), 1, "provider restart lost durable counter state");
+  assert.notEqual(restartedEndpoint, endpoint);
+  odin = await startOdin(odinPort, restartedEndpoint);
+  assert.equal(await odin.waitFor("ODIN_READY "), odinEndpoint);
+  headless = startDotnet(["headless", "--endpoint", restartedEndpoint, "--token", token]);
+  await headless.waitFor("HEADLESS_READY ");
+  await page.evaluate(() => { window.__sampleCommandId = "browser-click-2"; });
+  await page.locator("button").click();
+  await page.waitForFunction(() => window.__sampleReceipt?.count === 2 && window.__sampleCount === 2);
+  assert.equal(JSON.parse(await headless.waitFor("HEADLESS_UPDATE ")).count, 2);
+  const connectionStates = await page.evaluate(() => window.__sampleConnectionStates);
+  assert.equal(connectionStates[0], "connected");
+  assert.equal(connectionStates.at(-1), "connected");
+  assert.ok(connectionStates.includes("reconnecting"));
+  assert.ok(!connectionStates.includes("disposed"));
 
   console.log(JSON.stringify({
     providerEndpoint: endpoint,
+    replacementProviderEndpoint: restartedEndpoint,
+    odinEndpoint,
     browserRuntime: "chromium",
     headlessRuntime: "csharp",
     receiptId: firstReceipt,
-    count: 1,
-    restartCount: 1,
+    count: 2,
+    routeRotationCount: 1,
   }));
 } finally {
   if (browser) await browser.close().catch(() => undefined);
   if (headless) await stop(headless.process);
   if (provider) await stop(provider.process);
+  if (odin) await stop(odin.process);
   if (httpServer) await new Promise(resolve => httpServer.close(resolve));
   await rm(workRoot, { recursive: true, force: true });
 }
 
 async function startProvider(port) {
   return startDotnet(["provider", "--port", String(port), "--state", statePath, "--token", token]);
+}
+
+async function startOdin(port, providerEndpoint) {
+  return startDotnet([
+    "odin",
+    "--port", String(port),
+    "--provider-endpoint", providerEndpoint,
+    "--token", token,
+  ]);
 }
 
 function startDotnet(arguments_) {

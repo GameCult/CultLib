@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.verse-catalog-response.schema.json",
+  "title": "CultMesh Verse Catalog Response",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "verses"],
+  "additionalProperties": false,
+  "$defs": {
+    "compatibility": {
+      "type": "object",
+      "required": ["transportVersion", "rulesHash", "compatibleVerseIds", "requiredPluginIds", "optionalPluginIds"],
+      "additionalProperties": false,
+      "properties": {
+        "transportVersion": { "type": "string", "minLength": 1 },
+        "rulesHash": { "type": "string", "minLength": 1 },
+        "compatibleVerseIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "requiredPluginIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "optionalPluginIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      }
+    },
+    "verse": {
+      "type": "object",
+      "required": ["verseId", "displayName", "authorityModel", "compatibility", "discoveryEndpoints", "authorityRuntimeIds"],
+      "additionalProperties": false,
+      "properties": {
+        "verseId": { "type": "string", "minLength": 1 },
+        "displayName": { "type": "string", "minLength": 1 },
+        "authorityModel": { "type": "string", "minLength": 1 },
+        "compatibility": { "$ref": "#/$defs/compatibility" },
+        "discoveryEndpoints": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "authorityRuntimeIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "parentVerseId": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    }
+  },
+  "properties": {
+    "schemaVersion": { "const": "cultmesh.verse_catalog_response.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "verses": { "type": "array", "items": { "$ref": "#/$defs/verse" } }
+  }
+}

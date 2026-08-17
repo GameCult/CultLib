@@ -58,6 +58,42 @@ import {
   type InteropNote,
 } from "./interop/cultnet-interop-shared";
 
+test("CultNet validates the canonical CultMesh Verse catalog messages", () => {
+  const request = parseCultNetMessage({
+    schemaVersion: "cultmesh.verse_catalog_request.v0",
+    messageId: "catalog-1",
+    verseIds: ["sample.counter"],
+    transportVersion: "cultmesh.v1",
+  });
+  assert.equal(request.schemaVersion, "cultmesh.verse_catalog_request.v0");
+
+  const response = parseCultNetMessage({
+    schemaVersion: "cultmesh.verse_catalog_response.v0",
+    messageId: "catalog-1",
+    verses: [{
+      verseId: "sample.counter",
+      displayName: "Counter",
+      authorityModel: "OperatorCluster",
+      compatibility: {
+        transportVersion: "cultmesh.v1",
+        rulesHash: "counter-v1",
+        compatibleVerseIds: [],
+        requiredPluginIds: [],
+        optionalPluginIds: [],
+      },
+      discoveryEndpoints: ["wss://provider.example/cultmesh"],
+      authorityRuntimeIds: ["sample.counter-provider"],
+    }],
+  });
+  assert.equal(response.schemaVersion, "cultmesh.verse_catalog_response.v0");
+  assert.equal(response.verses[0].authorityRuntimeIds[0], "sample.counter-provider");
+
+  assert.throws(() => parseCultNetMessage({
+    ...response,
+    verses: [{ ...response.verses[0], compatibility: { ...response.verses[0].compatibility, rulesHash: "" } }],
+  }), /rulesHash/);
+});
+
 class FakeRudpReconnectTransport extends EventEmitter {
   public connectCalls = 0;
   public closeCalls = 0;

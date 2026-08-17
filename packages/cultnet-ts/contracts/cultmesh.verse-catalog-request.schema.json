@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.verse-catalog-request.schema.json",
+  "title": "CultMesh Verse Catalog Request",
+  "type": "object",
+  "required": ["schemaVersion", "messageId"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultmesh.verse_catalog_request.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "verseIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "transportVersion": { "type": "string", "minLength": 1 }
+  }
+}

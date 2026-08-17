@@ -2,6 +2,7 @@ import { parseEveCommandReceipt, parseEveSurfaceDocument } from "@gamecult/eve-c
 import { renderEveSurface } from "@gamecult/eve-browser-lowering";
 import {
   CultMeshBrowserClient,
+  CultMeshBrowserOdinRendezvous,
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
 } from "cultmesh-browser";
@@ -11,14 +12,16 @@ declare global {
     __sampleReady?: boolean;
     __sampleCount?: number;
     __sampleReceipt?: { receiptId: string; count: number };
+    __sampleCommandId?: string;
+    __sampleConnectionStates?: string[];
     __sampleError?: string;
   }
 }
 
 const params = new URLSearchParams(location.search);
-const endpoint = params.get("endpoint");
+const odinEndpoint = params.get("odin");
 const token = params.get("token") || "sample-session";
-if (!endpoint) throw new Error("The sample requires an endpoint query parameter.");
+if (!odinEndpoint) throw new Error("The sample requires an Odin endpoint query parameter.");
 document.cookie = `cultnet_session=${encodeURIComponent(token)}; Path=/; SameSite=Strict`;
 
 const host = document.querySelector<HTMLElement>("#surface")!;
@@ -29,10 +32,15 @@ try {
     verseId: "sample.counter",
     providerId: "sample.counter-provider",
     runtimeId: "sample.chromium",
-    rendezvous: {
-      resolve: async identity => ({ ...identity, endpoint }),
-    },
+    rendezvous: new CultMeshBrowserOdinRendezvous({
+      endpoints: [odinEndpoint],
+      runtimeId: "sample.chromium.discovery",
+      transportVersion: "cultmesh.v1",
+    }),
   });
+  window.__sampleConnectionStates = [];
+  mesh.watchState(state => window.__sampleConnectionStates!.push(state));
+  window.__sampleCommandId = "browser-click-1";
   const counter = await mesh.leaseRawDocument({
     schemaId: "sample.counter_state.v1",
     recordKey: "counter:main",
@@ -53,7 +61,7 @@ try {
         operation: intent.command,
         payloadSchema: "sample.increment.v1",
         payload: { amount: 1 },
-        idempotencyKey: "browser-click-1",
+        idempotencyKey: window.__sampleCommandId,
       });
       const receipt = parseEveCommandReceipt(decodeCultNetOperationPayload(response)) as {
         receiptId: string;
