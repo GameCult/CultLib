@@ -5282,6 +5282,12 @@ namespace GameCult.Networking.Tests
                 schema => schema.SchemaVersion == CultNetSchemaVersions.DocumentPutRaw);
             var rawSnapshot = Array.Find(response.Schemas,
                 schema => schema.SchemaVersion == CultNetSchemaVersions.SnapshotResponseRaw);
+            var subscribe = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.DatabaseSubscribe);
+            var unsubscribe = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.DatabaseUnsubscribe);
+            var change = Array.Find(response.Schemas,
+                schema => schema.SchemaVersion == CultNetSchemaVersions.DatabaseChangeRaw);
             var ghostlight = Array.Find(response.Schemas,
                 schema => schema.SchemaVersion == "ghostlight.agent_state.v0");
             var transportProfile = Array.Find(response.Schemas,
@@ -5294,6 +5300,13 @@ namespace GameCult.Networking.Tests
 
             Assert.That(rawSnapshot, Is.Not.Null);
             Assert.That(rawSnapshot!.SchemaJson, Does.Contain("cultnet.snapshot_response_raw.v0"));
+
+            Assert.That(subscribe, Is.Not.Null);
+            Assert.That(subscribe!.SchemaJson, Does.Contain("cultnet.database_subscribe.v0"));
+            Assert.That(unsubscribe, Is.Not.Null);
+            Assert.That(unsubscribe!.SchemaJson, Does.Contain("cultnet.database_unsubscribe.v0"));
+            Assert.That(change, Is.Not.Null);
+            Assert.That(change!.SchemaJson, Does.Contain("cultnet.database_change_raw.v0"));
 
             Assert.That(ghostlight, Is.Not.Null);
             Assert.That(ghostlight!.DocumentType, Is.EqualTo("ghostlight.agent-state"));

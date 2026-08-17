@@ -65,5 +65,7 @@ This checkpoint proves clean package consumption, canonical Eve contract
 validation, and two independent lowering/observation consumers inside Node. It
 does **not** claim a real browser process, an Odin-discovered network hop, or
 cross-language command execution. Those are the next public Verse conformance
-gates; do not cite this sample as evidence that they exist.
+gates; do not cite this sample as evidence that they exist. Their owner map and
+executable acceptance contract are recorded in
+[`browser-verse-transport.md`](../browser-verse-transport.md).
 

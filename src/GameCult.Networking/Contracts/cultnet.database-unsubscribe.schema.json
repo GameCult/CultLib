@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.database-unsubscribe.schema.json",
+  "title": "CultNet Database Unsubscribe Message",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "subscriptionId"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.database_unsubscribe.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "subscriptionId": { "type": "string", "minLength": 1 }
+  }
+}
+

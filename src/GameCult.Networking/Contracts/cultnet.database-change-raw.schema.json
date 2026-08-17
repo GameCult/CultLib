@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.database-change-raw.schema.json",
+  "title": "CultNet Raw Database Change Message",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "subscriptionId", "changeKind"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.database_change_raw.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "subscriptionId": { "type": "string", "minLength": 1 },
+    "changeKind": { "enum": ["added", "updated", "removed"] },
+    "document": { "$ref": "./cultnet.raw-document-record.schema.json" },
+    "recordKey": { "type": "string", "minLength": 1 },
+    "schemaId": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "changeKind": { "const": "removed" } } },
+      "then": { "required": ["recordKey", "schemaId"] },
+      "else": { "required": ["document"] }
+    }
+  ]
+}
+

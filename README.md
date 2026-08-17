@@ -67,6 +67,8 @@ start with the maintained
 [`CultMesh And Eve Getting Started`](src/GameCult.Mesh/docs/getting-started/README.md)
 series. Its first executable package-consumer checkpoint is
 [`samples/eve-two-runtime`](samples/eve-two-runtime/README.md).
+The missing real-browser/network boundary is mapped explicitly in
+[`browser-verse-transport.md`](src/GameCult.Mesh/docs/browser-verse-transport.md).
 
 If you want only the smallest durable "open node -> put typed doc -> get typed doc"
 path, use

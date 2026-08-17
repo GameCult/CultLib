@@ -371,6 +371,27 @@ namespace GameCult.Networking
             },
             new SchemaResourceSpec
             {
+                FileName = "cultnet.database-subscribe.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.DatabaseSubscribe,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.database-unsubscribe.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.DatabaseUnsubscribe,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.database-change-raw.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.DatabaseChangeRaw,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
                 FileName = "cultnet.schema-descriptor.schema.json",
                 Kind = "shared_contract",
                 WireContracts = new[] { CultNetWireContracts.SchemaV0, CultNetWireContracts.GameCultNetworkingV0 }

@@ -1261,6 +1261,64 @@ test("operation envelopes preserve typed service routing and payload correlation
   assert.equal(response.messageId, request.messageId);
 });
 
+test("database subscription contracts match the C# live document lane", () => {
+  const subscribe = parseCultNetMessage({
+    schemaVersion: "cultnet.database_subscribe.v0",
+    messageId: "subscribe-counter",
+    subscriptionId: "counter:browser-1",
+    schemaIds: ["sample.counter_state.v1"],
+    recordKeys: ["counter:main"],
+    includeSnapshot: true,
+    consumerRuntimeId: "browser-1",
+  });
+  assert.equal(subscribe.schemaVersion, "cultnet.database_subscribe.v0");
+  assert.equal(subscribe.subscriptionId, "counter:browser-1");
+
+  const added = parseCultNetMessage({
+    schemaVersion: "cultnet.database_change_raw.v0",
+    messageId: "change-counter-1",
+    subscriptionId: "counter:browser-1",
+    changeKind: "added",
+    document: {
+      schemaId: "sample.counter_state.v1",
+      recordKey: "counter:main",
+      storedAt: "2026-08-17T00:00:00Z",
+      payloadEncoding: "messagepack",
+      payload: new Uint8Array([0x81, 0xa5, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x01]),
+    },
+  });
+  assert.equal(added.schemaVersion, "cultnet.database_change_raw.v0");
+  assert.equal(added.document?.recordKey, "counter:main");
+
+  const removed = parseCultNetMessage({
+    schemaVersion: "cultnet.database_change_raw.v0",
+    messageId: "change-counter-2",
+    subscriptionId: "counter:browser-1",
+    changeKind: "removed",
+    recordKey: "counter:main",
+    schemaId: "sample.counter_state.v1",
+  });
+  assert.equal(removed.schemaVersion, "cultnet.database_change_raw.v0");
+  assert.equal(removed.recordKey, "counter:main");
+
+  const unsubscribe = parseCultNetMessage({
+    schemaVersion: "cultnet.database_unsubscribe.v0",
+    messageId: "unsubscribe-counter",
+    subscriptionId: "counter:browser-1",
+  });
+  assert.equal(unsubscribe.schemaVersion, "cultnet.database_unsubscribe.v0");
+
+  assert.throws(
+    () => parseCultNetMessage({
+      schemaVersion: "cultnet.database_change_raw.v0",
+      messageId: "invalid-change",
+      subscriptionId: "counter:browser-1",
+      changeKind: "updated",
+    }),
+    /document: is required/,
+  );
+});
+
 test("RUDP operation service correlates typed payload envelopes", async () => {
   const server = await startCultNetOperationServer({
     runtimeId: "sai-sidecar",

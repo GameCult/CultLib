@@ -18,6 +18,9 @@ import transportProfileSchema from "../contracts/cultnet.transport-profile.schem
 import snapshotRequestSchema from "../contracts/cultnet.snapshot-request.schema.json";
 import snapshotResponseSchema from "../contracts/cultnet.snapshot-response.schema.json";
 import snapshotResponseRawSchema from "../contracts/cultnet.snapshot-response-raw.schema.json";
+import databaseSubscribeSchema from "../contracts/cultnet.database-subscribe.schema.json";
+import databaseUnsubscribeSchema from "../contracts/cultnet.database-unsubscribe.schema.json";
+import databaseChangeRawSchema from "../contracts/cultnet.database-change-raw.schema.json";
 import schemaDescriptorSchema from "../contracts/cultnet.schema-descriptor.schema.json";
 import schemaCatalogRequestSchema from "../contracts/cultnet.schema-catalog-request.schema.json";
 import schemaCatalogResponseSchema from "../contracts/cultnet.schema-catalog-response.schema.json";
@@ -44,6 +47,9 @@ export type CultNetSchemaVersion =
   | "cultnet.snapshot_request.v0"
   | "cultnet.snapshot_response.v0"
   | "cultnet.snapshot_response_raw.v0"
+  | "cultnet.database_subscribe.v0"
+  | "cultnet.database_unsubscribe.v0"
+  | "cultnet.database_change_raw.v0"
   | "cultnet.schema_catalog_request.v0"
   | "cultnet.schema_catalog_response.v0"
   | "cultnet.shard_catalog_request.v0"
@@ -215,6 +221,34 @@ export interface CultNetSnapshotResponseRawMessage {
   schemaVersion: "cultnet.snapshot_response_raw.v0";
   messageId: string;
   documents: CultNetRawDocumentRecord[];
+}
+
+export interface CultNetDatabaseSubscribeMessage {
+  schemaVersion: "cultnet.database_subscribe.v0";
+  messageId: string;
+  subscriptionId: string;
+  schemaIds?: string[];
+  recordKeys?: string[];
+  includeSnapshot: boolean;
+  consumerRuntimeId?: string;
+  bodyIds?: string[];
+  supportedBodyTransports?: string[];
+}
+
+export interface CultNetDatabaseUnsubscribeMessage {
+  schemaVersion: "cultnet.database_unsubscribe.v0";
+  messageId: string;
+  subscriptionId: string;
+}
+
+export interface CultNetDatabaseChangeRawMessage {
+  schemaVersion: "cultnet.database_change_raw.v0";
+  messageId: string;
+  subscriptionId: string;
+  changeKind: "added" | "updated" | "removed";
+  document?: CultNetRawDocumentRecord;
+  recordKey?: string;
+  schemaId?: string;
 }
 
 export interface CultNetSchemaDescriptor {
@@ -535,6 +569,9 @@ export type CultNetMessage =
   | CultNetSnapshotRequestMessage
   | CultNetSnapshotResponseMessage
   | CultNetSnapshotResponseRawMessage
+  | CultNetDatabaseSubscribeMessage
+  | CultNetDatabaseUnsubscribeMessage
+  | CultNetDatabaseChangeRawMessage
   | CultNetSchemaCatalogRequestMessage
   | CultNetSchemaCatalogResponseMessage
   | CultNetShardCatalogRequestMessage
@@ -562,6 +599,9 @@ const CULTNET_MESSAGE_SCHEMAS = [
   snapshotRequestSchema,
   snapshotResponseSchema,
   snapshotResponseRawSchema,
+  databaseSubscribeSchema,
+  databaseUnsubscribeSchema,
+  databaseChangeRawSchema,
   schemaCatalogRequestSchema,
   schemaCatalogResponseSchema,
   shardCatalogRequestSchema,
@@ -618,6 +658,11 @@ export function parseCultNetMessage(input: unknown, wireContract: CultNetWireCon
   if (schemaVersion === "cultnet.snapshot_response_raw.v0") {
     validateSnapshotResponseRawMessage(input);
     return input as CultNetSnapshotResponseRawMessage;
+  }
+
+  if (schemaVersion === "cultnet.database_change_raw.v0") {
+    validateDatabaseChangeRawMessage(input);
+    return input as CultNetDatabaseChangeRawMessage;
   }
 
   if (!validator(input)) {
@@ -951,9 +996,39 @@ function validateSnapshotResponseRawMessage(
   });
 }
 
+function validateDatabaseChangeRawMessage(
+  input: unknown,
+): asserts input is CultNetDatabaseChangeRawMessage {
+  const candidate = validateBinaryMessageRoot(input, "cultnet.database_change_raw.v0");
+  requireNonEmptyString(candidate.subscriptionId, "/subscriptionId");
+  if (candidate.changeKind !== "added" &&
+      candidate.changeKind !== "updated" &&
+      candidate.changeKind !== "removed") {
+    throw new Error(
+      "Validation failed for cultnet.database_change_raw.v0: /changeKind: must be added, updated, or removed",
+    );
+  }
+
+  if (candidate.changeKind === "removed") {
+    requireNonEmptyString(candidate.recordKey, "/recordKey");
+    requireNonEmptyString(candidate.schemaId, "/schemaId");
+    return;
+  }
+
+  if (!("document" in candidate)) {
+    throw new Error(
+      "Validation failed for cultnet.database_change_raw.v0: /document: is required for added or updated changes",
+    );
+  }
+  validateRawDocumentRecord(candidate.document, "/document");
+}
+
 function validateBinaryMessageRoot(
   input: unknown,
-  schemaVersion: "cultnet.document_put_raw.v0" | "cultnet.snapshot_response_raw.v0",
+  schemaVersion:
+    | "cultnet.document_put_raw.v0"
+    | "cultnet.snapshot_response_raw.v0"
+    | "cultnet.database_change_raw.v0",
 ): Record<string, unknown> {
   if (!input || typeof input !== "object") {
     throw new Error(`Validation failed for ${schemaVersion}: /: must be an object`);
@@ -1043,6 +1118,15 @@ function normalizeCultNetOptionalNulls(
       acceptLegacyPropertyName(candidate, "ShardEpoch", "shardEpoch");
       stripNullProperties(candidate, ["schemaIds", "recordKeys", "shardId", "shardEpoch"]);
       return;
+    case "cultnet.database_subscribe.v0":
+      stripNullProperties(candidate, [
+        "schemaIds",
+        "recordKeys",
+        "consumerRuntimeId",
+        "bodyIds",
+        "supportedBodyTransports",
+      ]);
+      return;
     case "cultnet.schema_catalog_request.v0":
       stripNullProperties(candidate, ["schemaIds", "kinds"]);
       return;
@@ -1092,6 +1176,9 @@ export const cultNetSchemas = {
   snapshotRequestSchema,
   snapshotResponseSchema,
   snapshotResponseRawSchema,
+  databaseSubscribeSchema,
+  databaseUnsubscribeSchema,
+  databaseChangeRawSchema,
   schemaDescriptorSchema,
   schemaCatalogRequestSchema,
   schemaCatalogResponseSchema,
