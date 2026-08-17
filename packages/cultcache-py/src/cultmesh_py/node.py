@@ -84,7 +84,6 @@ class CultMeshReactiveDocumentReconciliation:
 @dataclass(frozen=True)
 class CultMeshReactiveDocumentOptions:
     flush_delay_seconds: float = 0.016
-    detect_local_changes: bool = True
     replace_dirty_current_on_canonical_snapshot: bool = False
 
 
@@ -248,13 +247,19 @@ class CultMeshNode:
             shard_epoch=shard_epoch,
         )
 
-    def reactive_document(
+    def authoritative_writer(
         self,
         document: DocumentDefinition[Any],
         key: str,
-        options: CultMeshReactiveDocumentOptions | None = None,
-    ) -> "CultMeshReactiveDocument":
-        return self.database.reactive_document(document, key, options)
+    ) -> "CultMeshDocumentWriter":
+        return self.database.authoritative_writer(document, key)
+
+    def observe_document(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> "CultMeshObservedDocument":
+        return self.database.observe_document(document, key)
 
     def sync_document_from_publication(
         self,
@@ -744,17 +749,27 @@ class CultMeshDatabase:
         )
         return self.get_required(requested, key)
 
-    def reactive_document(
+    def authoritative_writer(
         self,
         document: DocumentDefinition[Any],
         key: str,
-        options: CultMeshReactiveDocumentOptions | None = None,
-    ) -> "CultMeshReactiveDocument":
+    ) -> "CultMeshDocumentWriter":
         if not key:
             raise ValueError("key must be non-empty")
         if not any(self._documents_alias(document, registered) for registered in self.documents):
             self.register_document(document)
-        return CultMeshReactiveDocument(self, document, key, options)
+        return CultMeshDocumentWriter(self, document, key)
+
+    def observe_document(
+        self,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> "CultMeshObservedDocument":
+        if not key:
+            raise ValueError("key must be non-empty")
+        if not any(self._documents_alias(document, registered) for registered in self.documents):
+            self.register_document(document)
+        return CultMeshObservedDocument(self, document, key)
 
     def sync_document_from_publication(
         self,
@@ -1254,17 +1269,104 @@ def _document_matches_schema_id(document: DocumentDefinition[Any], schema_id: st
     return _infer_schema_name(schema_id) == entry.schema_name
 
 
-class CultMeshReactiveDocument:
+class CultMeshDocumentWriter:
     def __init__(
         self,
         database: CultMeshDatabase,
         document: DocumentDefinition[Any],
         key: str,
+    ) -> None:
+        self.database = database
+        self.document = document
+        self.key = key
+
+    def write(self, value: Any) -> None:
+        self.database.put(self.document, self.key, self._clone(value))
+
+    def update(self, callback: Callable[[Any], Any | None]) -> Any:
+        draft = self._clone(self.database.get_required(self.document, self.key))
+        replacement = callback(draft)
+        next_value = draft if replacement is None else replacement
+        self.write(next_value)
+        return self._clone(next_value)
+
+    def reactive(
+        self,
         options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> "CultMeshReactiveDocument":
+        return CultMeshReactiveDocument(self, options)
+
+    def _clone(self, value: Any) -> Any:
+        return self.document.decode_payload(self.document.encode_payload(value))
+
+
+class CultMeshObservedDocument:
+    def __init__(
+        self,
+        database: CultMeshDatabase,
+        document: DocumentDefinition[Any],
+        key: str,
     ) -> None:
         self._database = database
         self._document = document
         self._key = key
+        self._lock = threading.RLock()
+        self._disposed = False
+        self._current = self._clone(database.get_required(document, key))
+        self._unsubscribe = database.watch_record(document, key, self._apply_canonical_change)
+
+    @property
+    def current(self) -> Any:
+        with self._lock:
+            self._raise_if_disposed()
+            return self._current
+
+    def refresh(self) -> Any:
+        with self._lock:
+            self._raise_if_disposed()
+            self._current = self._clone(
+                self._database.get_required(self._document, self._key)
+            )
+            return self._current
+
+    def dispose(self) -> None:
+        with self._lock:
+            if self._disposed:
+                return
+            self._disposed = True
+        self._unsubscribe()
+
+    def __enter__(self) -> "CultMeshObservedDocument":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.dispose()
+
+    def _apply_canonical_change(self, change: CultMeshDatabaseChange) -> None:
+        if change.value is None:
+            return
+        with self._lock:
+            if not self._disposed:
+                self._current = self._clone(change.value)
+
+    def _clone(self, value: Any) -> Any:
+        return self._document.decode_payload(self._document.encode_payload(value))
+
+    def _raise_if_disposed(self) -> None:
+        if self._disposed:
+            raise RuntimeError("CultMeshObservedDocument has been disposed")
+
+
+class CultMeshReactiveDocument:
+    def __init__(
+        self,
+        writer: CultMeshDocumentWriter,
+        options: CultMeshReactiveDocumentOptions | None = None,
+    ) -> None:
+        self.writer = writer
+        self._database = writer.database
+        self._document = writer.document
+        self._key = writer.key
         self._options = options or CultMeshReactiveDocumentOptions()
         self._lock = threading.RLock()
         self._disposed = False
@@ -1272,14 +1374,14 @@ class CultMeshReactiveDocument:
         self._flushing = False
         self._flush_queued = False
         self._flush_timer: threading.Timer | None = None
-        self._detect_timer: threading.Timer | None = None
         self._reconciliation_version = 0
         self.reconciliation: CultMeshReactiveDocumentReconciliation | None = None
-        self.current = self._clone(self._database.get_required(document, key))
-        self._last_clean_payload = self._serialize(self.current)
-        self._unsubscribe = self._database.watch_record(document, key, self._apply_canonical_change)
-        if self._options.detect_local_changes:
-            self._schedule_detection()
+        self._current = self._clone(self._database.get_required(self._document, self._key))
+        self._unsubscribe = self._database.watch_record(
+            self._document,
+            self._key,
+            self._apply_canonical_change,
+        )
 
     @property
     def document(self) -> DocumentDefinition[Any]:
@@ -1294,42 +1396,43 @@ class CultMeshReactiveDocument:
         with self._lock:
             return self._dirty
 
-    def update(self, callback: Callable[[Any], None]) -> Any:
+    @property
+    def snapshot(self) -> Any:
         with self._lock:
             self._raise_if_disposed()
-            callback(self.current)
-            self._dirty = True
-            self._schedule_flush_locked()
-            return self.current
+            return self._clone(self._current)
 
-    def set_current(self, value: Any) -> Any:
+    def update(self, callback: Callable[[Any], Any | None]) -> Any:
         with self._lock:
             self._raise_if_disposed()
-            self.current = self._clone(value)
+            draft = self._clone(self._current)
+            replacement = callback(draft)
+            self._current = self._clone(draft if replacement is None else replacement)
             self._dirty = True
             self._schedule_flush_locked()
-            return self.current
+            return self._clone(self._current)
 
-    def mark_dirty(self) -> None:
+    def replace_local(self, value: Any) -> Any:
         with self._lock:
             self._raise_if_disposed()
+            self._current = self._clone(value)
             self._dirty = True
             self._schedule_flush_locked()
+            return self._clone(self._current)
 
     def refresh(self) -> Any:
         with self._lock:
             self._raise_if_disposed()
-            self.current = self._clone(self._database.get_required(self._document, self._key))
-            self._last_clean_payload = self._serialize(self.current)
+            self._current = self._clone(
+                self._database.get_required(self._document, self._key)
+            )
             self._dirty = False
             self.reconciliation = None
-            return self.current
+            return self._clone(self._current)
 
     def flush(self) -> None:
         with self._lock:
             self._raise_if_disposed()
-            if not self._dirty:
-                self._detect_local_changes_locked()
             if not self._dirty:
                 return
             if self._flushing:
@@ -1340,16 +1443,14 @@ class CultMeshReactiveDocument:
                 self._flush_timer = None
             self._flushing = True
             self._dirty = False
-            predicted = self._clone(self.current)
-            self._last_clean_payload = self._serialize(predicted)
+            predicted = self._clone(self._current)
 
         try:
-            self._database.put(self._document, self._key, predicted)
+            self.writer.write(predicted)
         finally:
             should_flush_again = False
             with self._lock:
                 self._flushing = False
-                self._detect_local_changes_locked()
                 should_flush_again = self._flush_queued or self._dirty
                 self._flush_queued = False
             if should_flush_again:
@@ -1367,8 +1468,6 @@ class CultMeshReactiveDocument:
             self._disposed = True
             if self._flush_timer is not None:
                 self._flush_timer.cancel()
-            if self._detect_timer is not None:
-                self._detect_timer.cancel()
         self._unsubscribe()
 
     def __enter__(self) -> "CultMeshReactiveDocument":
@@ -1385,7 +1484,7 @@ class CultMeshReactiveDocument:
                 return
             canonical = self._clone(change.value)
             if self._dirty or self._flushing:
-                predicted = self._clone(self.current)
+                predicted = self._clone(self._current)
                 delta = self._create_delta(predicted, canonical)
                 if delta:
                     self._reconciliation_version += 1
@@ -1400,31 +1499,8 @@ class CultMeshReactiveDocument:
                     self.reconciliation = None
                 if not self._options.replace_dirty_current_on_canonical_snapshot:
                     return
-            self.current = canonical
-            self._last_clean_payload = self._serialize(self.current)
+            self._current = canonical
             self.reconciliation = None
-
-    def _schedule_detection(self) -> None:
-        delay = max(self._options.flush_delay_seconds, 0.001)
-        timer = threading.Timer(delay, self._detect_timer_elapsed)
-        timer.daemon = True
-        self._detect_timer = timer
-        timer.start()
-
-    def _detect_timer_elapsed(self) -> None:
-        with self._lock:
-            if self._disposed:
-                return
-            if not self._dirty and not self._flushing:
-                self._detect_local_changes_locked()
-                if self._dirty:
-                    self._schedule_flush_locked()
-            if not self._disposed and self._options.detect_local_changes:
-                self._schedule_detection()
-
-    def _detect_local_changes_locked(self) -> None:
-        if self._serialize(self.current) != self._last_clean_payload:
-            self._dirty = True
 
     def _schedule_flush_locked(self) -> None:
         if self._options.flush_delay_seconds <= 0:
@@ -1436,9 +1512,6 @@ class CultMeshReactiveDocument:
         timer.daemon = True
         self._flush_timer = timer
         timer.start()
-
-    def _serialize(self, value: Any) -> bytes:
-        return self._document.encode_payload(value)
 
     def _clone(self, value: Any) -> Any:
         return self._document.decode_payload(self._document.encode_payload(value))

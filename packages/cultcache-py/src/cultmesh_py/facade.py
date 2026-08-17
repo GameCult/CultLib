@@ -24,11 +24,11 @@ from cultnet_py import (
 from .client import CultMeshDocumentSubscription, CultMeshPeerExchangeClient, CultMeshVerseDiscoveryClient
 from .node import (
     CultMeshDocumentPublicationSource,
+    CultMeshDocumentWriter,
     CultMeshNode,
     CultMeshNodeOptions,
+    CultMeshObservedDocument,
     CultMeshPublicationDocumentBinding,
-    CultMeshReactiveDocument,
-    CultMeshReactiveDocumentOptions,
     create_node,
 )
 from .server import CultMeshLocalServer
@@ -301,13 +301,20 @@ class CultMesh:
         )
 
     @staticmethod
-    def reactive_document(
+    def authoritative_writer(
         node: CultMeshNode,
         document: DocumentDefinition[Any],
         key: str,
-        options: CultMeshReactiveDocumentOptions | None = None,
-    ) -> CultMeshReactiveDocument:
-        return node.reactive_document(document, key, options)
+    ) -> CultMeshDocumentWriter:
+        return node.authoritative_writer(document, key)
+
+    @staticmethod
+    def observe_document(
+        node: CultMeshNode,
+        document: DocumentDefinition[Any],
+        key: str,
+    ) -> CultMeshObservedDocument:
+        return node.observe_document(document, key)
 
     @staticmethod
     def publication_source_from_peer_snapshot(

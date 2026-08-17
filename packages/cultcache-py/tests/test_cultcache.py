@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import hashlib
 import hmac
 import io
@@ -2448,7 +2449,7 @@ class CultCacheTests(unittest.TestCase):
         self.assertIsNone(node.get(alias, "note:alias"))
         self.assertEqual(node.get_all(alias), [])
 
-    def test_cultmesh_reactive_document_coalesces_direct_alias_member_writes(self) -> None:
+    def test_cultmesh_reactive_document_coalesces_explicit_alias_updates(self) -> None:
         @dataclass
         class CanonicalNote:
             body: str
@@ -2481,16 +2482,14 @@ class CultCacheTests(unittest.TestCase):
         seen: list[CultMeshDatabaseChange] = []
         node.database.watch_record(alias, "note:reactive", seen.append)
 
-        reactive = node.reactive_document(
-            alias,
-            "note:reactive",
-            CultMeshReactiveDocumentOptions(flush_delay_seconds=0.02),
+        reactive = node.authoritative_writer(alias, "note:reactive").reactive(
+            CultMeshReactiveDocumentOptions(flush_delay_seconds=0.02)
         )
         try:
-            self.assertIsInstance(reactive.current, UiNote)
-            reactive.current.body = "first-local-edit"
-            reactive.current.body = "second-local-edit"
-            reactive.current.revision = 2
+            self.assertIsInstance(reactive.snapshot, UiNote)
+            reactive.update(lambda note: setattr(note, "body", "first-local-edit"))
+            reactive.update(lambda note: setattr(note, "body", "second-local-edit"))
+            reactive.update(lambda note: setattr(note, "revision", 2))
 
             self._wait_until(lambda: node.get_required(alias, "note:reactive").body == "second-local-edit")
 
@@ -2518,19 +2517,18 @@ class CultCacheTests(unittest.TestCase):
         node.register_document(document)
         node.put(document, "note:reconcile", Note("initial", 1))
 
-        reactive = CultMesh.reactive_document(
+        reactive = CultMesh.authoritative_writer(
             node,
             document,
             "note:reconcile",
-            CultMeshReactiveDocumentOptions(flush_delay_seconds=60),
-        )
+        ).reactive(CultMeshReactiveDocumentOptions(flush_delay_seconds=60))
         try:
             reactive.update(lambda note: setattr(note, "body", "local-prediction"))
-            reactive.current.revision = 2
+            reactive.update(lambda note: setattr(note, "revision", 2))
 
             node.put(document, "note:reconcile", Note("authoritative", 7))
 
-            self.assertEqual(reactive.current.body, "local-prediction")
+            self.assertEqual(reactive.snapshot.body, "local-prediction")
             self.assertIsNotNone(reactive.reconciliation)
             self.assertEqual(reactive.reconciliation.canonical.body, "authoritative")
             self.assertEqual(reactive.reconciliation.predicted.body, "local-prediction")
@@ -2542,6 +2540,65 @@ class CultCacheTests(unittest.TestCase):
             self.assertIsNone(reactive.reconciliation)
         finally:
             reactive.dispose()
+
+    def test_cultmesh_reactive_document_is_idle_until_explicit_nested_update(self) -> None:
+        document = define_document_type(
+            "mesh.nested_loadout",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-reactive-nested")
+        node.register_document(document)
+        node.put(
+            document,
+            "ship:nested",
+            {"loadout": {"weapon": {"tuning": {"damage": 10}}}},
+        )
+
+        with patch("cultmesh_py.node.threading.Timer") as timer:
+            reactive = node.authoritative_writer(document, "ship:nested").reactive()
+            timer.assert_not_called()
+
+        try:
+            borrowed = reactive.snapshot
+            borrowed["loadout"]["weapon"]["tuning"]["damage"] = 99
+            self.assertEqual(
+                node.get_required(document, "ship:nested")["loadout"]["weapon"]["tuning"]["damage"],
+                10,
+            )
+
+            reactive.update(
+                lambda draft: draft["loadout"]["weapon"]["tuning"].__setitem__("damage", 12)
+            )
+            reactive.flush()
+
+            self.assertEqual(reactive.snapshot["loadout"]["weapon"]["tuning"]["damage"], 12)
+            self.assertEqual(
+                node.get_required(document, "ship:nested")["loadout"]["weapon"]["tuning"]["damage"],
+                12,
+            )
+        finally:
+            reactive.dispose()
+
+    def test_cultmesh_observed_document_cannot_publish_borrowed_mutation(self) -> None:
+        document = define_document_type(
+            "mesh.observed_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-observed")
+        node.register_document(document)
+        node.put(document, "note:observed", {"body": "initial"})
+
+        observed = node.observe_document(document, "note:observed")
+        try:
+            observed.current["body"] = "borrowed-local-edit"
+            self.assertEqual(node.get_required(document, "note:observed")["body"], "initial")
+
+            node.put(document, "note:observed", {"body": "canonical"})
+            self.assertEqual(observed.current["body"], "canonical")
+        finally:
+            observed.dispose()
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(
