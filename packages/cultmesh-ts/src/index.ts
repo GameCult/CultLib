@@ -232,6 +232,7 @@ export interface CultMeshReactiveDocumentOptions {
   readonly context?: CultMeshQueryContext | string;
   readonly watch?: boolean;
   readonly debounceMs?: number;
+  readonly replaceDirtyCurrentOnCanonicalSnapshot?: boolean;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -248,14 +249,29 @@ export interface CultMeshReactiveDocumentReconciliation<TDocument extends object
 }
 
 export interface CultMeshReactiveDocument<TDocument extends object> {
-  readonly current: TDocument;
+  readonly writer: CultMeshDocumentWriter<TDocument>;
+  readonly snapshot: TDocument;
+  readonly dirty: boolean;
   readonly reconciliation: CultMeshReactiveDocumentReconciliation<TDocument> | undefined;
   readonly ready: Promise<TDocument>;
   readonly disposed: boolean;
+  update(update: (draft: TDocument) => void | TDocument): TDocument;
+  replaceLocal(value: TDocument): TDocument;
+  flush(): Promise<void>;
   clearReconciliation(): void;
   refresh(): Promise<TDocument>;
   dispose(): void;
 }
+
+export interface CultMeshObservedDocument<TDocument extends object> {
+  readonly current: TDocument;
+  readonly ready: Promise<TDocument>;
+  readonly disposed: boolean;
+  refresh(): Promise<TDocument>;
+  dispose(): void;
+}
+
+export type CultMeshDocumentWriteKind = "authoritative-replacement" | "prediction";
 
 export interface CultMeshNativeSliceColumn {
   readonly name: string;
@@ -842,10 +858,6 @@ export class CultMeshDocumentHandle<TDocument> {
     return this.submitPredictionDocument !== undefined;
   }
 
-  public get canSet(): boolean {
-    return this.canSubmitPrediction || this.canReplace;
-  }
-
   public latest(context: CultMeshQueryContext | string = "local"): Promise<TDocument> {
     return this.snapshotDocument(
       this.resolveContext(typeof context === "string" ? cultMeshQueryContext(context) : context),
@@ -932,63 +944,44 @@ export class CultMeshDocumentHandle<TDocument> {
     return this.submitPredictionDocument(this.resolveContext(context), value);
   }
 
-  public set(value: TDocument): Promise<void>;
-  public set(context: CultMeshQueryContext | string, value: TDocument): Promise<void>;
-  public set(
-    contextOrValue: CultMeshQueryContext | string | TDocument,
-    maybeValue?: TDocument,
-  ): Promise<void> {
-    const hasContext =
-      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
-    const context = hasContext
-      ? typeof contextOrValue === "string"
-        ? cultMeshQueryContext(contextOrValue)
-        : contextOrValue as CultMeshQueryContext
-      : cultMeshQueryContext("local");
-    const value = hasContext ? maybeValue : contextOrValue as TDocument;
-    if (value === undefined) {
-      throw new Error(`Document '${this.documentId}' requires a value.`);
+  public authoritativeWriter(
+    context: CultMeshQueryContext | string = "local",
+  ): CultMeshDocumentWriter<TDocument & object> {
+    if (!this.replaceDocument) {
+      throw new Error(`Document '${this.documentId}' does not support authoritative replacement.`);
     }
-
-    const resolved = this.resolveContext(context);
-    if (this.submitPredictionDocument) {
-      return this.submitPredictionDocument(resolved, value);
-    }
-    if (this.replaceDocument) {
-      return this.replaceDocument(resolved, value);
-    }
-
-    throw new Error(`Document '${this.documentId}' does not support mutation.`);
+    const resolved = this.resolveContext(
+      typeof context === "string" ? cultMeshQueryContext(context) : context,
+    );
+    return new CultMeshDocumentWriter(
+      this as unknown as CultMeshDocumentHandle<TDocument & object>,
+      "authoritative-replacement",
+      resolved,
+      value => this.replaceDocument!(resolved, value as unknown as TDocument),
+    );
   }
 
-  public update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument>;
-  public update(
-    context: CultMeshQueryContext | string,
-    update: CultMeshDocumentUpdater<TDocument>,
-  ): Promise<TDocument>;
-  public async update(
-    contextOrUpdate: CultMeshQueryContext | string | CultMeshDocumentUpdater<TDocument>,
-    maybeUpdate?: CultMeshDocumentUpdater<TDocument>,
-  ): Promise<TDocument> {
-    const hasContext =
-      typeof contextOrUpdate === "string" || isCultMeshQueryContext(contextOrUpdate);
-    const context = hasContext
-      ? contextOrUpdate as CultMeshQueryContext | string
-      : "local";
-    const update = hasContext ? maybeUpdate : contextOrUpdate as CultMeshDocumentUpdater<TDocument>;
-    if (!update) {
-      throw new Error(`Document '${this.documentId}' requires an update function.`);
+  public predictionWriter(
+    context: CultMeshQueryContext | string = "local",
+  ): CultMeshDocumentWriter<TDocument & object> {
+    if (!this.submitPredictionDocument) {
+      throw new Error(`Document '${this.documentId}' does not support prediction submission.`);
     }
-
-    const next = await update(await this.latest(context));
-    await this.set(context, next);
-    return next;
+    const resolved = this.resolveContext(
+      typeof context === "string" ? cultMeshQueryContext(context) : context,
+    );
+    return new CultMeshDocumentWriter(
+      this as unknown as CultMeshDocumentHandle<TDocument & object>,
+      "prediction",
+      resolved,
+      value => this.submitPredictionDocument!(resolved, value as unknown as TDocument),
+    );
   }
 
-  public reactive<TObject extends TDocument & object>(
+  public observe<TObject extends TDocument & object>(
     options: CultMeshReactiveDocumentOptions = {},
-  ): CultMeshReactiveDocument<TObject> {
-    return new CultMeshReactiveDocumentHandle<TObject>(
+  ): CultMeshObservedDocument<TObject> {
+    return new CultMeshObservedDocumentHandle<TObject>(
       this as unknown as CultMeshDocumentHandle<TObject>,
       options,
     );
@@ -1041,22 +1034,40 @@ export class CultMeshDocumentHandle<TDocument> {
   }
 }
 
-class CultMeshReactiveDocumentHandle<TDocument extends object>
-  implements CultMeshReactiveDocument<TDocument> {
+export class CultMeshDocumentWriter<TDocument extends object> {
+  public constructor(
+    public readonly document: CultMeshDocumentHandle<TDocument>,
+    public readonly kind: CultMeshDocumentWriteKind,
+    public readonly context: CultMeshQueryContext,
+    private readonly writeDocument: (value: TDocument) => Promise<void>,
+  ) {}
+
+  public write(value: TDocument): Promise<void> {
+    return this.writeDocument(cloneCultMeshDocument(value));
+  }
+
+  public async update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument> {
+    const next = await update(cloneCultMeshDocument(await this.document.latest(this.context)));
+    await this.write(next);
+    return next;
+  }
+
+  public reactive(
+    options: Omit<CultMeshReactiveDocumentOptions, "context"> = {},
+  ): CultMeshReactiveDocument<TDocument> {
+    return new CultMeshReactiveDocumentHandle(this, options);
+  }
+}
+
+class CultMeshObservedDocumentHandle<TDocument extends object>
+  implements CultMeshObservedDocument<TDocument> {
   readonly #document: CultMeshDocumentHandle<TDocument>;
   readonly #context: CultMeshQueryContext | string;
   readonly #onError: (error: unknown) => void;
-  readonly #debounceMs: number;
-  #current: TDocument;
+  #canonicalVersion = 0;
+  #current = {} as TDocument;
   #disposed = false;
-  #applyingRemote = false;
-  #pendingSet: Promise<void> = Promise.resolve();
-  #flushScheduled = false;
-  #flushTimer: ReturnType<typeof setTimeout> | undefined;
   #unsubscribe: CultMeshUnsubscribe | undefined;
-  #lastPredicted: TDocument | undefined;
-  #reconciliation: CultMeshReactiveDocumentReconciliation<TDocument> | undefined;
-  #reconciliationVersion = 0;
 
   public readonly ready: Promise<TDocument>;
 
@@ -1066,19 +1077,17 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   ) {
     this.#document = document;
     this.#context = options.context ?? "local";
-    this.#debounceMs = options.debounceMs ?? 0;
     this.#onError = options.onError ?? ((error) => {
       queueMicrotask(() => {
         throw error;
       });
     });
-    this.#current = this.createProxy({} as TDocument);
     this.ready = this.refresh();
-
     if (options.watch !== false) {
       try {
         this.#unsubscribe = document.watch(this.#context, value => {
-          this.applySnapshot(value);
+          this.#current = cloneCultMeshDocument(value);
+          this.#canonicalVersion++;
         });
       } catch (error) {
         this.#onError(error);
@@ -1087,7 +1096,98 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   }
 
   public get current(): TDocument {
+    this.throwIfDisposed();
     return this.#current;
+  }
+
+  public get disposed(): boolean {
+    return this.#disposed;
+  }
+
+  public async refresh(): Promise<TDocument> {
+    this.throwIfDisposed();
+    const versionBeforeRead = this.#canonicalVersion;
+    const latest = cloneCultMeshDocument(await this.#document.latest(this.#context));
+    if (versionBeforeRead === this.#canonicalVersion) {
+      this.#current = latest;
+      this.#canonicalVersion++;
+    }
+    return this.#current;
+  }
+
+  public dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+  }
+
+  private throwIfDisposed(): void {
+    if (this.#disposed) {
+      throw new Error(`Observed document '${this.#document.documentId}' is disposed.`);
+    }
+  }
+}
+
+class CultMeshReactiveDocumentHandle<TDocument extends object>
+  implements CultMeshReactiveDocument<TDocument> {
+  readonly #writer: CultMeshDocumentWriter<TDocument>;
+  readonly #document: CultMeshDocumentHandle<TDocument>;
+  readonly #onError: (error: unknown) => void;
+  readonly #debounceMs: number;
+  readonly #replaceDirtyCurrentOnCanonicalSnapshot: boolean;
+  #current = {} as TDocument;
+  #disposed = false;
+  #pendingSet: Promise<void> = Promise.resolve();
+  #flushScheduled = false;
+  #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #unsubscribe: CultMeshUnsubscribe | undefined;
+  #dirty = false;
+  #lastPredicted: TDocument | undefined;
+  #reconciliation: CultMeshReactiveDocumentReconciliation<TDocument> | undefined;
+  #reconciliationVersion = 0;
+  #canonicalVersion = 0;
+
+  public readonly ready: Promise<TDocument>;
+
+  public constructor(
+    writer: CultMeshDocumentWriter<TDocument>,
+    options: Omit<CultMeshReactiveDocumentOptions, "context"> = {},
+  ) {
+    this.#writer = writer;
+    this.#document = writer.document;
+    this.#debounceMs = options.debounceMs ?? 0;
+    this.#replaceDirtyCurrentOnCanonicalSnapshot =
+      options.replaceDirtyCurrentOnCanonicalSnapshot ?? false;
+    this.#onError = options.onError ?? ((error) => {
+      queueMicrotask(() => {
+        throw error;
+      });
+    });
+    this.ready = this.refresh();
+
+    if (options.watch !== false) {
+      try {
+        this.#unsubscribe = this.#document.watch(this.#writer.context, value => {
+          this.applySnapshot(value);
+        });
+      } catch (error) {
+        this.#onError(error);
+      }
+    }
+  }
+
+  public get writer(): CultMeshDocumentWriter<TDocument> {
+    return this.#writer;
+  }
+
+  public get snapshot(): TDocument {
+    this.throwIfDisposed();
+    return cloneCultMeshDocument(this.#current);
+  }
+
+  public get dirty(): boolean {
+    return this.#dirty;
   }
 
   public get reconciliation(): CultMeshReactiveDocumentReconciliation<TDocument> | undefined {
@@ -1099,9 +1199,37 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   }
 
   public async refresh(): Promise<TDocument> {
-    const latest = await this.#document.latest(this.#context);
-    this.applySnapshot(latest);
-    return this.#current;
+    this.throwIfDisposed();
+    const versionBeforeRead = this.#canonicalVersion;
+    const latest = await this.#document.latest(this.#writer.context);
+    if (versionBeforeRead === this.#canonicalVersion) {
+      this.applySnapshot(latest);
+    }
+    return this.snapshot;
+  }
+
+  public update(update: (draft: TDocument) => void | TDocument): TDocument {
+    this.throwIfDisposed();
+    const draft = cloneCultMeshDocument(this.#current);
+    const returned = update(draft);
+    this.#current = cloneCultMeshDocument(returned ?? draft);
+    this.#dirty = true;
+    this.queueSet();
+    return this.snapshot;
+  }
+
+  public replaceLocal(value: TDocument): TDocument {
+    this.throwIfDisposed();
+    this.#current = cloneCultMeshDocument(value);
+    this.#dirty = true;
+    this.queueSet();
+    return this.snapshot;
+  }
+
+  public async flush(): Promise<void> {
+    this.throwIfDisposed();
+    this.flushNow();
+    await this.#pendingSet;
   }
 
   public clearReconciliation(): void {
@@ -1121,18 +1249,13 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
 
   private applySnapshot(value: TDocument): void {
     const canonical = cloneCultMeshDocument(value);
+    this.#canonicalVersion++;
     this.captureReconciliation(canonical);
-    this.#applyingRemote = true;
-    try {
-      for (const key of Reflect.ownKeys(this.#current)) {
-        if (!Reflect.has(canonical, key)) {
-          Reflect.deleteProperty(this.#current, key);
-        }
-      }
-      Object.assign(this.#current, canonical);
-    } finally {
-      this.#applyingRemote = false;
+    if (this.#dirty && !this.#replaceDirtyCurrentOnCanonicalSnapshot) {
+      return;
     }
+    this.#current = canonical;
+    this.#dirty = false;
   }
 
   private captureReconciliation(canonical: TDocument): void {
@@ -1158,27 +1281,6 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
     this.#lastPredicted = undefined;
   }
 
-  private createProxy(seed: TDocument): TDocument {
-    return new Proxy(seed, {
-      set: (target, property, value) => {
-        const changed = !Object.is(Reflect.get(target, property), value);
-        const ok = Reflect.set(target, property, value);
-        if (ok && changed && !this.#applyingRemote) {
-          this.queueSet();
-        }
-        return ok;
-      },
-      deleteProperty: (target, property) => {
-        const hadProperty = Reflect.has(target, property);
-        const ok = Reflect.deleteProperty(target, property);
-        if (ok && hadProperty && !this.#applyingRemote) {
-          this.queueSet();
-        }
-        return ok;
-      },
-    });
-  }
-
   private queueSet(): void {
     if (this.#disposed) {
       return;
@@ -1188,20 +1290,7 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
     }
 
     this.#flushScheduled = true;
-    const flush = () => {
-      this.#flushScheduled = false;
-      this.#flushTimer = undefined;
-      if (this.#disposed) {
-        return;
-      }
-
-      const snapshot = cloneCultMeshDocument(this.#current);
-      this.#lastPredicted = snapshot;
-      this.#pendingSet = this.#pendingSet
-        .catch(() => undefined)
-        .then(() => this.#document.set(this.#context, snapshot))
-        .catch(error => this.#onError(error));
-    };
+    const flush = () => this.flushNow();
 
     const debounceMs = this.#debounceMs;
     if (debounceMs > 0) {
@@ -1218,6 +1307,29 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
     }
 
     this.#flushTimer = setTimeout(flush, 0);
+  }
+
+  private flushNow(): void {
+    if (!this.#flushScheduled && !this.#dirty) return;
+    this.#flushScheduled = false;
+    if (this.#flushTimer !== undefined) {
+      clearTimeout(this.#flushTimer);
+      this.#flushTimer = undefined;
+    }
+    if (this.#disposed || !this.#dirty) return;
+    const snapshot = cloneCultMeshDocument(this.#current);
+    this.#dirty = false;
+    this.#lastPredicted = snapshot;
+    this.#pendingSet = this.#pendingSet
+      .catch(() => undefined)
+      .then(() => this.#writer.write(snapshot))
+      .catch(error => this.#onError(error));
+  }
+
+  private throwIfDisposed(): void {
+    if (this.#disposed) {
+      throw new Error(`Reactive document '${this.#document.documentId}' is disposed.`);
+    }
   }
 }
 
@@ -1295,10 +1407,6 @@ export class CultMeshBoundDocumentHandle<TDocument> {
     return this.document.canSubmitPrediction;
   }
 
-  public get canSet(): boolean {
-    return this.document.canSet;
-  }
-
   public latest(): Promise<TDocument> {
     return this.document.latest(cultMeshQueryContextFromVerse(this.verse));
   }
@@ -1319,18 +1427,18 @@ export class CultMeshBoundDocumentHandle<TDocument> {
     return this.document.submitPrediction(cultMeshQueryContextFromVerse(this.verse), value);
   }
 
-  public set(value: TDocument): Promise<void> {
-    return this.document.set(cultMeshQueryContextFromVerse(this.verse), value);
+  public authoritativeWriter(): CultMeshDocumentWriter<TDocument & object> {
+    return this.document.authoritativeWriter(cultMeshQueryContextFromVerse(this.verse));
   }
 
-  public update(update: CultMeshDocumentUpdater<TDocument>): Promise<TDocument> {
-    return this.document.update(cultMeshQueryContextFromVerse(this.verse), update);
+  public predictionWriter(): CultMeshDocumentWriter<TDocument & object> {
+    return this.document.predictionWriter(cultMeshQueryContextFromVerse(this.verse));
   }
 
-  public reactive<TObject extends TDocument & object>(
+  public observe<TObject extends TDocument & object>(
     options: Omit<CultMeshReactiveDocumentOptions, "context"> = {},
-  ): CultMeshReactiveDocument<TObject> {
-    return this.document.reactive<TObject>({
+  ): CultMeshObservedDocument<TObject> {
+    return this.document.observe<TObject>({
       ...options,
       context: cultMeshQueryContextFromVerse(this.verse),
     });
@@ -1451,10 +1559,6 @@ export class CultMeshDocumentCatalog {
     return this.tryDocument(schema)?.canSubmitPrediction ?? false;
   }
 
-  public canSet(schema: CultMeshDocumentSchemaDescriptor): boolean {
-    return this.tryDocument(schema)?.canSet ?? false;
-  }
-
   public submitPrediction<TDocument>(
     schema: CultMeshDocumentSchemaDescriptor,
     value: TDocument,
@@ -1482,60 +1586,18 @@ export class CultMeshDocumentCatalog {
     return this.document(schema, options).submitPrediction(context, value);
   }
 
-  public set<TDocument>(
+  public authoritativeWriter<TDocument extends object>(
     schema: CultMeshDocumentSchemaDescriptor,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-  ): Promise<void>;
-  public set<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    context: CultMeshQueryContext | string,
-    value: TDocument,
-    options?: { parse?: (value: unknown) => TDocument },
-  ): Promise<void>;
-  public set<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    contextOrValue: CultMeshQueryContext | string | TDocument,
-    valueOrOptions?: TDocument | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
-  ): Promise<void> {
-    const hasContext =
-      typeof contextOrValue === "string" || isCultMeshQueryContext(contextOrValue);
-    const context = hasContext
-      ? contextOrValue as CultMeshQueryContext | string
-      : (valueOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
-    const value = hasContext ? valueOrOptions as TDocument : contextOrValue as TDocument;
-    const options = hasContext ? maybeOptions : valueOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
-    return this.document(schema, options).set(context, value);
+    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
+  ): CultMeshDocumentWriter<TDocument> {
+    return this.document(schema, options).authoritativeWriter(options.context ?? "local");
   }
 
-  public update<TDocument>(
+  public predictionWriter<TDocument extends object>(
     schema: CultMeshDocumentSchemaDescriptor,
-    update: CultMeshDocumentUpdater<TDocument>,
-    options?: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-  ): Promise<TDocument>;
-  public update<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    context: CultMeshQueryContext | string,
-    update: CultMeshDocumentUpdater<TDocument>,
-    options?: { parse?: (value: unknown) => TDocument },
-  ): Promise<TDocument>;
-  public update<TDocument>(
-    schema: CultMeshDocumentSchemaDescriptor,
-    contextOrUpdate: CultMeshQueryContext | string | CultMeshDocumentUpdater<TDocument>,
-    updateOrOptions?: CultMeshDocumentUpdater<TDocument> | { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string },
-    maybeOptions: { parse?: (value: unknown) => TDocument } = {},
-  ): Promise<TDocument> {
-    const hasContext =
-      typeof contextOrUpdate === "string" || isCultMeshQueryContext(contextOrUpdate);
-    const context = hasContext
-      ? contextOrUpdate as CultMeshQueryContext | string
-      : (updateOrOptions as { context?: CultMeshQueryContext | string } | undefined)?.context ?? "local";
-    const update = hasContext
-      ? updateOrOptions as CultMeshDocumentUpdater<TDocument>
-      : contextOrUpdate as CultMeshDocumentUpdater<TDocument>;
-    const options = hasContext ? maybeOptions : updateOrOptions as { parse?: (value: unknown) => TDocument } | undefined;
-    return this.document(schema, options).update(context, update);
+    options: { parse?: (value: unknown) => TDocument; context?: CultMeshQueryContext | string } = {},
+  ): CultMeshDocumentWriter<TDocument> {
+    return this.document(schema, options).predictionWriter(options.context ?? "local");
   }
 
   public watch<TDocument>(
@@ -3927,29 +3989,6 @@ export class CultMeshNode {
     );
   }
 
-  public reactiveDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    key: string,
-    options: {
-      context?: CultMeshQueryContext | string;
-      watch?: boolean;
-      debounceMs?: number;
-      onError?: (error: unknown) => void;
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      pollMs?: number;
-    } = {},
-  ): CultMeshReactiveDocument<CultCacheDocumentValue<TDefinition> & object> {
-    const {
-      documentId,
-      routeHint,
-      pollMs,
-      ...reactiveOptions
-    } = options;
-    return this.document(definition, key, { documentId, routeHint, pollMs })
-      .reactive<CultCacheDocumentValue<TDefinition> & object>(reactiveOptions);
-  }
-
   public async syncDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
     peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
     definition: TDefinition,
@@ -5003,23 +5042,6 @@ export class CultMesh {
     } = {},
   ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
     return cultMeshGlobalDocumentFromCache(cache, definition, options);
-  }
-
-  public static reactiveDocument<TDefinition extends AnyCultCacheDocumentDefinition>(
-    node: CultMeshNode,
-    definition: TDefinition,
-    key: string,
-    options: {
-      context?: CultMeshQueryContext | string;
-      watch?: boolean;
-      debounceMs?: number;
-      onError?: (error: unknown) => void;
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      pollMs?: number;
-    } = {},
-  ): CultMeshReactiveDocument<CultCacheDocumentValue<TDefinition> & object> {
-    return node.reactiveDocument(definition, key, options);
   }
 
   public static syncDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(

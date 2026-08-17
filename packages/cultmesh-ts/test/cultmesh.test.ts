@@ -114,7 +114,6 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   assert.equal(document.documentId, "cultmesh.note:note:1");
   assert.equal(document.canReplace, true);
   assert.equal(document.canSubmitPrediction, false);
-  assert.equal(document.canSet, true);
   assert.equal((await bound.latest()).body, "initial");
 
   await bound.replace({
@@ -131,13 +130,12 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
 
   const catalog = CultMesh.documents(document);
   assert.equal(catalog.canReplace(noteAliasDocument), true);
-  assert.equal(catalog.canSet(noteAliasDocument), true);
-  await catalog.set(noteAliasDocument, {
-    noteId: "note:1",
-    body: "catalog-updated",
-  }, {
+  await catalog.authoritativeWriter(noteAliasDocument, {
     parse: value => noteAliasDocument.schema.parse(value),
     context: "browser-client",
+  }).write({
+    noteId: "note:1",
+    body: "catalog-updated",
   });
   assert.equal(
     (await catalog.latest(noteAliasDocument, "browser-client", {
@@ -145,7 +143,7 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
     })).body,
     "catalog-updated",
   );
-  const incremented = await bound.update(value => ({
+  const incremented = await bound.authoritativeWriter().update(value => ({
     ...value,
     body: `${value.body}:updated-through-bound-set`,
   }));
@@ -183,17 +181,15 @@ test("CultMesh TS document handles submit predictions through configured authori
 
   assert.equal(document.canReplace, false);
   assert.equal(document.canSubmitPrediction, true);
-  assert.equal(document.canSet, true);
   assert.equal(bound.canSubmitPrediction, true);
-  assert.equal(bound.canSet, true);
   assert.equal(catalog.canSubmitPrediction(noteAliasDocument), true);
-  assert.equal(catalog.canSet(noteAliasDocument), true);
 
-  await catalog.set(noteAliasDocument, "pilot-a", {
+  await catalog.predictionWriter(noteAliasDocument, {
+    parse: value => noteAliasDocument.schema.parse(value),
+    context: "pilot-a",
+  }).write({
     noteId: "note:prediction",
     body: "predicted",
-  }, {
-    parse: value => noteAliasDocument.schema.parse(value),
   });
 
   assert.deepEqual(contexts, ["pilot-a:network"]);
@@ -204,14 +200,14 @@ test("CultMesh TS document handles submit predictions through configured authori
     parse: value => noteAliasDocument.schema.parse(value),
   });
   assert.equal(alias.canSubmitPrediction, true);
-  await alias.set({
+  await alias.predictionWriter().write({
     noteId: "note:prediction",
     body: "alias-predicted",
   });
 
   assert.deepEqual(predictions, ["predicted", "alias-predicted"]);
   assert.equal((await document.latest("pilot-a")).body, "alias-predicted");
-  const updated = await document.update("pilot-a", value => ({
+  const updated = await document.predictionWriter("pilot-a").update(value => ({
     ...value,
     body: "updated-as-prediction",
   }));
@@ -225,6 +221,34 @@ test("CultMesh TS document handles submit predictions through configured authori
     }),
     /does not support replacement/,
   );
+});
+
+test("CultMesh TS documents with both capabilities require an immutable writer choice", async () => {
+  let current = { noteId: "note:dual", body: "initial" };
+  const writes: string[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:dual",
+    noteDocument,
+    async () => current,
+    {
+      replaceDocument: async (_context, value) => {
+        writes.push(`authoritative:${value.body}`);
+        current = value;
+      },
+      submitPrediction: async (_context, value) => {
+        writes.push(`prediction:${value.body}`);
+        current = value;
+      },
+    },
+  );
+
+  assert.equal((document as unknown as { set?: unknown }).set, undefined);
+  await document.authoritativeWriter().write({ noteId: "note:dual", body: "canonical" });
+  const predictionWriter = document.predictionWriter();
+  await predictionWriter.write({ noteId: "note:dual", body: "predicted" });
+
+  assert.equal(predictionWriter.kind, "prediction");
+  assert.deepEqual(writes, ["authoritative:canonical", "prediction:predicted"]);
 });
 
 test("CultMesh TS store document handles choose compatible foreign schema payloads", async () => {
@@ -280,7 +304,7 @@ test("CultMesh TS store document handles choose compatible foreign schema payloa
   });
 });
 
-test("CultMesh TS reactive documents submit predictions from member writes", async () => {
+test("CultMesh TS reactive documents submit predictions from explicit updates", async () => {
   let current = {
     noteId: "note:reactive",
     body: "initial",
@@ -299,23 +323,71 @@ test("CultMesh TS reactive documents submit predictions from member writes", asy
     },
   );
 
-  const reactive = document.reactive<typeof current>({
+  const reactive = document.predictionWriter().reactive({
     watch: false,
   });
   await reactive.ready;
-  reactive.current.body = "member-write-prediction";
-  reactive.current.body = "member-write-prediction-final";
+  reactive.update(value => {
+    value.body = "explicit-update-prediction";
+  });
+  reactive.update(value => {
+    value.body = "explicit-update-prediction-final";
+  });
   await waitFor(
-    () => predictions.includes("member-write-prediction-final"),
-    "reactive member write prediction",
+    () => predictions.includes("explicit-update-prediction-final"),
+    "reactive explicit update prediction",
   );
 
-  assert.equal(current.body, "member-write-prediction-final");
-  assert.deepEqual(predictions, ["member-write-prediction-final"]);
+  assert.equal(current.body, "explicit-update-prediction-final");
+  assert.deepEqual(predictions, ["explicit-update-prediction-final"]);
   reactive.dispose();
-  reactive.current.body = "after-dispose";
+  assert.throws(() => reactive.update(value => {
+    value.body = "after-dispose";
+  }), /disposed/);
+  assert.deepEqual(predictions, ["explicit-update-prediction-final"]);
+});
+
+test("CultMesh TS reactive updates publish nested edits while snapshot mutation stays local", async () => {
+  let current = {
+    shipId: "ship:nested",
+    loadout: {
+      weapon: {
+        key: "weapon:laser",
+        tuning: { damage: 10 },
+      },
+    },
+  };
+  const predictions: typeof current[] = [];
+  const document = CultMesh.document(
+    "cultmesh.ship:nested",
+    { schemaId: "cultmesh.ship.nested.v0" },
+    async () => current,
+    {
+      submitPrediction: async (_context, value) => {
+        current = structuredClone(value);
+        predictions.push(structuredClone(value));
+      },
+    },
+  );
+  const reactive = document.predictionWriter().reactive({ watch: false });
+  await reactive.ready;
+
+  reactive.update(draft => {
+    draft.loadout.weapon.tuning.damage = 12;
+  });
+  await reactive.flush();
+
+  assert.equal(current.loadout.weapon.tuning.damage, 12);
+  assert.equal(predictions.length, 1);
+
+  const borrowed = reactive.snapshot;
+  borrowed.loadout.weapon.tuning.damage = 99;
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.deepEqual(predictions, ["member-write-prediction-final"]);
+
+  assert.equal(reactive.snapshot.loadout.weapon.tuning.damage, 12);
+  assert.equal(current.loadout.weapon.tuning.damage, 12);
+  assert.equal(predictions.length, 1);
+  reactive.dispose();
 });
 
 test("CultMesh TS node opens same-schema aliases with one call", async () => {
@@ -333,7 +405,7 @@ test("CultMesh TS node opens same-schema aliases with one call", async () => {
   });
   assert.equal(aliasHandle.documentId, "cultmesh.note.ui:note:node-reactive");
   assert.equal((await aliasHandle.latest()).body, "initial");
-  await aliasHandle.set({
+  await aliasHandle.authoritativeWriter().write({
     noteId: "note:node-reactive",
     body: "edited-through-alias-handle",
   });
@@ -355,26 +427,29 @@ test("CultMesh TS node opens same-schema aliases with one call", async () => {
     ["edited-through-alias-put"],
   );
 
-  const reactive = node.reactiveDocument(noteAliasDocument, "note:node-reactive", {
-    context: CultMesh.queryContext("browser-client"),
+  const reactive = aliasHandle.authoritativeWriter(
+    CultMesh.queryContext("browser-client"),
+  ).reactive({
     watch: false,
   });
   await reactive.ready;
-  reactive.current.body = "edited-through-node-helper";
+  reactive.update(value => {
+    value.body = "edited-through-node-helper";
+  });
   await waitFor(
     () => node.getRequired(noteDocument, "note:node-reactive").body === "edited-through-node-helper",
     "node-level reactive alias write",
   );
 
-  assert.equal(reactive.current.noteId, "note:node-reactive");
+  assert.equal(reactive.snapshot.noteId, "note:node-reactive");
   assert.equal(
     node.document(noteDocument, "note:node-reactive").asSchemaAlias(noteAliasDocument, {
       parse: value => noteAliasDocument.schema.parse(value),
-    }).canSet,
+    }).canReplace,
     true,
   );
   assert.equal(
-    (await CultMesh.reactiveDocument(node, noteAliasDocument, "note:node-reactive", {
+    (await node.document(noteAliasDocument, "note:node-reactive").observe({
       watch: false,
     }).ready).body,
     "edited-through-node-helper",
@@ -409,10 +484,12 @@ test("CultMesh TS reactive documents store reconciliation deltas after mispredic
     },
   );
 
-  const reactive = document.reactive<typeof current>();
+  const reactive = document.predictionWriter().reactive();
   await reactive.ready;
-  reactive.current.body = "predicted";
-  reactive.current.revision = 7;
+  reactive.update(value => {
+    value.body = "predicted";
+    value.revision = 7;
+  });
   await waitFor(() => predictions.length === 1, "reactive reconciliation prediction");
 
   watcher?.({
@@ -421,8 +498,8 @@ test("CultMesh TS reactive documents store reconciliation deltas after mispredic
     revision: 5,
   });
 
-  assert.equal(reactive.current.body, "authoritative");
-  assert.equal(reactive.current.revision, 5);
+  assert.equal(reactive.snapshot.body, "authoritative");
+  assert.equal(reactive.snapshot.revision, 5);
   assert.equal(reactive.reconciliation?.version, 1);
   assert.deepEqual(reactive.reconciliation?.canonical, {
     noteId: "note:reconcile",
@@ -444,7 +521,7 @@ test("CultMesh TS reactive documents store reconciliation deltas after mispredic
   reactive.dispose();
 });
 
-test("CultMesh TS reactive documents coalesce same-frame member writes", async () => {
+test("CultMesh TS reactive documents coalesce same-frame explicit updates", async () => {
   let current = {
     noteId: "note:reactive-frame",
     body: "initial",
@@ -468,14 +545,14 @@ test("CultMesh TS reactive documents coalesce same-frame member writes", async (
     },
   );
 
-  const reactive = document.reactive<typeof current>({
+  const reactive = document.predictionWriter().reactive({
     watch: false,
   });
   try {
     await reactive.ready;
-    reactive.current.body = "frame-1";
-    reactive.current.body = "frame-2";
-    reactive.current.body = "frame-3";
+    reactive.update(value => { value.body = "frame-1"; });
+    reactive.update(value => { value.body = "frame-2"; });
+    reactive.update(value => { value.body = "frame-3"; });
 
     assert.equal(frameCallbacks.length, 1);
     frameCallbacks[0](performance.now());
@@ -524,14 +601,14 @@ test("CultMesh TS reactive documents queue edits made while a prediction is in f
     },
   );
 
-  const reactive = document.reactive<typeof current>({
+  const reactive = document.predictionWriter().reactive({
     watch: false,
     debounceMs: 0,
   });
   await reactive.ready;
-  reactive.current.body = "first";
+  reactive.update(value => { value.body = "first"; });
   await firstPredictionStarted;
-  reactive.current.body = "second";
+  reactive.update(value => { value.body = "second"; });
   releaseFirstPrediction();
   await waitFor(() => predictions.length === 2, "in-flight queued prediction");
 
@@ -540,13 +617,13 @@ test("CultMesh TS reactive documents queue edits made while a prediction is in f
   reactive.dispose();
 });
 
-test("CultMesh TS reactive read-only documents surface mutation failures and keep watching", async () => {
+test("CultMesh TS observed documents never publish borrowed snapshot mutation and keep watching", async () => {
   let current = {
     noteId: "note:reactive-readonly",
     body: "initial",
   };
   let watcher: ((value: typeof current) => void) | undefined;
-  const errors: string[] = [];
+  const writes: typeof current[] = [];
   const document = CultMesh.document(
     "cultmesh.note:reactive-readonly",
     noteDocument,
@@ -558,15 +635,17 @@ test("CultMesh TS reactive read-only documents surface mutation failures and kee
           watcher = undefined;
         };
       },
+      submitPrediction: async (_context, value) => {
+        writes.push(value);
+      },
     },
   );
 
-  const reactive = document.reactive<typeof current>({
-    onError: error => errors.push(String((error as Error).message ?? error)),
-  });
-  await reactive.ready;
-  reactive.current.body = "local-readonly-edit";
-  await waitFor(() => errors.length === 1, "read-only mutation error");
+  const observed = document.observe<typeof current>();
+  await observed.ready;
+  observed.current.body = "borrowed-local-edit";
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(writes, []);
 
   current = {
     noteId: "note:reactive-readonly",
@@ -574,9 +653,8 @@ test("CultMesh TS reactive read-only documents surface mutation failures and kee
   };
   watcher?.(current);
 
-  assert.match(errors[0], /does not support mutation/);
-  assert.equal(reactive.current.body, "canonical-after-error");
-  reactive.dispose();
+  assert.equal(observed.current.body, "canonical-after-error");
+  observed.dispose();
 });
 
 test("CultMesh TS document handles read schema publications from single-file stores", async () => {
@@ -796,7 +874,7 @@ test("CultMesh TS syncs configured publications into local node aliases", async 
   assert.deepEqual(facadeSynced, synced);
   assert.equal(target.getRequired(noteDocument, "note:published").body, "publication source hydrates local alias");
   assert.equal(target.getRequired(noteAliasDocument, "note:published").body, "publication source hydrates local alias");
-  assert.equal((await target.reactiveDocument(noteAliasDocument, "note:published", { watch: false }).ready).body, "publication source hydrates local alias");
+  assert.equal((await target.document(noteAliasDocument, "note:published").observe({ watch: false }).ready).body, "publication source hydrates local alias");
 });
 
 test("CultMesh TS syncs configured publication catalogs into local node aliases", async () => {

@@ -99,11 +99,13 @@ const station = await CultMesh.startNode(statePath, {
 const stock = station.document(stationStockUiDocument, "station:starbridge:stock");
 const current = await stock.latest();
 
-await stock.set(updatedStockFromUi);
+await stock.authoritativeWriter().write(updatedStockFromUi);
 
-const reactive = station.reactiveDocument(stationStockUiDocument, "station:starbridge:stock");
+const reactive = stock.authoritativeWriter().reactive();
 await reactive.ready;
-reactive.current.availableMissiles -= 4;
+reactive.update(draft => {
+  draft.availableMissiles -= 4;
+});
 ```
 
 State pointers are the same kind of managed surface for UI and tools. They can
@@ -418,7 +420,8 @@ Use `node.syncDocumentFromPeerSnapshot(...)` or
 local node from the remote snapshot. The helper requests the raw snapshot,
 applies it through the node's document registry, and returns the requested
 typed definition. Same-schema aliases stay local after the call: the caller can
-keep using `node.document(aliasDefinition, key)` or `node.reactiveDocument(...)`
+keep using `node.document(aliasDefinition, key)` and explicitly select
+`authoritativeWriter()`, `predictionWriter()`, or `observe()`
 without re-threading the RUDP peer.
 
 The same typed-definition overload is available for
@@ -432,7 +435,7 @@ sync came from local persistence or a remote CultNet snapshot.
 Use `node.syncDocumentFromPublication(...)` or
 `CultMesh.syncDocumentFromPublication(...)` for the same source-agnostic shape
 when the publication should hydrate a local node before the caller continues
-through `node.document(...)` or `node.reactiveDocument(...)`.
+through `node.document(...)` and its explicit writer or observer.
 
 ## Streaming Mode
 
