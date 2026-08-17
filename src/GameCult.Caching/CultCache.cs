@@ -1271,6 +1271,7 @@ namespace GameCult.Caching
         private readonly CultDocumentRegistry _registry;
         private readonly List<CacheBackingStore> _backingStores = new();
         private readonly ConcurrentDictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, CultStoredDocument>> _typeMaps = new();
         private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, string>> _nameMaps = new();
         private readonly ConcurrentDictionary<(Type Type, string Alias), ConcurrentDictionary<string, string>> _indexMaps = new();
         private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
@@ -1598,10 +1599,25 @@ namespace GameCult.Caching
         /// </summary>
         public IEnumerable<T> GetAll<T>() where T : class
         {
+            return GetStoredDocuments<T>().Select(entry => (T)entry.Document);
+        }
+
+        /// <summary>
+        /// Gets typed cached records with their stable CultCache identities without scanning unrelated documents.
+        /// </summary>
+        public IEnumerable<CultStoredDocument> GetStoredDocuments<T>() where T : class
+        {
             var type = typeof(T);
-            return _entries.Values
-                .Where(entry => type.IsAssignableFrom(entry.Descriptor.DocumentType))
-                .Select(entry => (T)entry.Document);
+            if (type.IsSealed)
+            {
+                return _typeMaps.TryGetValue(type, out var exact)
+                    ? exact.Values
+                    : Enumerable.Empty<CultStoredDocument>();
+            }
+
+            return _typeMaps
+                .Where(pair => type.IsAssignableFrom(pair.Key))
+                .SelectMany(pair => pair.Value.Values);
         }
 
         /// <summary>
@@ -1867,6 +1883,11 @@ namespace GameCult.Caching
 
         private void AddIndexes(CultStoredDocument stored)
         {
+            var typeMap = _typeMaps.GetOrAdd(
+                stored.Descriptor.DocumentType,
+                _ => new ConcurrentDictionary<string, CultStoredDocument>(StringComparer.Ordinal));
+            typeMap[stored.Key.Value] = stored;
+
             if (stored.Descriptor.IsGlobal)
             {
                 _globalKeys[stored.Descriptor.DocumentType] = stored.Key.Value;
@@ -1897,6 +1918,9 @@ namespace GameCult.Caching
 
         private void RemoveIndexes(CultStoredDocument stored)
         {
+            if (_typeMaps.TryGetValue(stored.Descriptor.DocumentType, out var typeMap))
+                typeMap.TryRemove(stored.Key.Value, out _);
+
             if (stored.Descriptor.IsGlobal)
             {
                 _globalKeys.TryRemove(stored.Descriptor.DocumentType, out _);

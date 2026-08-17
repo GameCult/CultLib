@@ -807,6 +807,37 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task CultCache_TypedStoredDocumentIndex_Tracks_Upsert_Replacement_And_Removal()
+        {
+            var cache = new CultCache();
+            var key = new CultRecordKey("typed-index:named");
+            await cache.UpsertAsync(typeof(NamedTestEntry), new NamedTestEntry
+            {
+                Name = "indexed",
+                Value = "first"
+            }, key);
+            await cache.UpsertAsync(typeof(AlternateNamedTestEntry), new AlternateNamedTestEntry
+            {
+                Name = "unrelated"
+            }, new CultRecordKey("typed-index:unrelated"));
+
+            var initial = cache.GetStoredDocuments<NamedTestEntry>().Single();
+            Assert.That(initial.Key, Is.EqualTo(key));
+            Assert.That(((NamedTestEntry)initial.Document).Value, Is.EqualTo("first"));
+
+            await cache.UpsertAsync(typeof(NamedTestEntry), new NamedTestEntry
+            {
+                Name = "indexed",
+                Value = "second"
+            }, key);
+            var replaced = cache.GetStoredDocuments<NamedTestEntry>().Single();
+            Assert.That(((NamedTestEntry)replaced.Document).Value, Is.EqualTo("second"));
+
+            Assert.That(cache.Remove(key), Is.True);
+            Assert.That(cache.GetStoredDocuments<NamedTestEntry>(), Is.Empty);
+        }
+
+        [Test]
         public async Task CultCache_FlushOnDispose_Persists_When_Enabled()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.msgpack");
