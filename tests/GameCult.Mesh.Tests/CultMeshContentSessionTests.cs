@@ -52,7 +52,7 @@ public sealed class CultMeshContentSessionTests
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
-            CultMeshEndpointId.Parse("service:aetheria.daemon"));
+            CultMeshEndpointId.Parse("aetheria"));
         using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshContentTransferStateDocument)));
         var transfer = new CultMeshContentTransferService(
@@ -114,7 +114,7 @@ public sealed class CultMeshContentSessionTests
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
-            CultMeshEndpointId.Parse("service:aetheria.daemon"));
+            CultMeshEndpointId.Parse("aetheria"));
         using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshContentTransferStateDocument)));
         var transfer = new CultMeshContentTransferService(

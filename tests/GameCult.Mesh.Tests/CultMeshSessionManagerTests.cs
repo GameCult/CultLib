@@ -14,6 +14,27 @@ namespace GameCult.Mesh.Tests;
 public sealed class CultMeshSessionManagerTests
 {
     [Test]
+    public async Task Connect_ResolvesOnlyTheRequestedVerseIdentity()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = new CultMeshDiscoveryService(
+            new[] { new MultiVerseRouteSource(clock) },
+            new CultMeshDiscoveryServiceOptions { Clock = clock });
+        CultMeshTransportCandidate? connected = null;
+        var connector = new FakeConnector((candidate, _) =>
+        {
+            connected = candidate;
+            return Task.FromResult<ICultNetSchemaClient>(new FakeSchemaClient());
+        });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+
+        await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents);
+
+        connected.Should().NotBeNull();
+        connected!.Endpoint.Should().Be("rudp://aetheria:3076");
+    }
+
+    [Test]
     public async Task Connect_ReusesInflightAndEstablishedSession()
     {
         var clock = new ManualSessionClock();
@@ -21,7 +42,7 @@ public sealed class CultMeshSessionManagerTests
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var connector = new FakeConnector(async (_, _) => { await release.Task; return new FakeSchemaClient(); });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        var endpoint = CultMeshEndpointId.Parse("aetheria");
 
         var first = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
         var second = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
@@ -49,7 +70,7 @@ public sealed class CultMeshSessionManagerTests
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
 
-        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("odin:aetheria"), CultMeshProtocols.Documents);
+        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents);
         session.State.Path!.Endpoint.Should().Be("rudp://fast:3076");
         slowRelease.TrySetResult();
         await WaitUntilAsync(() => slowClient.DisposeCount == 1);
@@ -70,7 +91,7 @@ public sealed class CultMeshSessionManagerTests
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
         using var cancellation = new CancellationTokenSource();
-        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        var endpoint = CultMeshEndpointId.Parse("aetheria");
 
         var cancelled = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents, cancellation.Token);
         var survivor = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
@@ -97,7 +118,7 @@ public sealed class CultMeshSessionManagerTests
             return Task.FromResult<ICultNetSchemaClient>(client);
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        var endpoint = CultMeshEndpointId.Parse("aetheria");
         var first = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
         var states = new List<CultMeshSessionStatus>();
         using var stateWatch = first.WatchState().Subscribe(state => states.Add(state.Status));
@@ -129,7 +150,7 @@ public sealed class CultMeshSessionManagerTests
         using var manager = new CultMeshSessionManager(discovery, Array.Empty<ICultMeshTransportConnector>(), new CultMeshSessionManagerOptions { Clock = clock });
 
         var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
-            manager.ConnectAsync(CultMeshEndpointId.Parse("odin:aetheria"), CultMeshProtocols.Documents));
+            manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents));
 
         error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Transport);
         error.InnerException.Should().BeOfType<CultMeshSessionException>()
@@ -144,7 +165,7 @@ public sealed class CultMeshSessionManagerTests
         var client = new RespondingSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        var endpoint = CultMeshEndpointId.Parse("aetheria");
         using var first = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
         using var second = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
 
@@ -166,7 +187,7 @@ public sealed class CultMeshSessionManagerTests
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
         var exchange = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions { Sessions = manager, Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("odin:aetheria");
+        var endpoint = CultMeshEndpointId.Parse("aetheria");
 
         var first = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
         var second = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
@@ -185,7 +206,7 @@ public sealed class CultMeshSessionManagerTests
         var client = new LeaseSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("odin:aetheria"), CultMeshProtocols.Subscriptions);
+        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Subscriptions);
         using var first = session.OpenSchemaClient();
         using var second = session.OpenSchemaClient();
         var firstCount = 0;
@@ -235,6 +256,38 @@ public sealed class CultMeshSessionManagerTests
                         new CultMeshVerseCompatibility("cultmesh.v0", "rules"), _endpoints()),
                     SourceId, _clock.UtcNow, _clock.UtcNow + _ttl, CultMeshDiscoveryTrust.Signed)
             });
+    }
+
+    private sealed class MultiVerseRouteSource : ICultMeshLookupSource
+    {
+        private readonly ManualSessionClock _clock;
+        public MultiVerseRouteSource(ManualSessionClock clock) => _clock = clock;
+        public string SourceId => "odin";
+
+        public Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(
+            CultMeshDiscoveryQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            var expires = _clock.UtcNow.AddMinutes(1);
+            return Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(new[]
+            {
+                Observation("norn", "rudp://norn:3076", expires),
+                Observation("aetheria", "rudp://aetheria:3076", expires)
+            });
+        }
+
+        private CultMeshDiscoveryObservation Observation(string verseId, string endpoint, DateTimeOffset expires) =>
+            new(
+                new CultMeshVerseDescriptor(
+                    verseId,
+                    verseId,
+                    CultMeshVerseAuthorityModel.OperatorCluster,
+                    new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+                    new[] { endpoint }),
+                SourceId,
+                _clock.UtcNow,
+                expires,
+                CultMeshDiscoveryTrust.Signed);
     }
 
     private sealed class FakeConnector : ICultMeshTransportConnector

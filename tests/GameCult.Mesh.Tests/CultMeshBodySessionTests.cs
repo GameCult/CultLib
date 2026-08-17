@@ -28,7 +28,7 @@ public sealed class CultMeshBodySessionTests
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource() });
         using var sessions = new CultMeshSessionManager(discovery, new[] { connector });
         var provider = new CultMeshSessionBodyProvider(
-            "aetheria.daemon", sessions, CultMeshEndpointId.Parse("service:aetheria.daemon"));
+            "aetheria.daemon", sessions, CultMeshEndpointId.Parse("aetheria"));
 
         var received = await provider.FetchAsync(descriptor);
 
@@ -69,7 +69,7 @@ public sealed class CultMeshBodySessionTests
         using var sessions = new CultMeshSessionManager(discovery,
             new ICultMeshTransportConnector[] { new CultMeshSchemaTransportConnector() });
         var provider = new CultMeshSessionBodyProvider("aetheria.daemon", sessions,
-            CultMeshEndpointId.Parse("service:aetheria.daemon"),
+            CultMeshEndpointId.Parse("aetheria"),
             new CultMeshSessionBodyProviderOptions { ResponseTimeout = TimeSpan.FromSeconds(10) });
 
         var elapsed = Stopwatch.StartNew();

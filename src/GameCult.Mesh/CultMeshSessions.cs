@@ -520,7 +520,9 @@ namespace GameCult.Mesh
                     CultMeshSessionFailureReason.UnsupportedPath,
                     "No streaming content connectors are configured. Register the TCP content connector or the explicit legacy RUDP connector.");
 
-            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
+            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
+                endpointId.Value,
+                new[] { endpointId.Value })).ConfigureAwait(false);
             var candidates = discovery.Candidates
                 .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
@@ -646,7 +648,9 @@ namespace GameCult.Mesh
                     CultMeshSessionFailureReason.UnsupportedPath,
                     "No realtime state connectors are configured. Register a QUIC connector explicitly.");
 
-            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
+            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
+                endpointId.Value,
+                new[] { endpointId.Value })).ConfigureAwait(false);
             var routes = discovery.Candidates
                 .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
@@ -733,7 +737,9 @@ namespace GameCult.Mesh
 
         private async Task<ConnectedPath> ResolveConnectedPathAsync(CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
         {
-            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(endpointId.Value)).ConfigureAwait(false);
+            var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
+                endpointId.Value,
+                new[] { endpointId.Value })).ConfigureAwait(false);
             var candidates = discovery.Candidates.SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
                 .Select(endpoint => new CultMeshTransportCandidate(endpoint))
