@@ -35,15 +35,31 @@ Run the same provider and connect at least two lowerers. Both must report the
 same provider id, surface id, surface version, and command receipt ids. Native
 pixels may differ; provider truth may not.
 
-Current verification for the Unity consumer:
+The package-artifact browser/headless checkpoint is executable from CultLib:
+
+```powershell
+cd CultLib
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
+  -EveRoot ..\Eve
+```
+
+The verifier builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`, and
+`@gamecult/eve-browser-lowering`, installs the tarballs into an empty temporary
+consumer, and runs `samples/eve-two-runtime/sample.mjs`. One provider-owned
+counter surface is lowered by a browser runtime and observed by a headless
+runtime. A browser command crosses the typed operation boundary, both runtimes
+converge on the same state and receipt identity, a duplicate idempotency key is
+not applied twice, and the state plus receipt survive reopening the `.ccmp`
+store.
+
+Current verification for the Unity consumer remains:
 
 ```powershell
 cd E:\Projects\EveUnity
 powershell -ExecutionPolicy Bypass -File .\scripts\run-release-consumer-tests.ps1
 ```
 
-The browser/Electron counterpart and a single command-driven two-runtime sample
-remain required before this chapter can be considered complete. Their absence
-is tracked as developer-experience debt rather than papered over with bespoke
-setup instructions.
+This checkpoint proves clean package consumption and two lowering/observation
+runtimes. It does not claim an Odin-discovered network hop or cross-language
+command execution; those remain separate public Verse conformance gates.
 
