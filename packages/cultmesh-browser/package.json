@@ -1,0 +1,50 @@
+{
+  "name": "cultmesh-browser",
+  "version": "0.1.0",
+  "description": "Browser-safe CultMesh document leases and typed operations over CultNet WebSocket transport.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "prepack": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
+    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+  },
+  "keywords": [
+    "cultmesh",
+    "cultnet",
+    "browser",
+    "websocket",
+    "gamecult"
+  ],
+  "author": "metacratic",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GameCult/CultLib.git",
+    "directory": "packages/cultmesh-browser"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "cultnet-ts": "^0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

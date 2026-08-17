@@ -390,6 +390,21 @@ peer lookup and handshake before returning the same RUDP transport. Packet
 semantics, schema-channel send/receive helpers, and reconnect state still live
 in `GameCult.Networking`.
 
+## Browser WebSocket Host
+
+`GameCult.Networking.WebSockets` keeps ASP.NET Core hosting out of the
+netstandard CultNet core while adapting an authenticated binary WebSocket to
+the same `ICultNetSchemaServer` and `ICultNetSchemaClient` ports. A host calls
+`UseWebSockets()` and maps `MapCultNetWebSocket(...)` with an authorization
+predicate. Anonymous use requires the explicit `AllowAnonymousDevelopment`
+opt-in. Text frames and messages over the configured size bound are closed
+before schema dispatch.
+
+The matching `CultNetWebSocketSchemaClient` is suitable for C# headless and
+service consumers. Browser applications use `cultmesh-browser`, which owns
+stable Verse/provider identity, document leases, resubscription, and operation
+correlation above the raw WebSocket route.
+
 ## Important Constraints
 
 - `Server` currently centers on `PlayerData` as the built-in account model.

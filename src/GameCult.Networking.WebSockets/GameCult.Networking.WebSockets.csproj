@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>CultNet schema-v0 WebSocket host adapter for browser and web runtimes</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameCult.Networking\GameCult.Networking.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+</Project>

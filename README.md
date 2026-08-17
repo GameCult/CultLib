@@ -11,8 +11,9 @@ The stack is less a single product than a set of capabilities:
 
 - logging primitives and implementations
 - CultCache typed documents, `.cc` persistence, and SoA memory access
-- CultNet schema-v0 messages over TCP, WebSocket, LiteNetLib adapters, and
-  CultLib's native cross-runtime RUDP pipe
+- CultNet schema-v0 messages over TCP and LiteNetLib adapters, a bounded
+  ASP.NET Core WebSocket host adapter, and CultLib's native cross-runtime RUDP
+  pipe
 - CultMesh distributed realtime database, Verse discovery, authority leases,
   shard replication, and witness-authoritative simulation consensus
 - typed geometry domain/chunk documents for distributed CSG and LOD streaming
@@ -38,7 +39,7 @@ and pretending the label makes it furniture.
 | --- | --- | --- | --- | --- |
 | Local typed state | `GameCult.Caching` / CultCache | Document identity, schema compatibility, record keys, indexes, globals, and local persistence | You need a typed cache, file-compatible save data, local reactive reads, or a stable domain document model | Peer discovery, transport security, shard routing, or mesh consensus |
 | Procedural geometry state | `GameCult.Geometry` | CultCache-native domain trees, LOD build requests, selected-cut diagnostics, and chunk artifact payloads | Rust, Unity, or remote workers need to share CSG/LOD geometry and graph metadata as typed state | Transport policy, peer discovery, or gameplay authority |
-| Network transport and database plumbing | `GameCult.Networking` / CultNet | Native RUDP sessions, LiteNetLib/TCP/WebSocket adapters, authentication, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, reliable UDP, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
+| Network transport and database plumbing | `GameCult.Networking` / CultNet | Native RUDP sessions, LiteNetLib/TCP adapters, an authenticated WebSocket host adapter, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, reliable UDP, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
 | Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
 | Realtime media/frame streams | `GameCult.Mesh` / CultMesh streaming mode | Stream identity, authority, clock metadata, body transport negotiation, frame cursors, and backpressure state | Audio/video/tensor frames need to move between runtimes through shared memory, GPU handles, platform buffers, or CultCache page refs | Durable document mutation, mesh consensus facts, or pretending inline bytes are zero-copy |
 | Daemon-published UI | Eve / CultUI | Typed operator and user-facing surfaces over CultMesh state | A daemon should expose controls, inspection, or workflow UI that can lower into GUI, TUI, web, native, overlay, or agent clients | One-off vendor dashboards, untyped debug panels, or runtime-local UI that cannot travel with the daemon |
@@ -67,7 +68,10 @@ start with the maintained
 [`CultMesh And Eve Getting Started`](src/GameCult.Mesh/docs/getting-started/README.md)
 series. Its first executable package-consumer checkpoint is
 [`samples/eve-two-runtime`](samples/eve-two-runtime/README.md).
-The missing real-browser/network boundary is mapped explicitly in
+The real-process browser continuation is
+[`samples/eve-browser-network`](samples/eve-browser-network/README.md).
+The implemented browser client boundary and remaining real-network gate are
+mapped explicitly in
 [`browser-verse-transport.md`](src/GameCult.Mesh/docs/browser-verse-transport.md).
 
 If you want only the smallest durable "open node -> put typed doc -> get typed doc"
@@ -89,6 +93,7 @@ The solution includes:
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
 - `GameCult.Geometry`: CultCache-native geometry domain, selected-cut, and chunk artifact documents for VibeGeometry/Fensalir-style pipelines
 - `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
+- `GameCult.Networking.WebSockets`: bounded ASP.NET Core binary WebSocket host adapter for browser CultMesh clients
 - `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
 - `GameCult.Caching.Tests`: NUnit tests for cache and backing-store behavior
 - `GameCult.Networking.Tests`: NUnit tests for networking behavior
@@ -96,6 +101,7 @@ The solution includes:
 - `packages/cultcache-ts`: TypeScript CultCache with MessagePack persistence and inspector tooling
 - `packages/cultnet-ts`: TypeScript CultNet schema-v0 contracts, framing, discovery, raw document replication, and interop tests
 - `packages/cultmesh-ts`: TypeScript CultMesh local node and mesh catalog surface for local runtimes such as VoidBot
+- `packages/cultmesh-browser`: browser-safe, read-only CultMesh document leases and typed operations over an Odin-resolved WebSocket route
 - `packages/cultcache-py`: Python CultCache/CultNet/CultMesh package with CultCache v1 wire parity
 - `packages/cultcache-rs`: Rust CultCache and derive macro
 - `packages/cultnet-rs`: Rust CultNet contracts, framing, discovery, and interop peer
@@ -114,6 +120,7 @@ src/
   GameCult.Caching.MessagePack.Analyzers/
   GameCult.Geometry/
   GameCult.Networking/
+  GameCult.Networking.WebSockets/
   GameCult.Mesh/
   GameCult.Unity/
 tests/
@@ -124,6 +131,7 @@ packages/
   cultcache-ts/
   cultnet-ts/
   cultmesh-ts/
+  cultmesh-browser/
   cultmesh-kotlin/
   cultcache-py/
   cultcache-rs/
@@ -149,6 +157,7 @@ npm test --workspace packages/cultcache-ts
 npm test --workspace packages/cultnet-ts
 npm run test:interop --workspace packages/cultnet-ts
 npm test --workspace packages/cultmesh-ts
+npm test --workspace packages/cultmesh-browser
 ```
 
 Rust package tests:

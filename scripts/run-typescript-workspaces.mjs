@@ -6,7 +6,7 @@ if (!command) throw new Error("Usage: node scripts/run-typescript-workspaces.mjs
 
 const npmCli = process.env.npm_execpath ??
   join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-const workspaces = ["cultcache-ts", "cultnet-ts", "cultmesh-ts"];
+const workspaces = ["cultcache-ts", "cultnet-ts", "cultmesh-ts", "cultmesh-browser"];
 const childEnv = process.platform === "win32"
   ? {
       ...process.env,

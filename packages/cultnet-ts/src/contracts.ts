@@ -951,8 +951,11 @@ function encodeLegacySchemaDescriptor(schema: CultNetSchemaDescriptor): Record<s
 }
 
 function encodeBase64Url(input: Uint8Array): string {
-  return Buffer.from(input)
-    .toString("base64")
+  let binary = "";
+  for (let offset = 0; offset < input.length; offset += 0x8000) {
+    binary += String.fromCharCode(...input.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary)
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/u, "");
@@ -971,7 +974,13 @@ function decodeBase64Url(input: string, fieldName: string): Uint8Array {
     ? normalized
     : normalized + "=".repeat(4 - remainder);
 
-  return Buffer.from(padded, "base64");
+  let binary: string;
+  try {
+    binary = atob(padded);
+  } catch (error) {
+    throw new Error(`${fieldName} must be valid base64url data.`, { cause: error });
+  }
+  return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
 function validateDocumentPutRawMessage(input: unknown): asserts input is CultNetDocumentPutRawMessage {
@@ -1126,6 +1135,12 @@ function normalizeCultNetOptionalNulls(
         "bodyIds",
         "supportedBodyTransports",
       ]);
+      return;
+    case "cultnet.operation_request.v0":
+      stripNullProperties(candidate, ["payloadEncoding", "sourceRuntimeId", "targetRuntimeId"]);
+      return;
+    case "cultnet.operation_response.v0":
+      stripNullProperties(candidate, ["payloadEncoding", "diagnostics", "sourceRuntimeId"]);
       return;
     case "cultnet.schema_catalog_request.v0":
       stripNullProperties(candidate, ["schemaIds", "kinds"]);

@@ -4,11 +4,19 @@
   "workspaces": [
     "packages/cultcache-ts",
     "packages/cultnet-ts",
-    "packages/cultmesh-ts"
+    "packages/cultmesh-ts",
+    "packages/cultmesh-browser"
   ],
   "scripts": {
     "build:ts": "node scripts/run-typescript-workspaces.mjs build",
     "test:ts": "node scripts/run-typescript-workspaces.mjs test",
-    "test:pack:ts": "node scripts/test-typescript-package-closure.mjs"
+    "test:pack:ts": "node scripts/test-typescript-package-closure.mjs",
+    "test:eve-browser-network": "node scripts/verify-eve-browser-network.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "fast-uri": "3.1.5",
+    "js-yaml": "4.3.1",
+    "playwright-core": "^1.62.1"
   }
 }

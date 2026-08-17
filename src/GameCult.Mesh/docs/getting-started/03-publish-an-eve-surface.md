@@ -61,11 +61,17 @@ cd E:\Projects\EveUnity
 powershell -ExecutionPolicy Bypass -File .\scripts\run-release-consumer-tests.ps1
 ```
 
-This checkpoint proves clean package consumption, canonical Eve contract
+This first checkpoint proves clean package consumption, canonical Eve contract
 validation, and two independent lowering/observation consumers inside Node. It
 does **not** claim a real browser process, an Odin-discovered network hop, or
-cross-language command execution. Those are the next public Verse conformance
-gates; do not cite this sample as evidence that they exist. Their owner map and
-executable acceptance contract are recorded in
+cross-language command execution. Do not cite it as evidence for those layers.
+
+The next executable checkpoint is
+[`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
+It runs a durable C# provider, a real Chromium Eve lowerer, and an independent
+C# headless observer over the same authenticated binary CultNet WebSocket lane.
+It proves command idempotency and provider restart. Live Odin discovery and
+route rotation remain separate gates. Their owner map and full acceptance
+contract are recorded in
 [`browser-verse-transport.md`](../browser-verse-transport.md).
 

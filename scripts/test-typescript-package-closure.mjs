@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const workspacePackages = ["cultcache-ts", "cultnet-ts", "cultmesh-ts"];
+const workspacePackages = ["cultcache-ts", "cultnet-ts", "cultmesh-ts", "cultmesh-browser"];
 const npmCli = process.env.npm_execpath ??
   join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
 const childEnv = process.platform === "win32"
@@ -69,6 +69,17 @@ assert.deepEqual(mesh.CultMesh.vec2(3, 4), { x: 3, y: 4 });
 `);
   execFileSync(process.execPath, ["runtime-smoke.cjs"], { cwd: consumerRoot, stdio: "inherit" });
 
+  writeFileSync(join(consumerRoot, "browser-runtime-smoke.mjs"), `
+import assert from "node:assert/strict";
+import { CultMeshBrowserClient, decodeCultNetPayload } from "cultmesh-browser";
+import { parseCultNetMessage } from "cultnet-ts/contracts";
+assert.equal(typeof CultMeshBrowserClient.connect, "function");
+assert.equal(typeof decodeCultNetPayload, "function");
+assert.equal(typeof parseCultNetMessage, "function");
+assert.equal("putDocument" in CultMeshBrowserClient.prototype, false);
+`);
+  execFileSync(process.execPath, ["browser-runtime-smoke.mjs"], { cwd: consumerRoot, stdio: "inherit" });
+
   writeFileSync(join(consumerRoot, "types-smoke.ts"), `
 import { defineDocumentType } from "cultcache-ts";
 import { CultNetPeer } from "cultnet-ts";
@@ -109,6 +120,37 @@ void providerTransport;
     "--moduleResolution", "Node",
     "--skipLibCheck",
     "types-smoke.ts",
+  ], { cwd: consumerRoot, stdio: "inherit" });
+
+  writeFileSync(join(consumerRoot, "browser-types-smoke.mts"), `
+import {
+  CultMeshBrowserClient,
+  type CultMeshBrowserIdentity,
+  type CultMeshRawDocumentLeaseOptions,
+} from "cultmesh-browser";
+
+const identity: CultMeshBrowserIdentity = {
+  verseId: "smoke",
+  providerId: "smoke.provider",
+};
+const lease: CultMeshRawDocumentLeaseOptions = {
+  schemaId: "smoke.document.v1",
+  recordKey: "smoke:main",
+};
+const clientType: typeof CultMeshBrowserClient = CultMeshBrowserClient;
+void identity;
+void lease;
+void clientType;
+`);
+  execFileSync(process.execPath, [
+    tsc,
+    "--noEmit",
+    "--strict",
+    "--target", "ES2022",
+    "--module", "NodeNext",
+    "--moduleResolution", "NodeNext",
+    "--skipLibCheck",
+    "browser-types-smoke.mts",
   ], { cwd: consumerRoot, stdio: "inherit" });
 
   console.log("TypeScript package closure smoke: passed");

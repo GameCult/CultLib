@@ -821,9 +821,9 @@ test("CultNet can round-trip gamecult.networking.v0 auth messages through the ex
   assert.deepEqual(wireValue, [
     0,
     [
-      Buffer.from("nonce", "utf8"),
-      Buffer.from("auth", "utf8"),
-      Buffer.from("password", "utf8"),
+      new TextEncoder().encode("nonce"),
+      new TextEncoder().encode("auth"),
+      new TextEncoder().encode("password"),
     ],
   ]);
 
@@ -1259,6 +1259,24 @@ test("operation envelopes preserve typed service routing and payload correlation
   });
   assert.equal(response.schemaVersion, "cultnet.operation_response.v0");
   assert.equal(response.messageId, request.messageId);
+});
+
+test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {
+  const originalBuffer = globalThis.Buffer;
+  try {
+    Object.defineProperty(globalThis, "Buffer", { configurable: true, value: undefined });
+    const message = parseCultNetMessage({
+      schemaVersion: "cultnet.login.v0",
+      nonce: "AQID",
+      auth: "BAUG",
+      password: "BwgJ",
+    });
+    const wire = encodeCultNetMessageForWire(message, "gamecult.networking.v0") as [number, Uint8Array[]];
+    assert.equal(wire[0], 0);
+    assert.deepEqual([...wire[1][0]], [1, 2, 3]);
+  } finally {
+    Object.defineProperty(globalThis, "Buffer", { configurable: true, value: originalBuffer });
+  }
 });
 
 test("database subscription contracts match the C# live document lane", () => {
