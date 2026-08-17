@@ -7,10 +7,12 @@ $ErrorActionPreference = "Stop"
 $cultLibRoot = Split-Path -Parent $PSScriptRoot
 $samplePath = Join-Path $cultLibRoot "samples\eve-two-runtime\sample.mjs"
 $eveBrowserPackage = Join-Path $EveRoot "packages\eve-browser-lowering"
+$eveContractsPackage = Join-Path $EveRoot "packages\eve-contracts"
 $packageRoots = @(
     (Join-Path $cultLibRoot "packages\cultcache-ts"),
     (Join-Path $cultLibRoot "packages\cultnet-ts"),
     (Join-Path $cultLibRoot "packages\cultmesh-ts"),
+    $eveContractsPackage,
     $eveBrowserPackage
 )
 
@@ -56,7 +58,7 @@ try {
                     throw "CultNet TypeScript contract generation failed: $packageRoot"
                 }
             }
-            $typescriptPath = if ($packageRoot -eq $eveBrowserPackage) {
+            $typescriptPath = if ($packageRoot -eq $eveBrowserPackage -or $packageRoot -eq $eveContractsPackage) {
                 Join-Path $packageRoot "node_modules\typescript\bin\tsc"
             }
             else {

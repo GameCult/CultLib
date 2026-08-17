@@ -1,0 +1,32 @@
+# Eve Two-Consumer Counter
+
+This is the smallest executable package-consumer checkpoint for CultMesh plus
+Eve. It intentionally has one owner for each decision:
+
+- the provider node owns the counter document and command transaction;
+- Eve owns the validated surface and command-receipt contracts;
+- CultMesh owns typed observation and the operation boundary;
+- the DOM lowerer owns HTML only;
+- the headless observer owns no state.
+
+Run it from the CultLib repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
+  -EveRoot ..\Eve
+```
+
+The verifier builds package artifacts, installs them into a new empty temporary
+consumer, and runs `sample.mjs`. Success proves:
+
+1. no source-tree import is required by the consumer;
+2. the provider surface and receipt pass Eve's generated runtime validators;
+3. a DOM click executes one idempotent provider operation;
+4. the DOM binding and a separate headless observer converge on the same count;
+5. the canonical receipt and state survive reopening the `.cc` store.
+
+This is not yet the promised networked multiplayer tutorial. The DOM lowerer is
+hosted by jsdom in Node and both consumers share one local CultMesh node. A real
+browser transport, Odin discovery, process separation, and a second language
+runtime require distinct executable gates. Keeping that limitation visible is
+part of the sample contract.

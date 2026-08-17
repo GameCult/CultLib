@@ -35,7 +35,7 @@ Run the same provider and connect at least two lowerers. Both must report the
 same provider id, surface id, surface version, and command receipt ids. Native
 pixels may differ; provider truth may not.
 
-The package-artifact browser/headless checkpoint is executable from CultLib:
+The package-artifact DOM-lowerer/headless checkpoint is executable from CultLib:
 
 ```powershell
 cd CultLib
@@ -43,14 +43,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample
   -EveRoot ..\Eve
 ```
 
-The verifier builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`, and
-`@gamecult/eve-browser-lowering`, installs the tarballs into an empty temporary
-consumer, and runs `samples/eve-two-runtime/sample.mjs`. One provider-owned
-counter surface is lowered by a browser runtime and observed by a headless
-runtime. A browser command crosses the typed operation boundary, both runtimes
-converge on the same state and receipt identity, a duplicate idempotency key is
-not applied twice, and the state plus receipt survive reopening the `.ccmp`
-store.
+The verifier builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
+`@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the
+tarballs into an empty temporary consumer, and runs
+`samples/eve-two-runtime/sample.mjs`. Eve's generated runtime validators reject
+an invalid surface or receipt before either enters the store. One provider-owned
+counter surface is lowered into a jsdom DOM host and observed by an independent
+headless CultMesh observer. A DOM command crosses the typed operation boundary,
+both consumers converge on the same state and canonical receipt identity, a
+duplicate idempotency key is not applied twice, and the state plus receipt
+survive reopening the `.cc` store.
 
 Current verification for the Unity consumer remains:
 
@@ -59,7 +61,9 @@ cd E:\Projects\EveUnity
 powershell -ExecutionPolicy Bypass -File .\scripts\run-release-consumer-tests.ps1
 ```
 
-This checkpoint proves clean package consumption and two lowering/observation
-runtimes. It does not claim an Odin-discovered network hop or cross-language
-command execution; those remain separate public Verse conformance gates.
+This checkpoint proves clean package consumption, canonical Eve contract
+validation, and two independent lowering/observation consumers inside Node. It
+does **not** claim a real browser process, an Odin-discovered network hop, or
+cross-language command execution. Those are the next public Verse conformance
+gates; do not cite this sample as evidence that they exist.
 

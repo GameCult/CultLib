@@ -12,14 +12,19 @@ using var mesh = new CultMeshClient(new CultMeshClientOptions
     RendezvousEndpoints = new[] { "rudp://odin.gamecult.net:3076" }
 });
 
-using var pilotSurfaceLease = await mesh.LeaseDocumentAsync<EveSurfaceDocument>(
-    "aetheria.daemon",
-    "eve:surface:aetheria.pilot",
+using var counterLease = await mesh.LeaseDocumentAsync<CounterState>(
+    "sample.counter-provider",
+    "counter:main",
     cancellationToken);
-var pilotSurface = pilotSurfaceLease.Handle;
+var counter = counterLease.Handle;
 
-using var surfaceWatch = pilotSurface.Watch().Subscribe(Render);
+using var counterWatch = counter.Watch(value =>
+    Console.WriteLine($"Count: {value.Count}"));
 ```
+
+`CounterState` is the application document from chapter 1. Eve documents enter
+in chapter 3, where the sample installs the renderer-neutral Eve contract
+package explicitly. This identity/session API does not depend on a UI runtime.
 
 Keep `mesh` for the application lifetime and dispose each document lease when
 the consuming screen or system closes. Leases for the same identity share one

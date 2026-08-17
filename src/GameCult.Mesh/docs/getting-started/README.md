@@ -4,6 +4,18 @@ This series builds one typed application state and presents it through multiple
 Eve runtimes. It is maintained as an API acceptance test: examples use public
 APIs, name the owner of each decision, and include a verification checkpoint.
 
+Run the current clean-consumer checkpoint first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
+  -EveRoot ..\Eve
+```
+
+It installs packed artifacts into an empty temporary project, validates the Eve
+surface and receipt, executes one idempotent counter command, proves two local
+consumers converge, and reopens the durable `.cc` store. It is deliberately not
+called a networked-browser proof; chapter 3 names that remaining boundary.
+
 Follow the chapters in order:
 
 1. [Persist typed application state](01-persist-typed-state.md)

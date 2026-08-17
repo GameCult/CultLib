@@ -62,8 +62,14 @@ the stack. If a design needs another peer-to-peer category, first check whether
 it is really Verse policy, peer exchange, or shard authority wearing a fake
 mustache.
 
-If you want the smallest durable "open node -> put typed doc -> get typed doc"
-path, start with
+If you want to build an application rather than tour the component drawer,
+start with the maintained
+[`CultMesh And Eve Getting Started`](src/GameCult.Mesh/docs/getting-started/README.md)
+series. Its first executable package-consumer checkpoint is
+[`samples/eve-two-runtime`](samples/eve-two-runtime/README.md).
+
+If you want only the smallest durable "open node -> put typed doc -> get typed doc"
+path, use
 [`src/GameCult.Mesh/docs/durable-node-quickstart.md`](src/GameCult.Mesh/docs/durable-node-quickstart.md).
 If you want the lower-level "typed local document -> raw wire document ->
 mesh/runtime watch surface" handoff, follow it with

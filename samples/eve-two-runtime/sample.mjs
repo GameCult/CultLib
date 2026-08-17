@@ -6,6 +6,10 @@ import { JSDOM } from "jsdom";
 import { z } from "zod";
 import { defineDocumentType } from "cultcache-ts";
 import { CultMesh } from "cultmesh-ts";
+import {
+  parseEveCommandReceipt,
+  parseEveSurfaceDocument,
+} from "@gamecult/eve-contracts";
 import { renderEveSurface } from "@gamecult/eve-browser-lowering";
 
 const providerId = "sample.counter-provider";
@@ -22,36 +26,38 @@ const counterDocument = defineDocumentType({
 const surfaceDocument = defineDocumentType({
   type: "gamecult.eve.surface",
   schemaId: "gamecult.eve.surface.v1",
-  schema: z.any(),
+  schema: z.unknown().transform(value => parseEveSurfaceDocument(value)),
 });
 
 const receiptDocument = defineDocumentType({
-  type: "sample.counter_receipt",
-  schemaId: "sample.counter_receipt.v1",
-  schema: z.object({
-    receiptId: z.string(),
-    operationId: z.literal("sample.counter.increment"),
-    idempotencyKey: z.string(),
-    count: z.number().int(),
-  }),
+  type: "gamecult.eve.command_receipt",
+  schemaId: "gamecult.eve.command_receipt.v1",
+  schema: z.unknown().transform(value => parseEveCommandReceipt(value)),
   name: "receiptId",
 });
 
 function counterSurface() {
   return {
+    type: "surface-state",
+    schema: "gamecult.eve.surface.v1",
     providerId,
+    providerKind: "sample.daemon",
     title: "CultMesh two-runtime counter",
     version: 1,
+    updatedAtUtc: "2026-08-17T00:00:00Z",
     surface: {
       id: surfaceId,
+      title: "Counter",
       root: {
         id: "counter.root",
         kind: "column",
+        props: {},
         children: [
           {
             id: "counter.value",
             kind: "metric",
             props: { label: "Canonical count", value: 0 },
+            children: [],
             stateBindings: [{
               targetProp: "value",
               pointerId: "sample.counter.count",
@@ -64,10 +70,21 @@ function counterSurface() {
             id: "counter.increment",
             kind: "control.button",
             props: { label: "Increment", command: "sample.counter.increment" },
+            children: [],
           },
         ],
       },
+      styles: {},
     },
+    commands: [{
+      schema: "gamecult.eve.command.v1",
+      command: "sample.counter.increment",
+      label: "Increment",
+      surfaceId,
+      transport: "cultmesh",
+      authority: "provider-daemon",
+      result: "gamecult.eve.command_receipt.v1",
+    }],
   };
 }
 
@@ -97,7 +114,16 @@ async function waitFor(predicate, description) {
   }
 }
 
-const statePath = join(await mkdtemp(join(tmpdir(), "cultmesh-eve-two-runtime-")), "state.ccmp");
+assert.throws(
+  () => parseEveSurfaceDocument({ providerId, surface: { id: surfaceId } }),
+  /Invalid Eve surface/,
+);
+assert.throws(
+  () => parseEveCommandReceipt({ receiptId: "unowned" }),
+  /Invalid Eve commandReceipt/,
+);
+
+const statePath = join(await mkdtemp(join(tmpdir(), "cultmesh-eve-two-runtime-")), "state.cc");
 const node = await CultMesh.startNode(statePath, {
   documents: [counterDocument, surfaceDocument, receiptDocument],
 });
@@ -120,7 +146,16 @@ const increment = CultMesh.operation("sample.counter.increment", async (_request
   }));
   const receipt = {
     receiptId: `receipt:${idempotencyKey}`,
-    operationId: "sample.counter.increment",
+    schema: "gamecult.eve.command_receipt.v1",
+    commandId: idempotencyKey,
+    command: "sample.counter.increment",
+    state: "accepted",
+    ownerRepo: "CultLib",
+    authority: "provider-daemon",
+    providerId,
+    surfaceId,
+    issuedAtUtc: new Date().toISOString(),
+    sourceVersion: next.count,
     idempotencyKey,
     count: next.count,
   };
@@ -162,7 +197,21 @@ assert.equal(duplicate.receiptId, browserReceipt.receiptId);
 assert.equal(headless.current.count, 1);
 
 headless.dispose();
-renderEveSurface({ providerId, surface: { id: "sample.closed" } }, host);
+renderEveSurface(parseEveSurfaceDocument({
+  type: "surface-state",
+  schema: "gamecult.eve.surface.v1",
+  providerId,
+  providerKind: "sample.daemon",
+  title: "Closed counter",
+  version: 2,
+  updatedAtUtc: "2026-08-17T00:00:01Z",
+  surface: {
+    id: "sample.closed",
+    root: { id: "closed.root", kind: "column", props: {}, children: [] },
+    styles: {},
+  },
+  commands: [],
+}), host);
 dom.window.close();
 await node.flush();
 const reopened = await CultMesh.startNode(statePath, {
@@ -178,6 +227,7 @@ console.log(JSON.stringify({
   providerId,
   surfaceId,
   receiptId: browserReceipt.receiptId,
+  loweringRuntime: "jsdom",
   browserCount: 1,
   headlessCount: 1,
   restartCount: 1,
