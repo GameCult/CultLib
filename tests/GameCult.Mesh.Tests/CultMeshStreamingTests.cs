@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using GameCult.Caching;
@@ -1989,6 +1990,69 @@ public sealed class CultMeshStreamingTests
         predictions[0].Text.Should().Be("explicit-member-edit");
         predictions[0].Revision.Should().Be(3);
         reactive.IsDirty.Should().BeFalse();
+    }
+
+    [TestCase(1)]
+    [TestCase(100)]
+    [TestCase(1000)]
+    public async Task ReactiveDocument_SchedulingScalesWithChangedDocumentsOnly(int documentCount)
+    {
+        var clock = new BlockingCountClock();
+        var reactiveDocuments = new List<CultMeshReactiveDocument<MeshNoteDocument>>(documentCount);
+
+        try
+        {
+            for (var index = 0; index < documentCount; index++)
+            {
+                var subject = new Subject<MeshNoteDocument>();
+                var current = new MeshNoteDocument
+                {
+                    Schema = "tests.mesh_note.v1",
+                    Text = $"initial-{index}",
+                    Revision = 1
+                };
+                var handle = CultMesh.Document(
+                    $"mesh.note.reactive.scale.{index}",
+                    CultMesh.Verse("scale", "test"),
+                    _ => Task.FromResult(current),
+                    _ => subject,
+                    value =>
+                    {
+                        current = value;
+                        subject.OnNext(value);
+                        return Task.CompletedTask;
+                    });
+
+                reactiveDocuments.Add(await handle.AuthoritativeWriter().ReactiveAsync(
+                    new CultMeshReactiveDocumentOptions
+                    {
+                        Clock = clock,
+                        FlushDelay = TimeSpan.FromSeconds(1)
+                    }));
+            }
+
+            clock.DelayCount.Should().Be(0, "idle reactive documents must not schedule background work");
+
+            var changedDocumentCount = Math.Max(1, documentCount / 100);
+            for (var index = 0; index < changedDocumentCount; index++)
+            {
+                reactiveDocuments[index].Update(document =>
+                {
+                    document.Text = $"changed-{index}";
+                    document.Revision++;
+                });
+            }
+
+            clock.DelayCount.Should().Be(
+                changedDocumentCount,
+                "flush scheduling must be proportional to explicitly changed documents");
+            reactiveDocuments.Count(document => document.IsDirty).Should().Be(changedDocumentCount);
+        }
+        finally
+        {
+            foreach (var reactiveDocument in reactiveDocuments)
+                reactiveDocument.Dispose();
+        }
     }
 
     [Test]
@@ -3999,5 +4063,20 @@ internal sealed class FailedBackgroundSchemaClient : ICultNetSchemaClient, ICult
 
     public void Dispose()
     {
+    }
+}
+
+internal sealed class BlockingCountClock : ICultMeshClock
+{
+    private int _delayCount;
+
+    public DateTimeOffset UtcNow => DateTimeOffset.UnixEpoch;
+
+    public int DelayCount => Volatile.Read(ref _delayCount);
+
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref _delayCount);
+        return Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
     }
 }

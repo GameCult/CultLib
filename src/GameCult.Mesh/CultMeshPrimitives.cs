@@ -1371,6 +1371,12 @@ namespace GameCult.Mesh
         /// </summary>
         public TimeSpan FlushDelay { get; set; } = TimeSpan.FromMilliseconds(16);
 
+        /// <summary>
+        /// Gets or sets the clock that owns delayed flush scheduling. Tests and deterministic hosts may
+        /// replace the system clock without introducing a second scheduler abstraction.
+        /// </summary>
+        public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
+
         /// <summary>Gets or sets whether canonical snapshots replace dirty local predictions immediately.</summary>
         public bool ReplaceDirtyCurrentOnCanonicalSnapshot { get; set; }
     }
@@ -1425,7 +1431,7 @@ namespace GameCult.Mesh
         private readonly CultMeshReactiveDocumentOptions _options;
         private readonly object _gate = new();
         private IDisposable? _subscription;
-        private Timer? _flushTimer;
+        private CancellationTokenSource? _flushDelayCancellation;
         private TDocument _current;
         private bool _dirty;
         private bool _flushQueued;
@@ -1542,7 +1548,7 @@ namespace GameCult.Mesh
                     return;
                 }
 
-                _flushTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                CancelScheduledFlushLocked();
                 _flushing = true;
                 _dirty = false;
                 predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
@@ -1582,10 +1588,10 @@ namespace GameCult.Mesh
                 if (_disposed)
                     return;
                 _disposed = true;
+                CancelScheduledFlushLocked();
             }
 
             _subscription?.Dispose();
-            _flushTimer?.Dispose();
         }
 
         private void ApplyCanonicalSnapshot(TDocument canonical)
@@ -1634,8 +1640,48 @@ namespace GameCult.Mesh
                 return;
             }
 
-            _flushTimer ??= new Timer(_ => _ = Task.Run(FlushAsync));
-            _flushTimer.Change(_options.FlushDelay, Timeout.InfiniteTimeSpan);
+            CancelScheduledFlushLocked();
+            var cancellation = new CancellationTokenSource();
+            _flushDelayCancellation = cancellation;
+            _ = FlushAfterDelayAsync(cancellation);
+        }
+
+        private async Task FlushAfterDelayAsync(CancellationTokenSource cancellation)
+        {
+            try
+            {
+                await _options.Clock.DelayAsync(_options.FlushDelay, cancellation.Token).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    if (_disposed || cancellation.IsCancellationRequested)
+                        return;
+                }
+
+                await FlushAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_flushDelayCancellation, cancellation))
+                        _flushDelayCancellation = null;
+                }
+
+                cancellation.Dispose();
+            }
+        }
+
+        private void CancelScheduledFlushLocked()
+        {
+            var cancellation = _flushDelayCancellation;
+            _flushDelayCancellation = null;
+            if (cancellation == null)
+                return;
+
+            cancellation.Cancel();
         }
 
         private static IReadOnlyDictionary<string, object?> CreateReconciliationDelta(

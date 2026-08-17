@@ -16,7 +16,7 @@ import io
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from cultcache_py import (
@@ -2579,6 +2579,71 @@ class CultCacheTests(unittest.TestCase):
             )
         finally:
             reactive.dispose()
+
+    def test_cultmesh_reactive_scheduling_scales_with_changed_documents_only(self) -> None:
+        document = define_document_type(
+            "mesh.reactive_scale_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+
+        for document_count in (1, 100, 1000):
+            node = create_node(runtime_id=f"python-reactive-scale-{document_count}")
+            node.register_document(document)
+            for index in range(document_count):
+                node.put(document, f"note:{index}", {"body": "initial", "revision": 1})
+
+            scheduled_timers: list[Any] = []
+
+            class FakeTimer:
+                def __init__(self, interval: float, callback: Callable[[], None]) -> None:
+                    self.interval = interval
+                    self.callback = callback
+                    self.daemon = False
+                    self.cancelled = False
+                    self.started = False
+                    scheduled_timers.append(self)
+
+                def start(self) -> None:
+                    self.started = True
+
+                def cancel(self) -> None:
+                    self.cancelled = True
+
+            reactive_documents: list[Any] = []
+            with patch("cultmesh_py.node.threading.Timer", FakeTimer):
+                try:
+                    for index in range(document_count):
+                        reactive_documents.append(
+                            node.authoritative_writer(document, f"note:{index}").reactive()
+                        )
+
+                    self.assertEqual(
+                        len(scheduled_timers),
+                        0,
+                        f"{document_count} idle documents must schedule no timers",
+                    )
+
+                    changed_document_count = max(1, document_count // 100)
+                    for index in range(changed_document_count):
+                        reactive_documents[index].update(
+                            lambda draft, changed=index: draft.update(
+                                body=f"changed-{changed}",
+                                revision=2,
+                            )
+                        )
+
+                    self.assertEqual(len(scheduled_timers), changed_document_count)
+                    self.assertTrue(all(timer.started for timer in scheduled_timers))
+                    self.assertEqual(
+                        sum(reactive.is_dirty for reactive in reactive_documents),
+                        changed_document_count,
+                    )
+                finally:
+                    for reactive in reactive_documents:
+                        reactive.dispose()
+
+            self.assertTrue(all(timer.cancelled for timer in scheduled_timers))
 
     def test_cultmesh_observed_document_cannot_publish_borrowed_mutation(self) -> None:
         document = define_document_type(

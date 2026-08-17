@@ -69,4 +69,18 @@ Cut line:
 - nested edits made through `Update` are coalesced and published;
 - direct mutation of a returned snapshot cannot publish;
 - an idle reactive document creates no periodic detection work;
+- scheduling 1, 100, or 1,000 reactive documents creates zero idle work, and
+  editing one percent schedules only that one percent;
 - canonical reconciliation and in-flight edits remain deterministic.
+
+Run the cross-runtime scheduling gate from a CultLib checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-reactive-document-scaling.ps1
+```
+
+The gate runs the C#, TypeScript, and Python implementations against the same
+1/100/1,000-document cases. It proves ownership and scheduling proportionality;
+it does not claim allocation, payload-size, or end-to-end latency budgets. Those
+need a separate measured benchmark against representative document bodies and
+real transports.

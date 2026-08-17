@@ -572,6 +572,82 @@ test("CultMesh TS reactive documents coalesce same-frame explicit updates", asyn
   }
 });
 
+test("CultMesh TS reactive scheduling scales with changed documents only", async () => {
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const previousCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  const frameCallbacks = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  globalThis.requestAnimationFrame = callback => {
+    const frame = nextFrame++;
+    frameCallbacks.set(frame, callback);
+    return frame;
+  };
+  globalThis.cancelAnimationFrame = frame => {
+    frameCallbacks.delete(frame);
+  };
+
+  try {
+    for (const documentCount of [1, 100, 1000]) {
+      const reactiveDocuments = [];
+      for (let index = 0; index < documentCount; index++) {
+        let current = {
+          noteId: `note:scale:${index}`,
+          body: "initial",
+        };
+        const document = CultMesh.document(
+          `cultmesh.note:scale:${index}`,
+          noteDocument,
+          async () => current,
+          {
+            submitPrediction: async (_context, value) => {
+              current = value;
+            },
+          },
+        );
+        reactiveDocuments.push(document.predictionWriter().reactive({ watch: false }));
+      }
+
+      await Promise.all(reactiveDocuments.map(document => document.ready));
+      assert.equal(frameCallbacks.size, 0, `${documentCount} idle documents scheduled no work`);
+
+      const changedDocumentCount = Math.max(1, Math.floor(documentCount / 100));
+      for (let index = 0; index < changedDocumentCount; index++) {
+        reactiveDocuments[index].update(value => {
+          value.body = `changed-${index}`;
+        });
+      }
+
+      assert.equal(
+        frameCallbacks.size,
+        changedDocumentCount,
+        `${documentCount} documents scheduled only the ${changedDocumentCount} changed documents`,
+      );
+      assert.equal(
+        reactiveDocuments.filter(document => document.dirty).length,
+        changedDocumentCount,
+      );
+
+      for (const reactive of reactiveDocuments) reactive.dispose();
+      assert.equal(frameCallbacks.size, 0, "dispose cancels every scheduled frame flush");
+    }
+  } finally {
+    if (previousRequestAnimationFrame) {
+      globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+    } else {
+      delete (globalThis as unknown as {
+        requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+      }).requestAnimationFrame;
+    }
+    if (previousCancelAnimationFrame) {
+      globalThis.cancelAnimationFrame = previousCancelAnimationFrame;
+    } else {
+      delete (globalThis as unknown as {
+        cancelAnimationFrame?: (handle: number) => void;
+      }).cancelAnimationFrame;
+    }
+  }
+});
+
 test("CultMesh TS reactive documents queue edits made while a prediction is in flight", async () => {
   let current = {
     noteId: "note:reactive-in-flight",

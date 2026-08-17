@@ -1140,7 +1140,7 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
   #disposed = false;
   #pendingSet: Promise<void> = Promise.resolve();
   #flushScheduled = false;
-  #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #cancelScheduledFlush: (() => void) | undefined;
   #unsubscribe: CultMeshUnsubscribe | undefined;
   #dirty = false;
   #lastPredicted: TDocument | undefined;
@@ -1238,10 +1238,8 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
 
   public dispose(): void {
     this.#disposed = true;
-    if (this.#flushTimer !== undefined) {
-      clearTimeout(this.#flushTimer);
-      this.#flushTimer = undefined;
-    }
+    this.#cancelScheduledFlush?.();
+    this.#cancelScheduledFlush = undefined;
     this.#flushScheduled = false;
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
@@ -1294,28 +1292,35 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
 
     const debounceMs = this.#debounceMs;
     if (debounceMs > 0) {
-      this.#flushTimer = setTimeout(flush, debounceMs);
+      const timer = setTimeout(flush, debounceMs);
+      this.#cancelScheduledFlush = () => clearTimeout(timer);
       return;
     }
 
     const requestFrame = (globalThis as {
       requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+      cancelAnimationFrame?: (handle: number) => void;
     }).requestAnimationFrame;
     if (typeof requestFrame === "function") {
-      requestFrame(() => flush());
+      const frame = requestFrame(() => flush());
+      const cancelFrame = (globalThis as {
+        cancelAnimationFrame?: (handle: number) => void;
+      }).cancelAnimationFrame;
+      this.#cancelScheduledFlush = typeof cancelFrame === "function"
+        ? () => cancelFrame(frame)
+        : undefined;
       return;
     }
 
-    this.#flushTimer = setTimeout(flush, 0);
+    const timer = setTimeout(flush, 0);
+    this.#cancelScheduledFlush = () => clearTimeout(timer);
   }
 
   private flushNow(): void {
     if (!this.#flushScheduled && !this.#dirty) return;
     this.#flushScheduled = false;
-    if (this.#flushTimer !== undefined) {
-      clearTimeout(this.#flushTimer);
-      this.#flushTimer = undefined;
-    }
+    this.#cancelScheduledFlush?.();
+    this.#cancelScheduledFlush = undefined;
     if (this.#disposed || !this.#dirty) return;
     const snapshot = cloneCultMeshDocument(this.#current);
     this.#dirty = false;
