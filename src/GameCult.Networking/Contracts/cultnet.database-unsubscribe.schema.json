@@ -11,4 +11,3 @@
     "subscriptionId": { "type": "string", "minLength": 1 }
   }
 }
-
