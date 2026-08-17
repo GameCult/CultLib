@@ -42,6 +42,40 @@ namespace GameCult.Mesh
         public TimeSpan SubscriptionResponseTimeout { get; set; } = TimeSpan.FromSeconds(2);
     }
 
+    /// <summary>Owns one shared live document subscription until disposed.</summary>
+    public sealed class CultMeshDocumentLease<TDocument> : IDisposable where TDocument : class
+    {
+        private Action? _release;
+
+        internal CultMeshDocumentLease(CultMeshDocumentHandle<TDocument> handle, Action release)
+        {
+            Handle = handle ?? throw new ArgumentNullException(nameof(handle));
+            _release = release ?? throw new ArgumentNullException(nameof(release));
+        }
+
+        /// <summary>Gets the live typed document handle owned by this lease.</summary>
+        public CultMeshDocumentHandle<TDocument> Handle { get; }
+
+        public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+    }
+
+    /// <summary>Owns one shared live collection subscription until disposed.</summary>
+    public sealed class CultMeshCollectionLease<TDocument> : IDisposable where TDocument : class
+    {
+        private Action? _release;
+
+        internal CultMeshCollectionLease(CultMeshCollectionHandle<TDocument> handle, Action release)
+        {
+            Handle = handle ?? throw new ArgumentNullException(nameof(handle));
+            _release = release ?? throw new ArgumentNullException(nameof(release));
+        }
+
+        /// <summary>Gets the live typed collection handle owned by this lease.</summary>
+        public CultMeshCollectionHandle<TDocument> Handle { get; }
+
+        public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+    }
+
     /// <summary>
     /// Owns discovery and reusable sessions for one application lifetime.
     /// Applications address stable identities; CultMesh owns physical routes and reconnection.
@@ -51,9 +85,8 @@ namespace GameCult.Mesh
         private readonly CultMeshDiscoveryService _discovery;
         private readonly CultMeshSessionManager _sessions;
         private readonly TimeSpan _subscriptionResponseTimeout;
-        private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _documents = new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, Lazy<Task<object>>> _collections = new(StringComparer.Ordinal);
-        private readonly ConcurrentBag<IDisposable> _documentResources = new();
+        private readonly ConcurrentDictionary<string, SharedResource> _documents = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, SharedResource> _collections = new(StringComparer.Ordinal);
         private bool _disposed;
 
         public CultMeshClient(CultMeshClientOptions options)
@@ -147,8 +180,8 @@ namespace GameCult.Mesh
                 options);
         }
 
-        /// <summary>Opens one live typed document by stable provider identity and record key.</summary>
-        public async Task<CultMeshDocumentHandle<TDocument>> DocumentAsync<TDocument>(
+        /// <summary>Leases one shared live typed document by stable provider identity and record key.</summary>
+        public async Task<CultMeshDocumentLease<TDocument>> LeaseDocumentAsync<TDocument>(
             string endpointId,
             string recordKey,
             CancellationToken cancellationToken = default)
@@ -158,31 +191,40 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
             var key = endpointId.Trim() + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + recordKey.Trim();
-            var lazy = _documents.GetOrAdd(key, _ => new Lazy<Task<object>>(
-                async () => await OpenDocumentAsync<TDocument>(endpointId.Trim(), recordKey.Trim()).ConfigureAwait(false),
-                LazyThreadSafetyMode.ExecutionAndPublication));
-            try
+            while (true)
             {
-                var binding = (RemoteDocumentBinding<TDocument>)await AwaitForCallerAsync(lazy.Value, cancellationToken)
-                    .ConfigureAwait(false);
-                return binding.Handle;
-            }
-            catch
-            {
-                _documents.TryRemove(key, out _);
-                throw;
+                var resource = _documents.GetOrAdd(key, _ => new SharedResource(
+                    async owner => await OpenDocumentAsync<TDocument>(endpointId.Trim(), recordKey.Trim(), owner).ConfigureAwait(false)));
+                if (!resource.TryAcquire())
+                {
+                    RemoveExact(_documents, key, resource);
+                    continue;
+                }
+                try
+                {
+                    var binding = (RemoteDocumentBinding<TDocument>)await AwaitForCallerAsync(resource.Value, cancellationToken)
+                        .ConfigureAwait(false);
+                    return new CultMeshDocumentLease<TDocument>(
+                        binding.Handle,
+                        () => Release(_documents, key, resource));
+                }
+                catch
+                {
+                    Release(_documents, key, resource);
+                    throw;
+                }
             }
         }
 
-        /// <summary>Opens a live collection of one typed schema by stable provider identity.</summary>
-        public Task<CultMeshCollectionHandle<TDocument>> CollectionAsync<TDocument>(
+        /// <summary>Leases a shared live collection of one typed schema by stable provider identity.</summary>
+        public Task<CultMeshCollectionLease<TDocument>> LeaseCollectionAsync<TDocument>(
             string endpointId,
             CancellationToken cancellationToken)
             where TDocument : class =>
-            CollectionAsync<TDocument>(endpointId, includeInitialSnapshot: true, cancellationToken);
+            LeaseCollectionAsync<TDocument>(endpointId, includeInitialSnapshot: true, cancellationToken);
 
-        /// <summary>Opens a live collection and optionally skips replaying its initial snapshot.</summary>
-        public async Task<CultMeshCollectionHandle<TDocument>> CollectionAsync<TDocument>(
+        /// <summary>Leases a live collection and optionally skips replaying its initial snapshot.</summary>
+        public async Task<CultMeshCollectionLease<TDocument>> LeaseCollectionAsync<TDocument>(
             string endpointId,
             bool includeInitialSnapshot = true,
             CancellationToken cancellationToken = default)
@@ -192,21 +234,73 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
             var identity = endpointId.Trim();
             var key = identity + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + includeInitialSnapshot;
-            var lazy = _collections.GetOrAdd(key, _ => new Lazy<Task<object>>(
-                async () => await OpenCollectionAsync<TDocument>(identity, includeInitialSnapshot).ConfigureAwait(false),
-                LazyThreadSafetyMode.ExecutionAndPublication));
-            try
+            while (true)
             {
-                var binding = (RemoteCollectionBinding<TDocument>)await AwaitForCallerAsync(lazy.Value, cancellationToken)
-                    .ConfigureAwait(false);
-                return binding.Handle;
-            }
-            catch
-            {
-                _collections.TryRemove(key, out _);
-                throw;
+                var resource = _collections.GetOrAdd(key, _ => new SharedResource(
+                    async owner => await OpenCollectionAsync<TDocument>(identity, includeInitialSnapshot, owner).ConfigureAwait(false)));
+                if (!resource.TryAcquire())
+                {
+                    RemoveExact(_collections, key, resource);
+                    continue;
+                }
+                try
+                {
+                    var binding = (RemoteCollectionBinding<TDocument>)await AwaitForCallerAsync(resource.Value, cancellationToken)
+                        .ConfigureAwait(false);
+                    return new CultMeshCollectionLease<TDocument>(
+                        binding.Handle,
+                        () => Release(_collections, key, resource));
+                }
+                catch
+                {
+                    Release(_collections, key, resource);
+                    throw;
+                }
             }
         }
+
+        /// <summary>
+        /// Submits one typed document to a provider by stable identity. Submission is uncommitted input;
+        /// only a provider-authored receipt or resulting state can establish acceptance.
+        /// </summary>
+        public async Task SubmitDocumentAsync<TDocument>(
+            string endpointId,
+            string recordKey,
+            TDocument document,
+            string sourceRuntimeId,
+            string sourceRole,
+            CancellationToken cancellationToken = default)
+            where TDocument : class
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (string.IsNullOrWhiteSpace(sourceRuntimeId)) throw new ArgumentException("Source runtime identity is required.", nameof(sourceRuntimeId));
+            if (string.IsNullOrWhiteSpace(sourceRole)) throw new ArgumentException("Source role is required.", nameof(sourceRole));
+
+            var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
+            var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
+            var message = networkRegistry.CreateRawDocumentPutMessage(
+                "cultmesh-client-submit-" + Guid.NewGuid().ToString("N"),
+                new CultRecordHandle<TDocument>(new CultRecordKey(recordKey.Trim())),
+                document,
+                new CultNetDocumentMessageOptions
+                {
+                    SourceRuntimeId = sourceRuntimeId.Trim(),
+                    SourceRole = sourceRole.Trim()
+                });
+            var session = await ConnectAsync(endpointId.Trim(), CultMeshProtocols.Documents, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            session.OpenSchemaClient().SendCultNet(message);
+        }
+
+        /// <summary>Gets the number of currently leased shared document subscriptions.</summary>
+        public int ActiveDocumentResourceCount => _documents.Count;
+
+        /// <summary>Gets the number of currently leased shared collection subscriptions.</summary>
+        public int ActiveCollectionResourceCount => _collections.Count;
 
         /// <summary>Reads one typed record once through the reusable document session.</summary>
         public async Task<TDocument> ReadAsync<TDocument>(
@@ -293,7 +387,7 @@ namespace GameCult.Mesh
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var resource in _documentResources) resource.Dispose();
+            foreach (var resource in _documents.Values.Concat(_collections.Values).Distinct()) resource.Dispose();
             _documents.Clear();
             _collections.Clear();
             _sessions.Dispose();
@@ -305,12 +399,15 @@ namespace GameCult.Mesh
             if (_disposed) throw new ObjectDisposedException(nameof(CultMeshClient));
         }
 
-        private async Task<object> OpenDocumentAsync<TDocument>(string endpointId, string recordKey)
+        private async Task<object> OpenDocumentAsync<TDocument>(
+            string endpointId,
+            string recordKey,
+            SharedResource owner)
             where TDocument : class
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
             var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey, _subscriptionResponseTimeout);
-            _documentResources.Add(binding);
+            owner.Attach(binding);
             try
             {
                 await binding.StartAsync().ConfigureAwait(false);
@@ -318,17 +415,21 @@ namespace GameCult.Mesh
             }
             catch
             {
+                owner.Detach(binding);
                 binding.Dispose();
                 throw;
             }
         }
 
-        private async Task<object> OpenCollectionAsync<TDocument>(string endpointId, bool includeInitialSnapshot)
+        private async Task<object> OpenCollectionAsync<TDocument>(
+            string endpointId,
+            bool includeInitialSnapshot,
+            SharedResource owner)
             where TDocument : class
         {
             var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
             var binding = new RemoteCollectionBinding<TDocument>(session, endpointId, includeInitialSnapshot, _subscriptionResponseTimeout);
-            _documentResources.Add(binding);
+            owner.Attach(binding);
             try
             {
                 await binding.StartAsync().ConfigureAwait(false);
@@ -336,6 +437,7 @@ namespace GameCult.Mesh
             }
             catch
             {
+                owner.Detach(binding);
                 binding.Dispose();
                 throw;
             }
@@ -351,6 +453,99 @@ namespace GameCult.Mesh
                     throw new OperationCanceledException(cancellationToken);
             }
             return await shared.ConfigureAwait(false);
+        }
+
+        private static void Release(
+            ConcurrentDictionary<string, SharedResource> resources,
+            string key,
+            SharedResource resource)
+        {
+            if (!resource.Release()) return;
+            RemoveExact(resources, key, resource);
+            resource.Dispose();
+        }
+
+        private static void RemoveExact(
+            ConcurrentDictionary<string, SharedResource> resources,
+            string key,
+            SharedResource resource)
+        {
+            ((ICollection<KeyValuePair<string, SharedResource>>)resources)
+                .Remove(new KeyValuePair<string, SharedResource>(key, resource));
+        }
+
+        private sealed class SharedResource : IDisposable
+        {
+            private readonly object _gate = new();
+            private readonly Lazy<Task<object>> _value;
+            private IDisposable? _attached;
+            private int _leases;
+            private bool _retired;
+
+            public SharedResource(Func<SharedResource, Task<object>> open)
+            {
+                if (open == null) throw new ArgumentNullException(nameof(open));
+                _value = new Lazy<Task<object>>(() => open(this), LazyThreadSafetyMode.ExecutionAndPublication);
+            }
+
+            public Task<object> Value => _value.Value;
+
+            public bool TryAcquire()
+            {
+                lock (_gate)
+                {
+                    if (_retired) return false;
+                    _leases++;
+                    return true;
+                }
+            }
+
+            public bool Release()
+            {
+                lock (_gate)
+                {
+                    if (_leases <= 0) return false;
+                    _leases--;
+                    if (_leases != 0) return false;
+                    _retired = true;
+                    return true;
+                }
+            }
+
+            public void Attach(IDisposable resource)
+            {
+                if (resource == null) throw new ArgumentNullException(nameof(resource));
+                lock (_gate)
+                {
+                    if (_retired)
+                    {
+                        resource.Dispose();
+                        throw new ObjectDisposedException(nameof(SharedResource));
+                    }
+                    if (_attached != null) throw new InvalidOperationException("CultMesh shared resource already has a live binding.");
+                    _attached = resource;
+                }
+            }
+
+            public void Detach(IDisposable resource)
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_attached, resource)) _attached = null;
+                }
+            }
+
+            public void Dispose()
+            {
+                IDisposable? attached;
+                lock (_gate)
+                {
+                    _retired = true;
+                    attached = _attached;
+                    _attached = null;
+                }
+                attached?.Dispose();
+            }
         }
 
         private sealed class RemoteDocumentBinding<TDocument> : IDisposable where TDocument : class

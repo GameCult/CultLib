@@ -12,15 +12,18 @@ using var mesh = new CultMeshClient(new CultMeshClientOptions
     RendezvousEndpoints = new[] { "rudp://odin.gamecult.net:3076" }
 });
 
-var pilotSurface = await mesh.DocumentAsync<EveSurfaceDocument>(
+using var pilotSurfaceLease = await mesh.LeaseDocumentAsync<EveSurfaceDocument>(
     "aetheria.daemon",
     "eve:surface:aetheria.pilot",
     cancellationToken);
+var pilotSurface = pilotSurfaceLease.Handle;
 
 using var surfaceWatch = pilotSurface.Watch().Subscribe(Render);
 ```
 
-Keep `mesh` for the application lifetime. The document handle is stable: when
+Keep `mesh` for the application lifetime and dispose each document lease when
+the consuming screen or system closes. Leases for the same identity share one
+subscription. The document handle is stable while leased: when
 Odin advertises a new physical route after a partition, CultMesh migrates the
 session, restores the server-side subscription, refreshes the typed snapshot,
 and continues the same watch.
