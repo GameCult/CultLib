@@ -911,9 +911,6 @@ namespace GameCult.Mesh
         /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
         bool CanSubmitPrediction { get; }
 
-        /// <summary>Gets whether this handle can accept a transparent document mutation.</summary>
-        bool CanSet { get; }
-
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
         CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
@@ -974,9 +971,6 @@ namespace GameCult.Mesh
 
         /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
         public bool CanSubmitPrediction => _submitPrediction != null;
-
-        /// <summary>Gets whether this handle can accept a transparent document mutation.</summary>
-        public bool CanSet => CanSubmitPrediction || CanReplace;
 
         /// <summary>Reads one coherent document snapshot.</summary>
         public Task<TDocument> LatestAsync()
@@ -1048,57 +1042,41 @@ namespace GameCult.Mesh
             return _submitPrediction(value);
         }
 
-        /// <summary>
-        /// Sets the document value through the configured authority shape.
-        /// Prediction-backed documents publish a prediction; mutable documents replace authoritatively.
-        /// </summary>
-        public Task SetAsync(TDocument value)
+        /// <summary>Gets an explicit authoritative replacement writer for this document.</summary>
+        public CultMeshDocumentWriter<TDocument> AuthoritativeWriter()
         {
-            if (value == null) throw new ArgumentNullException(nameof(value));
-            if (_submitPrediction != null)
-                return _submitPrediction(value);
-            if (_replace != null)
-                return _replace(value);
-
-            throw new NotSupportedException($"Document handle '{DocumentId}' does not accept mutations.");
+            if (_replace == null)
+                throw new NotSupportedException($"Document handle '{DocumentId}' is read-only.");
+            return new CultMeshDocumentWriter<TDocument>(
+                this,
+                CultMeshDocumentWriteKind.AuthoritativeReplacement,
+                _replace);
         }
 
-        /// <summary>Reads, updates, and sets the document value through the configured authority shape.</summary>
-        public async Task<TDocument> UpdateAsync(Func<TDocument, TDocument> update)
+        /// <summary>Gets an explicit client prediction writer for this document.</summary>
+        public CultMeshDocumentWriter<TDocument> PredictionWriter()
         {
-            if (update == null) throw new ArgumentNullException(nameof(update));
-            var next = update(await LatestAsync().ConfigureAwait(false));
-            await SetAsync(next).ConfigureAwait(false);
-            return next;
+            if (_submitPrediction == null)
+                throw new NotSupportedException($"Document handle '{DocumentId}' does not accept client predictions.");
+            return new CultMeshDocumentWriter<TDocument>(
+                this,
+                CultMeshDocumentWriteKind.Prediction,
+                _submitPrediction);
         }
 
-        /// <summary>Reads, updates, and sets the document value through the configured authority shape.</summary>
-        public async Task<TDocument> UpdateAsync(Func<TDocument, Task<TDocument>> update)
-        {
-            if (update == null) throw new ArgumentNullException(nameof(update));
-            var next = await update(await LatestAsync().ConfigureAwait(false)).ConfigureAwait(false);
-            await SetAsync(next).ConfigureAwait(false);
-            return next;
-        }
-
-        /// <summary>
-        /// Creates a managed reactive document mirror whose local edits can be coalesced into one prediction or replacement.
-        /// </summary>
-        public async Task<CultMeshReactiveDocument<TDocument>> ReactiveAsync(
-            CultMeshReactiveDocumentOptions? options = null)
+        /// <summary>Creates a read-only in-memory mirror updated by the document watch.</summary>
+        public async Task<CultMeshObservedDocument<TDocument>> ObserveAsync()
         {
             var current = CloneDocument(await LatestAsync().ConfigureAwait(false));
-            var reactive = new CultMeshReactiveDocument<TDocument>(this, current, options);
-            reactive.Start();
-            return reactive;
+            var observed = new CultMeshObservedDocument<TDocument>(this, current);
+            observed.Start();
+            return observed;
         }
 
-        /// <summary>
-        /// Creates a managed reactive document mirror synchronously for host APIs that cannot be async.
-        /// </summary>
-        public CultMeshReactiveDocument<TDocument> Reactive(CultMeshReactiveDocumentOptions? options = null)
+        /// <summary>Creates a read-only in-memory mirror synchronously.</summary>
+        public CultMeshObservedDocument<TDocument> Observe()
         {
-            return ReactiveAsync(options).ConfigureAwait(false).GetAwaiter().GetResult();
+            return ObserveAsync().ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
         /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
@@ -1216,6 +1194,174 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// A read-only local mirror of a watched typed document. Observation never acquires a write
+    /// capability and never polls or serializes the document while idle.
+    /// </summary>
+    public sealed class CultMeshObservedDocument<TDocument> : IDisposable
+        where TDocument : class
+    {
+        private readonly object _gate = new();
+        private IDisposable? _subscription;
+        private TDocument _current;
+        private bool _disposed;
+
+        internal CultMeshObservedDocument(
+            CultMeshDocumentHandle<TDocument> document,
+            TDocument current)
+        {
+            Document = document ?? throw new ArgumentNullException(nameof(document));
+            _current = current ?? throw new ArgumentNullException(nameof(current));
+        }
+
+        /// <summary>Gets the underlying read/watch handle.</summary>
+        public CultMeshDocumentHandle<TDocument> Document { get; }
+
+        /// <summary>
+        /// Gets the current borrowed snapshot. Treat the object graph as read-only; local mutation
+        /// cannot publish and is replaced by the next canonical snapshot.
+        /// </summary>
+        public TDocument Current
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    return _current;
+                }
+            }
+        }
+
+        internal void Start()
+        {
+            _subscription = Document.Watch(ApplyCanonicalSnapshot);
+        }
+
+        /// <summary>Reads and adopts a fresh canonical snapshot.</summary>
+        public async Task<TDocument> RefreshAsync()
+        {
+            ThrowIfDisposed();
+            var latest = CultMeshDocumentHandle<TDocument>.CloneDocument(
+                await Document.LatestAsync().ConfigureAwait(false));
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                _current = latest;
+                return _current;
+            }
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+            }
+
+            _subscription?.Dispose();
+        }
+
+        private void ApplyCanonicalSnapshot(TDocument canonical)
+        {
+            if (canonical == null)
+                return;
+            var next = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
+            lock (_gate)
+            {
+                if (!_disposed)
+                    _current = next;
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(CultMeshObservedDocument<TDocument>));
+        }
+    }
+
+    /// <summary>Names the one immutable authority path selected by a document writer.</summary>
+    public enum CultMeshDocumentWriteKind
+    {
+        /// <summary>The writer replaces canonical state through its owning provider.</summary>
+        AuthoritativeReplacement,
+
+        /// <summary>The writer submits a client prediction or candidate for validation.</summary>
+        Prediction
+    }
+
+    /// <summary>
+    /// An explicit, immutable write capability for one typed document. A writer never switches
+    /// between authoritative replacement and prediction based on runtime availability.
+    /// </summary>
+    public sealed class CultMeshDocumentWriter<TDocument>
+        where TDocument : class
+    {
+        private readonly Func<TDocument, Task> _write;
+
+        internal CultMeshDocumentWriter(
+            CultMeshDocumentHandle<TDocument> document,
+            CultMeshDocumentWriteKind kind,
+            Func<TDocument, Task> write)
+        {
+            Document = document ?? throw new ArgumentNullException(nameof(document));
+            Kind = kind;
+            _write = write ?? throw new ArgumentNullException(nameof(write));
+        }
+
+        /// <summary>Gets the document read/watch handle paired with this writer.</summary>
+        public CultMeshDocumentHandle<TDocument> Document { get; }
+
+        /// <summary>Gets the immutable authority path selected for this writer.</summary>
+        public CultMeshDocumentWriteKind Kind { get; }
+
+        /// <summary>Writes one value through this writer's named authority path.</summary>
+        public Task WriteAsync(TDocument value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            return _write(value);
+        }
+
+        /// <summary>Reads, transforms, and writes through this writer's named authority path.</summary>
+        public async Task<TDocument> UpdateAsync(Func<TDocument, TDocument> update)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            var next = update(await Document.LatestAsync().ConfigureAwait(false));
+            await WriteAsync(next).ConfigureAwait(false);
+            return next;
+        }
+
+        /// <summary>Reads, transforms, and writes through this writer's named authority path.</summary>
+        public async Task<TDocument> UpdateAsync(Func<TDocument, Task<TDocument>> update)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            var next = await update(await Document.LatestAsync().ConfigureAwait(false)).ConfigureAwait(false);
+            await WriteAsync(next).ConfigureAwait(false);
+            return next;
+        }
+
+        /// <summary>Creates an explicitly writable reactive mirror.</summary>
+        public async Task<CultMeshReactiveDocument<TDocument>> ReactiveAsync(
+            CultMeshReactiveDocumentOptions? options = null)
+        {
+            var current = CultMeshDocumentHandle<TDocument>.CloneDocument(
+                await Document.LatestAsync().ConfigureAwait(false));
+            var reactive = new CultMeshReactiveDocument<TDocument>(this, current, options);
+            reactive.Start();
+            return reactive;
+        }
+
+        /// <summary>Creates an explicitly writable reactive mirror synchronously.</summary>
+        public CultMeshReactiveDocument<TDocument> Reactive(CultMeshReactiveDocumentOptions? options = null)
+        {
+            return ReactiveAsync(options).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>
     /// Configures a managed CultMesh reactive document mirror.
     /// </summary>
     public sealed class CultMeshReactiveDocumentOptions
@@ -1224,9 +1370,6 @@ namespace GameCult.Mesh
         /// Gets or sets the write coalescing window. The default approximates a frame boundary for non-Unity hosts.
         /// </summary>
         public TimeSpan FlushDelay { get; set; } = TimeSpan.FromMilliseconds(16);
-
-        /// <summary>Gets or sets whether direct edits to Current should be detected and flushed automatically.</summary>
-        public bool DetectLocalChanges { get; set; } = true;
 
         /// <summary>Gets or sets whether canonical snapshots replace dirty local predictions immediately.</summary>
         public bool ReplaceDirtyCurrentOnCanonicalSnapshot { get; set; }
@@ -1272,18 +1415,18 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
-    /// Managed typed document mirror that keeps an editable current value and coalesces local edits into CultMesh mutations.
+    /// Managed typed document mirror that coalesces explicit local edits through one selected writer.
     /// </summary>
     public sealed class CultMeshReactiveDocument<TDocument> : IDisposable
         where TDocument : class
     {
+        private readonly CultMeshDocumentWriter<TDocument> _writer;
         private readonly CultMeshDocumentHandle<TDocument> _document;
         private readonly CultMeshReactiveDocumentOptions _options;
         private readonly object _gate = new();
         private IDisposable? _subscription;
         private Timer? _flushTimer;
-        private Timer? _changeDetectionTimer;
-        private byte[] _lastCleanSnapshot;
+        private TDocument _current;
         private bool _dirty;
         private bool _flushQueued;
         private bool _flushing;
@@ -1291,21 +1434,37 @@ namespace GameCult.Mesh
         private int _reconciliationVersion;
 
         internal CultMeshReactiveDocument(
-            CultMeshDocumentHandle<TDocument> document,
+            CultMeshDocumentWriter<TDocument> writer,
             TDocument current,
             CultMeshReactiveDocumentOptions? options)
         {
-            _document = document ?? throw new ArgumentNullException(nameof(document));
-            Current = current ?? throw new ArgumentNullException(nameof(current));
+            _writer = writer ?? throw new ArgumentNullException(nameof(writer));
+            _document = writer.Document;
+            _current = current ?? throw new ArgumentNullException(nameof(current));
             _options = options ?? new CultMeshReactiveDocumentOptions();
-            _lastCleanSnapshot = SerializeDocument(Current);
         }
+
+        /// <summary>Gets the immutable write capability selected for this mirror.</summary>
+        public CultMeshDocumentWriter<TDocument> Writer => _writer;
 
         /// <summary>Gets the underlying document handle.</summary>
         public CultMeshDocumentHandle<TDocument> Document => _document;
 
-        /// <summary>Gets the editable local document value.</summary>
-        public TDocument Current { get; private set; }
+        /// <summary>
+        /// Gets a cloned local snapshot. Mutating the returned object cannot mutate or publish the mirror;
+        /// use <see cref="Update"/> or <see cref="ReplaceLocal"/> for edits.
+        /// </summary>
+        public TDocument Snapshot
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    ThrowIfDisposed();
+                    return CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
+                }
+            }
+        }
 
         /// <summary>Gets whether local edits are waiting to be sent.</summary>
         public bool IsDirty
@@ -1323,25 +1482,6 @@ namespace GameCult.Mesh
         internal void Start()
         {
             _subscription = _document.Watch(ApplyCanonicalSnapshot);
-            if (_options.DetectLocalChanges && _document.CanSet)
-            {
-                var interval = _options.FlushDelay <= TimeSpan.Zero
-                    ? TimeSpan.FromMilliseconds(1)
-                    : _options.FlushDelay;
-                _changeDetectionTimer = new Timer(_ => _ = Task.Run(DetectLocalChangesAsync));
-                _changeDetectionTimer.Change(interval, interval);
-            }
-        }
-
-        /// <summary>Marks the current value dirty and schedules a coalesced prediction or replacement.</summary>
-        public void MarkDirty()
-        {
-            ThrowIfDisposed();
-            lock (_gate)
-            {
-                _dirty = true;
-                ScheduleFlushLocked();
-            }
         }
 
         /// <summary>Mutates the current value and schedules a coalesced prediction or replacement.</summary>
@@ -1351,24 +1491,24 @@ namespace GameCult.Mesh
             ThrowIfDisposed();
             lock (_gate)
             {
-                update(Current);
+                update(_current);
                 _dirty = true;
                 ScheduleFlushLocked();
-                return Current;
+                return CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
             }
         }
 
         /// <summary>Replaces the current local value and schedules a coalesced prediction or replacement.</summary>
-        public TDocument SetCurrent(TDocument value)
+        public TDocument ReplaceLocal(TDocument value)
         {
             if (value == null) throw new ArgumentNullException(nameof(value));
             ThrowIfDisposed();
             lock (_gate)
             {
-                Current = CultMeshDocumentHandle<TDocument>.CloneDocument(value);
+                _current = CultMeshDocumentHandle<TDocument>.CloneDocument(value);
                 _dirty = true;
                 ScheduleFlushLocked();
-                return Current;
+                return CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
             }
         }
 
@@ -1380,11 +1520,10 @@ namespace GameCult.Mesh
                 await _document.LatestAsync().ConfigureAwait(false));
             lock (_gate)
             {
-                Current = latest;
-                _lastCleanSnapshot = SerializeDocument(Current);
+                _current = latest;
                 _dirty = false;
                 Reconciliation = null;
-                return Current;
+                return CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
             }
         }
 
@@ -1395,8 +1534,6 @@ namespace GameCult.Mesh
             lock (_gate)
             {
                 ThrowIfDisposed();
-                if (!_dirty && _document.CanSet)
-                    DetectLocalChangesLocked();
                 if (!_dirty)
                     return;
                 if (_flushing)
@@ -1408,13 +1545,12 @@ namespace GameCult.Mesh
                 _flushTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 _flushing = true;
                 _dirty = false;
-                predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(Current);
-                _lastCleanSnapshot = SerializeDocument(predicted);
+                predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
             }
 
             try
             {
-                await _document.SetAsync(predicted).ConfigureAwait(false);
+                await _writer.WriteAsync(predicted).ConfigureAwait(false);
             }
             finally
             {
@@ -1422,8 +1558,6 @@ namespace GameCult.Mesh
                 lock (_gate)
                 {
                     _flushing = false;
-                    if (_document.CanSet)
-                        DetectLocalChangesLocked();
                     shouldFlushAgain = _flushQueued || _dirty;
                     _flushQueued = false;
                 }
@@ -1452,7 +1586,6 @@ namespace GameCult.Mesh
 
             _subscription?.Dispose();
             _flushTimer?.Dispose();
-            _changeDetectionTimer?.Dispose();
         }
 
         private void ApplyCanonicalSnapshot(TDocument canonical)
@@ -1468,7 +1601,7 @@ namespace GameCult.Mesh
                 var nextCanonical = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
                 if (_dirty || _flushing)
                 {
-                    var predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(Current);
+                    var predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
                     var delta = CreateReconciliationDelta(predicted, nextCanonical);
                     if (delta.Count == 0)
                     {
@@ -1488,32 +1621,9 @@ namespace GameCult.Mesh
                         return;
                 }
 
-                Current = nextCanonical;
-                _lastCleanSnapshot = SerializeDocument(Current);
+                _current = nextCanonical;
                 Reconciliation = null;
             }
-        }
-
-        private Task DetectLocalChangesAsync()
-        {
-            lock (_gate)
-            {
-                if (_disposed || !_document.CanSet || _dirty || _flushing)
-                    return Task.CompletedTask;
-                DetectLocalChangesLocked();
-                if (_dirty)
-                    ScheduleFlushLocked();
-            }
-
-            return Task.CompletedTask;
-        }
-
-        private void DetectLocalChangesLocked()
-        {
-            var currentSnapshot = SerializeDocument(Current);
-            if (_lastCleanSnapshot.SequenceEqual(currentSnapshot))
-                return;
-            _dirty = true;
         }
 
         private void ScheduleFlushLocked()
@@ -1526,11 +1636,6 @@ namespace GameCult.Mesh
 
             _flushTimer ??= new Timer(_ => _ = Task.Run(FlushAsync));
             _flushTimer.Change(_options.FlushDelay, Timeout.InfiniteTimeSpan);
-        }
-
-        private static byte[] SerializeDocument(TDocument document)
-        {
-            return CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument));
         }
 
         private static IReadOnlyDictionary<string, object?> CreateReconciliationDelta(
@@ -1778,13 +1883,6 @@ namespace GameCult.Mesh
             return TryGetDocument<TDocument>(out var document) && document.CanSubmitPrediction;
         }
 
-        /// <summary>Gets whether one typed document can accept transparent mutations by CLR type or same-schema alias.</summary>
-        public bool CanSet<TDocument>()
-            where TDocument : class
-        {
-            return TryGetDocument<TDocument>(out var document) && document.CanSet;
-        }
-
         /// <summary>Submits a client prediction for one typed document by CLR type or same-schema alias.</summary>
         public Task SubmitPredictionAsync<TDocument>(TDocument value)
             where TDocument : class
@@ -1792,25 +1890,18 @@ namespace GameCult.Mesh
             return Document<TDocument>().SubmitPredictionAsync(value);
         }
 
-        /// <summary>Sets one typed document through its configured authority shape by CLR type or same-schema alias.</summary>
-        public Task SetAsync<TDocument>(TDocument value)
+        /// <summary>Gets an explicit authoritative writer by CLR type or same-schema alias.</summary>
+        public CultMeshDocumentWriter<TDocument> AuthoritativeWriter<TDocument>()
             where TDocument : class
         {
-            return Document<TDocument>().SetAsync(value);
+            return Document<TDocument>().AuthoritativeWriter();
         }
 
-        /// <summary>Reads, updates, and sets one typed document through its configured authority shape.</summary>
-        public Task<TDocument> UpdateAsync<TDocument>(Func<TDocument, TDocument> update)
+        /// <summary>Gets an explicit prediction writer by CLR type or same-schema alias.</summary>
+        public CultMeshDocumentWriter<TDocument> PredictionWriter<TDocument>()
             where TDocument : class
         {
-            return Document<TDocument>().UpdateAsync(update);
-        }
-
-        /// <summary>Reads, updates, and sets one typed document through its configured authority shape.</summary>
-        public Task<TDocument> UpdateAsync<TDocument>(Func<TDocument, Task<TDocument>> update)
-            where TDocument : class
-        {
-            return Document<TDocument>().UpdateAsync(update);
+            return Document<TDocument>().PredictionWriter();
         }
 
         /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>
@@ -1827,21 +1918,6 @@ namespace GameCult.Mesh
             return Document<TDocument>().Watch(onNext);
         }
 
-        /// <summary>Creates a managed reactive document mirror by CLR type or same-schema alias.</summary>
-        public Task<CultMeshReactiveDocument<TDocument>> ReactiveAsync<TDocument>(
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            return Document<TDocument>().ReactiveAsync(options);
-        }
-
-        /// <summary>Creates a managed reactive document mirror synchronously by CLR type or same-schema alias.</summary>
-        public CultMeshReactiveDocument<TDocument> Reactive<TDocument>(
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            return Document<TDocument>().Reactive(options);
-        }
     }
 
     /// <summary>

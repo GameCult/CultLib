@@ -503,6 +503,22 @@ namespace GameCult.Networking
         /// </summary>
         public IReadOnlyList<CultNetClientAuthorityScope> ClientAuthorityScopes => _clientAuthorityScopes;
 
+        /// <summary>Gets whether this database instance can authoritatively replace the document at a key.</summary>
+        public bool CanWriteAuthoritatively<T>(CultRecordKey key) where T : class
+        {
+            ThrowIfDisposed();
+            var descriptor = _cache.Registry.GetRequired<T>();
+            return ResolveShardInternal(descriptor, key).IsPrimary;
+        }
+
+        /// <summary>Gets whether this database instance can submit a prediction for the document at a key.</summary>
+        public bool CanSubmitPrediction<T>(CultRecordKey key) where T : class
+        {
+            ThrowIfDisposed();
+            var descriptor = _cache.Registry.GetRequired<T>();
+            return _clientAuthorityScopes.Any(scope => scope.Matches(_runtimeId, descriptor, key));
+        }
+
         /// <summary>
         /// Gets mutation log entries for a shard after the supplied sequence.
         /// </summary>

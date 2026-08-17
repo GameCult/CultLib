@@ -493,56 +493,6 @@ namespace GameCult.Mesh
             return Document<TDocument>(recordKey, verse.Context, documentId, sources, routeHint);
         }
 
-        /// <summary>
-        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
-        /// </summary>
-        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
-            CultRecordKey key,
-            CultMeshVerseContext context,
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            return Document<TDocument>(key, context).ReactiveAsync(options);
-        }
-
-        /// <summary>
-        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
-        /// </summary>
-        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
-            CultRecordKey key,
-            CultMeshVerse verse,
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            if (verse == null) throw new ArgumentNullException(nameof(verse));
-            return ReactiveDocumentAsync<TDocument>(key, verse.Context, options);
-        }
-
-        /// <summary>
-        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
-        /// </summary>
-        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
-            string recordKey,
-            CultMeshVerseContext context,
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            return ReactiveDocumentAsync<TDocument>(new CultRecordKey(recordKey), context, options);
-        }
-
-        /// <summary>
-        /// Creates a managed reactive document mirror over one distributed record hosted by this node.
-        /// </summary>
-        public Task<CultMeshReactiveDocument<TDocument>> ReactiveDocumentAsync<TDocument>(
-            string recordKey,
-            CultMeshVerse verse,
-            CultMeshReactiveDocumentOptions? options = null)
-            where TDocument : class
-        {
-            if (verse == null) throw new ArgumentNullException(nameof(verse));
-            return ReactiveDocumentAsync<TDocument>(recordKey, verse.Context, options);
-        }
-
         /// <inheritdoc />
         public void Dispose()
         {
@@ -2010,21 +1960,22 @@ namespace GameCult.Mesh
             var sourceList = sources?.ToArray()
                 ?? new[] { ProjectionSource(key.Value, descriptor.SchemaId, "CultNet database record") };
             var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Automatic, "CultNet database document");
-            return Document<TDocument>(
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
                 ResolveDocumentId(documentId, key),
-                context,
-                async _ => await ReadDatabaseDocumentRequiredAsync<TDocument>(database, key).ConfigureAwait(false),
-                _ => WatchDatabaseRecordAs<TDocument>(database, key),
-                async value =>
-                {
-                    await PutDatabaseDocumentAsync(database, key, value, predicted: false).ConfigureAwait(false);
-                },
-                async value =>
-                {
-                    await PutDatabaseDocumentAsync(database, key, value, predicted: true).ConfigureAwait(false);
-                },
+                (_parameters, _context) => ReadDatabaseDocumentRequiredAsync<TDocument>(database, key),
+                (_parameters, _context) => WatchDatabaseRecordAs<TDocument>(database, key),
                 sourceList,
                 route);
+            Func<TDocument, Task>? replace = database.CanWriteAuthoritatively<TDocument>(key)
+                ? value => PutDatabaseDocumentAsync(database, key, value, predicted: false)
+                : null;
+            Func<TDocument, Task>? submitPrediction = database.CanSubmitPrediction<TDocument>(key)
+                ? value => PutDatabaseDocumentAsync(database, key, value, predicted: true)
+                : null;
+            return new CultMeshDocumentHandle<TDocument>(
+                BindLiveFeed(context, feed),
+                replace,
+                submitPrediction);
         }
 
         /// <summary>

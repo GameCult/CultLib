@@ -940,16 +940,17 @@ public sealed class CultMeshStreamingTests
             CultMesh.Verse("starbridge", "pilot-a"));
         var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
 
-        handle.CanReplace.Should().BeTrue();
+        handle.CanReplace.Should().BeFalse();
+        alias.CanReplace.Should().BeFalse();
         alias.CanSubmitPrediction.Should().BeTrue();
-        alias.CanSet.Should().BeTrue();
         var catalog = CultMesh.Documents(handle);
         catalog.CanSubmitPrediction<MeshNoteAliasDocument>().Should().BeTrue();
-        catalog.CanSet<MeshNoteAliasDocument>().Should().BeTrue();
+        var predictionWriter = catalog.PredictionWriter<MeshNoteAliasDocument>();
+        predictionWriter.Kind.Should().Be(CultMeshDocumentWriteKind.Prediction);
 
         MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
-        await catalog.SetAsync(new MeshNoteAliasDocument
+        await predictionWriter.WriteAsync(new MeshNoteAliasDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "predicted-thermal",
@@ -961,7 +962,7 @@ public sealed class CultMeshStreamingTests
         observed.Revision.Should().Be(5);
         (await handle.LatestAsync()).Text.Should().Be("predicted-thermal");
 
-        var updated = await alias.UpdateAsync(value => new MeshNoteAliasDocument
+        var updated = await alias.PredictionWriter().UpdateAsync(value => new MeshNoteAliasDocument
         {
             Schema = value.Schema,
             Text = "updated-as-prediction",
@@ -1002,13 +1003,13 @@ public sealed class CultMeshStreamingTests
             });
         var catalog = CultMesh.Documents(handle);
 
-        using var reactive = await catalog.ReactiveAsync<MeshNoteAliasDocument>(
+        using var reactive = await catalog.PredictionWriter<MeshNoteAliasDocument>().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
             });
 
-        reactive.Current.Text.Should().Be("initial");
+        reactive.Snapshot.Text.Should().Be("initial");
         reactive.Update(document =>
         {
             document.Text = "first-local-edit";
@@ -1052,7 +1053,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.AuthoritativeWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1071,7 +1072,7 @@ public sealed class CultMeshStreamingTests
             Revision = 7
         });
 
-        reactive.Current.Text.Should().Be("local-prediction");
+        reactive.Snapshot.Text.Should().Be("local-prediction");
         reactive.Reconciliation.Should().NotBeNull();
         reactive.Reconciliation!.Version.Should().Be(1);
         reactive.Reconciliation!.Canonical.Text.Should().Be("canonical-correction");
@@ -1112,7 +1113,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMilliseconds(25)
@@ -1137,7 +1138,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ReactiveDocument_DetectsAndCoalescesDirectCurrentMemberWrites()
+    public async Task ReactiveDocument_CoalescesExplicitMemberUpdates()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -1166,26 +1167,29 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMilliseconds(25)
             });
 
-        reactive.Current.Text = "direct-member-one";
-        reactive.Current.Text = "direct-member-two";
-        reactive.Current.Revision = 2;
+        reactive.Update(document => document.Text = "explicit-member-one");
+        reactive.Update(document =>
+        {
+            document.Text = "explicit-member-two";
+            document.Revision = 2;
+        });
 
         await WaitForAsync(() => predictions.Count == 1);
 
-        predictions[0].Text.Should().Be("direct-member-two");
+        predictions[0].Text.Should().Be("explicit-member-two");
         predictions[0].Revision.Should().Be(2);
-        current.Text.Should().Be("direct-member-two");
+        current.Text.Should().Be("explicit-member-two");
         reactive.IsDirty.Should().BeFalse();
     }
 
     [Test]
-    public async Task ReactiveDocument_QueuesDirectCurrentEditsWhileFlushIsInFlight()
+    public async Task ReactiveDocument_QueuesExplicitEditsWhileFlushIsInFlight()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -1221,7 +1225,7 @@ public sealed class CultMeshStreamingTests
                 subject.OnNext(value);
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1235,8 +1239,11 @@ public sealed class CultMeshStreamingTests
         var flushTask = reactive.FlushAsync();
         await firstPredictionStarted.Task;
 
-        reactive.Current.Text = "second-after-flight-started";
-        reactive.Current.Revision = 3;
+        reactive.Update(document =>
+        {
+            document.Text = "second-after-flight-started";
+            document.Revision = 3;
+        });
         releaseFirstPrediction.SetResult();
 
         await flushTask;
@@ -1274,7 +1281,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.AuthoritativeWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1293,7 +1300,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ReactiveDocument_ReadOnlyHandleRejectsFlush()
+    public void ReactiveDocument_ReadOnlyHandleRejectsWriterSelection()
     {
         var current = new MeshNoteDocument
         {
@@ -1307,16 +1314,45 @@ public sealed class CultMeshStreamingTests
             _ => Task.FromResult(current),
             _ => new Subject<MeshNoteDocument>());
 
-        using var reactive = await handle.ReactiveAsync(
-            new CultMeshReactiveDocumentOptions
-            {
-                FlushDelay = TimeSpan.FromMinutes(1)
-            });
-        reactive.Update(document => document.Text = "not-allowed");
+        Action authoritative = () => handle.AuthoritativeWriter();
+        Action prediction = () => handle.PredictionWriter();
 
-        Func<Task> act = () => reactive.FlushAsync();
+        authoritative.Should().Throw<NotSupportedException>();
+        prediction.Should().Throw<NotSupportedException>();
+    }
 
-        await act.Should().ThrowAsync<NotSupportedException>();
+    [Test]
+    public async Task ObservedDocument_WatchesWithoutWriteCapabilityOrIdleTimer()
+    {
+        var subject = new Subject<MeshNoteDocument>();
+        var current = new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "initial",
+            Revision = 1
+        };
+        var handle = CultMesh.Document(
+            "mesh.note.observed.readonly",
+            CultMesh.Verse("starbridge", "observer"),
+            _ => Task.FromResult(current),
+            _ => subject);
+
+        using var observed = await handle.ObserveAsync();
+        observed.Current.Text.Should().Be("initial");
+        typeof(CultMeshObservedDocument<MeshNoteDocument>)
+            .GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .Should()
+            .NotContain(field => field.FieldType == typeof(System.Threading.Timer));
+
+        subject.OnNext(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "canonical-update",
+            Revision = 2
+        });
+
+        observed.Current.Text.Should().Be("canonical-update");
+        observed.Current.Revision.Should().Be(2);
     }
 
     [Test]
@@ -1349,7 +1385,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        var reactive = await handle.ReactiveAsync(
+        var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMilliseconds(25)
@@ -1384,7 +1420,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.AuthoritativeWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1),
@@ -1399,8 +1435,8 @@ public sealed class CultMeshStreamingTests
             Revision = 9
         });
 
-        reactive.Current.Text.Should().Be("canonical-wins");
-        reactive.Current.Revision.Should().Be(9);
+        reactive.Snapshot.Text.Should().Be("canonical-wins");
+        reactive.Snapshot.Revision.Should().Be(9);
         reactive.Reconciliation.Should().BeNull();
     }
 
@@ -1426,7 +1462,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.AuthoritativeWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1442,7 +1478,7 @@ public sealed class CultMeshStreamingTests
         await reactive.RefreshAsync();
         await reactive.FlushAsync();
 
-        reactive.Current.Text.Should().Be("fresh-canonical");
+        reactive.Snapshot.Text.Should().Be("fresh-canonical");
         reactive.IsDirty.Should().BeFalse();
         replacements.Should().BeEmpty();
     }
@@ -1495,7 +1531,8 @@ public sealed class CultMeshStreamingTests
             .Watch(observedByCommander.Add);
         using var pilotReactive = await CultMesh
             .Documents(pilotHandle)
-            .ReactiveAsync<MeshNoteAliasDocument>(
+            .PredictionWriter<MeshNoteAliasDocument>()
+            .ReactiveAsync(
                 new CultMeshReactiveDocumentOptions
                 {
                     FlushDelay = TimeSpan.FromMinutes(1)
@@ -1557,14 +1594,13 @@ public sealed class CultMeshStreamingTests
             database,
             key,
             CultMesh.Verse("starbridge", "commander-rts"));
-        using var commanderReactive = await commanderHandle
+        MeshNoteAliasDocument commanderSnapshot = null!;
+        using var commanderSubscription = commanderHandle
             .AsSchemaAlias<MeshNoteAliasDocument>()
-            .ReactiveAsync(new CultMeshReactiveDocumentOptions
-            {
-                FlushDelay = TimeSpan.FromMinutes(1)
-            });
+            .Watch(value => commanderSnapshot = value);
         using var pilotReactive = await pilotHandle
             .AsSchemaAlias<MeshNoteAliasDocument>()
+            .PredictionWriter()
             .ReactiveAsync(new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1582,16 +1618,16 @@ public sealed class CultMeshStreamingTests
         });
         await pilotReactive.FlushAsync();
 
-        await WaitForAsync(() => commanderReactive.Current.Text == "pilot-coalesced-order");
+        await WaitForAsync(() => commanderSnapshot?.Text == "pilot-coalesced-order");
 
         pilotReactive.IsDirty.Should().BeFalse();
-        commanderReactive.Document.Context.RuntimeId.Should().Be("commander-rts");
-        commanderReactive.Current.Revision.Should().Be(3);
+        commanderHandle.Context.RuntimeId.Should().Be("commander-rts");
+        commanderSnapshot.Revision.Should().Be(3);
         cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("pilot-coalesced-order");
     }
 
     [Test]
-    public async Task NodeReactiveDocument_OpensSameSchemaAliasWithOneCall()
+    public async Task NodeDocument_OpensExplicitPredictionWriterForSameSchemaAlias()
     {
         var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
         using var temp = new TemporaryDirectory();
@@ -1630,10 +1666,10 @@ public sealed class CultMeshStreamingTests
             Revision = 1
         }, new CultRecordHandle<MeshNoteDocument>(key));
 
-        using var pilotReactive = await node.ReactiveDocumentAsync<MeshNoteAliasDocument>(
-            key,
-            CultMesh.Verse("starbridge", "pilot-a"),
-            new CultMeshReactiveDocumentOptions
+        using var pilotReactive = await node
+            .Document<MeshNoteAliasDocument>(key, CultMesh.Verse("starbridge", "pilot-a"))
+            .PredictionWriter()
+            .ReactiveAsync(new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
             });
@@ -1658,7 +1694,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ReactiveDocument_SyncedSnapshotEndpointCapturesCanonicalCorrectionAcrossRuntimeBoundary()
+    public async Task SyncedSnapshotEndpointObservesCanonicalCorrectionAcrossRuntimeBoundary()
     {
         var sourceCache = new CultCache();
         var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
@@ -1700,18 +1736,10 @@ public sealed class CultMeshStreamingTests
                 {
                     DocumentRegistry = registry
                 }
-            });
+        });
         var handle = surface.SyncTo(node).Document<MeshNoteAliasDocument>(key.Value);
-        using var reactive = await handle.ReactiveAsync(new CultMeshReactiveDocumentOptions
-        {
-            FlushDelay = TimeSpan.FromMinutes(1)
-        });
-
-        reactive.Update(document =>
-        {
-            document.Text = "local-prediction";
-            document.Revision = 2;
-        });
+        MeshNoteAliasDocument observed = null!;
+        using var subscription = handle.Watch(value => observed = value);
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
@@ -1719,11 +1747,9 @@ public sealed class CultMeshStreamingTests
             Revision = 7
         }, new CultRecordHandle<MeshNoteDocument>(key));
 
-        await WaitForAsync(() => reactive.Reconciliation?.Canonical.Text == "remote-authority-correction");
+        await WaitForAsync(() => observed?.Text == "remote-authority-correction");
 
-        reactive.Current.Text.Should().Be("local-prediction");
-        reactive.Reconciliation!.Predicted.Text.Should().Be("local-prediction");
-        reactive.Reconciliation.Canonical.Revision.Should().Be(7);
+        observed.Revision.Should().Be(7);
         node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("remote-authority-correction");
     }
 
@@ -1796,13 +1822,13 @@ public sealed class CultMeshStreamingTests
                     DocumentRegistry = registry
                 }
             });
-        using var reactive = await surface
+        var reconstructed = await surface
             .SyncTo(freshRuntime)
             .Documents(CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value))
-            .ReactiveAsync<MeshNoteAliasDocument>();
+            .LatestAsync<MeshNoteAliasDocument>();
 
-        reactive.Current.Text.Should().Be("after-reboot-authority");
-        reactive.Current.Revision.Should().Be(4);
+        reconstructed.Text.Should().Be("after-reboot-authority");
+        reconstructed.Revision.Should().Be(4);
         freshRuntime.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("after-reboot-authority");
     }
 
@@ -1849,17 +1875,11 @@ public sealed class CultMeshStreamingTests
                     DocumentRegistry = registry
                 }
             });
-        using var reactive = await surface
+        var readOnlyHandle = surface
             .SyncTo(node)
-            .Document<MeshNoteAliasDocument>(key.Value)
-            .ReactiveAsync(new CultMeshReactiveDocumentOptions
-            {
-                FlushDelay = TimeSpan.FromMinutes(1)
-            });
-        reactive.Update(document => document.Text = "observer-should-not-write");
-
-        Func<Task> flush = () => reactive.FlushAsync();
-        await flush.Should().ThrowAsync<NotSupportedException>();
+            .Document<MeshNoteAliasDocument>(key.Value);
+        readOnlyHandle.CanReplace.Should().BeFalse();
+        readOnlyHandle.CanSubmitPrediction.Should().BeFalse();
 
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
@@ -1867,16 +1887,14 @@ public sealed class CultMeshStreamingTests
             Text = "fresh-authority",
             Revision = 5
         }, new CultRecordHandle<MeshNoteDocument>(key));
-        await reactive.RefreshAsync();
-        await reactive.FlushAsync();
+        var refreshed = await readOnlyHandle.LatestAsync();
 
-        reactive.Current.Text.Should().Be("fresh-authority");
-        reactive.IsDirty.Should().BeFalse();
+        refreshed.Text.Should().Be("fresh-authority");
         node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(5);
     }
 
     [Test]
-    public async Task ReactiveDocument_MarkDirtyFlushesDirectMemberEdits()
+    public async Task ReactiveDocument_SnapshotMutationCannotPublish()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -1905,24 +1923,24 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
             });
 
-        reactive.Current.Text = "direct-member-edit";
-        reactive.Current.Revision = 12;
-        reactive.MarkDirty();
+        var escapedSnapshot = reactive.Snapshot;
+        escapedSnapshot.Text = "must-not-publish";
+        escapedSnapshot.Revision = 12;
         await reactive.FlushAsync();
 
-        predictions.Should().ContainSingle();
-        predictions[0].Text.Should().Be("direct-member-edit");
-        predictions[0].Revision.Should().Be(12);
+        predictions.Should().BeEmpty();
+        reactive.Snapshot.Text.Should().Be("initial");
+        reactive.IsDirty.Should().BeFalse();
     }
 
     [Test]
-    public async Task ReactiveDocument_DetectsDirectMemberEditsWithoutMarkDirty()
+    public async Task ReactiveDocument_IdleMirrorDoesNotPublishUntilExplicitUpdate()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -1951,26 +1969,30 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMilliseconds(10)
             });
 
-        reactive.Current.Text = "direct-member-edit";
-        reactive.Current.Revision = 2;
-        reactive.Current.Text = "direct-member-edit-final";
-        reactive.Current.Revision = 3;
+        await Task.Delay(75);
+        predictions.Should().BeEmpty();
+
+        reactive.Update(document =>
+        {
+            document.Text = "explicit-member-edit";
+            document.Revision = 3;
+        });
 
         await WaitForAsync(() => predictions.Count == 1);
 
-        predictions[0].Text.Should().Be("direct-member-edit-final");
+        predictions[0].Text.Should().Be("explicit-member-edit");
         predictions[0].Revision.Should().Be(3);
         reactive.IsDirty.Should().BeFalse();
     }
 
     [Test]
-    public async Task ReactiveDocument_FlushAsyncCapturesDirectMemberEdit()
+    public async Task ReactiveDocument_ReplaceLocalFlushesWholeDocument()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -1999,18 +2021,22 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
             });
 
-        reactive.Current.Text = "direct-member-flush";
-        reactive.Current.Revision = 4;
+        reactive.ReplaceLocal(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "whole-document-replacement",
+            Revision = 4
+        });
         await reactive.FlushAsync();
 
         predictions.Should().ContainSingle();
-        predictions[0].Text.Should().Be("direct-member-flush");
+        predictions[0].Text.Should().Be("whole-document-replacement");
         predictions[0].Revision.Should().Be(4);
     }
 
@@ -2036,7 +2062,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync();
+        using var reactive = await handle.AuthoritativeWriter().ReactiveAsync();
 
         await reactive.FlushAsync();
 
@@ -2081,7 +2107,7 @@ public sealed class CultMeshStreamingTests
                 subject.OnNext(value);
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -2138,7 +2164,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMilliseconds(35)
@@ -2161,7 +2187,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ReactiveDocument_DirectEditsDuringInFlightFlushQueueLatestPrediction()
+    public async Task ReactiveDocument_ExplicitEditsDuringInFlightFlushQueueLatestPrediction()
     {
         var subject = new Subject<MeshNoteDocument>();
         var current = new MeshNoteDocument
@@ -2197,24 +2223,30 @@ public sealed class CultMeshStreamingTests
                 subject.OnNext(value);
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
             });
-        reactive.Current.Text = "first-direct";
-        reactive.Current.Revision = 2;
+        reactive.Update(document =>
+        {
+            document.Text = "first-explicit";
+            document.Revision = 2;
+        });
         var flush = reactive.FlushAsync();
         await firstWriteStarted.Task;
 
-        reactive.Current.Text = "second-direct";
-        reactive.Current.Revision = 3;
+        reactive.Update(document =>
+        {
+            document.Text = "second-explicit";
+            document.Revision = 3;
+        });
         allowFirstWrite.SetResult(true);
         await flush;
 
         predictions.Should().HaveCount(2);
-        predictions[0].Text.Should().Be("first-direct");
-        predictions[1].Text.Should().Be("second-direct");
+        predictions[0].Text.Should().Be("first-explicit");
+        predictions[1].Text.Should().Be("second-explicit");
         reactive.IsDirty.Should().BeFalse();
     }
 
@@ -2246,7 +2278,7 @@ public sealed class CultMeshStreamingTests
                 return Task.CompletedTask;
             });
 
-        using var reactive = await handle.ReactiveAsync(
+        using var reactive = await handle.PredictionWriter().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -2259,7 +2291,7 @@ public sealed class CultMeshStreamingTests
 
         await reactive.FlushAsync();
 
-        reactive.Current.Text.Should().Be("accepted");
+        reactive.Snapshot.Text.Should().Be("accepted");
         reactive.Reconciliation.Should().BeNull();
         reactive.IsDirty.Should().BeFalse();
     }
