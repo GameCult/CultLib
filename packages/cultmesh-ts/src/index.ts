@@ -1312,8 +1312,11 @@ class CultMeshReactiveDocumentHandle<TDocument extends object>
       return;
     }
 
-    const timer = setTimeout(flush, 0);
-    this.#cancelScheduledFlush = () => clearTimeout(timer);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) flush();
+    });
+    this.#cancelScheduledFlush = () => { cancelled = true; };
   }
 
   private flushNow(): void {

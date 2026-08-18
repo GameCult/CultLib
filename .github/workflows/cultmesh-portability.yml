@@ -50,7 +50,7 @@ jobs:
 
       - name: Measure representative reactive workload
         shell: pwsh
-        run: ./scripts/measure-reactive-document-performance.ps1 -Quick
+        run: ./scripts/measure-reactive-document-performance.ps1 -Quick -SkipRuntimeBuild
 
       - name: Churn 100,000 distinct document leases
         run: >-

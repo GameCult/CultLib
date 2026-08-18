@@ -572,6 +572,42 @@ test("CultMesh TS reactive documents coalesce same-frame explicit updates", asyn
   }
 });
 
+test("CultMesh TS headless reactive documents coalesce on one microtask", async () => {
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+  delete (globalThis as unknown as {
+    requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+  }).requestAnimationFrame;
+  let current = { noteId: "note:reactive-headless", body: "initial" };
+  const predictions: string[] = [];
+  const document = CultMesh.document(
+    "cultmesh.note:reactive-headless",
+    noteDocument,
+    async () => current,
+    {
+      submitPrediction: async (_context, value) => {
+        predictions.push(value.body);
+        current = value;
+      },
+    },
+  );
+  const reactive = document.predictionWriter().reactive({ watch: false });
+  try {
+    await reactive.ready;
+    reactive.update(value => { value.body = "microtask-1"; });
+    reactive.update(value => { value.body = "microtask-2"; });
+    reactive.update(value => { value.body = "microtask-3"; });
+    assert.equal(predictions.length, 0, "the current turn remains coalesced");
+
+    await waitFor(() => predictions.length === 1, "headless microtask prediction");
+    assert.deepEqual(predictions, ["microtask-3"]);
+  } finally {
+    reactive.dispose();
+    if (previousRequestAnimationFrame) {
+      globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+    }
+  }
+});
+
 test("CultMesh TS reactive scheduling scales with changed documents only", async () => {
   const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
   const previousCancelAnimationFrame = globalThis.cancelAnimationFrame;
