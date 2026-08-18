@@ -63,7 +63,9 @@ CultNet WebSocket lanes. The open browser resolves provider identity through
 the canonical Verse catalog, survives a provider restart on a different route,
 and resubscribes. The retained C# client then invokes a second typed operation
 through `CultMeshClient.InvokeAsync`; Chromium and C# observe the same
-provider-authored state and receipt chronology.
+provider-authored state and receipt chronology. The same retained C# session
+then completes 10,000 typed no-op operations under explicit p99 and post-GC
+managed-memory gates, so the tutorial pressure-tests the API it teaches.
 
 Current verification for the Unity consumer remains:
 

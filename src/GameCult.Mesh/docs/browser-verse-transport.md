@@ -183,6 +183,9 @@ Current executable coverage from `scripts/verify-eve-browser-network.mjs`:
   second command through `CultMeshClient.InvokeAsync`, and receives the
   provider-authored receipt without application transport or reconnect code;
 - Chromium observes the C# command's canonical state and receipt chronology;
+- 10,000 typed no-op operations traverse the retained C# WebSocket session;
+  the gate records throughput, p99, post-GC managed growth, and private-memory
+  movement without growing provider state;
 - generated browser bundle contains no `node:` builtin import.
 
 The full public Verse gate still requires the deployed Odin daemon rather than
@@ -203,9 +206,11 @@ From an empty temporary consumer using packed/released artifacts only:
 8. invoke from C# after route replacement and require Chromium to observe the
    same provider-authored state and receipt;
 9. restart the provider and prove state plus receipt persistence;
-10. reject malformed schemas, direct document writes, duplicate command
+10. run a non-persistent operation workload long enough to falsify retained
+   callback or managed-heap growth;
+11. reject malformed schemas, direct document writes, duplicate command
    effects, stale subscription generations, and unsupported authority;
-11. inspect the browser bundle and fail if it contains Node builtin imports.
+12. inspect the browser bundle and fail if it contains Node builtin imports.
 
 The gate runs on Windows and Linux. A screenshot is useful presentation
 evidence, but the receipt/state chronology is the authority proof.

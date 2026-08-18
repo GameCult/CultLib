@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Text.Json;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -97,7 +98,24 @@ static async Task RunProviderAsync(Args arguments)
     var operationGate = new SemaphoreSlim(1, 1);
     schemaServer.OnCultNet<CultNetOperationRequestMessage>(async (request, peer) =>
     {
-        if (request.ServiceId != "sample.counter" || request.Operation != "sample.counter.increment")
+        if (request.ServiceId != "sample.counter")
+        {
+            peer.SendCultNet(new CultNetErrorMessage { Error = "Unsupported sample operation." });
+            return;
+        }
+        if (request.Operation == "sample.counter.ping")
+        {
+            var ping = MessagePackSerializer.Deserialize<PingRequest>(
+                Convert.FromBase64String(request.Payload),
+                CultNetSchemaMessageSerialization.Options);
+            SendOperationResponse(
+                peer,
+                request,
+                "sample.ping_receipt.v1",
+                new PingReceipt { Sequence = ping.Sequence });
+            return;
+        }
+        if (request.Operation != "sample.counter.increment")
         {
             peer.SendCultNet(new CultNetErrorMessage { Error = "Unsupported sample operation." });
             return;
@@ -110,7 +128,8 @@ static async Task RunProviderAsync(Args arguments)
             if (!current.Receipts.TryGetValue(request.MessageId, out var receipt))
             {
                 var input = MessagePackSerializer.Deserialize<IncrementRequest>(
-                    Convert.FromBase64String(request.Payload));
+                    Convert.FromBase64String(request.Payload),
+                    CultNetSchemaMessageSerialization.Options);
                 receipt = IncrementReceipt.Accepted(request.MessageId, current.Count + input.Amount);
                 var receipts = new Dictionary<string, IncrementReceipt>(current.Receipts, StringComparer.Ordinal)
                 {
@@ -124,16 +143,7 @@ static async Task RunProviderAsync(Args arguments)
                 });
                 await cache.FlushAsync();
             }
-            peer.SendCultNet(new CultNetOperationResponseMessage
-            {
-                MessageId = request.MessageId,
-                ServiceId = request.ServiceId,
-                Operation = request.Operation,
-                Status = "accepted",
-                PayloadSchema = "gamecult.eve.command_receipt.v1",
-                Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(receipt)),
-                SourceRuntimeId = "sample.counter-provider"
-            });
+            SendOperationResponse(peer, request, "gamecult.eve.command_receipt.v1", receipt);
         }
         finally
         {
@@ -229,8 +239,99 @@ static async Task RunHeadlessAsync(Args arguments)
             count = result.Value.Count,
             status = result.Status
         }));
+        Console.WriteLine("HEADLESS_NETWORK_BENCHMARK " + JsonSerializer.Serialize(
+            await MeasureOperationSessionAsync(mesh, arguments)));
     });
     await Task.WhenAll(completion.Task, commandTask).WaitAsync(TimeSpan.FromSeconds(45));
+}
+
+static void SendOperationResponse<T>(
+    ICultNetSchemaServerPeer peer,
+    CultNetOperationRequestMessage request,
+    string payloadSchema,
+    T payload)
+{
+    peer.SendCultNet(new CultNetOperationResponseMessage
+    {
+        MessageId = request.MessageId,
+        ServiceId = request.ServiceId,
+        Operation = request.Operation,
+        Status = "accepted",
+        PayloadSchema = payloadSchema,
+        Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
+            payload,
+            CultNetSchemaMessageSerialization.Options)),
+        SourceRuntimeId = "sample.counter-provider"
+    });
+}
+
+static async Task<object> MeasureOperationSessionAsync(CultMeshClient mesh, Args arguments)
+{
+    const int warmupOperations = 100;
+    if (arguments.BenchmarkOperations <= 0)
+        throw new ArgumentOutOfRangeException(nameof(arguments.BenchmarkOperations));
+    for (var index = 0; index < warmupOperations; index++)
+        await PingAsync(mesh, arguments, "warmup:" + index, index);
+
+    ForceCollection();
+    using var process = Process.GetCurrentProcess();
+    process.Refresh();
+    var managedHeapBefore = GC.GetTotalMemory(forceFullCollection: false);
+    var privateBytesBefore = process.PrivateMemorySize64;
+    var latencies = new double[arguments.BenchmarkOperations];
+    var clock = Stopwatch.StartNew();
+    for (var index = 0; index < arguments.BenchmarkOperations; index++)
+    {
+        var started = Stopwatch.GetTimestamp();
+        await PingAsync(mesh, arguments, "benchmark:" + index, index);
+        latencies[index] = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+    }
+    clock.Stop();
+    ForceCollection();
+    process.Refresh();
+    var managedHeapAfter = GC.GetTotalMemory(forceFullCollection: false);
+    var privateBytesAfter = process.PrivateMemorySize64;
+    Array.Sort(latencies);
+    var p99 = latencies[Math.Clamp((int)Math.Ceiling(latencies.Length * 0.99) - 1, 0, latencies.Length - 1)];
+    var managedHeapGrowth = managedHeapAfter - managedHeapBefore;
+    if (managedHeapGrowth > 8 * 1024 * 1024)
+        throw new InvalidOperationException($"Retained operation session grew the managed heap by {managedHeapGrowth} bytes.");
+    if (p99 > 250)
+        throw new InvalidOperationException($"Retained operation session p99 was {p99:F2} ms.");
+    return new
+    {
+        operations = arguments.BenchmarkOperations,
+        p99Milliseconds = p99,
+        operationsPerSecond = arguments.BenchmarkOperations / clock.Elapsed.TotalSeconds,
+        managedHeapBefore,
+        managedHeapAfter,
+        managedHeapGrowth,
+        privateBytesBefore,
+        privateBytesAfter,
+        privateBytesGrowth = privateBytesAfter - privateBytesBefore
+    };
+}
+
+static async Task PingAsync(CultMeshClient mesh, Args arguments, string idempotencyKey, int sequence)
+{
+    var result = await mesh.InvokeAsync<PingRequest, PingReceipt>(
+        arguments.VerseId,
+        "sample.counter",
+        "sample.counter.ping",
+        "sample.ping_request.v1",
+        "sample.ping_receipt.v1",
+        new PingRequest { Sequence = sequence },
+        sourceRuntimeId: "sample.csharp",
+        idempotencyKey: idempotencyKey);
+    if (result.Status != "accepted" || result.Value.Sequence != sequence)
+        throw new InvalidOperationException("The typed ping receipt did not match its request.");
+}
+
+static void ForceCollection()
+{
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    GC.Collect();
 }
 
 static EveSurfaceDocument CreateCounterSurface()
@@ -300,6 +401,7 @@ sealed class Args
     public string TransportVersion { get; private init; } = "cultmesh.v0";
     public string RulesHash { get; private init; } = "sample-counter-v1";
     public int ExpectedCount { get; private init; } = 2;
+    public int BenchmarkOperations { get; private init; } = 10_000;
 
     public static Args Parse(string[] values)
     {
@@ -322,7 +424,10 @@ sealed class Args
             RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1"),
             ExpectedCount = named.TryGetValue("--expected-count", out var expectedCount)
                 ? int.Parse(expectedCount)
-                : 2
+                : 2,
+            BenchmarkOperations = named.TryGetValue("--benchmark-operations", out var benchmarkOperations)
+                ? int.Parse(benchmarkOperations)
+                : 10_000
         };
     }
 }
@@ -369,4 +474,16 @@ public sealed class IncrementReceipt
         IdempotencyKey = id,
         Count = count
     };
+}
+
+[MessagePackObject]
+public sealed class PingRequest
+{
+    [Key("sequence")] public int Sequence { get; set; }
+}
+
+[MessagePackObject]
+public sealed class PingReceipt
+{
+    [Key("sequence")] public int Sequence { get; set; }
 }

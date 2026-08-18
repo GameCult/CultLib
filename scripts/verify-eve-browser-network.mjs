@@ -109,6 +109,10 @@ try {
   assert.equal(secondHeadlessUpdate.count, 2);
   assert.ok(secondHeadlessUpdate.receiptIds.includes(firstReceipt));
   assert.ok(secondHeadlessUpdate.receiptIds.includes(secondReceipt));
+  const networkBenchmark = JSON.parse(await headless.waitFor("HEADLESS_NETWORK_BENCHMARK ", 60_000));
+  assert.equal(networkBenchmark.operations, 10_000);
+  assert.ok(networkBenchmark.p99Milliseconds < 250);
+  assert.ok(networkBenchmark.managedHeapGrowth <= 8 * 1024 * 1024);
   const connectionStates = await page.evaluate(() => window.__sampleConnectionStates);
   assert.equal(connectionStates[0], "connected");
   assert.equal(connectionStates.at(-1), "connected");
@@ -126,6 +130,7 @@ try {
     count: 2,
     routeRotationCount: 1,
     retainedHeadlessLease: true,
+    networkBenchmark,
   }));
 } finally {
   if (browser) await browser.close().catch(() => undefined);

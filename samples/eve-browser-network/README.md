@@ -33,6 +33,11 @@ port, updates the local Odin fixture, and requires both retained clients to
 rediscover and resubscribe. The C# client invokes the second command through
 `CultMeshClient.InvokeAsync`; Chromium observes the resulting count and both
 clients observe both canonical receipt ids.
+The retained C# client then sends 10,000 typed no-op operations over the same
+real WebSocket session. The gate records p99 latency, throughput, managed heap,
+and private memory, and rejects more than 8 MiB of post-GC managed growth or a
+250 ms p99. The no-op provider handler stores no receipt history, so persistence
+growth cannot impersonate a client leak.
 The fixture speaks the production Verse-catalog contract; a deployment smoke
 against the full Odin daemon remains a separate infrastructure gate.
 

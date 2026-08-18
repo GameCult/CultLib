@@ -18,7 +18,9 @@ headless observer converge, and reopens the durable `.cc` store. Then it boots a
 durable C# provider, local Odin fixture, real Chromium lowerer, and independent
 C# client. Chromium invokes before provider replacement; C# invokes afterward.
 Both retained clients prove discovery by identity, canonical receipts, provider
-restart on another route, resubscription, and durable convergence.
+restart on another route, resubscription, and durable convergence. The retained
+C# session also completes 10,000 non-persistent typed operations under p99 and
+post-GC managed-memory gates.
 Set `CHROME_PATH` only when no installed Chrome, Chromium, Edge, or Playwright
 Chromium can be found automatically.
 
