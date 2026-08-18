@@ -1426,6 +1426,8 @@ namespace GameCult.Mesh
     public sealed class CultMeshReactiveDocument<TDocument> : IDisposable
         where TDocument : class
     {
+        private static readonly CultMeshComparableMember[] ComparableMembers =
+            GetComparableMembers(typeof(TDocument)).ToArray();
         private readonly CultMeshDocumentWriter<TDocument> _writer;
         private readonly CultMeshDocumentHandle<TDocument> _document;
         private readonly CultMeshReactiveDocumentOptions _options;
@@ -1604,30 +1606,33 @@ namespace GameCult.Mesh
                 if (_disposed)
                     return;
 
-                var nextCanonical = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
+                TDocument? replacement = null;
                 if (_dirty || _flushing)
                 {
-                    var predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
-                    var delta = CreateReconciliationDelta(predicted, nextCanonical);
+                    var delta = CreateReconciliationDelta(_current, canonical);
                     if (delta.Count == 0)
                     {
                         Reconciliation = null;
+                        if (!_options.ReplaceDirtyCurrentOnCanonicalSnapshot)
+                            return;
                     }
                     else
                     {
+                        var nextCanonical = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
+                        var predicted = CultMeshDocumentHandle<TDocument>.CloneDocument(_current);
+                        replacement = nextCanonical;
                         Reconciliation = new CultMeshReactiveDocumentReconciliation<TDocument>(
                             nextCanonical,
                             predicted,
                             delta,
                             ++_reconciliationVersion,
                             DateTimeOffset.UtcNow);
+                        if (!_options.ReplaceDirtyCurrentOnCanonicalSnapshot)
+                            return;
                     }
-
-                    if (!_options.ReplaceDirtyCurrentOnCanonicalSnapshot)
-                        return;
                 }
 
-                _current = nextCanonical;
+                _current = replacement ?? CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
                 Reconciliation = null;
             }
         }
@@ -1689,7 +1694,7 @@ namespace GameCult.Mesh
             TDocument canonical)
         {
             var delta = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var member in GetComparableMembers(typeof(TDocument)))
+            foreach (var member in ComparableMembers)
             {
                 var predictedValue = member.GetValue(predicted);
                 var canonicalValue = member.GetValue(canonical);

@@ -1566,11 +1566,13 @@ class CultMeshReactiveDocument:
         with self._lock:
             if self._disposed:
                 return
-            canonical = self._clone(change.value)
+            replacement = None
             if self._dirty or self._flushing:
-                predicted = self._clone(self._current)
-                delta = self._create_delta(predicted, canonical)
+                delta = self._create_delta(self._current, change.value)
                 if delta:
+                    canonical = self._clone(change.value)
+                    predicted = self._clone(self._current)
+                    replacement = canonical
                     self._reconciliation_version += 1
                     self.reconciliation = CultMeshReactiveDocumentReconciliation(
                         canonical=canonical,
@@ -1583,7 +1585,11 @@ class CultMeshReactiveDocument:
                     self.reconciliation = None
                 if not self._options.replace_dirty_current_on_canonical_snapshot:
                     return
-            self._current = canonical
+            self._current = (
+                replacement
+                if replacement is not None
+                else self._clone(change.value)
+            )
             self.reconciliation = None
 
     def _schedule_flush_locked(self) -> None:
