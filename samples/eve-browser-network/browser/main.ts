@@ -32,6 +32,7 @@ try {
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
     runtimeId: "sample.chromium",
+    trust: { mode: "local-development" },
     rendezvous: new CultMeshBrowserOdinRendezvous({
       endpoints: [odinEndpoint],
       runtimeId: "sample.chromium.discovery",

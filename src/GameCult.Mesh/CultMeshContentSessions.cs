@@ -136,7 +136,9 @@ namespace GameCult.Mesh
                     "cultmesh-content-client",
                     target,
                     CultMeshProtocols.Content,
-                    candidate.Generation,
+                    candidate,
+                    null,
+                    _options.Clock.UtcNow,
                     _options.ResponseTimeout,
                     cancellationToken).ConfigureAwait(false);
                 return new LegacyRudpContentTransport(

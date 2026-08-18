@@ -64,13 +64,20 @@ operation.
 transport diagnostics. None of these grant provider authority or become content
 identity.
 
-Before a schema, content, or realtime session becomes online, the transport
-must prove that the connected peer matches the selected Verse, authority
-runtime, protocol, and route generation. TCP schema and content lanes use the
-portable CultNet session-open handshake. QUIC uses the exact Odin-bound route
-plus its TLS endpoint/certificate proof. A connector that returns bytes without
-authority proof is rejected; racing every endpoint in a Verse descriptor is
-not route selection.
+Before a schema, content, or realtime session becomes online, consumer-owned
+trust verifies an Odin-signed route certificate binding Verse, authority
+runtime, protocol set, endpoint, generation, validity interval, and provider
+P-256 key. Schema and content lanes then require a fresh client nonce signed by
+that provider key. QUIC uses the signed endpoint plus its TLS
+endpoint/certificate proof. A connector that returns bytes without this chain
+is rejected; racing every endpoint in a Verse descriptor is not route
+selection. Unsigned traffic exists only under an explicitly selected
+`LocalDevelopment` policy and only for in-process or loopback routes.
+
+Route and session signatures use ECDSA P-256 with SHA-256 and fixed-width IEEE
+P1363 `r || s` encoding, matching browser WebCrypto. Their canonical
+transcripts are ordered UTF-8 fields prefixed by four-byte big-endian lengths;
+serializer bytes are never signature authority.
 
 **Forbidden writers:** applications and renderers do not choose unadvertised
 endpoints, implement reconnect loops, or bypass verification. Schema messages
@@ -94,7 +101,8 @@ new seam does not pretend that migration has already occurred.
 ## Security and release gate
 
 The current TCP control and content connectors are plaintext and therefore
-restricted to local or otherwise trusted deployment. Adding TLS must not move
+restricted to explicit loopback development. They cannot carry an authenticated
+remote session. Adding TLS must not move
 discovery, authorization, content verification, or application semantics into
 the TCP adapter.
 

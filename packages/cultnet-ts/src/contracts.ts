@@ -62,8 +62,8 @@ export type CultNetSchemaVersion =
   | "cultnet.operation_response.v0"
   | "cultmesh.verse_catalog_request.v0"
   | "cultmesh.verse_catalog_response.v0"
-  | "cultmesh.session_open.v1"
-  | "cultmesh.session_accepted.v1";
+  | "cultmesh.session_open.v2"
+  | "cultmesh.session_accepted.v2";
 
 export type CultNetSchemaKind = "wire_message" | "document_payload" | "shared_contract";
 export type CultNetRawPayloadEncoding = "messagepack";
@@ -365,26 +365,41 @@ export interface CultMeshAuthorityRouteMessage {
   protocolIds: string[];
   priority: number;
   generation: string;
+  certificate?: CultMeshRouteCertificateMessage;
+}
+
+export interface CultMeshRouteCertificateMessage {
+  providerKeyId: string;
+  providerPublicKeyX: string;
+  providerPublicKeyY: string;
+  odinKeyId: string;
+  issuedAtUnixMilliseconds: number;
+  expiresAtUnixMilliseconds: number;
+  signature: string;
 }
 
 export interface CultMeshSessionOpenMessage {
-  schemaVersion: "cultmesh.session_open.v1";
+  schemaVersion: "cultmesh.session_open.v2";
   messageId: string;
   sourceRuntimeId: string;
   verseId: string;
   authorityRuntimeId: string;
   protocolId: string;
   routeGeneration: string;
+  clientNonce: string;
 }
 
 export interface CultMeshSessionAcceptedMessage {
-  schemaVersion: "cultmesh.session_accepted.v1";
+  schemaVersion: "cultmesh.session_accepted.v2";
   messageId: string;
   accepted: boolean;
   verseId: string;
   authorityRuntimeId: string;
   protocolId: string;
   routeGeneration: string;
+  clientNonce: string;
+  providerKeyId: string;
+  providerSignature: string;
   error?: string;
 }
 
@@ -1236,7 +1251,7 @@ function normalizeCultNetOptionalNulls(
         }
       }
       return;
-    case "cultmesh.session_accepted.v1":
+    case "cultmesh.session_accepted.v2":
       stripNullProperties(candidate, ["error"]);
       return;
     case "cultnet.schema_catalog_request.v0":

@@ -17,6 +17,7 @@ namespace GameCult.Mesh
         public string VerseId { get; set; } = string.Empty;
         public string AuthorityRuntimeId { get; set; } = string.Empty;
         public string RouteGeneration { get; set; } = string.Empty;
+        public CultMeshSessionProofSigner? ProofSigner { get; set; }
 
         internal void Validate()
         {
@@ -344,7 +345,10 @@ namespace GameCult.Mesh
             var requestBytes = await CultMeshTcpContentWire.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
             var request = CultNetSchemaMessageSerialization.Deserialize(requestBytes) as CultMeshSessionOpenMessage
                 ?? throw new InvalidDataException("TCP content session did not begin with an authority handshake.");
-            var accepted = string.Equals(request.VerseId, _options.VerseId, StringComparison.Ordinal) &&
+            var accepted = !string.IsNullOrWhiteSpace(request.MessageId) &&
+                !string.IsNullOrWhiteSpace(request.SourceRuntimeId) &&
+                IsNonce(request.ClientNonce) &&
+                string.Equals(request.VerseId, _options.VerseId, StringComparison.Ordinal) &&
                 string.Equals(request.AuthorityRuntimeId, _options.AuthorityRuntimeId, StringComparison.Ordinal) &&
                 string.Equals(request.ProtocolId, CultMeshProtocols.Content.Value, StringComparison.Ordinal) &&
                 string.Equals(request.RouteGeneration, _options.RouteGeneration, StringComparison.Ordinal);
@@ -356,6 +360,11 @@ namespace GameCult.Mesh
                 AuthorityRuntimeId = _options.AuthorityRuntimeId,
                 ProtocolId = CultMeshProtocols.Content.Value,
                 RouteGeneration = _options.RouteGeneration,
+                ClientNonce = request.ClientNonce ?? string.Empty,
+                ProviderKeyId = accepted ? _options.ProofSigner?.ProviderKeyId ?? string.Empty : string.Empty,
+                ProviderSignature = accepted && _options.ProofSigner != null
+                    ? _options.ProofSigner.Sign(request)
+                    : string.Empty,
                 Error = accepted ? null : "Content session target does not match this authority route."
             };
             await CultMeshTcpContentWire.WriteFrameAsync(
@@ -363,6 +372,13 @@ namespace GameCult.Mesh
                 CultNetSchemaMessageSerialization.Serialize(response),
                 cancellationToken).ConfigureAwait(false);
             return accepted;
+        }
+
+        private static bool IsNonce(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            try { return Convert.FromBase64String(value).Length == 32; }
+            catch (FormatException) { return false; }
         }
 
         private async Task SendChunkAsync(
@@ -473,7 +489,8 @@ namespace GameCult.Mesh
                 VerseId = target.VerseId,
                 AuthorityRuntimeId = target.AuthorityRuntimeId,
                 ProtocolId = CultMeshProtocols.Content.Value,
-                RouteGeneration = candidate.Generation
+                RouteGeneration = candidate.Generation,
+                ClientNonce = CreateNonce()
             };
             await WriteFrameAsync(stream, CultNetSchemaMessageSerialization.Serialize(request), cancellationToken)
                 .ConfigureAwait(false);
@@ -485,11 +502,20 @@ namespace GameCult.Mesh
                 !string.Equals(response.VerseId, target.VerseId, StringComparison.Ordinal) ||
                 !string.Equals(response.AuthorityRuntimeId, target.AuthorityRuntimeId, StringComparison.Ordinal) ||
                 !string.Equals(response.ProtocolId, CultMeshProtocols.Content.Value, StringComparison.Ordinal) ||
-                !string.Equals(response.RouteGeneration, candidate.Generation, StringComparison.Ordinal))
+                !string.Equals(response.RouteGeneration, candidate.Generation, StringComparison.Ordinal) ||
+                candidate.VerifiedAuthority == null ||
+                !CultMeshAuthorityProof.VerifySession(request, response, candidate.VerifiedAuthority))
                 throw new CultMeshSessionException(new CultMeshSessionFailure(
                     CultMeshSessionFailureReason.Authority,
                     response.Error ?? "TCP content endpoint did not prove the selected authority route.",
                     candidate.Endpoint));
+        }
+
+        private static string CreateNonce()
+        {
+            var nonce = new byte[32];
+            using (var random = System.Security.Cryptography.RandomNumberGenerator.Create()) random.GetBytes(nonce);
+            return Convert.ToBase64String(nonce);
         }
 
         public static async Task<byte[]> ReadFrameAsync(Stream stream, CancellationToken cancellationToken)

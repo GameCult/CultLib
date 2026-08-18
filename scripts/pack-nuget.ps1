@@ -34,7 +34,7 @@ foreach ($project in $projects) {
     "--nologo", "--verbosity", "quiet", "-p:NoWarn=1591%3BCS8632"
   )
   if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
-    $packArguments += "-p:Version=$PackageVersion"
+    $packArguments += "-p:CultLibPackageVersion=$PackageVersion"
   }
   & dotnet @packArguments
   if ($LASTEXITCODE -ne 0) {

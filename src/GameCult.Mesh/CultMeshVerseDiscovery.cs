@@ -39,7 +39,17 @@ namespace GameCult.Mesh
                     Endpoint = route.Endpoint,
                     ProtocolIds = route.ProtocolIds.ToArray(),
                     Priority = route.Priority,
-                    Generation = route.Generation
+                    Generation = route.Generation,
+                    Certificate = route.Certificate == null ? null : new CultMeshRouteCertificateMessage
+                    {
+                        ProviderKeyId = route.Certificate.ProviderKey.KeyId,
+                        ProviderPublicKeyX = route.Certificate.ProviderKey.X,
+                        ProviderPublicKeyY = route.Certificate.ProviderKey.Y,
+                        OdinKeyId = route.Certificate.OdinKeyId,
+                        IssuedAtUnixMilliseconds = route.Certificate.IssuedAtUnixMilliseconds,
+                        ExpiresAtUnixMilliseconds = route.Certificate.ExpiresAtUnixMilliseconds,
+                        Signature = route.Certificate.Signature
+                    }
                 }).ToArray(),
                 ParentVerseId = verse.ParentVerseId,
                 Description = verse.Description
@@ -63,7 +73,16 @@ namespace GameCult.Mesh
                 route.Endpoint,
                 route.ProtocolIds,
                 route.Priority,
-                route.Generation)).ToArray();
+                route.Generation,
+                route.Certificate == null ? null : new CultMeshRouteCertificate(
+                    new CultMeshEcdsaP256PublicKey(
+                        route.Certificate.ProviderKeyId,
+                        route.Certificate.ProviderPublicKeyX,
+                        route.Certificate.ProviderPublicKeyY),
+                    route.Certificate.OdinKeyId,
+                    route.Certificate.IssuedAtUnixMilliseconds,
+                    route.Certificate.ExpiresAtUnixMilliseconds,
+                    route.Certificate.Signature))).ToArray();
             return new CultMeshVerseDescriptor(
                 message.VerseId,
                 message.DisplayName,

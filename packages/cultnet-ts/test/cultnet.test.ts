@@ -97,15 +97,18 @@ test("CultNet validates the canonical CultMesh Verse catalog messages", () => {
   assert.equal(response.verses[0].authorityRoutes![0].generation, "provider-route-1");
 
   const session = parseCultNetMessage({
-    schemaVersion: "cultmesh.session_accepted.v1",
+    schemaVersion: "cultmesh.session_accepted.v2",
     messageId: "session-1",
     accepted: true,
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-provider",
     protocolId: "cultmesh.documents.v1",
     routeGeneration: "provider-route-1",
+    clientNonce: "bm9uY2U=",
+    providerKeyId: "provider-key-1",
+    providerSignature: "c2lnbmF0dXJl",
   });
-  assert.equal(session.schemaVersion, "cultmesh.session_accepted.v1");
+  assert.equal(session.schemaVersion, "cultmesh.session_accepted.v2");
 
   assert.throws(() => parseCultNetMessage({
     ...response,

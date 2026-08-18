@@ -40,6 +40,7 @@ public sealed class CultMeshClientTests
                     return new RendezvousClient();
                 }
             },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -48,7 +49,7 @@ public sealed class CultMeshClientTests
 
         first.Should().BeSameAs(second);
         first.Target.Should().Be(Target);
-        first.State.Path!.Endpoint.Should().Be("rudp://aetheria:3081");
+        first.State.Path!.Endpoint.Should().Be("rudp://127.0.0.1:3081");
         discoveryClients.Should().Be(1);
         connector.ConnectCount.Should().Be(1);
     }
@@ -61,6 +62,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -82,6 +84,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -103,6 +106,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
@@ -125,6 +129,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -148,6 +153,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             SubscriptionResponseTimeout = TimeSpan.FromMilliseconds(20)
         });
@@ -168,6 +174,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -187,6 +194,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -211,6 +219,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -237,6 +246,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -262,6 +272,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         var request = new ClientTestDocument { Id = "command:1", Text = "move" };
@@ -288,6 +299,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -319,6 +331,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             OperationResponseTimeout = TimeSpan.FromSeconds(2)
         });
@@ -348,6 +361,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             OperationResponseTimeout = TimeSpan.FromSeconds(5)
         });
@@ -378,6 +392,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -403,6 +418,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         var opening = mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
@@ -432,7 +448,7 @@ public sealed class CultMeshClientTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
-                        new[] { "rudp://aetheria:3081" },
+                        new[] { "rudp://127.0.0.1:3081" },
                         new[] { "aetheria-daemon" }).ToMessage()
                 }
             };

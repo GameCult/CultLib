@@ -102,7 +102,8 @@ namespace GameCult.Mesh
             string endpoint,
             IEnumerable<string>? protocolIds = null,
             int priority = 0,
-            string? generation = null)
+            string? generation = null,
+            CultMeshRouteCertificate? certificate = null)
         {
             AuthorityRuntimeId = RequireNonEmpty(authorityRuntimeId, nameof(authorityRuntimeId));
             Endpoint = RequireNonEmpty(endpoint, nameof(endpoint));
@@ -112,6 +113,7 @@ namespace GameCult.Mesh
             Generation = string.IsNullOrWhiteSpace(generation)
                 ? AuthorityRuntimeId + "@" + Endpoint
                 : generation!.Trim();
+            Certificate = certificate;
         }
 
         public string AuthorityRuntimeId { get; }
@@ -119,6 +121,8 @@ namespace GameCult.Mesh
         public IReadOnlyList<string> ProtocolIds { get; }
         public int Priority { get; }
         public string Generation { get; }
+        /// <summary>Gets the optional Odin-signed binding from this route to its provider key.</summary>
+        public CultMeshRouteCertificate? Certificate { get; }
 
         public bool Supports(CultMeshProtocolId protocol) =>
             protocol != null &&

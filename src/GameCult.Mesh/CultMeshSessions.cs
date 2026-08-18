@@ -86,19 +86,28 @@ namespace GameCult.Mesh
             CultMeshTransportPathKind pathKind = CultMeshTransportPathKind.Direct,
             int priority = 0,
             string authorityRuntimeId = "",
-            string generation = "")
+            string generation = "",
+            CultMeshAuthorityRoute? authorityRoute = null)
         {
             Endpoint = string.IsNullOrWhiteSpace(endpoint) ? throw new ArgumentException("Physical endpoint is required.", nameof(endpoint)) : endpoint;
             PathKind = pathKind;
             Priority = priority;
             AuthorityRuntimeId = authorityRuntimeId?.Trim() ?? string.Empty;
             Generation = generation?.Trim() ?? string.Empty;
+            AuthorityRoute = authorityRoute;
         }
         public string Endpoint { get; }
         public CultMeshTransportPathKind PathKind { get; }
         public int Priority { get; }
         public string AuthorityRuntimeId { get; }
         public string Generation { get; }
+        public CultMeshAuthorityRoute? AuthorityRoute { get; }
+        internal CultMeshVerifiedAuthorityRoute? VerifiedAuthority { get; private set; }
+        internal CultMeshTransportCandidate WithVerifiedAuthority(CultMeshVerifiedAuthorityRoute verified)
+        {
+            VerifiedAuthority = verified ?? throw new ArgumentNullException(nameof(verified));
+            return this;
+        }
     }
 
     public enum CultMeshSessionStatus { Connecting, Online, Degraded, Reconnecting, Offline }
@@ -534,6 +543,9 @@ namespace GameCult.Mesh
         public int MaxRacedCandidates { get; set; } = 2;
         public string RuntimeId { get; set; } = "cultmesh-client";
         public TimeSpan IdentityHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        /// <summary>Gets or sets the consumer-owned trust roots and explicit local-development policy.</summary>
+        public CultMeshAuthorityTrustPolicy Trust { get; set; } = new(
+            CultMeshAuthorityTrustMode.AuthenticatedRemote);
     }
 
     public sealed class CultMeshSessionManager : IDisposable
@@ -1039,7 +1051,9 @@ namespace GameCult.Mesh
                     _options.RuntimeId,
                     target,
                     protocol,
-                    route.Candidate.Generation,
+                    route.Candidate,
+                    _options.Trust,
+                    _options.Clock.UtcNow,
                     _options.IdentityHandshakeTimeout).ConfigureAwait(false);
                 return new ConnectedPath(route.Candidate, client);
             }
@@ -1065,7 +1079,7 @@ namespace GameCult.Mesh
         private CultMeshSessionException Failure(CultMeshSessionFailureReason reason, string message, Exception? inner = null) =>
             new CultMeshSessionException(new CultMeshSessionFailure(reason, message), inner);
 
-        private static CultMeshTransportCandidate[] BoundCandidates(
+        private CultMeshTransportCandidate[] BoundCandidates(
             CultMeshDiscoveryState discovery,
             CultMeshSessionTarget target,
             CultMeshProtocolId protocol)
@@ -1080,10 +1094,15 @@ namespace GameCult.Mesh
                 .GroupBy(route => route.Endpoint, StringComparer.Ordinal)
                 .Select(group => group.OrderBy(route => route.Priority).First())
                 .Select(route => new CultMeshTransportCandidate(
-                    route.Endpoint,
-                    priority: route.Priority,
-                    authorityRuntimeId: route.AuthorityRuntimeId,
-                    generation: route.Generation))
+                        route.Endpoint,
+                        priority: route.Priority,
+                        authorityRuntimeId: route.AuthorityRuntimeId,
+                        generation: route.Generation,
+                        authorityRoute: route)
+                    .WithVerifiedAuthority(_options.Trust.Verify(
+                        target.VerseId,
+                        route,
+                        _options.Clock.UtcNow)))
                 .OrderBy(candidate => candidate.Priority)
                 .ThenBy(candidate => candidate.Endpoint, StringComparer.Ordinal)
                 .ToArray();

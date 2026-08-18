@@ -198,6 +198,10 @@ static async Task RunHeadlessAsync(Args arguments)
             CreateClient = CreateClient,
             TransportVersion = arguments.TransportVersion
         },
+        Sessions = new CultMeshSessionManagerOptions
+        {
+            Trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.LocalDevelopment)
+        },
         Connectors =
         [
             new CultMeshUriSchemaTransportConnector(

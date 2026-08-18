@@ -44,7 +44,7 @@ public sealed class CultMeshTransportModularityTests
             {
                 legacy,
                 new CultMeshTcpSchemaTransportConnector()
-            });
+            }, CultMeshTestTrust.LocalSessions);
 
         var session = await sessions.ConnectAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"),
@@ -91,7 +91,7 @@ public sealed class CultMeshTransportModularityTests
             {
                 legacy,
                 new CultMeshTcpContentTransportConnector()
-            });
+            }, CultMeshTestTrust.LocalSessions);
 
         var session = await sessions.ConnectContentAsync(new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         using var destination = new MemoryStream();
@@ -111,7 +111,7 @@ public sealed class CultMeshTransportModularityTests
         });
         using var sessions = new CultMeshSessionManager(
             discovery,
-            Array.Empty<ICultMeshTransportConnector>());
+            Array.Empty<ICultMeshTransportConnector>(), CultMeshTestTrust.LocalSessions);
 
         Func<Task> connect = async () => await sessions.ConnectContentAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
@@ -132,7 +132,7 @@ public sealed class CultMeshTransportModularityTests
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
             Array.Empty<ICultMeshContentTransportConnector>(),
-            new ICultMeshRealtimeTransportConnector[] { connector });
+            new ICultMeshRealtimeTransportConnector[] { connector }, CultMeshTestTrust.LocalSessions);
         var session = await sessions.ConnectRealtimeAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         var sent = new CultMeshRealtimeFrame
@@ -163,7 +163,7 @@ public sealed class CultMeshTransportModularityTests
         });
         using var sessions = new CultMeshSessionManager(
             discovery,
-            Array.Empty<ICultMeshTransportConnector>());
+            Array.Empty<ICultMeshTransportConnector>(), CultMeshTestTrust.LocalSessions);
 
         Func<Task> connect = async () => await sessions.ConnectRealtimeAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
@@ -183,7 +183,7 @@ public sealed class CultMeshTransportModularityTests
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
             Array.Empty<ICultMeshContentTransportConnector>(),
-            new ICultMeshRealtimeTransportConnector[] { new UnverifiedRealtimeConnector() });
+            new ICultMeshRealtimeTransportConnector[] { new UnverifiedRealtimeConnector() }, CultMeshTestTrust.LocalSessions);
 
         Func<Task> connect = async () => await sessions.ConnectRealtimeAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"));

@@ -136,9 +136,9 @@ namespace GameCult.Networking
         /// </summary>
         public const string VerseCatalogResponse = "cultmesh.verse_catalog_response.v0";
         /// <summary>CultMesh session identity request contract identifier.</summary>
-        public const string SessionOpen = "cultmesh.session_open.v1";
+        public const string SessionOpen = "cultmesh.session_open.v2";
         /// <summary>CultMesh verified session identity response contract identifier.</summary>
-        public const string SessionAccepted = "cultmesh.session_accepted.v1";
+        public const string SessionAccepted = "cultmesh.session_accepted.v2";
         /// <summary>
         /// CultMesh peer exchange request contract identifier.
         /// </summary>
@@ -1194,6 +1194,7 @@ namespace GameCult.Networking
         [Key("authorityRuntimeId")] public string AuthorityRuntimeId { get; set; } = string.Empty;
         [Key("protocolId")] public string ProtocolId { get; set; } = string.Empty;
         [Key("routeGeneration")] public string RouteGeneration { get; set; } = string.Empty;
+        [Key("clientNonce")] public string ClientNonce { get; set; } = string.Empty;
     }
 
     /// <summary>Accepts or rejects a CultMesh session with the server's actual identity.</summary>
@@ -1207,6 +1208,9 @@ namespace GameCult.Networking
         [Key("authorityRuntimeId")] public string AuthorityRuntimeId { get; set; } = string.Empty;
         [Key("protocolId")] public string ProtocolId { get; set; } = string.Empty;
         [Key("routeGeneration")] public string RouteGeneration { get; set; } = string.Empty;
+        [Key("clientNonce")] public string ClientNonce { get; set; } = string.Empty;
+        [Key("providerKeyId")] public string ProviderKeyId { get; set; } = string.Empty;
+        [Key("providerSignature")] public string ProviderSignature { get; set; } = string.Empty;
         [Key("error")] public string? Error { get; set; }
     }
 
@@ -1308,6 +1312,19 @@ namespace GameCult.Networking
         [Key("protocolIds")] public string[] ProtocolIds { get; set; } = Array.Empty<string>();
         [Key("priority")] public int Priority { get; set; }
         [Key("generation")] public string Generation { get; set; } = string.Empty;
+        [Key("certificate")] public CultMeshRouteCertificateMessage? Certificate { get; set; }
+    }
+
+    [MessagePackObject]
+    public class CultMeshRouteCertificateMessage
+    {
+        [Key("providerKeyId")] public string ProviderKeyId { get; set; } = string.Empty;
+        [Key("providerPublicKeyX")] public string ProviderPublicKeyX { get; set; } = string.Empty;
+        [Key("providerPublicKeyY")] public string ProviderPublicKeyY { get; set; } = string.Empty;
+        [Key("odinKeyId")] public string OdinKeyId { get; set; } = string.Empty;
+        [Key("issuedAtUnixMilliseconds")] public long IssuedAtUnixMilliseconds { get; set; }
+        [Key("expiresAtUnixMilliseconds")] public long ExpiresAtUnixMilliseconds { get; set; }
+        [Key("signature")] public string Signature { get; set; } = string.Empty;
     }
 
     /// <summary>

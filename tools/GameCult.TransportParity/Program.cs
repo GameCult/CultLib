@@ -201,7 +201,8 @@ static async Task<StateResult> MeasureCultMeshQuicStateAsync(int payloadBytes, i
         [new CultMeshQuicRealtimeTransportConnector(new CultMeshQuicRealtimeConnectorOptions
         {
             ValidateProviderCertificate = (_, _, _, _) => true
-        })]);
+        })],
+        LocalDevelopmentSessions());
     var session = await sessions.ConnectRealtimeAsync(
         new CultMeshSessionTarget("parity", "service:parity.provider"));
     var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -363,7 +364,8 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
         discovery,
         Array.Empty<ICultMeshTransportConnector>(),
         [new CultMeshLegacyRudpContentTransportConnector(
-            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromMinutes(2) })]);
+            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromMinutes(2) })],
+        LocalDevelopmentSessions());
     var provider = new CultMeshSessionContentProvider(
         "parity.provider", sessions, new CultMeshSessionTarget("parity", "service:parity.provider"));
     var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
@@ -411,7 +413,8 @@ static async Task<Result> MeasureCultMeshTcpAsync(byte[] payload)
     using var sessions = new CultMeshSessionManager(
         discovery,
         Array.Empty<ICultMeshTransportConnector>(),
-        [new CultMeshTcpContentTransportConnector()]);
+        [new CultMeshTcpContentTransportConnector()],
+        LocalDevelopmentSessions());
     var provider = new CultMeshSessionContentProvider(
         "parity.provider", sessions, new CultMeshSessionTarget("parity", "service:parity.provider"));
     var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
@@ -455,6 +458,11 @@ static X509Certificate2 CreateCertificate()
 
 static string TempPath(string plane) =>
     Path.Combine(Path.GetTempPath(), $"cultmesh-parity-{plane}-{Guid.NewGuid():N}.body");
+
+static CultMeshSessionManagerOptions LocalDevelopmentSessions() => new()
+{
+    Trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.LocalDevelopment)
+};
 
 static Socket BindUdpSocket()
 {

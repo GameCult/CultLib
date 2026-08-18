@@ -27,7 +27,22 @@
         "endpoint": { "type": "string", "minLength": 1 },
         "protocolIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "priority": { "type": "integer", "minimum": 0 },
-        "generation": { "type": "string", "minLength": 1 }
+        "generation": { "type": "string", "minLength": 1 },
+        "certificate": { "$ref": "#/$defs/routeCertificate" }
+      }
+    },
+    "routeCertificate": {
+      "type": "object",
+      "required": ["providerKeyId", "providerPublicKeyX", "providerPublicKeyY", "odinKeyId", "issuedAtUnixMilliseconds", "expiresAtUnixMilliseconds", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "providerKeyId": { "type": "string", "minLength": 1 },
+        "providerPublicKeyX": { "type": "string", "minLength": 1 },
+        "providerPublicKeyY": { "type": "string", "minLength": 1 },
+        "odinKeyId": { "type": "string", "minLength": 1 },
+        "issuedAtUnixMilliseconds": { "type": "integer", "minimum": 0 },
+        "expiresAtUnixMilliseconds": { "type": "integer", "minimum": 1 },
+        "signature": { "type": "string", "minLength": 1 }
       }
     },
     "verse": {

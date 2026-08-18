@@ -9,9 +9,10 @@ selection owner then resolves the provider runtime from Odin's descriptor before
 opening the session. Discovery owns the current physical routes, and the session
 manager owns connection reuse, path rotation, and transport failure state.
 Each Odin route binds that authority runtime to one endpoint, protocol set, and
-generation. The client verifies the same tuple with the connected peer before
-the session becomes online; runtime membership and endpoint reachability are
-not independent routing evidence.
+generation. For a remote Verse, Odin signs that exact tuple and the provider's
+P-256 public key. The client pins an Odin root from its own configuration, then
+requires the connected provider to sign a fresh client nonce. A route cannot
+become usable by merely repeating the expected Verse and runtime strings.
 
 ```csharp
 using GameCult.Mesh;
@@ -22,9 +23,22 @@ const string verseId = "sample.counter";
 var target = new CultMeshSessionTarget(verseId, "sample.counter-daemon");
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 var cancellationToken = timeout.Token;
+var odinRoot = new CultMeshEcdsaP256PublicKey(
+    Environment.GetEnvironmentVariable("ODIN_ROOT_KEY_ID")
+        ?? throw new InvalidOperationException("Set ODIN_ROOT_KEY_ID."),
+    Environment.GetEnvironmentVariable("ODIN_ROOT_P256_X")
+        ?? throw new InvalidOperationException("Set ODIN_ROOT_P256_X."),
+    Environment.GetEnvironmentVariable("ODIN_ROOT_P256_Y")
+        ?? throw new InvalidOperationException("Set ODIN_ROOT_P256_Y."));
 using var mesh = new CultMeshClient(new CultMeshClientOptions
 {
-    RendezvousEndpoints = new[] { odinEndpoint }
+    RendezvousEndpoints = new[] { odinEndpoint },
+    Sessions = new CultMeshSessionManagerOptions
+    {
+        Trust = new CultMeshAuthorityTrustPolicy(
+            CultMeshAuthorityTrustMode.AuthenticatedRemote,
+            new[] { odinRoot })
+    }
 });
 
 using var counterLease = await mesh.LeaseDocumentAsync<CounterState>(
@@ -64,6 +78,21 @@ using var stateWatch = session.WatchState().Subscribe(state =>
 Application code does not reconnect, sleep, rank endpoints, or replace the
 session. Those decisions belong to CultMesh.
 
+For a deliberately local, moddable Verse, select the exception explicitly and
+use only in-process or loopback routes:
+
+```csharp
+Sessions = new CultMeshSessionManagerOptions
+{
+    Trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.LocalDevelopment)
+}
+```
+
+`LocalDevelopment` never accepts an unsigned non-loopback route. Verse names,
+provider names, and Odin wire fields cannot turn this exception on. Remote
+routes require a trusted Odin signature, provider nonce proof, certificate
+validity, and a protected channel.
+
 Fast session-management check (this uses controlled transports; it is not the
 network proof):
 
@@ -71,7 +100,7 @@ network proof):
 dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj --filter FullyQualifiedName~CultMeshSessionManagerTests
 ```
 
-The real checkpoint in chapter 4 additionally advertises a better-priority
+The local checkpoint in chapter 4 additionally advertises a better-priority
 endpoint for the wrong authority runtime. Both the C# and browser clients must
 ignore it, verify the intended peer, survive route replacement, and reject
 wrong-source operation responses.

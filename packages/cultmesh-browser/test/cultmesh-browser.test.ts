@@ -19,8 +19,11 @@ import {
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
   type CultMeshBrowserRoute,
+  type CultMeshBrowserP256PublicKey,
   type CultMeshBrowserSocket,
 } from "../src/index.js";
+
+const localTrust = { mode: "local-development" as const };
 
 test("Odin rendezvous resolves stable authority-runtime identity and observes route rotation", async () => {
   const odin = new FakeOdin("ws://127.0.0.1:4050/mesh");
@@ -98,6 +101,7 @@ test("browser client leases provider state, invokes an operation, and follows ro
     verseId: route.verseId,
     authorityRuntimeId: route.authorityRuntimeId,
     runtimeId: "browser-test",
+    trust: localTrust,
     rendezvous: { resolve: async () => route },
     createId: () => `id-${++id}`,
     socketFactory: endpoint => endpoint === first.route.endpoint ? first.open() : second.open(),
@@ -144,6 +148,7 @@ test("browser client rejects wrong rendezvous identity and has no document write
       verseId: "sample.counter",
       authorityRuntimeId: "sample.counter-daemon",
       runtimeId: "browser-test",
+      trust: localTrust,
       rendezvous: {
         resolve: async () => ({
           ...provider.route,
@@ -165,11 +170,62 @@ test("browser client rejects a route whose peer proves the wrong authority", asy
       verseId: "sample.counter",
       authorityRuntimeId: "sample.counter-daemon",
       runtimeId: "browser-peer-proof-test",
+      trust: localTrust,
       rendezvous: { resolve: async () => ({ ...provider.route, authorityRuntimeId: "sample.counter-daemon" }) },
       socketFactory: () => provider.open(),
     }),
     /proved .*intruder-runtime.*expected .*sample.counter-daemon/,
   );
+});
+
+test("browser client accepts an Odin-certified route only after provider nonce proof", async () => {
+  const fixture = await createSignedRoute("wss://provider.example/mesh");
+  const client = await CultMeshBrowserClient.connect({
+    ...fixture.route,
+    runtimeId: "browser-authenticated-test",
+    rendezvous: { resolve: async () => fixture.route },
+    trust: { mode: "authenticated-remote", odinRoots: [fixture.odinPublic] },
+    socketFactory: () => signedHandshakeSocket(fixture.route, fixture.providerPrivate),
+  });
+
+  assert.equal(client.state, "connected");
+  await client.dispose();
+});
+
+test("browser client rejects a credential-free authority impersonator", async () => {
+  const fixture = await createSignedRoute("wss://provider.example/mesh");
+  const impersonator = new FakeProvider("wss://provider.example/mesh", 1);
+
+  await assert.rejects(
+    CultMeshBrowserClient.connect({
+      ...fixture.route,
+      runtimeId: "browser-impersonation-test",
+      rendezvous: { resolve: async () => fixture.route },
+      trust: { mode: "authenticated-remote", odinRoots: [fixture.odinPublic] },
+      socketFactory: () => impersonator.open(),
+    }),
+    /did not prove possession/,
+  );
+});
+
+test("browser client rejects a mutated or expired signed route before opening a provider socket", async () => {
+  const fixture = await createSignedRoute("wss://provider.example/mesh");
+  let opened = false;
+  const connect = (route: CultMeshBrowserRoute, now?: () => number) => CultMeshBrowserClient.connect({
+    ...route,
+    runtimeId: "browser-route-certificate-test",
+    rendezvous: { resolve: async () => route },
+    trust: { mode: "authenticated-remote", odinRoots: [fixture.odinPublic], now },
+    socketFactory: () => {
+      opened = true;
+      return signedHandshakeSocket(route, fixture.providerPrivate);
+    },
+  });
+
+  await assert.rejects(connect({ ...fixture.route, endpoint: "wss://evil.example/mesh" }), /signature is invalid/);
+  assert.equal(opened, false);
+  await assert.rejects(connect(fixture.route, () => fixture.expiresAt), /not currently valid/);
+  assert.equal(opened, false);
 });
 
 test("browser client bounds unanswered provider operations", async () => {
@@ -182,6 +238,7 @@ test("browser client bounds unanswered provider operations", async () => {
   const client = await CultMeshBrowserClient.connect({
     ...route,
     runtimeId: "browser-timeout-test",
+    trust: localTrust,
     rendezvous: { resolve: async () => route },
     requestTimeoutMs: 5,
     socketFactory: () => handshakeOnlySocket(route),
@@ -204,6 +261,7 @@ test("browser client rejects a correlated framework failure without waiting for 
   const client = await CultMeshBrowserClient.connect({
     ...provider.route,
     runtimeId: "browser-failure-test",
+    trust: localTrust,
     rendezvous: { resolve: async () => provider.route },
     requestTimeoutMs: 60_000,
     socketFactory: () => provider.open(),
@@ -228,6 +286,82 @@ test("browser client rejects a correlated framework failure without waiting for 
   await client.dispose();
 });
 
+test("browser client replays one idempotent operation after route loss without duplicating its effect", async () => {
+  const firstRoute = localRoute("ws://127.0.0.1:4311/mesh", "generation-1");
+  const secondRoute = localRoute("ws://127.0.0.1:4312/mesh", "generation-2");
+  let route = firstRoute;
+  let effectCount = 0;
+  let dropFirstResponse = true;
+  const results = new Map<string, CultNetMessage>();
+  const open = () => {
+    let socket: FakeSocket;
+    socket = new FakeSocket(wire => {
+      const message = parseCultNetMessage(decode(wire));
+      if (message.schemaVersion === "cultmesh.session_open.v2") {
+        socket.deliver({
+          schemaVersion: "cultmesh.session_accepted.v2",
+          messageId: message.messageId,
+          accepted: true,
+          verseId: message.verseId,
+          authorityRuntimeId: message.authorityRuntimeId,
+          protocolId: message.protocolId,
+          routeGeneration: message.routeGeneration,
+          clientNonce: message.clientNonce,
+          providerKeyId: "",
+          providerSignature: "",
+        });
+        return;
+      }
+      if (message.schemaVersion !== "cultnet.operation_request.v0") return;
+      let response = results.get(message.messageId);
+      if (!response) {
+        effectCount++;
+        response = {
+          schemaVersion: "cultnet.operation_response.v0",
+          messageId: message.messageId,
+          serviceId: message.serviceId,
+          operation: message.operation,
+          status: "accepted",
+          payloadSchema: "sample.increment_receipt.v1",
+          payloadEncoding: "messagepack-base64",
+          payload: Buffer.from(encode({ count: effectCount })).toString("base64"),
+          sourceRuntimeId: "sample.counter-daemon",
+        };
+        results.set(message.messageId, response!);
+      }
+      if (dropFirstResponse) {
+        dropFirstResponse = false;
+        route = secondRoute;
+        socket.close(1012, "route lost after commit");
+        return;
+      }
+      socket.deliver(response!);
+    }, () => undefined);
+    return socket;
+  };
+  const client = await CultMeshBrowserClient.connect({
+    ...firstRoute,
+    runtimeId: "browser-operation-replay-test",
+    rendezvous: { resolve: async () => route },
+    trust: localTrust,
+    reconnectDelayMs: 1,
+    requestTimeoutMs: 2_000,
+    socketFactory: () => open(),
+  });
+
+  const response = await client.invoke({
+    serviceId: "sample.counter",
+    operation: "increment",
+    payloadSchema: "sample.increment.v1",
+    payload: { amount: 1 },
+    idempotencyKey: "replay-once",
+  });
+
+  assert.deepEqual(decodeCultNetOperationPayload<{ count: number }>(response), { count: 1 });
+  assert.equal(effectCount, 1);
+  await client.dispose();
+});
+
 test("browser client rejects an operation response from another runtime", async () => {
   const provider = new FakeProvider(
     "ws://127.0.0.1:4371/mesh",
@@ -239,6 +373,7 @@ test("browser client rejects an operation response from another runtime", async 
   const client = await CultMeshBrowserClient.connect({
     ...provider.route,
     runtimeId: "browser-response-authority-test",
+    trust: localTrust,
     rendezvous: { resolve: async () => provider.route },
     socketFactory: () => provider.open(),
   });
@@ -266,6 +401,7 @@ test("browser client rejects oversized outbound schema messages", async () => {
     CultMeshBrowserClient.connect({
       ...route,
       runtimeId: "browser-size-test",
+      trust: localTrust,
       rendezvous: { resolve: async () => route },
       maxFrameBytes: 8,
       socketFactory: () => new FakeSocket(() => undefined, () => undefined),
@@ -279,6 +415,7 @@ test("browser client reserves subscription identity while the initial lease open
   const client = await CultMeshBrowserClient.connect({
     ...provider.route,
     runtimeId: "browser-lease-race-test",
+    trust: localTrust,
     rendezvous: { resolve: async () => provider.route },
     socketFactory: () => provider.open(),
   });
@@ -344,7 +481,7 @@ class FakeProvider {
   private receive(socket: FakeSocket, wire: Uint8Array): void {
     const message = parseCultNetMessage(decode(wire));
     switch (message.schemaVersion) {
-      case "cultmesh.session_open.v1":
+      case "cultmesh.session_open.v2":
         this.acceptSession(socket, message);
         return;
       case "cultnet.database_subscribe.v0":
@@ -363,13 +500,16 @@ class FakeProvider {
 
   private acceptSession(socket: FakeSocket, message: CultMeshSessionOpenMessage): void {
     socket.deliver({
-      schemaVersion: "cultmesh.session_accepted.v1",
+      schemaVersion: "cultmesh.session_accepted.v2",
       messageId: message.messageId,
       accepted: true,
       verseId: message.verseId,
       authorityRuntimeId: this.#runtimeId,
       protocolId: message.protocolId,
       routeGeneration: message.routeGeneration,
+      clientNonce: message.clientNonce,
+      providerKeyId: "",
+      providerSignature: "",
     });
   }
 
@@ -501,18 +641,33 @@ function handshakeOnlySocket(route: CultMeshBrowserRoute): FakeSocket {
   let socket: FakeSocket;
   socket = new FakeSocket(wire => {
     const message = parseCultNetMessage(decode(wire));
-    if (message.schemaVersion !== "cultmesh.session_open.v1") return;
+    if (message.schemaVersion !== "cultmesh.session_open.v2") return;
     socket.deliver({
-      schemaVersion: "cultmesh.session_accepted.v1",
+      schemaVersion: "cultmesh.session_accepted.v2",
       messageId: message.messageId,
       accepted: true,
       verseId: route.verseId,
       authorityRuntimeId: route.authorityRuntimeId,
       protocolId: message.protocolId,
       routeGeneration: message.routeGeneration,
+      clientNonce: message.clientNonce,
+      providerKeyId: "",
+      providerSignature: "",
     });
   }, () => undefined);
   return socket;
+}
+
+function localRoute(endpoint: string, generation: string): CultMeshBrowserRoute {
+  return {
+    verseId: "sample.counter",
+    authorityRuntimeId: "sample.counter-daemon",
+    endpoint,
+    protocolId: "cultmesh.documents.v1",
+    protocolIds: ["cultmesh.documents.v1"],
+    priority: 0,
+    generation,
+  };
 }
 
 class FakeSocket implements CultMeshBrowserSocket {
@@ -553,6 +708,116 @@ class FakeSocket implements CultMeshBrowserSocket {
     const wire = encode(encodeCultNetMessageForWire(message));
     queueMicrotask(() => this.onmessage?.({ data: wire.slice().buffer } as MessageEvent));
   }
+}
+
+async function createSignedRoute(endpoint: string): Promise<{
+  route: CultMeshBrowserRoute;
+  odinPublic: CultMeshBrowserP256PublicKey;
+  providerPrivate: CryptoKey;
+  expiresAt: number;
+}> {
+  const odin = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const provider = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const odinPublic = await exportPublic("odin-root-1", odin.publicKey);
+  const providerPublic = await exportPublic("provider-1", provider.publicKey);
+  const issuedAt = Date.now() - 1_000;
+  const expiresAt = Date.now() + 60_000;
+  const unsigned: CultMeshBrowserRoute = {
+    verseId: "sample.counter",
+    authorityRuntimeId: "sample.counter-daemon",
+    endpoint,
+    protocolId: "cultmesh.documents.v1",
+    protocolIds: ["cultmesh.documents.v1"],
+    priority: 0,
+    generation: "signed-generation-1",
+    certificate: {
+      providerKey: providerPublic,
+      odinKeyId: odinPublic.keyId,
+      issuedAtUnixMilliseconds: issuedAt,
+      expiresAtUnixMilliseconds: expiresAt,
+      signature: "",
+    },
+  };
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    odin.privateKey,
+    testCanonicalRoute(unsigned).slice().buffer as ArrayBuffer,
+  );
+  return {
+    route: { ...unsigned, certificate: { ...unsigned.certificate!, signature: toBase64(new Uint8Array(signature)) } },
+    odinPublic,
+    providerPrivate: provider.privateKey,
+    expiresAt,
+  };
+}
+
+function signedHandshakeSocket(route: CultMeshBrowserRoute, providerPrivate: CryptoKey): FakeSocket {
+  let socket: FakeSocket;
+  socket = new FakeSocket(wire => {
+    const message = parseCultNetMessage(decode(wire));
+    if (message.schemaVersion !== "cultmesh.session_open.v2") return;
+    void crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      providerPrivate,
+      testCanonicalSession(message, route.endpoint).slice().buffer as ArrayBuffer,
+    ).then(signature => socket.deliver({
+      schemaVersion: "cultmesh.session_accepted.v2",
+      messageId: message.messageId,
+      accepted: true,
+      verseId: message.verseId,
+      authorityRuntimeId: message.authorityRuntimeId,
+      protocolId: message.protocolId,
+      routeGeneration: message.routeGeneration,
+      clientNonce: message.clientNonce,
+      providerKeyId: route.certificate!.providerKey.keyId,
+      providerSignature: toBase64(new Uint8Array(signature)),
+    }));
+  }, () => undefined);
+  return socket;
+}
+
+async function exportPublic(keyId: string, key: CryptoKey): Promise<CultMeshBrowserP256PublicKey> {
+  const jwk = await crypto.subtle.exportKey("jwk", key);
+  return { keyId, x: urlBase64ToBase64(jwk.x!), y: urlBase64ToBase64(jwk.y!) };
+}
+
+function testCanonicalRoute(route: CultMeshBrowserRoute): Uint8Array {
+  const certificate = route.certificate!;
+  return testCanonical(
+    "gamecult.cultmesh.route-certificate.v1", route.verseId, route.authorityRuntimeId, route.endpoint,
+    [...route.protocolIds!].sort().join("\u001f"), String(route.priority), route.generation,
+    certificate.providerKey.keyId, certificate.providerKey.x, certificate.providerKey.y,
+    certificate.odinKeyId, String(certificate.issuedAtUnixMilliseconds), String(certificate.expiresAtUnixMilliseconds),
+  );
+}
+
+function testCanonicalSession(message: CultMeshSessionOpenMessage, endpoint: string): Uint8Array {
+  return testCanonical(
+    "gamecult.cultmesh.session-proof.v1", message.clientNonce, message.messageId, message.sourceRuntimeId,
+    message.verseId, message.authorityRuntimeId, message.protocolId, endpoint, message.routeGeneration,
+  );
+}
+
+function testCanonical(...values: string[]): Uint8Array {
+  const chunks = values.map(value => new TextEncoder().encode(value));
+  const bytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + 4 + chunk.length, 0));
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+  for (const chunk of chunks) {
+    view.setUint32(offset, chunk.length, false);
+    offset += 4;
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return bytes;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
+}
+
+function urlBase64ToBase64(value: string): string {
+  return Buffer.from(value, "base64url").toString("base64");
 }
 
 function bytesToBase64(bytes: Uint8Array): string {

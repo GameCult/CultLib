@@ -55,7 +55,7 @@ public sealed class CultMeshContentSessionTests
         using var sessions = new CultMeshSessionManager(
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
-            new ICultMeshContentTransportConnector[] { connector });
+            new ICultMeshContentTransportConnector[] { connector }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
@@ -99,7 +99,7 @@ public sealed class CultMeshContentSessionTests
         using var sessions = new CultMeshSessionManager(
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
-            new ICultMeshContentTransportConnector[] { new CultMeshTcpContentTransportConnector() });
+            new ICultMeshContentTransportConnector[] { new CultMeshTcpContentTransportConnector() }, CultMeshTestTrust.LocalSessions);
 
         Func<Task> connect = async () => await sessions.ConnectContentAsync(
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
@@ -151,7 +151,7 @@ public sealed class CultMeshContentSessionTests
         using var sessions = new CultMeshSessionManager(
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
-            new ICultMeshContentTransportConnector[] { connector });
+            new ICultMeshContentTransportConnector[] { connector }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
@@ -220,7 +220,7 @@ public sealed class CultMeshContentSessionTests
     {
         private readonly string _endpoint;
 
-        public RouteSource(string endpoint = "rudp://content.test:3076") => _endpoint = endpoint;
+        public RouteSource(string endpoint = "rudp://127.0.0.14:3076") => _endpoint = endpoint;
 
         public string SourceId => "test-rendezvous";
 
