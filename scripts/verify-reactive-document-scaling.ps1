@@ -31,6 +31,26 @@ if (-not (Test-Path -LiteralPath $typescript)) {
     throw "TypeScript compiler not found: $typescript"
 }
 
+foreach ($dependency in @("cultcache-ts", "cultnet-ts")) {
+    $dependencyRoot = Join-Path $root "packages\$dependency"
+    Push-Location $dependencyRoot
+    try {
+        if ($dependency -eq "cultnet-ts") {
+            & $nodeExecutable (Join-Path $dependencyRoot "tools\generate-swarm-contracts.mjs")
+            if ($LASTEXITCODE -ne 0) {
+                throw "CultNet TypeScript contract generation failed."
+            }
+        }
+        & $nodeExecutable $typescript -p tsconfig.json --pretty false
+        if ($LASTEXITCODE -ne 0) {
+            throw "TypeScript dependency build failed: $dependency"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 & $dotnet.Source test (Join-Path $root "tests\GameCult.Mesh.Tests\GameCult.Mesh.Tests.csproj") `
     --filter "FullyQualifiedName~ReactiveDocument_SchedulingScalesWithChangedDocumentsOnly" `
     --nologo `
