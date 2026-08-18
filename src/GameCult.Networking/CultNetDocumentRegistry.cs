@@ -224,6 +224,9 @@ namespace GameCult.Networking
                 Document = new CultNetRawDocumentRecord
                 {
                     SchemaId = binding.SchemaId,
+                    SchemaName = descriptor.SchemaName,
+                    SchemaVersion = descriptor.SchemaVersion,
+                    SchemaContentHash = descriptor.ContentHash,
                     RecordKey = handle.Key.Value,
                     StoredAt = storedAt,
                     PayloadEncoding = "messagepack",
@@ -292,6 +295,9 @@ namespace GameCult.Networking
                 documents.Add(new CultNetRawDocumentRecord
                 {
                     SchemaId = binding.SchemaId,
+                    SchemaName = descriptor.SchemaName,
+                    SchemaVersion = descriptor.SchemaVersion,
+                    SchemaContentHash = descriptor.ContentHash,
                     RecordKey = key,
                     StoredAt = storedAt,
                     PayloadEncoding = "messagepack",

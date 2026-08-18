@@ -608,6 +608,18 @@ namespace GameCult.Networking
         /// </summary>
         [Key("schemaId")] public string SchemaId { get; set; } = string.Empty;
         /// <summary>
+        /// Gets or sets the stable schema family name when the publisher has a typed descriptor.
+        /// </summary>
+        [Key("schemaName")] public string? SchemaName { get; set; }
+        /// <summary>
+        /// Gets or sets the portable versioned schema contract when the publisher has a typed descriptor.
+        /// </summary>
+        [Key("schemaVersion")] public string? SchemaVersion { get; set; }
+        /// <summary>
+        /// Gets or sets the canonical schema content hash when the publisher has a typed descriptor.
+        /// </summary>
+        [Key("schemaContentHash")] public string? SchemaContentHash { get; set; }
+        /// <summary>
         /// Gets or sets the record key.
         /// </summary>
         [Key("recordKey")] public string RecordKey { get; set; } = string.Empty;

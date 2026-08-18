@@ -1982,6 +1982,9 @@ namespace GameCult.Networking.Tests
 
             Assert.That(message, Is.Not.Null);
             Assert.That(message!.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(message.Document.SchemaName, Is.EqualTo(descriptor.SchemaName));
+            Assert.That(message.Document.SchemaVersion, Is.EqualTo(descriptor.SchemaVersion));
+            Assert.That(message.Document.SchemaContentHash, Is.EqualTo(descriptor.ContentHash));
         }
 
         [Test]

@@ -571,7 +571,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     this.#pendingSnapshots.delete(message.messageId);
     clearTimeout(pending.timer);
     const matches = message.documents.filter(record =>
-      record.schemaId === pending.lease.schemaId && record.recordKey === pending.lease.recordKey);
+      record.recordKey === pending.lease.recordKey && recordMatchesSchema(record, pending.lease.schemaId));
     if (matches.length > 1) {
       pending.reject(new Error(`CultMesh snapshot returned duplicate record '${pending.lease.recordKey}'.`));
       return;
@@ -584,11 +584,11 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     const lease = this.#leases.get(message.subscriptionId) ?? this.#openingLeases.get(message.subscriptionId);
     if (!lease) return;
     if (message.changeKind === "removed") {
-      if (message.recordKey === lease.recordKey && message.schemaId === lease.schemaId) lease.apply(undefined);
+      if (message.recordKey === lease.recordKey) lease.apply(undefined);
       return;
     }
     const record = message.document;
-    if (record?.recordKey === lease.recordKey && record.schemaId === lease.schemaId) lease.apply(record);
+    if (record?.recordKey === lease.recordKey && recordMatchesSchema(record, lease.schemaId)) lease.apply(record);
   }
 
   private rejectCorrelated(reason: string): void {
@@ -626,6 +626,12 @@ export function decodeCultNetPayload<T>(record: CultNetRawDocumentRecord): T {
     throw new Error(`Unsupported CultNet document payload '${record.payloadEncoding}'.`);
   }
   return decode(record.payload) as T;
+}
+
+function recordMatchesSchema(record: CultNetRawDocumentRecord, requestedSchema: string): boolean {
+  return record.schemaId === requestedSchema ||
+    record.schemaName === requestedSchema ||
+    record.schemaVersion === requestedSchema;
 }
 
 export function decodeCultNetOperationPayload<T>(response: CultNetOperationResponseMessage): T {

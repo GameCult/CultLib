@@ -270,7 +270,10 @@ class FakeProvider {
 
   private record(): CultNetRawDocumentRecord {
     return {
-      schemaId: "sample.counter_state.v1",
+      schemaId: "sha256:sample-counter-state",
+      schemaName: "sample.counter_state",
+      schemaVersion: "sample.counter_state.v1",
+      schemaContentHash: "sha256:sample-counter-state-content",
       recordKey: "counter:main",
       storedAt: "2026-08-17T00:00:00Z",
       payloadEncoding: "messagepack",

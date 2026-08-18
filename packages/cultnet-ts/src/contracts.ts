@@ -190,6 +190,9 @@ export interface CultNetDocumentDeleteMessage {
 
 export interface CultNetRawDocumentRecord {
   schemaId: string;
+  schemaName?: string;
+  schemaVersion?: string;
+  schemaContentHash?: string;
   recordKey: string;
   storedAt: string;
   payloadEncoding: CultNetRawPayloadEncoding;
@@ -1104,6 +1107,9 @@ function validateRawDocumentRecord(
 
   const candidate = input as Record<string, unknown>;
   requireNonEmptyString(candidate.schemaId, `${instancePath}/schemaId`);
+  requireOptionalNonEmptyString(candidate.schemaName, `${instancePath}/schemaName`);
+  requireOptionalNonEmptyString(candidate.schemaVersion, `${instancePath}/schemaVersion`);
+  requireOptionalNonEmptyString(candidate.schemaContentHash, `${instancePath}/schemaContentHash`);
   requireNonEmptyString(candidate.recordKey, `${instancePath}/recordKey`);
   requireNonEmptyString(candidate.storedAt, `${instancePath}/storedAt`);
   if (candidate.payloadEncoding !== "messagepack") {
