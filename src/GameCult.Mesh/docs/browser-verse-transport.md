@@ -172,18 +172,21 @@ Current executable coverage from `scripts/verify-eve-browser-network.mjs`:
 
 - authenticated binary C# WebSocket provider;
 - separate local Odin fixture using the canonical Verse-catalog messages;
-- real Chromium and independent C# headless consumers;
+- real Chromium and retained C# headless consumers, both discovered through
+  the same Odin identity;
 - shared surface and counter document leases;
 - Eve button to typed operation to provider receipt to shared state;
 - duplicate idempotency key produces one effect;
 - provider restart on a different physical port rehydrates the `.cc` state;
 - the retained browser lease rediscovers through Odin, resubscribes, and
   commits a second provider-authored receipt;
+- the retained C# lease independently rediscovers, resubscribes, and observes
+  both canonical receipt ids without application reconnect code;
 - generated browser bundle contains no `node:` builtin import.
 
 The full public Verse gate still requires the deployed Odin daemon rather than
-the local contract fixture, retained C# lease reconnection through the same
-identity path, released-artifact-only .NET consumption, and Windows/Linux CI.
+the local contract fixture and released-artifact-only .NET consumption. The
+source-contract gate runs on Windows and Linux CI.
 
 From an empty temporary consumer using packed/released artifacts only:
 

@@ -20,6 +20,7 @@ const statePath = join(workRoot, "counter.cc");
 const bundlePath = join(workRoot, "bundle.js");
 const token = "sample-session";
 let provider;
+let replacementProvider;
 let odin;
 let headless;
 let httpServer;
@@ -51,6 +52,7 @@ try {
     join(sampleRoot, "EveBrowserNetworkSample.csproj"),
     "--verbosity", "quiet",
     "-p:NoWarn=1591%3BCS8632",
+    `-p:EveRoot=${eveRoot}`,
   ]);
   const providerPort = await freePort();
   const replacementProviderPort = await freePort();
@@ -60,7 +62,10 @@ try {
   const endpoint = await provider.waitFor("PROVIDER_READY ");
   odin = await startOdin(odinPort, endpoint);
   const odinEndpoint = await odin.waitFor("ODIN_READY ");
-  headless = startDotnet(["headless", "--endpoint", endpoint, "--token", token]);
+  headless = startDotnet([
+    "headless", "--odin", odinEndpoint, "--verse-id", "sample.counter",
+    "--expected-count", "2", "--token", token,
+  ]);
   await headless.waitFor("HEADLESS_READY ");
   httpServer = await serve(httpPort, sampleRoot, bundlePath);
 
@@ -74,24 +79,33 @@ try {
   await page.locator("button").click();
   await page.waitForFunction(() => window.__sampleReceipt?.count === 1 && window.__sampleCount === 1);
   const firstReceipt = await page.evaluate(() => window.__sampleReceipt?.receiptId);
-  assert.equal(JSON.parse(await headless.waitFor("HEADLESS_UPDATE ")).count, 1);
+  const firstHeadlessUpdate = JSON.parse(await headless.waitFor("HEADLESS_UPDATE_1 "));
+  assert.equal(firstHeadlessUpdate.count, 1);
+  assert.ok(firstHeadlessUpdate.receiptIds.includes(firstReceipt));
   await page.locator("button").click();
   await page.waitForFunction(receipt => window.__sampleReceipt?.receiptId === receipt, firstReceipt);
   assert.equal(await page.evaluate(() => window.__sampleCount), 1, "duplicate idempotency key changed canonical state");
 
-  await stop(provider.process);
-  await stop(odin.process);
-  provider = await startProvider(replacementProviderPort);
-  const restartedEndpoint = await provider.waitFor("PROVIDER_READY ");
+  replacementProvider = await startProvider(replacementProviderPort);
+  const restartedEndpoint = await replacementProvider.waitFor("PROVIDER_READY ");
   assert.notEqual(restartedEndpoint, endpoint);
+  await stop(odin.process);
   odin = await startOdin(odinPort, restartedEndpoint);
   assert.equal(await odin.waitFor("ODIN_READY "), odinEndpoint);
-  headless = startDotnet(["headless", "--endpoint", restartedEndpoint, "--token", token]);
-  await headless.waitFor("HEADLESS_READY ");
+  await stop(provider.process);
+  provider = replacementProvider;
+  replacementProvider = undefined;
+  await page.waitForFunction(() =>
+    window.__sampleConnectionStates?.includes("reconnecting")
+    && window.__sampleConnectionStates.at(-1) === "connected");
   await page.evaluate(() => { window.__sampleCommandId = "browser-click-2"; });
   await page.locator("button").click();
   await page.waitForFunction(() => window.__sampleReceipt?.count === 2 && window.__sampleCount === 2);
-  assert.equal(JSON.parse(await headless.waitFor("HEADLESS_UPDATE ")).count, 2);
+  const secondReceipt = await page.evaluate(() => window.__sampleReceipt?.receiptId);
+  const secondHeadlessUpdate = JSON.parse(await headless.waitFor("HEADLESS_UPDATE_2 "));
+  assert.equal(secondHeadlessUpdate.count, 2);
+  assert.ok(secondHeadlessUpdate.receiptIds.includes(firstReceipt));
+  assert.ok(secondHeadlessUpdate.receiptIds.includes(secondReceipt));
   const connectionStates = await page.evaluate(() => window.__sampleConnectionStates);
   assert.equal(connectionStates[0], "connected");
   assert.equal(connectionStates.at(-1), "connected");
@@ -105,13 +119,16 @@ try {
     browserRuntime: "chromium",
     headlessRuntime: "csharp",
     receiptId: firstReceipt,
+    secondReceiptId: secondReceipt,
     count: 2,
     routeRotationCount: 1,
+    retainedHeadlessLease: true,
   }));
 } finally {
   if (browser) await browser.close().catch(() => undefined);
   if (headless) await stop(headless.process);
   if (provider) await stop(provider.process);
+  if (replacementProvider) await stop(replacementProvider.process);
   if (odin) await stop(odin.process);
   if (httpServer) await new Promise(resolve => httpServer.close(resolve));
   await rm(workRoot, { recursive: true, force: true });

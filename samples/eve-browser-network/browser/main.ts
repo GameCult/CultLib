@@ -35,7 +35,7 @@ try {
     rendezvous: new CultMeshBrowserOdinRendezvous({
       endpoints: [odinEndpoint],
       runtimeId: "sample.chromium.discovery",
-      transportVersion: "cultmesh.v1",
+      transportVersion: "cultmesh.v0",
     }),
   });
   window.__sampleConnectionStates = [];

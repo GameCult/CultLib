@@ -6,7 +6,9 @@ This is the real-process continuation of `samples/eve-two-runtime`:
   idempotency, and canonical receipts;
 - one real Chromium page leases both documents through `cultmesh-browser` and
   lowers the provider-owned Eve surface;
-- one independent C# headless client observes the same typed counter;
+- one retained C# headless client discovers the provider through the same Odin
+  identity, observes the typed counter and canonical receipt ids, and survives
+  the provider route replacement without application reconnect code;
 - one separate local Odin fixture answers the canonical CultMesh Verse catalog
   over binary CultNet WebSocket messages;
 - the browser and C# clients speak the same binary CultNet schema-v0 WebSocket
@@ -28,6 +30,8 @@ The verifier clicks the Eve button twice with one idempotency key, requires one
 state transition, restarts the provider on a different physical port, updates
 the local Odin fixture, and requires the still-open browser to rediscover the
 route, resubscribe, execute a second command, and preserve the durable count.
+The retained C# lease independently rediscovers the same replacement route and
+observes both canonical receipt ids.
 The fixture speaks the production Verse-catalog contract; a deployment smoke
 against the full Odin daemon remains a separate infrastructure gate.
 

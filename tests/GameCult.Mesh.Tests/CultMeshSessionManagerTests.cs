@@ -128,7 +128,6 @@ public sealed class CultMeshSessionManagerTests
         clients[0].Emit(new CultNetErrorMessage { Error = "before rotation" });
 
         route = "rudp://second:3076";
-        clock.Advance(TimeSpan.FromSeconds(6));
         clients[0].Fail(new IOException("partition"));
         await WaitUntilAsync(() => first.State.Status == CultMeshSessionStatus.Online && connector.ConnectCount == 2);
         var second = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
@@ -140,6 +139,22 @@ public sealed class CultMeshSessionManagerTests
         connector.ConnectCount.Should().Be(2);
         clients[0].DisposeCount.Should().Be(1);
         deliveries.Should().Be(2);
+    }
+
+    [Test]
+    public async Task UriConnectorPreservesTheAdvertisedPath()
+    {
+        var client = new FakeUriSchemaClient();
+        var connector = new CultMeshUriSchemaTransportConnector(
+            "websocket",
+            new[] { "ws", "wss" },
+            _ => client);
+        var candidate = new CultMeshTransportCandidate("wss://odin.example/game/cultmesh?generation=7");
+
+        var connected = await connector.ConnectAsync(candidate, CultMeshProtocols.Documents);
+
+        connected.Should().BeSameAs(client);
+        client.Endpoint.Should().Be(new Uri(candidate.Endpoint));
     }
 
     [Test]
@@ -324,6 +339,22 @@ public sealed class CultMeshSessionManagerTests
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
         public void Fail(Exception error) => _failure.TrySetResult(error);
         public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
+    }
+
+    private sealed class FakeUriSchemaClient : ICultNetUriSchemaClient
+    {
+        public bool Connected => Endpoint != null;
+        public Uri? Endpoint { get; private set; }
+        public void Connect(string host, int port) => throw new AssertionException("URI connection was not used.");
+        public Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Endpoint = endpoint;
+            return Task.CompletedTask;
+        }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
+        public void Dispose() { }
     }
 
     private sealed class RespondingSchemaClient : ICultNetSchemaClient

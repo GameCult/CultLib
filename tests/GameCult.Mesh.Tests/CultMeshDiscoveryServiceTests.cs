@@ -236,6 +236,33 @@ public sealed class CultMeshDiscoveryServiceTests
         }
     }
 
+    [Test]
+    public async Task Invalidate_BypassesFreshMemoryAndPersistedRoutesForTheNextLookup()
+    {
+        var clock = new ManualClock(new DateTimeOffset(2026, 8, 18, 0, 0, 0, TimeSpan.Zero));
+        var route = "rudp://first:3076";
+        var source = new DelegateSource("odin", _ => Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(
+            new[] { Observation("aetheria", "odin", clock, TimeSpan.FromMinutes(5), CultMeshDiscoveryTrust.Signed, route) }));
+        using var cache = new CultCache();
+        using var service = new CultMeshDiscoveryService(
+            new[] { source },
+            new CultMeshDiscoveryServiceOptions
+            {
+                Clock = clock,
+                Store = new CultMeshCultCacheDiscoveryStore(cache)
+            });
+        var query = new CultMeshDiscoveryQuery("aetheria", new[] { "aetheria" });
+
+        var first = await service.ResolveAsync(query);
+        route = "rudp://second:3076";
+        service.Invalidate(query);
+        var second = await service.ResolveAsync(query);
+
+        first.Candidates.Single().Descriptor.DiscoveryEndpoints.Should().Equal("rudp://first:3076");
+        second.Candidates.Single().Descriptor.DiscoveryEndpoints.Should().Equal("rudp://second:3076");
+        source.LookupCount.Should().Be(2);
+    }
+
     private static CultMeshDiscoveryObservation Observation(
         string verseId,
         string sourceId,

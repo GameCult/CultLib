@@ -131,7 +131,7 @@ try {
             throw "Clean consumer package installation failed."
         }
         Copy-Item -LiteralPath $samplePath -Destination (Join-Path $consumerRoot "sample.mjs")
-        & $nodePath .\sample.mjs
+        & $nodePath (Join-Path $consumerRoot "sample.mjs")
         if ($LASTEXITCODE -ne 0) {
             throw "Eve two-runtime sample failed."
         }

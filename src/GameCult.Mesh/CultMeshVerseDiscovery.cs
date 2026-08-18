@@ -182,6 +182,9 @@ namespace GameCult.Mesh
         /// <summary>Gets or sets the identity of this bootstrap lookup source.</summary>
         public string SourceId { get; set; } = "configured-bootstrap";
 
+        /// <summary>Gets or sets the CultMesh transport contract requested from rendezvous.</summary>
+        public string TransportVersion { get; set; } = "cultmesh.v0";
+
         /// <summary>Gets or sets how long a successful compatibility observation remains fresh.</summary>
         public TimeSpan ObservationTtl { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -215,7 +218,6 @@ namespace GameCult.Mesh
             CultMeshVerseCatalogRequestMessage? request = null)
         {
             if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
-            var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
             var messageId = Guid.NewGuid().ToString("N");
             var completion = new TaskCompletionSource<CultMeshVerseCatalogResponseMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -234,7 +236,13 @@ namespace GameCult.Mesh
             Emit(CultMeshDiagnosticKind.ConnectionAttempt, messageId, endpoint, "connecting");
             try
             {
-                client.Connect(host, port);
+                if (client is ICultNetUriSchemaClient uriClient)
+                    await uriClient.ConnectAsync(new Uri(endpoint)).ConfigureAwait(false);
+                else
+                {
+                    var (host, port) = CultNetSchemaWriteForwarder.ParseEndpoint(endpoint);
+                    client.Connect(host, port);
+                }
                 var backgroundFailure = (client as ICultNetSchemaClientHealth)?.BackgroundFailure;
                 await WaitForConnectionAsync(client, endpoint, backgroundFailure).ConfigureAwait(false);
                 client.SendCultNet(new CultMeshVerseCatalogRequestMessage

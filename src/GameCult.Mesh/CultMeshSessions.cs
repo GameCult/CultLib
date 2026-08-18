@@ -111,6 +111,66 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Connects exact URI routes through a caller-supplied URI-capable CultNet client.
+    /// This keeps transport packages outside CultMesh while preserving advertised paths.
+    /// </summary>
+    public sealed class CultMeshUriSchemaTransportConnector : ICultMeshTransportConnector
+    {
+        private readonly HashSet<string> _schemes;
+        private readonly Func<string, ICultNetUriSchemaClient> _createClient;
+
+        public CultMeshUriSchemaTransportConnector(
+            string connectorId,
+            IEnumerable<string> schemes,
+            Func<string, ICultNetUriSchemaClient> createClient,
+            int priority = 0)
+        {
+            if (string.IsNullOrWhiteSpace(connectorId))
+                throw new ArgumentException("Connector identity is required.", nameof(connectorId));
+            ConnectorId = connectorId.Trim();
+            _schemes = new HashSet<string>(
+                (schemes ?? throw new ArgumentNullException(nameof(schemes)))
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value.Trim()),
+                StringComparer.OrdinalIgnoreCase);
+            if (_schemes.Count == 0)
+                throw new ArgumentException("At least one URI scheme is required.", nameof(schemes));
+            _createClient = createClient ?? throw new ArgumentNullException(nameof(createClient));
+            Priority = priority;
+        }
+
+        public string ConnectorId { get; }
+        public int Priority { get; }
+
+        public bool CanConnect(CultMeshTransportCandidate candidate) =>
+            candidate != null &&
+            Uri.TryCreate(candidate.Endpoint, UriKind.Absolute, out var uri) &&
+            _schemes.Contains(uri.Scheme);
+
+        public async Task<ICultNetSchemaClient> ConnectAsync(
+            CultMeshTransportCandidate candidate,
+            CultMeshProtocolId protocol,
+            CancellationToken cancellationToken = default)
+        {
+            if (!CanConnect(candidate))
+                throw new NotSupportedException($"Connector '{ConnectorId}' does not support '{candidate?.Endpoint}'.");
+            var endpoint = new Uri(candidate.Endpoint, UriKind.Absolute);
+            var client = _createClient(candidate.Endpoint)
+                ?? throw new InvalidOperationException($"Connector '{ConnectorId}' returned no schema client.");
+            try
+            {
+                await client.ConnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                return client;
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
     /// Explicit compatibility connector for the previous RUDP/LiteNetLib schema lanes.
     /// Prefer <see cref="CultMeshTcpSchemaTransportConnector"/> for registered schemas.
     /// </summary>
@@ -862,6 +922,9 @@ namespace GameCult.Mesh
             Emit(session.EndpointId, session.Protocol, "reconnecting", failedPath.Candidate.Endpoint);
             try
             {
+                _discovery.Invalidate(new CultMeshDiscoveryQuery(
+                    session.EndpointId.Value,
+                    new[] { session.EndpointId.Value }));
                 var replacement = await ResolveConnectedPathAsync(session.EndpointId, session.Protocol).ConfigureAwait(false);
                 session.ReplacePhysicalChannel(replacement.Client);
                 session.Transition(new CultMeshSessionState(

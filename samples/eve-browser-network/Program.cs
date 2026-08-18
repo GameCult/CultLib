@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Eve.Surface;
 using GameCult.Mesh;
 using GameCult.Networking;
 using GameCult.Networking.WebSockets;
@@ -70,7 +71,7 @@ static async Task RunOdinAsync(Args arguments)
 
 static async Task RunProviderAsync(Args arguments)
 {
-    var registry = CultDocumentRegistry.ForTypes([typeof(CounterState), typeof(CounterSurfaceDocument)]);
+    var registry = CultDocumentRegistry.ForTypes([typeof(CounterState), typeof(EveSurfaceDocument)]);
     using var cache = await CultCacheMessagePack.OpenAsync(arguments.StatePath, new CultCacheOpenOptions
     {
         Registry = registry,
@@ -79,7 +80,7 @@ static async Task RunProviderAsync(Args arguments)
     });
     var documents = new CultNetDocumentRegistry(registry)
         .Register(CultNetDocumentBinding.ForDocument<CounterState>(registry, "sample.counter_state.v1"))
-        .Register(CultNetDocumentBinding.ForDocument<CounterSurfaceDocument>(registry, "gamecult.eve.surface.v1"));
+        .Register(CultNetDocumentBinding.ForDocument<EveSurfaceDocument>(registry, EveSurfaceDocument.SchemaId));
     using var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
     {
         RuntimeId = "sample.counter-provider",
@@ -87,8 +88,8 @@ static async Task RunProviderAsync(Args arguments)
     });
     if (cache.Get<CounterState>(new CultRecordKey(counterKey)) == null)
         await database.PutAsync(new CultRecordKey(counterKey), CounterState.Initial(counterKey));
-    if (cache.Get<CounterSurfaceDocument>(new CultRecordKey(surfaceKey)) == null)
-        await database.PutAsync(new CultRecordKey(surfaceKey), CounterSurfaceDocument.Create());
+    if (cache.Get<EveSurfaceDocument>(new CultRecordKey(surfaceKey)) == null)
+        await database.PutAsync(new CultRecordKey(surfaceKey), CreateCounterSurface());
     await cache.FlushAsync();
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
@@ -160,28 +161,107 @@ static async Task RunProviderAsync(Args arguments)
 
 static async Task RunHeadlessAsync(Args arguments)
 {
-    var registry = CultDocumentRegistry.ForTypes([typeof(CounterState)]);
-    using var cache = new CultCache(registry);
-    var documents = new CultNetDocumentRegistry(registry)
-        .Register(CultNetDocumentBinding.ForDocument<CounterState>(registry, "sample.counter_state.v1"));
-    using var transport = new CultNetWebSocketSchemaClient(options =>
+    if (string.IsNullOrWhiteSpace(arguments.OdinEndpoint))
+        throw new ArgumentException("The headless client requires --odin.");
+    CultNetWebSocketSchemaClient CreateClient() => new(options =>
         options.SetRequestHeader("Cookie", $"cultnet_session={arguments.Token}"));
-    using var subscriptions = new CultNetDatabaseSubscriptionClient(transport, cache, documents);
-    var changed = new TaskCompletionSource<CounterState>(TaskCreationOptions.RunContinuationsAsynchronously);
-    subscriptions.Changed += change =>
+    using var mesh = new CultMeshClient(new CultMeshClientOptions
     {
-        if (change.Document is CounterState counter) changed.TrySetResult(counter);
-    };
-    await transport.ConnectAsync(new Uri(arguments.Endpoint));
-    var initial = await subscriptions.SubscribeAsync(
-        "headless-counter",
-        recordKeys: [counterKey],
-        schemaIds: ["sample.counter_state.v1"],
-        deliveryMode: CultNetDatabaseSubscriptionDeliveryMode.Live);
-    var counter = initial.OfType<CounterState>().Single();
-    Console.WriteLine("HEADLESS_READY " + JsonSerializer.Serialize(new { count = counter.Count }));
-    var update = await changed.Task.WaitAsync(TimeSpan.FromSeconds(15));
-    Console.WriteLine("HEADLESS_UPDATE " + JsonSerializer.Serialize(new { count = update.Count }));
+        RendezvousEndpoints = [arguments.OdinEndpoint],
+        Discovery = new CultMeshVerseDiscoveryClientOptions
+        {
+            CreateClient = CreateClient,
+            TransportVersion = arguments.TransportVersion
+        },
+        Connectors =
+        [
+            new CultMeshUriSchemaTransportConnector(
+                "cultnet-websocket",
+                ["ws", "wss"],
+                _ => CreateClient())
+        ]
+    });
+    using var lease = await mesh.LeaseDocumentAsync<CounterState>(arguments.VerseId, counterKey);
+    var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var lastCount = -1;
+    using var watch = lease.Handle.Watch(counter =>
+    {
+        if (counter.Count <= lastCount) return;
+        lastCount = counter.Count;
+        if (counter.Count == 0)
+            Console.WriteLine("HEADLESS_READY " + JsonSerializer.Serialize(new { count = counter.Count }));
+        else
+            Console.WriteLine($"HEADLESS_UPDATE_{counter.Count} " + JsonSerializer.Serialize(new
+            {
+                count = counter.Count,
+                receiptIds = counter.Receipts.Values
+                    .Select(receipt => receipt.ReceiptId)
+                    .OrderBy(value => value, StringComparer.Ordinal)
+                    .ToArray()
+            }));
+        if (counter.Count >= arguments.ExpectedCount) completion.TrySetResult();
+    });
+    var initial = await lease.Handle.LatestAsync();
+    if (lastCount < 0)
+    {
+        lastCount = initial.Count;
+        Console.WriteLine("HEADLESS_READY " + JsonSerializer.Serialize(new { count = initial.Count }));
+    }
+    if (initial.Count >= arguments.ExpectedCount) completion.TrySetResult();
+    await completion.Task.WaitAsync(TimeSpan.FromSeconds(45));
+}
+
+static EveSurfaceDocument CreateCounterSurface()
+{
+    var networkRoute = new CultMeshRouteHint(CultMeshLocalityKind.Network, "cultmesh");
+    return new EveSurfaceDocument(
+        providerId: "sample.counter-provider",
+        providerKind: "sample.daemon",
+        title: "CultMesh browser counter",
+        version: 1,
+        updatedAtUtc: "2026-08-17T00:00:00Z",
+        surface: new EveSurfaceTree(
+            surfaceKey,
+            new EveSurfaceComponent(
+                "counter.root",
+                "column",
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                [
+                    new EveSurfaceComponent(
+                        "counter.value",
+                        "metric",
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["label"] = "Canonical count",
+                            ["value"] = "0"
+                        },
+                        [],
+                        [
+                            new CultMeshStateBindingDescriptor(
+                                "value",
+                                "sample.counter.count",
+                                "sample.counter_state:counter:main",
+                                "sample.counter_state.v1",
+                                networkRoute)
+                        ]),
+                    new EveSurfaceComponent(
+                        "counter.increment",
+                        "control.button",
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["label"] = "Increment",
+                            ["command"] = "sample.counter.increment"
+                        },
+                        [])
+                ]),
+            []),
+        commands:
+        [
+            new EveCommandTemplate(new CultMeshOperationBindingDescriptor(
+                "sample.counter.increment",
+                "Increment",
+                routeHint: networkRoute))
+        ]);
 }
 
 sealed class Args
@@ -189,14 +269,15 @@ sealed class Args
     public string Mode { get; private init; } = "";
     public int Port { get; private init; }
     public string StatePath { get; private init; } = "sample-counter.cc";
-    public string Endpoint { get; private init; } = "";
+    public string OdinEndpoint { get; private init; } = "";
     public string ProviderEndpoint { get; private init; } = "";
     public string Token { get; private init; } = "sample-session";
     public string VerseId { get; private init; } = "sample.counter";
     public string VerseName { get; private init; } = "CultMesh browser counter";
     public string AuthorityRuntimeId { get; private init; } = "sample.counter-provider";
-    public string TransportVersion { get; private init; } = "cultmesh.v1";
+    public string TransportVersion { get; private init; } = "cultmesh.v0";
     public string RulesHash { get; private init; } = "sample-counter-v1";
+    public int ExpectedCount { get; private init; } = 2;
 
     public static Args Parse(string[] values)
     {
@@ -209,14 +290,17 @@ sealed class Args
             Mode = values[0],
             Port = named.TryGetValue("--port", out var port) ? int.Parse(port) : 0,
             StatePath = named.GetValueOrDefault("--state", "sample-counter.cc"),
-            Endpoint = named.GetValueOrDefault("--endpoint", ""),
+            OdinEndpoint = named.GetValueOrDefault("--odin", ""),
             ProviderEndpoint = named.GetValueOrDefault("--provider-endpoint", ""),
             Token = named.GetValueOrDefault("--token", "sample-session"),
             VerseId = named.GetValueOrDefault("--verse-id", "sample.counter"),
             VerseName = named.GetValueOrDefault("--verse-name", "CultMesh browser counter"),
             AuthorityRuntimeId = named.GetValueOrDefault("--authority-runtime-id", "sample.counter-provider"),
-            TransportVersion = named.GetValueOrDefault("--transport-version", "cultmesh.v1"),
-            RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1")
+            TransportVersion = named.GetValueOrDefault("--transport-version", "cultmesh.v0"),
+            RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1"),
+            ExpectedCount = named.TryGetValue("--expected-count", out var expectedCount)
+                ? int.Parse(expectedCount)
+                : 2
         };
     }
 }
@@ -263,113 +347,4 @@ public sealed class IncrementReceipt
         IdempotencyKey = id,
         Count = count
     };
-}
-
-[CultDocument("gamecult.eve.surface", "gamecult.eve.surface.v1")]
-[MessagePackObject]
-public sealed class CounterSurfaceDocument
-{
-    [Key("type")] public string Type { get; set; } = "surface-state";
-    [Key("schema")] public string Schema { get; set; } = "gamecult.eve.surface.v1";
-    [Key("providerId")] public string ProviderId { get; set; } = "sample.counter-provider";
-    [Key("providerKind")] public string ProviderKind { get; set; } = "sample.daemon";
-    [Key("title")] public string Title { get; set; } = "CultMesh browser counter";
-    [Key("version")] public int Version { get; set; } = 1;
-    [Key("updatedAtUtc")] public string UpdatedAtUtc { get; set; } = "2026-08-17T00:00:00Z";
-    [Key("surface")] public EveSurface Surface { get; set; } = new();
-    [Key("commands")] public EveCommand[] Commands { get; set; } = [];
-
-    public static CounterSurfaceDocument Create() => new()
-    {
-        Surface = new EveSurface
-        {
-            Id = "sample.counter",
-            Title = "Counter",
-            Root = new EveComponent
-            {
-                Id = "counter.root",
-                Kind = "column",
-                Children =
-                [
-                    new EveComponent
-                    {
-                        Id = "counter.value",
-                        Kind = "metric",
-                        Props = new Dictionary<string, object> { ["label"] = "Canonical count", ["value"] = 0 },
-                        StateBindings =
-                        [
-                            new EveStateBinding
-                            {
-                                TargetProp = "value",
-                                PointerId = "sample.counter.count",
-                                SourceId = "sample.counter_state:counter:main",
-                                SchemaId = "sample.counter_state.v1",
-                                RouteKind = "cultmesh"
-                            }
-                        ]
-                    },
-                    new EveComponent
-                    {
-                        Id = "counter.increment",
-                        Kind = "control.button",
-                        Props = new Dictionary<string, object>
-                        {
-                            ["label"] = "Increment",
-                            ["command"] = "sample.counter.increment"
-                        }
-                    }
-                ]
-            }
-        },
-        Commands =
-        [
-            new EveCommand
-            {
-                Command = "sample.counter.increment",
-                Label = "Increment",
-                SurfaceId = "sample.counter"
-            }
-        ]
-    };
-}
-
-[MessagePackObject]
-public sealed class EveSurface
-{
-    [Key("id")] public string Id { get; set; } = "";
-    [Key("title")] public string Title { get; set; } = "";
-    [Key("root")] public EveComponent Root { get; set; } = new();
-    [Key("styles")] public Dictionary<string, object> Styles { get; set; } = [];
-}
-
-[MessagePackObject]
-public sealed class EveComponent
-{
-    [Key("id")] public string Id { get; set; } = "";
-    [Key("kind")] public string Kind { get; set; } = "";
-    [Key("props")] public Dictionary<string, object> Props { get; set; } = [];
-    [Key("children")] public EveComponent[] Children { get; set; } = [];
-    [Key("stateBindings")] public EveStateBinding[] StateBindings { get; set; } = [];
-}
-
-[MessagePackObject]
-public sealed class EveStateBinding
-{
-    [Key("targetProp")] public string TargetProp { get; set; } = "";
-    [Key("pointerId")] public string PointerId { get; set; } = "";
-    [Key("sourceId")] public string SourceId { get; set; } = "";
-    [Key("schemaId")] public string SchemaId { get; set; } = "";
-    [Key("routeKind")] public string RouteKind { get; set; } = "";
-}
-
-[MessagePackObject]
-public sealed class EveCommand
-{
-    [Key("schema")] public string Schema { get; set; } = "gamecult.eve.command.v1";
-    [Key("command")] public string Command { get; set; } = "";
-    [Key("label")] public string Label { get; set; } = "";
-    [Key("surfaceId")] public string SurfaceId { get; set; } = "";
-    [Key("transport")] public string Transport { get; set; } = "cultmesh";
-    [Key("authority")] public string Authority { get; set; } = "provider-daemon";
-    [Key("result")] public string Result { get; set; } = "gamecult.eve.command_receipt.v1";
 }

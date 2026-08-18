@@ -3,9 +3,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <EveRoot Condition="'$(EveRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\Eve</EveRoot>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
+    <ProjectReference Include="$(EveRoot)\packages\org.gamecult.eve.surface\GameCult.Eve.Surface.csproj"
+                      AdditionalProperties="CultLibRoot=$(MSBuildThisFileDirectory)..\.." />
   </ItemGroup>
 </Project>

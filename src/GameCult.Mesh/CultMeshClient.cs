@@ -782,7 +782,7 @@ namespace GameCult.Mesh
                     new CultMeshVerseCatalogRequestMessage
                     {
                         VerseIds = query.VerseIds.Count == 0 ? null : query.VerseIds.ToArray(),
-                        TransportVersion = "cultmesh.v0"
+                        TransportVersion = _options.TransportVersion
                     }).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 var observedAt = _options.Clock.UtcNow;

@@ -39,6 +39,17 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Schema client that connects to one exact advertised URI, including its path.
+    /// Host/port-only connection is retained for legacy transports; rendezvous and
+    /// route-aware clients should prefer this contract when available.
+    /// </summary>
+    public interface ICultNetUriSchemaClient : ICultNetSchemaClient
+    {
+        /// <summary>Connects to the exact advertised schema endpoint.</summary>
+        Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken = default);
+    }
+
+    /// <summary>
     /// Exposes terminal failure of a schema client's background transport work.
     /// </summary>
     public interface ICultNetSchemaClientHealth

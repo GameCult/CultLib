@@ -161,6 +161,7 @@ namespace GameCult.Mesh
         private readonly CultMeshDiscoveryServiceOptions _options;
         private readonly ConcurrentDictionary<string, Lazy<Task<CultMeshDiscoveryState>>> _inFlight = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, CultMeshDiscoveryState> _states = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, byte> _invalidated = new(StringComparer.Ordinal);
         private readonly Subject<CultMeshDiscoveryState> _updates = new();
         private long _diagnosticSequence;
         private bool _disposed;
@@ -181,6 +182,19 @@ namespace GameCult.Mesh
         {
             _states.TryGetValue(endpointId, out var state);
             return state == null ? null : EvaluateAt(state, _options.Clock.UtcNow);
+        }
+
+        /// <summary>
+        /// Invalidates one resolved identity so a transport failure must consult the
+        /// configured rendezvous sources again instead of retrying a fresh-but-dead route.
+        /// </summary>
+        public void Invalidate(CultMeshDiscoveryQuery query)
+        {
+            if (query == null) throw new ArgumentNullException(nameof(query));
+            ThrowIfDisposed();
+            var key = QueryKey(query);
+            _states.TryRemove(key, out _);
+            _invalidated[key] = 0;
         }
 
         public async Task<CultMeshDiscoveryState> ResolveAsync(
@@ -315,6 +329,7 @@ namespace GameCult.Mesh
         private async Task<CultMeshDiscoveryState?> LoadPreviousAsync(string queryKey, CancellationToken cancellationToken)
         {
             if (_states.TryGetValue(queryKey, out var current)) return current;
+            if (_invalidated.TryRemove(queryKey, out _)) return null;
             if (_options.Store == null) return null;
             var stored = await _options.Store.LoadAsync(queryKey, cancellationToken).ConfigureAwait(false);
             if (stored != null) _states[queryKey] = stored;

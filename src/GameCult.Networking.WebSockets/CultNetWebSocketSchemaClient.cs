@@ -5,7 +5,7 @@ using GameCult.Networking;
 namespace GameCult.Networking.WebSockets;
 
 /// <summary>Schema-v0 client over a binary WebSocket route.</summary>
-public sealed class CultNetWebSocketSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICultNetSchemaClientHealth
 {
     private readonly ConcurrentDictionary<Type, List<Delegate>> _handlers = new();
     private readonly object _handlerGate = new();
