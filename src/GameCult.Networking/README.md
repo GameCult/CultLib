@@ -390,6 +390,33 @@ peer lookup and handshake before returning the same RUDP transport. Packet
 semantics, schema-channel send/receive helpers, and reconnect state still live
 in `GameCult.Networking`.
 
+## Typed Operations
+
+`CultNetOperationServer` attaches typed application handlers to any
+`ICultNetSchemaServer`. It owns route/schema validation, MessagePack envelope
+encoding, correlation, and framework failure replies. The application handler
+owns domain validation, state mutation, idempotency, and durable receipts:
+
+```csharp
+using var operations = new CultNetOperationServer(schemaServer, "counter.provider")
+    .Register<IncrementRequest, IncrementReceipt>(
+        "counter",
+        "counter.increment",
+        "counter.increment_request.v1",
+        "counter.increment_receipt.v1",
+        command => IncrementExactlyOnceAsync(
+            command.IdempotencyKey,
+            command.Value));
+```
+
+Returning `CultNetOperationReply<T>.Rejected(...)` preserves a schema-valid
+domain receipt and status. Unknown routes, malformed payloads, and schema
+mismatches return the correlated `gamecult.cultnet.operation_failure.v1`
+payload; `CultMeshClient.InvokeAsync` raises
+`CultMeshRemoteOperationException` immediately instead of timing out. The
+browser client raises the equivalent `CultMeshBrowserOperationError` with the
+same status and failure code.
+
 ## Browser WebSocket Host
 
 `GameCult.Networking.WebSockets` keeps ASP.NET Core hosting out of the

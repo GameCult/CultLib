@@ -176,6 +176,29 @@ export interface CultMeshOperationOptions {
   targetRuntimeId?: string;
 }
 
+/** Portable schema returned when routing or envelope validation fails before a domain reply exists. */
+export const cultNetOperationFailureSchema = "gamecult.cultnet.operation_failure.v1";
+
+export interface CultNetOperationFailure {
+  code: string;
+  message: string;
+}
+
+/** Correlated framework-level failure returned by a CultMesh operation provider. */
+export class CultMeshBrowserOperationError extends Error {
+  readonly status: string;
+  readonly code: string;
+  readonly diagnostics: readonly string[];
+
+  constructor(response: CultNetOperationResponseMessage, failure: CultNetOperationFailure) {
+    super(failure.message || "CultMesh operation failed.");
+    this.name = "CultMeshBrowserOperationError";
+    this.status = response.status || "error";
+    this.code = failure.code || "operation-error";
+    this.diagnostics = response.diagnostics ?? [];
+  }
+}
+
 export type CultMeshConnectionState = "connecting" | "connected" | "reconnecting" | "disposed";
 
 type DocumentWatcher = (record: CultNetRawDocumentRecord | undefined) => void;
@@ -554,6 +577,19 @@ export class CultMeshBrowserClient implements AsyncDisposable {
         if (!pending) return;
         this.#pendingOperations.delete(message.messageId);
         clearTimeout(pending.timer);
+        if (message.payloadSchema === cultNetOperationFailureSchema) {
+          try {
+            pending.reject(new CultMeshBrowserOperationError(
+              message,
+              decodeCultNetOperationPayload<CultNetOperationFailure>(message),
+            ));
+          } catch (error) {
+            pending.reject(error instanceof Error
+              ? error
+              : new Error("CultMesh operation failure payload was malformed."));
+          }
+          return;
+        }
         pending.resolve(message);
         return;
       }

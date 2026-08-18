@@ -95,61 +95,50 @@ static async Task RunProviderAsync(Args arguments)
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
     using var subscriptions = new CultNetDatabaseSubscriptionServer(schemaServer, database);
-    var operationGate = new SemaphoreSlim(1, 1);
-    schemaServer.OnCultNet<CultNetOperationRequestMessage>(async (request, peer) =>
-    {
-        if (request.ServiceId != "sample.counter")
-        {
-            peer.SendCultNet(new CultNetErrorMessage { Error = "Unsupported sample operation." });
-            return;
-        }
-        if (request.Operation == "sample.counter.ping")
-        {
-            var ping = MessagePackSerializer.Deserialize<PingRequest>(
-                Convert.FromBase64String(request.Payload),
-                CultNetSchemaMessageSerialization.Options);
-            SendOperationResponse(
-                peer,
-                request,
-                "sample.ping_receipt.v1",
-                new PingReceipt { Sequence = ping.Sequence });
-            return;
-        }
-        if (request.Operation != "sample.counter.increment")
-        {
-            peer.SendCultNet(new CultNetErrorMessage { Error = "Unsupported sample operation." });
-            return;
-        }
-        await operationGate.WaitAsync();
-        try
-        {
-            var current = cache.Get<CounterState>(new CultRecordKey(counterKey))
-                ?? throw new InvalidOperationException("Counter state is unavailable.");
-            if (!current.Receipts.TryGetValue(request.MessageId, out var receipt))
+    using var operationGate = new SemaphoreSlim(1, 1);
+    using var operations = new CultNetOperationServer(schemaServer, "sample.counter-provider")
+        .Register<PingRequest, PingReceipt>(
+            "sample.counter",
+            "sample.counter.ping",
+            "sample.ping_request.v1",
+            "sample.ping_receipt.v1",
+            context => Task.FromResult(new PingReceipt { Sequence = context.Value.Sequence }))
+        .Register<IncrementRequest, IncrementReceipt>(
+            "sample.counter",
+            "sample.counter.increment",
+            "sample.increment.v1",
+            "gamecult.eve.command_receipt.v1",
+            async context =>
             {
-                var input = MessagePackSerializer.Deserialize<IncrementRequest>(
-                    Convert.FromBase64String(request.Payload),
-                    CultNetSchemaMessageSerialization.Options);
-                receipt = IncrementReceipt.Accepted(request.MessageId, current.Count + input.Amount);
-                var receipts = new Dictionary<string, IncrementReceipt>(current.Receipts, StringComparer.Ordinal)
+                await operationGate.WaitAsync();
+                try
                 {
-                    [request.MessageId] = receipt
-                };
-                await database.PutAsync(new CultRecordKey(counterKey), new CounterState
+                    var current = cache.Get<CounterState>(new CultRecordKey(counterKey))
+                        ?? throw new InvalidOperationException("Counter state is unavailable.");
+                    if (current.Receipts.TryGetValue(context.IdempotencyKey, out var existing))
+                        return existing;
+
+                    var receipt = IncrementReceipt.Accepted(
+                        context.IdempotencyKey,
+                        current.Count + context.Value.Amount);
+                    var receipts = new Dictionary<string, IncrementReceipt>(current.Receipts, StringComparer.Ordinal)
+                    {
+                        [context.IdempotencyKey] = receipt
+                    };
+                    await database.PutAsync(new CultRecordKey(counterKey), new CounterState
+                    {
+                        CounterId = counterKey,
+                        Count = receipt.Count,
+                        Receipts = receipts
+                    });
+                    await cache.FlushAsync();
+                    return receipt;
+                }
+                finally
                 {
-                    CounterId = counterKey,
-                    Count = receipt.Count,
-                    Receipts = receipts
-                });
-                await cache.FlushAsync();
-            }
-            SendOperationResponse(peer, request, "gamecult.eve.command_receipt.v1", receipt);
-        }
-        finally
-        {
-            operationGate.Release();
-        }
-    });
+                    operationGate.Release();
+                }
+            });
 
     var builder = WebApplication.CreateSlimBuilder();
     builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, arguments.Port));
@@ -245,26 +234,6 @@ static async Task RunHeadlessAsync(Args arguments)
     await Task.WhenAll(completion.Task, commandTask).WaitAsync(TimeSpan.FromSeconds(45));
 }
 
-static void SendOperationResponse<T>(
-    ICultNetSchemaServerPeer peer,
-    CultNetOperationRequestMessage request,
-    string payloadSchema,
-    T payload)
-{
-    peer.SendCultNet(new CultNetOperationResponseMessage
-    {
-        MessageId = request.MessageId,
-        ServiceId = request.ServiceId,
-        Operation = request.Operation,
-        Status = "accepted",
-        PayloadSchema = payloadSchema,
-        Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
-            payload,
-            CultNetSchemaMessageSerialization.Options)),
-        SourceRuntimeId = "sample.counter-provider"
-    });
-}
-
 static async Task<object> MeasureOperationSessionAsync(CultMeshClient mesh, Args arguments)
 {
     const int warmupOperations = 100;
@@ -337,54 +306,27 @@ static void ForceCollection()
 static EveSurfaceDocument CreateCounterSurface()
 {
     var networkRoute = new CultMeshRouteHint(CultMeshLocalityKind.Network, "cultmesh");
-    return new EveSurfaceDocument(
-        providerId: "sample.counter-provider",
-        providerKind: "sample.daemon",
-        title: "CultMesh browser counter",
-        version: 1,
-        updatedAtUtc: "2026-08-17T00:00:00Z",
-        surface: new EveSurfaceTree(
-            surfaceKey,
-            new EveSurfaceComponent(
-                "counter.root",
-                "column",
-                new Dictionary<string, string>(StringComparer.Ordinal),
-                [
-                    new EveSurfaceComponent(
-                        "counter.value",
-                        "metric",
-                        new Dictionary<string, string>(StringComparer.Ordinal)
-                        {
-                            ["label"] = "Canonical count",
-                            ["value"] = "0"
-                        },
-                        [],
-                        [
-                            new CultMeshStateBindingDescriptor(
-                                "value",
-                                "sample.counter.count",
-                                "sample.counter_state:counter:main",
-                                "sample.counter_state.v1",
-                                networkRoute)
-                        ]),
-                    new EveSurfaceComponent(
-                        "counter.increment",
-                        "control.button",
-                        new Dictionary<string, string>(StringComparer.Ordinal)
-                        {
-                            ["label"] = "Increment",
-                            ["command"] = "sample.counter.increment"
-                        },
-                        [])
-                ]),
-            []),
-        commands:
-        [
-            new EveCommandTemplate(new CultMeshOperationBindingDescriptor(
-                "sample.counter.increment",
-                "Increment",
-                routeHint: networkRoute))
-        ]);
+    var count = new CultMeshStateBindingDescriptor(
+        "value",
+        "sample.counter.count",
+        "sample.counter_state:counter:main",
+        "sample.counter_state.v1",
+        networkRoute);
+    var increment = CultMesh.OperationBinding(
+        "sample.counter.increment",
+        "Increment",
+        "sample.increment.v1",
+        networkRoute);
+    return EveSurface.Create(surfaceKey)
+        .Provider("sample.counter-provider", "sample.daemon")
+        .Title("CultMesh browser counter")
+        .Version(1)
+        .UpdatedAtUtc("2026-08-17T00:00:00Z")
+        .RootColumn("counter.root", root => root
+            .Title("counter.title", "CultMesh browser counter")
+            .Metric("counter.value", "Canonical count", "0", count)
+            .Button("counter.increment", "Increment", increment))
+        .Build();
 }
 
 sealed class Args

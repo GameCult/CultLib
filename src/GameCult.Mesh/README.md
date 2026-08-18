@@ -34,13 +34,17 @@ wire, see [docs/typed-document-path.md](docs/typed-document-path.md).
 
 ## Eve / CultUI Surfaces
 
-CultMesh includes the portable Eve/CultUI surface document contract and a fluent
-builder for daemon-published UI. The builder is deliberately shaped like the
-legacy CultUI/Unity properties panel API: compose menus and forms in readable
-imperative code, while the emitted document carries typed CultMesh operation
-bindings, state bindings, style tokens, and embedded surface slots.
+CultMesh supplies the typed state and operation binding descriptors used by Eve.
+The renderer-neutral `GameCult.Eve.Surface` package in the Eve repository owns
+the portable surface document and fluent builder. Add that package when a daemon
+publishes UI; do not add EveUnity to the provider. The emitted document carries
+typed CultMesh operation bindings, state bindings, style tokens, and embedded
+surface slots while remaining independent of any lowering runtime.
 
 ```csharp
+using GameCult.Eve.Surface;
+using GameCult.Mesh;
+
 var menu = EveSurface.Create("aetheria.main_menu.root")
     .Provider("aetheria", "game.menu")
     .TitleSubtitle("AETHERIA", "TERMINUS")

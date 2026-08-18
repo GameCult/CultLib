@@ -289,6 +289,36 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task InvokeOperation_ThrowsCorrelatedFrameworkFailureWithoutTimingOut()
+    {
+        var connector = new DocumentConnector { RejectOperations = true };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector },
+            OperationResponseTimeout = TimeSpan.FromSeconds(5)
+        });
+
+        Func<Task> invoke = async () => await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
+            "aetheria",
+            "tests.counter",
+            "tests.counter.increment",
+            "wrong.request.v1",
+            "tests.counter.increment_receipt.v1",
+            new ClientOperationRequest { Amount = 2 },
+            sourceRuntimeId: "pilot-one",
+            idempotencyKey: "pilot-command-invalid");
+
+        var failure = await invoke.Should().ThrowAsync<CultMeshRemoteOperationException>();
+        failure.Which.Status.Should().Be("invalid");
+        failure.Which.Code.Should().Be("request-schema-mismatch");
+        failure.Which.Message.Should().Contain("expected payload schema");
+        connector.Clients.Should().ContainSingle();
+        connector.Clients[0].Operations.Should().ContainSingle();
+    }
+
+    [Test]
     public async Task Dispose_TerminatesDocumentWaitingForInitialSnapshot()
     {
         var connector = new DocumentConnector { SuppressFirstSnapshot = true };
@@ -369,6 +399,7 @@ public sealed class CultMeshClientTests
         public List<DocumentClient> Clients { get; } = new();
         public bool SuppressFirstSnapshot { get; set; }
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
+        public bool RejectOperations { get; set; }
         public string ConnectorId => "document-test";
         public int Priority => 0;
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
@@ -382,7 +413,8 @@ public sealed class CultMeshClientTests
                 "pilot surface " + (Clients.Count + 1),
                 snapshotsToSuppress: SuppressFirstSnapshot && Clients.Count == 0
                     ? int.MaxValue
-                    : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0);
+                    : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0,
+                rejectOperations: RejectOperations);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
@@ -395,11 +427,13 @@ public sealed class CultMeshClientTests
         private readonly CultNetDocumentRegistry _documents;
         private readonly string _text;
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool _rejectOperations;
         private int _snapshotsToSuppress;
-        public DocumentClient(string text, int snapshotsToSuppress = 0)
+        public DocumentClient(string text, int snapshotsToSuppress = 0, bool rejectOperations = false)
         {
             _text = text;
             _snapshotsToSuppress = snapshotsToSuppress;
+            _rejectOperations = rejectOperations;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -420,6 +454,29 @@ public sealed class CultMeshClientTests
             if (message is CultNetOperationRequestMessage operation)
             {
                 Operations.Add(operation);
+                if (_rejectOperations)
+                {
+                    var failure = new CultNetOperationFailure
+                    {
+                        Code = "request-schema-mismatch",
+                        Message = "CultNet operation expected payload schema tests.counter.increment_request.v1."
+                    };
+                    var rejected = new CultNetOperationResponseMessage
+                    {
+                        MessageId = operation.MessageId,
+                        ServiceId = operation.ServiceId,
+                        Operation = operation.Operation,
+                        Status = "invalid",
+                        PayloadSchema = CultNetOperationServer.FailureSchemaId,
+                        Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
+                            failure,
+                            CultNetSchemaMessageSerialization.Options)),
+                        Diagnostics = new[] { failure.Message },
+                        SourceRuntimeId = "provider-daemon"
+                    };
+                    foreach (var handler in _operationResponses.ToArray()) handler(rejected);
+                    return;
+                }
                 var decodedRequest = MessagePackSerializer.Deserialize<ClientOperationRequest>(
                     Convert.FromBase64String(operation.Payload),
                     CultNetSchemaMessageSerialization.Options);

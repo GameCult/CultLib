@@ -82,6 +82,29 @@ namespace GameCult.Mesh
         public TResponse Value { get; }
     }
 
+    /// <summary>Correlated framework-level failure returned before a typed domain reply exists.</summary>
+    public sealed class CultMeshRemoteOperationException : Exception
+    {
+        internal CultMeshRemoteOperationException(
+            CultNetOperationResponseMessage envelope,
+            CultNetOperationFailure failure)
+            : base(failure?.Message ?? "CultMesh operation failed.")
+        {
+            Status = envelope?.Status ?? "error";
+            Code = failure?.Code ?? "operation-error";
+            Diagnostics = envelope?.Diagnostics ?? Array.Empty<string>();
+        }
+
+        /// <summary>Gets the provider-authored failure status.</summary>
+        public string Status { get; }
+
+        /// <summary>Gets the stable machine-readable failure code.</summary>
+        public string Code { get; }
+
+        /// <summary>Gets provider diagnostics carried by the response.</summary>
+        public IReadOnlyList<string> Diagnostics { get; }
+    }
+
     /// <summary>Owns one shared live document subscription until disposed.</summary>
     public sealed class CultMeshDocumentLease<TDocument> : IDisposable where TDocument : class
     {
@@ -408,6 +431,24 @@ namespace GameCult.Mesh
             if (!string.Equals(envelope.ServiceId, expectedService, StringComparison.Ordinal) ||
                 !string.Equals(envelope.Operation, expectedOperation, StringComparison.Ordinal))
                 throw new InvalidOperationException("CultMesh operation response did not match the requested service and operation.");
+            if (string.Equals(envelope.PayloadSchema, CultNetOperationServer.FailureSchemaId, StringComparison.Ordinal))
+            {
+                if (!string.Equals(envelope.PayloadEncoding, "messagepack-base64", StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        $"CultMesh operation failure returned unsupported payload encoding '{envelope.PayloadEncoding}'.");
+                CultNetOperationFailure failure;
+                try
+                {
+                    failure = MessagePackSerializer.Deserialize<CultNetOperationFailure>(
+                        Convert.FromBase64String(envelope.Payload),
+                        CultNetSchemaMessageSerialization.Options);
+                }
+                catch (Exception error) when (error is FormatException || error is MessagePackSerializationException)
+                {
+                    throw new InvalidOperationException("CultMesh operation failure payload was malformed.", error);
+                }
+                throw new CultMeshRemoteOperationException(envelope, failure);
+            }
             if (!string.Equals(envelope.PayloadSchema, expectedResponseSchema, StringComparison.Ordinal))
                 throw new InvalidOperationException(
                     $"CultMesh operation returned payload schema '{envelope.PayloadSchema}', expected '{expectedResponseSchema}'.");

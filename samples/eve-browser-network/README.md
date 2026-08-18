@@ -15,6 +15,12 @@ This is the real-process continuation of `samples/eve-two-runtime`:
 - the browser and C# clients speak the same binary CultNet schema-v0 WebSocket
   messages through the authenticated host adapter.
 
+The provider registers typed commands through `CultNetOperationServer`.
+Application code receives `CultNetOperationContext<TRequest>` and returns a
+typed receipt; it does not parse base64, switch on wire envelopes, or construct
+correlation responses. The counter's durable transaction still owns
+idempotency and state mutation.
+
 Run the proof from the CultLib repository:
 
 ```powershell

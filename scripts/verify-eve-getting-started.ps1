@@ -6,6 +6,17 @@ param(
 $ErrorActionPreference = "Stop"
 $cultLibRoot = Split-Path -Parent $PSScriptRoot
 $EveRoot = [IO.Path]::GetFullPath($EveRoot)
+$networkSample = Join-Path $cultLibRoot "samples\eve-browser-network\Program.cs"
+$networkSampleSource = Get-Content -LiteralPath $networkSample -Raw
+if ($networkSampleSource -match 'OnCultNet\s*<\s*CultNetOperationRequestMessage' -or
+    $networkSampleSource -match 'Convert\.FromBase64String\s*\(\s*request\.Payload') {
+    throw "The getting-started provider has regressed to hand-written CultNet operation envelope dispatch."
+}
+foreach ($requiredPrimitive in @("CultNetOperationServer", "EveSurface.Create")) {
+    if ($networkSampleSource -notmatch [regex]::Escape($requiredPrimitive)) {
+        throw "The getting-started provider is missing the public primitive '$requiredPrimitive'."
+    }
+}
 
 & (Join-Path $PSScriptRoot "verify-eve-two-runtime-sample.ps1") `
     -EveRoot $EveRoot `

@@ -13,6 +13,7 @@ import {
 
 import {
   CultMeshBrowserClient,
+  CultMeshBrowserOperationError,
   CultMeshBrowserOdinRendezvous,
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
@@ -142,6 +143,35 @@ test("browser client bounds unanswered provider operations", async () => {
   await client.dispose();
 });
 
+test("browser client rejects a correlated framework failure without waiting for timeout", async () => {
+  const provider = new FakeProvider("ws://127.0.0.1:4351/mesh", 1, true);
+  const client = await CultMeshBrowserClient.connect({
+    ...provider.route,
+    runtimeId: "browser-failure-test",
+    rendezvous: { resolve: async () => provider.route },
+    requestTimeoutMs: 60_000,
+    socketFactory: () => provider.open(),
+  });
+
+  await assert.rejects(
+    client.invoke({
+      serviceId: "sample.counter",
+      operation: "increment",
+      payloadSchema: "wrong.request.v1",
+      payload: { amount: 1 },
+      idempotencyKey: "failure-1",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CultMeshBrowserOperationError);
+      assert.equal(error.status, "invalid");
+      assert.equal(error.code, "request-schema-mismatch");
+      assert.match(error.message, /expected payload schema/i);
+      return true;
+    },
+  );
+  await client.dispose();
+});
+
 test("browser client rejects oversized outbound schema messages", async () => {
   const route = {
     verseId: "sample.counter",
@@ -189,8 +219,9 @@ class FakeProvider {
   readonly route: CultMeshBrowserRoute;
   #count: number;
   #subscriptions = new Map<FakeSocket, Map<string, CultNetDatabaseSubscribeMessage>>();
+  #rejectOperations: boolean;
 
-  constructor(endpoint: string, count: number) {
+  constructor(endpoint: string, count: number, rejectOperations = false) {
     this.route = {
       verseId: "sample.counter",
       providerId: "sample.counter-provider",
@@ -198,6 +229,7 @@ class FakeProvider {
       generation: endpoint,
     };
     this.#count = count;
+    this.#rejectOperations = rejectOperations;
   }
 
   get activeSubscriptionCount(): number {
@@ -242,6 +274,24 @@ class FakeProvider {
   }
 
   private invoke(socket: FakeSocket, message: CultNetOperationRequestMessage): void {
+    if (this.#rejectOperations) {
+      socket.deliver({
+        schemaVersion: "cultnet.operation_response.v0",
+        messageId: message.messageId,
+        serviceId: message.serviceId,
+        operation: message.operation,
+        status: "invalid",
+        payloadSchema: "gamecult.cultnet.operation_failure.v1",
+        payloadEncoding: "messagepack-base64",
+        payload: bytesToBase64(encode({
+          code: "request-schema-mismatch",
+          message: "Expected payload schema 'sample.increment.v1'.",
+        })),
+        diagnostics: ["Request schema did not match."],
+        sourceRuntimeId: "sample.counter-provider",
+      });
+      return;
+    }
     const payload = decode(base64ToBytes(message.payload)) as { amount: number };
     this.#count += payload.amount;
     for (const [peer, subscriptions] of this.#subscriptions) {
