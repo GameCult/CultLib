@@ -222,7 +222,6 @@ namespace GameCult.Mesh
     public sealed class CultMeshSession : IDisposable
     {
         private readonly Subject<CultMeshSessionState> _states = new();
-        private readonly ConcurrentBag<IDisposable> _subscriptions = new();
         private readonly ManagedSchemaChannel _channel;
         private long _physicalGeneration;
         private bool _disposed;
@@ -244,10 +243,7 @@ namespace GameCult.Mesh
         public IDisposable OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
         {
             if (callback == null) throw new ArgumentNullException(nameof(callback));
-            var subscription = new SessionSubscription<T>(callback);
-            Channel.OnCultNet<T>(subscription.Invoke);
-            _subscriptions.Add(subscription);
-            return subscription;
+            return _channel.Subscribe(callback);
         }
         internal void Transition(CultMeshSessionState state) { State = state; _states.OnNext(state); }
         internal void ReplacePhysicalChannel(ICultNetSchemaClient channel)
@@ -259,7 +255,6 @@ namespace GameCult.Mesh
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var subscription in _subscriptions) subscription.Dispose();
             _channel.Dispose();
             _states.Dispose();
         }
@@ -267,7 +262,7 @@ namespace GameCult.Mesh
         private sealed class ManagedSchemaChannel : ICultNetSchemaClient
         {
             private readonly object _gate = new();
-            private readonly List<IChannelRegistration> _registrations = new();
+            private readonly Dictionary<Type, IChannelRegistration> _registrations = new();
             private ICultNetSchemaClient _physical;
             private bool _disposed;
 
@@ -293,13 +288,22 @@ namespace GameCult.Mesh
             }
             public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
             {
+                _ = Subscribe(callback);
+            }
+            public IDisposable Subscribe<T>(Action<T> callback) where T : ICultNetSchemaMessage
+            {
                 if (callback == null) throw new ArgumentNullException(nameof(callback));
                 lock (_gate)
                 {
                     ThrowIfDisposed();
-                    var registration = new ChannelRegistration<T>(callback);
-                    registration.Attach(_physical);
-                    _registrations.Add(registration);
+                    if (!_registrations.TryGetValue(typeof(T), out var existing))
+                    {
+                        var created = new ChannelRegistration<T>();
+                        created.Attach(_physical);
+                        _registrations.Add(typeof(T), created);
+                        existing = created;
+                    }
+                    return ((ChannelRegistration<T>)existing).Subscribe(callback);
                 }
             }
             public void Replace(ICultNetSchemaClient physical)
@@ -310,7 +314,7 @@ namespace GameCult.Mesh
                 {
                     ThrowIfDisposed();
                     previous = _physical;
-                    foreach (var registration in _registrations) registration.Attach(physical);
+                    foreach (var registration in _registrations.Values) registration.Attach(physical);
                     _physical = physical;
                 }
                 previous.Dispose();
@@ -323,27 +327,69 @@ namespace GameCult.Mesh
                     if (_disposed) return;
                     _disposed = true;
                     physical = _physical;
+                    foreach (var registration in _registrations.Values) registration.Dispose();
                     _registrations.Clear();
                 }
                 physical.Dispose();
             }
             private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(ManagedSchemaChannel)); }
 
-            private interface IChannelRegistration { void Attach(ICultNetSchemaClient physical); }
+            private interface IChannelRegistration : IDisposable { void Attach(ICultNetSchemaClient physical); }
             private sealed class ChannelRegistration<T> : IChannelRegistration where T : ICultNetSchemaMessage
             {
-                private readonly Action<T> _callback;
-                public ChannelRegistration(Action<T> callback) => _callback = callback;
-                public void Attach(ICultNetSchemaClient physical) => physical.OnCultNet(_callback);
-            }
-        }
+                private readonly object _gate = new();
+                private readonly Dictionary<long, Action<T>> _callbacks = new();
+                private long _nextId;
+                private bool _disposed;
 
-        private sealed class SessionSubscription<T> : IDisposable where T : ICultNetSchemaMessage
-        {
-            private Action<T>? _callback;
-            public SessionSubscription(Action<T> callback) { _callback = callback; }
-            public void Invoke(T message) => Volatile.Read(ref _callback)?.Invoke(message);
-            public void Dispose() => Interlocked.Exchange(ref _callback, null);
+                public IDisposable Subscribe(Action<T> callback)
+                {
+                    lock (_gate)
+                    {
+                        if (_disposed) throw new ObjectDisposedException(nameof(ChannelRegistration<T>));
+                        var id = ++_nextId;
+                        _callbacks.Add(id, callback);
+                        return new Subscription(this, id);
+                    }
+                }
+
+                public void Attach(ICultNetSchemaClient physical) => physical.OnCultNet<T>(Dispatch);
+
+                public void Dispose()
+                {
+                    lock (_gate)
+                    {
+                        _disposed = true;
+                        _callbacks.Clear();
+                    }
+                }
+
+                private void Dispatch(T message)
+                {
+                    Action<T>[] callbacks;
+                    lock (_gate) callbacks = _callbacks.Values.ToArray();
+                    foreach (var callback in callbacks) callback(message);
+                }
+
+                private void Unsubscribe(long id)
+                {
+                    lock (_gate) _callbacks.Remove(id);
+                }
+
+                private sealed class Subscription : IDisposable
+                {
+                    private ChannelRegistration<T>? _owner;
+                    private readonly long _id;
+
+                    public Subscription(ChannelRegistration<T> owner, long id)
+                    {
+                        _owner = owner;
+                        _id = id;
+                    }
+
+                    public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Unsubscribe(_id);
+                }
+            }
         }
 
         private sealed class SessionSchemaClient : ICultNetSchemaClient

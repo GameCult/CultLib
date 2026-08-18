@@ -206,6 +206,32 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task Document_OneHundredThousandDistinctLeaseCyclesLeaveNoResourcesOrCallbacks()
+    {
+        const int leaseCount = 100_000;
+        var connector = new DocumentConnector();
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        for (var index = 0; index < leaseCount; index++)
+        {
+            var recordKey = "surface:churn:" + index;
+            using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", recordKey);
+            (await lease.Handle.LatestAsync()).Id.Should().Be(recordKey);
+        }
+
+        mesh.ActiveDocumentResourceCount.Should().Be(0);
+        mesh.ActiveCollectionResourceCount.Should().Be(0);
+        connector.Clients.Should().ContainSingle();
+        connector.Clients[0].HandlerRegistrationCount.Should().Be(2,
+            "one physical handler per message type must serve every logical lease");
+    }
+
+    [Test]
     public async Task SubmitDocument_SendsUncommittedInputThroughStableIdentitySession()
     {
         var connector = new DocumentConnector();
@@ -348,6 +374,7 @@ public sealed class CultMeshClientTests
         public bool Connected => true;
         public Task<Exception> BackgroundFailure => _failure.Task;
         public int SubscribeCount { get; private set; }
+        public int HandlerRegistrationCount { get; private set; }
         public List<CultNetDocumentPutRawMessage> Submitted { get; } = new();
         public void Connect(string host, int port) { }
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
@@ -364,10 +391,11 @@ public sealed class CultMeshClientTests
                 _snapshotsToSuppress--;
                 return;
             }
+            var recordKey = request.RecordKeys?.SingleOrDefault() ?? "surface:pilot";
             var put = _documents.CreateRawDocumentPutMessage(
                 "test-put",
-                new CultRecordHandle<ClientTestDocument>(new CultRecordKey("surface:pilot")),
-                new ClientTestDocument { Id = "surface:pilot", Text = _text });
+                new CultRecordHandle<ClientTestDocument>(new CultRecordKey(recordKey)),
+                new ClientTestDocument { Id = recordKey, Text = _text });
             var response = new CultNetSnapshotResponseRawMessage
             {
                 MessageId = request.MessageId,
@@ -377,6 +405,7 @@ public sealed class CultMeshClientTests
         }
         public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
         {
+            HandlerRegistrationCount++;
             if (typeof(T) == typeof(CultNetSnapshotResponseRawMessage))
                 _snapshots.Add(response => callback((T)(object)response));
         }
