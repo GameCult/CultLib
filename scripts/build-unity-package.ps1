@@ -2,6 +2,7 @@ param(
   [string] $Configuration = "Release",
   [string] $OutputDirectory = "artifacts\unity\org.gamecult.cultlib",
   [string] $NuGetConfig = "",
+  [switch] $NoRestore,
   [switch] $UpdateTemplate
 )
 
@@ -38,6 +39,7 @@ if (Test-Path -LiteralPath $outputRoot) {
 
 $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
 $publishArguments = @("publish", $projectPath, "-c", $Configuration, "-o", $publishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+if ($NoRestore) { $publishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $publishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
 }
@@ -46,6 +48,7 @@ if ($LASTEXITCODE -ne 0) {
   throw "CultLib publish failed with exit code $LASTEXITCODE"
 }
 $webSocketPublishArguments = @("publish", $webSocketProjectPath, "-c", $Configuration, "-f", "netstandard2.1", "-o", $webSocketPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+if ($NoRestore) { $webSocketPublishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $webSocketPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
 }
@@ -54,6 +57,7 @@ if ($LASTEXITCODE -ne 0) {
   throw "CultLib WebSocket publish failed with exit code $LASTEXITCODE"
 }
 $quicPublishArguments = @("publish", $quicProjectPath, "-c", $Configuration, "-o", $quicPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+if ($NoRestore) { $quicPublishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $quicPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
 }
