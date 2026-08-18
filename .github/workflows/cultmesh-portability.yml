@@ -1,6 +1,10 @@
 name: CultMesh portability and performance
 
 on:
+  push:
+    branches:
+      - main
+      - "codex/**"
   pull_request:
   workflow_dispatch:
 
