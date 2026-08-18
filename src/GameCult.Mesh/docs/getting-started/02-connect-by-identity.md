@@ -16,6 +16,7 @@ become usable by merely repeating the expected Verse and runtime strings.
 
 ```csharp
 using GameCult.Mesh;
+using GameCult.Networking.WebSockets;
 
 var odinEndpoint = Environment.GetEnvironmentVariable("ODIN_ENDPOINT")
     ?? throw new InvalidOperationException("Set ODIN_ENDPOINT to the configured rendezvous route.");
@@ -33,11 +34,22 @@ var odinRoot = new CultMeshEcdsaP256PublicKey(
 using var mesh = new CultMeshClient(new CultMeshClientOptions
 {
     RendezvousEndpoints = new[] { odinEndpoint },
+    Discovery = new CultMeshVerseDiscoveryClientOptions
+    {
+        CreateClientForEndpoint = _ => new CultNetWebSocketSchemaClient()
+    },
     Sessions = new CultMeshSessionManagerOptions
     {
         Trust = new CultMeshAuthorityTrustPolicy(
             CultMeshAuthorityTrustMode.AuthenticatedRemote,
             new[] { odinRoot })
+    },
+    Connectors = new ICultMeshTransportConnector[]
+    {
+        new CultMeshUriSchemaTransportConnector(
+            "cultnet-websocket",
+            new[] { "wss" },
+            _ => new CultNetWebSocketSchemaClient())
     }
 });
 
@@ -92,6 +104,30 @@ Sessions = new CultMeshSessionManagerOptions
 provider names, and Odin wire fields cannot turn this exception on. Remote
 routes require a trusted Odin signature, provider nonce proof, certificate
 validity, and a protected channel.
+
+The remote example requires both `GameCult.Mesh` and
+`GameCult.Networking.WebSockets` at the same CultLib package version. Core
+CultMesh does not silently install a network stack: the consumer chooses the
+secure connector and its TLS policy. The default TCP connector exists for the
+explicit loopback-development case and cannot satisfy authenticated-remote
+trust.
+
+An authenticated provider receives an Odin-certified route and its matching
+provider private key from deployment configuration. It attaches the proof gate
+to the same WSS schema server before publishing the route:
+
+```csharp
+using var identity = new CultMeshSessionIdentityServer(
+    schemaServer,
+    authorityRuntimeId: "sample.counter-daemon",
+    verseIds: new[] { "sample.counter" },
+    protocolIds: new[] { CultMeshProtocols.Documents.Value },
+    routeGenerations: new[] { certifiedRoute.Generation },
+    proofSigners: new[] { new CultMeshSessionProofSigner(certifiedRoute, providerPrivateKey) });
+```
+
+`certifiedRoute` is the exact signed route Odin publishes. The provider never
+holds Odin's signing key, and an unsigned WSS route is still untrusted.
 
 Fast session-management check (this uses controlled transports; it is not the
 network proof):

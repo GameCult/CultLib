@@ -9,6 +9,7 @@ import {
   type CultNetMessage,
   type CultNetOperationRequestMessage,
   type CultNetRawDocumentRecord,
+  type CultMeshVerseCatalogResponseMessage,
   type CultMeshSessionOpenMessage,
 } from "cultnet-ts/contracts";
 
@@ -38,16 +39,16 @@ test("Odin rendezvous resolves stable authority-runtime identity and observes ro
   assert.equal((await rendezvous.resolve({
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
-  })).endpoint, "ws://127.0.0.1:4050/mesh");
+  }, localTrust)).endpoint, "ws://127.0.0.1:4050/mesh");
 
   odin.providerEndpoint = "ws://127.0.0.1:4060/mesh";
   assert.equal((await rendezvous.resolve({
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
-  })).endpoint, "ws://127.0.0.1:4060/mesh");
+  }, localTrust)).endpoint, "ws://127.0.0.1:4060/mesh");
 
   await assert.rejects(
-    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "other-runtime" }),
+    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "other-runtime" }, localTrust),
     /could not resolve/,
   );
 });
@@ -64,7 +65,7 @@ test("Odin rendezvous never selects another authority's faster endpoint", async 
   const route = await rendezvous.resolve({
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
-  });
+  }, localTrust);
   assert.equal(route.endpoint, "ws://127.0.0.1:4050/mesh");
 });
 
@@ -80,16 +81,43 @@ test("Odin rendezvous accepts one-authority legacy routes and rejects ambiguous 
   const route = await rendezvous.resolve({
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
-  });
+  }, localTrust);
   assert.equal(route.endpoint, "ws://127.0.0.1:4070/mesh");
 
   odin.decoyEndpoint = "ws://127.0.0.1:4069/decoy";
   await assert.rejects(
-    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "sample.counter-daemon" }),
+    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "sample.counter-daemon" }, localTrust),
     (error: unknown) =>
       error instanceof AggregateError &&
       error.errors.some(inner => inner instanceof Error && /ambiguous legacy routes/.test(inner.message)),
   );
+});
+
+test("Odin rendezvous rejects a poisoned route without vetoing a certified fallback", async () => {
+  const signed = await createSignedRoute("wss://provider.example/mesh");
+  const odin = new FakeOdin(signed.route.endpoint);
+  odin.authorityRoutesOverride = [
+    {
+      authorityRuntimeId: signed.route.authorityRuntimeId,
+      endpoint: "wss://poison.example/mesh",
+      protocolIds: ["cultmesh.documents.v1"],
+      priority: 0,
+      generation: "poisoned",
+    },
+    routeForCatalog(signed.route),
+  ];
+  const rendezvous = new CultMeshBrowserOdinRendezvous({
+    endpoints: ["ws://127.0.0.1:4040/odin"],
+    runtimeId: "browser-certified-fallback-test",
+    socketFactory: () => odin.open(),
+  });
+
+  const selected = await rendezvous.resolve(
+    { verseId: signed.route.verseId, authorityRuntimeId: signed.route.authorityRuntimeId },
+    { mode: "authenticated-remote", odinRoots: [signed.odinPublic] },
+  );
+
+  assert.equal(selected.endpoint, signed.route.endpoint);
 });
 
 test("browser client leases provider state, invokes an operation, and follows route replacement", async () => {
@@ -362,6 +390,37 @@ test("browser client replays one idempotent operation after route loss without d
   await client.dispose();
 });
 
+test("an early caller reconnect cancels the scheduled reconnect and keeps one live socket", async () => {
+  const provider = new FakeProvider("ws://127.0.0.1:4361/mesh", 2);
+  const client = await CultMeshBrowserClient.connect({
+    ...provider.route,
+    runtimeId: "browser-single-reconnect-test",
+    rendezvous: { resolve: async () => provider.route },
+    trust: localTrust,
+    reconnectDelayMs: 40,
+    socketFactory: () => provider.open(),
+  });
+  const lease = await client.leaseRawDocument({
+    schemaId: "sample.counter_state.v1",
+    recordKey: "counter:main",
+  });
+
+  provider.dropConnections();
+  await client.invoke({
+    serviceId: "sample.counter",
+    operation: "increment",
+    payloadSchema: "sample.increment.v1",
+    payload: { amount: 1 },
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+
+  assert.equal(provider.openCount, 2);
+  assert.equal(provider.liveSocketCount, 1);
+  assert.equal(provider.activeSubscriptionCount, 1);
+  lease.dispose();
+  await client.dispose();
+});
+
 test("browser client rejects an operation response from another runtime", async () => {
   const provider = new FakeProvider(
     "ws://127.0.0.1:4371/mesh",
@@ -443,6 +502,7 @@ class FakeProvider {
   #rejectOperations: boolean;
   #runtimeId: string;
   #responseRuntimeId: string;
+  #openCount = 0;
 
   constructor(
     endpoint: string,
@@ -469,7 +529,20 @@ class FakeProvider {
     return count;
   }
 
+  get openCount(): number {
+    return this.#openCount;
+  }
+
+  get liveSocketCount(): number {
+    return this.#subscriptions.size;
+  }
+
+  dropConnections(): void {
+    for (const socket of [...this.#subscriptions.keys()]) socket.close(1012, "route dropped");
+  }
+
   open(): FakeSocket {
+    this.#openCount++;
     const socket = new FakeSocket(
       wire => this.receive(socket, wire),
       () => this.#subscriptions.delete(socket),
@@ -587,6 +660,7 @@ class FakeOdin {
   providerEndpoint: string;
   decoyEndpoint: string | undefined;
   omitAuthorityRoutes = false;
+  authorityRoutesOverride: NonNullable<CultMeshVerseCatalogResponseMessage["verses"][number]["authorityRoutes"]> | undefined;
 
   constructor(providerEndpoint: string) {
     this.providerEndpoint = providerEndpoint;
@@ -614,7 +688,7 @@ class FakeOdin {
           authorityRuntimeIds: this.decoyEndpoint
             ? ["sample.counter-daemon", "sample.decoy-daemon"]
             : ["sample.counter-daemon"],
-          ...(!this.omitAuthorityRoutes ? { authorityRoutes: [
+          ...(!this.omitAuthorityRoutes ? { authorityRoutes: this.authorityRoutesOverride ?? [
             ...(this.decoyEndpoint ? [{
               authorityRuntimeId: "sample.decoy-daemon",
               endpoint: this.decoyEndpoint,
@@ -635,6 +709,29 @@ class FakeOdin {
     }, () => undefined);
     return socket;
   }
+}
+
+function routeForCatalog(route: CultMeshBrowserRoute): NonNullable<
+  CultMeshVerseCatalogResponseMessage["verses"][number]["authorityRoutes"]
+>[number] {
+  return {
+    authorityRuntimeId: route.authorityRuntimeId,
+    endpoint: route.endpoint,
+    protocolIds: [...(route.protocolIds ?? [route.protocolId ?? "cultmesh.documents.v1"])],
+    priority: route.priority ?? 0,
+    generation: route.generation,
+    ...(route.certificate ? {
+      certificate: {
+        providerKeyId: route.certificate.providerKey.keyId,
+        providerPublicKeyX: route.certificate.providerKey.x,
+        providerPublicKeyY: route.certificate.providerKey.y,
+        odinKeyId: route.certificate.odinKeyId,
+        issuedAtUnixMilliseconds: route.certificate.issuedAtUnixMilliseconds,
+        expiresAtUnixMilliseconds: route.certificate.expiresAtUnixMilliseconds,
+        signature: route.certificate.signature,
+      },
+    } : {}),
+  };
 }
 
 function handshakeOnlySocket(route: CultMeshBrowserRoute): FakeSocket {

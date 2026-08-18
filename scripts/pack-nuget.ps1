@@ -71,6 +71,7 @@ if (-not $SkipConsumerSmoke) {
     Remove-Item -LiteralPath $smokeRoot -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+  $consumerPackages = Join-Path $smokeRoot "packages"
   $projectDocument = @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -78,6 +79,8 @@ if (-not $SkipConsumerSmoke) {
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <RestoreSources>$outputRoot;https://api.nuget.org/v3/index.json</RestoreSources>
+    <RestorePackagesPath>$consumerPackages</RestorePackagesPath>
+    <RestoreNoCache>true</RestoreNoCache>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="GameCult.Mesh" Version="$version" />

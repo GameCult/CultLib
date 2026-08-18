@@ -1084,16 +1084,21 @@ namespace GameCult.Mesh
             CultMeshSessionTarget target,
             CultMeshProtocolId protocol)
         {
-            return discovery.Candidates
+            var routes = discovery.Candidates
                 .SelectMany(candidate => candidate.Descriptor.AuthorityRoutes)
                 .Where(route => string.Equals(
                     route.AuthorityRuntimeId,
                     target.AuthorityRuntimeId,
                     StringComparison.Ordinal))
                 .Where(route => route.Supports(protocol))
-                .GroupBy(route => route.Endpoint, StringComparer.Ordinal)
-                .Select(group => group.OrderBy(route => route.Priority).First())
-                .Select(route => new CultMeshTransportCandidate(
+                .ToArray();
+            var verified = new List<CultMeshTransportCandidate>();
+            var rejected = new List<Exception>();
+            foreach (var route in routes)
+            {
+                try
+                {
+                    verified.Add(new CultMeshTransportCandidate(
                         route.Endpoint,
                         priority: route.Priority,
                         authorityRuntimeId: route.AuthorityRuntimeId,
@@ -1102,7 +1107,23 @@ namespace GameCult.Mesh
                     .WithVerifiedAuthority(_options.Trust.Verify(
                         target.VerseId,
                         route,
-                        _options.Clock.UtcNow)))
+                        _options.Clock.UtcNow)));
+                }
+                catch (CultMeshSessionException error)
+                {
+                    rejected.Add(error);
+                }
+            }
+            if (verified.Count == 0 && rejected.Count > 0)
+            {
+                throw Failure(
+                    CultMeshSessionFailureReason.Authentication,
+                    $"No trusted route remained for CultMesh target '{target}' and protocol '{protocol}'.",
+                    new AggregateException(rejected));
+            }
+            return verified
+                .GroupBy(candidate => candidate.Endpoint, StringComparer.Ordinal)
+                .Select(group => group.OrderBy(candidate => candidate.Priority).First())
                 .OrderBy(candidate => candidate.Priority)
                 .ThenBy(candidate => candidate.Endpoint, StringComparer.Ordinal)
                 .ToArray();

@@ -53,7 +53,10 @@ export interface CultMeshBrowserAuthorityTrustPolicy {
 }
 
 export interface CultMeshBrowserRendezvous {
-  resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute>;
+  resolve(
+    identity: CultMeshBrowserIdentity,
+    trust?: CultMeshBrowserAuthorityTrustPolicy,
+  ): Promise<CultMeshBrowserRoute>;
 }
 
 export interface CultMeshBrowserOdinRendezvousOptions {
@@ -101,13 +104,16 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
     if (this.#options.maxFrameBytes <= 0) throw new Error("Odin rendezvous maxFrameBytes must be positive.");
   }
 
-  async resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+  async resolve(
+    identity: CultMeshBrowserIdentity,
+    trust: CultMeshBrowserAuthorityTrustPolicy = { mode: "authenticated-remote", odinRoots: [] },
+  ): Promise<CultMeshBrowserRoute> {
     requireText(identity.verseId, "verseId");
     requireText(identity.authorityRuntimeId, "authorityRuntimeId");
     const failures: Error[] = [];
     for (const endpoint of this.#options.endpoints) {
       try {
-        return await this.resolveFrom(endpoint, identity);
+        return await this.resolveFrom(endpoint, identity, trust);
       } catch (error) {
         failures.push(error instanceof Error ? error : new Error(String(error)));
       }
@@ -118,7 +124,11 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
     );
   }
 
-  private resolveFrom(endpoint: string, identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+  private resolveFrom(
+    endpoint: string,
+    identity: CultMeshBrowserIdentity,
+    trust: CultMeshBrowserAuthorityTrustPolicy,
+  ): Promise<CultMeshBrowserRoute> {
     const socket = this.#options.socketFactory(endpoint);
     socket.binaryType = "arraybuffer";
     const messageId = this.#options.createId();
@@ -169,7 +179,9 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
             return;
           }
           if (message.schemaVersion !== "cultmesh.verse_catalog_response.v0" || message.messageId !== messageId) return;
-          finish(undefined, selectOdinRoute(message, identity));
+          void selectOdinRoute(message, identity, trust)
+            .then(route => finish(undefined, route))
+            .catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
       };
       socket.onerror = () => finish(new Error(`Odin WebSocket could not open '${endpoint}'.`));
@@ -501,6 +513,11 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 
   private connectSocket(): Promise<void> {
     this.throwIfDisposed();
+    if (this.#state === "connected" && this.#socket?.readyState === 1) return Promise.resolve();
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+    }
     if (this.#connectPromise) return this.#connectPromise;
     const generation = ++this.#socketGeneration;
     this.setState(this.#socket ? "reconnecting" : "connecting");
@@ -511,7 +528,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
   }
 
   private async openSocket(generation: number): Promise<void> {
-    const route = await this.#options.rendezvous.resolve(this.identity);
+    const route = await this.#options.rendezvous.resolve(this.identity, this.#options.trust);
     if (route.verseId !== this.identity.verseId ||
         route.authorityRuntimeId !== this.identity.authorityRuntimeId) {
       throw new Error("CultMesh rendezvous returned a route for the wrong stable identity.");
@@ -828,10 +845,11 @@ async function decodeSocketMessage(event: MessageEvent, maxFrameBytes: number): 
   return parseCultNetMessage(decode(payload));
 }
 
-function selectOdinRoute(
+async function selectOdinRoute(
   response: CultMeshVerseCatalogResponseMessage,
   identity: CultMeshBrowserIdentity,
-): CultMeshBrowserRoute {
+  trust: CultMeshBrowserAuthorityTrustPolicy,
+): Promise<CultMeshBrowserRoute> {
   const matchingVerses = response.verses.filter(verse => verse.verseId === identity.verseId);
   if (matchingVerses.length !== 1) {
     throw new Error(
@@ -871,26 +889,38 @@ function selectOdinRoute(
   if (routes.length === 0) {
     throw new Error(`Odin advertised no browser-compatible route for authority runtime '${identity.authorityRuntimeId}'.`);
   }
-  const route = routes[0];
-  return {
-    ...identity,
-    endpoint: route.endpoint,
-    protocolId: "cultmesh.documents.v1",
-    protocolIds: route.protocolIds,
-    priority: route.priority,
-    generation: route.generation,
-    ...(route.certificate ? { certificate: {
-      providerKey: {
-        keyId: route.certificate.providerKeyId,
-        x: route.certificate.providerPublicKeyX,
-        y: route.certificate.providerPublicKeyY,
-      },
-      odinKeyId: route.certificate.odinKeyId,
-      issuedAtUnixMilliseconds: route.certificate.issuedAtUnixMilliseconds,
-      expiresAtUnixMilliseconds: route.certificate.expiresAtUnixMilliseconds,
-      signature: route.certificate.signature,
-    } } : {}),
-  };
+  const failures: Error[] = [];
+  for (const route of routes) {
+    const candidate: CultMeshBrowserRoute = {
+      ...identity,
+      endpoint: route.endpoint,
+      protocolId: "cultmesh.documents.v1",
+      protocolIds: route.protocolIds,
+      priority: route.priority,
+      generation: route.generation,
+      ...(route.certificate ? { certificate: {
+        providerKey: {
+          keyId: route.certificate.providerKeyId,
+          x: route.certificate.providerPublicKeyX,
+          y: route.certificate.providerPublicKeyY,
+        },
+        odinKeyId: route.certificate.odinKeyId,
+        issuedAtUnixMilliseconds: route.certificate.issuedAtUnixMilliseconds,
+        expiresAtUnixMilliseconds: route.certificate.expiresAtUnixMilliseconds,
+        signature: route.certificate.signature,
+      } } : {}),
+    };
+    try {
+      await verifyAuthorityRoute(candidate, trust);
+      return candidate;
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  throw new AggregateError(
+    failures,
+    `Odin advertised no trusted browser route for authority runtime '${identity.authorityRuntimeId}'.`,
+  );
 }
 
 async function validateSessionAcceptance(

@@ -32,8 +32,8 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceRevision)) {
     throw "Could not determine the CultLib source revision for local package identity."
 }
 $verificationNonce = [guid]::NewGuid().ToString("N").Substring(0, 8)
-$cultLibLocalVersion = "1.0.33-local.$sourceRevision.$verificationNonce"
-$surfaceLocalVersion = "0.3.2-local.$sourceRevision.$verificationNonce"
+$cultLibLocalVersion = "1.0.34-local.$sourceRevision.$verificationNonce"
+$surfaceLocalVersion = "0.3.3-local.$sourceRevision.$verificationNonce"
 try {
     & (Join-Path $EveRoot "scripts\pack-dotnet-surface.ps1") `
         -CultLibRoot $cultLibRoot `

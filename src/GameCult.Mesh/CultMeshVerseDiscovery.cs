@@ -207,6 +207,12 @@ namespace GameCult.Mesh
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
 
+        /// <summary>
+        /// Gets or sets an endpoint-aware client factory for external transport packages.
+        /// When present, this owns discovery transport selection for each exact Odin route.
+        /// </summary>
+        public Func<string, ICultNetSchemaClient>? CreateClientForEndpoint { get; set; }
+
         /// <summary>Gets or sets the clock that owns discovery deadlines.</summary>
         public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
 
@@ -341,7 +347,8 @@ namespace GameCult.Mesh
 
         private ICultNetSchemaClient CreateClient(string endpoint)
         {
-            return _options.CreateClient?.Invoke()
+            return _options.CreateClientForEndpoint?.Invoke(endpoint)
+                   ?? _options.CreateClient?.Invoke()
                    ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 

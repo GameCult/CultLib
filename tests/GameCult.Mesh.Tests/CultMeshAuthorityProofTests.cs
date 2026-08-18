@@ -134,6 +134,45 @@ public sealed class CultMeshAuthorityProofTests
             .Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
     }
 
+    [Test]
+    public async Task SessionManagerRejectsOnlyThePoisonedRouteAndUsesCertifiedFallback()
+    {
+        using var odin = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var provider = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var now = DateTimeOffset.UtcNow;
+        var valid = CultMeshAuthorityProof.CreateSignedRoute(
+            "aetheria", "aetheria-daemon", "wss://provider.example/mesh",
+            new[] { CultMeshProtocols.Documents.Value }, 10, "generation-valid",
+            CultMeshEcdsaP256PublicKey.From("provider-valid", provider), "odin-valid",
+            now.AddMinutes(-1), now.AddMinutes(5), odin);
+        var poisoned = new CultMeshAuthorityRoute(
+            "aetheria-daemon", "wss://poison.example/mesh",
+            new[] { CultMeshProtocols.Documents.Value }, priority: 0, generation: "generation-poisoned");
+        var descriptor = new CultMeshVerseDescriptor(
+            "aetheria", "Aetheria", CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            authorityRoutes: new[] { poisoned, valid });
+        using var discovery = new CultMeshDiscoveryService(new[] { new SignedRouteSource(descriptor) });
+        var signer = new CultMeshSessionProofSigner(valid, provider);
+        var connector = new SigningConnector(signer);
+        using var manager = new CultMeshSessionManager(
+            discovery,
+            new[] { connector },
+            new CultMeshSessionManagerOptions
+            {
+                Trust = new CultMeshAuthorityTrustPolicy(
+                    CultMeshAuthorityTrustMode.AuthenticatedRemote,
+                    new[] { CultMeshEcdsaP256PublicKey.From("odin-valid", odin) })
+            });
+
+        var session = await manager.ConnectAsync(
+            new CultMeshSessionTarget("aetheria", "aetheria-daemon"),
+            CultMeshProtocols.Documents);
+
+        session.State.Path!.Endpoint.Should().Be(valid.Endpoint);
+        connector.Attempts.Should().Equal(valid.Endpoint);
+    }
+
     private static CultMeshAuthorityRoute SignedRoute(ECDsa odin, ECDsa provider) =>
         CultMeshAuthorityProof.CreateSignedRoute(
             "aetheria",
@@ -229,6 +268,55 @@ public sealed class CultMeshAuthorityProofTests
                 ClientNonce = request.ClientNonce,
                 ProviderKeyId = "provider-live",
                 ProviderSignature = string.Empty
+            });
+        }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultMeshSessionAcceptedMessage))
+                _accepted = response => callback((T)(object)response);
+        }
+        public void Dispose() { }
+    }
+
+    private sealed class SigningConnector : ICultMeshTransportConnector
+    {
+        private readonly CultMeshSessionProofSigner _signer;
+        public SigningConnector(CultMeshSessionProofSigner signer) => _signer = signer;
+        public List<string> Attempts { get; } = new();
+        public string ConnectorId => "signed-provider";
+        public int Priority => 0;
+        public bool CanConnect(CultMeshTransportCandidate candidate) => true;
+        public Task<ICultNetSchemaClient> ConnectAsync(
+            CultMeshTransportCandidate candidate,
+            CultMeshProtocolId protocol,
+            CancellationToken cancellationToken = default)
+        {
+            Attempts.Add(candidate.Endpoint);
+            return Task.FromResult<ICultNetSchemaClient>(new SigningClient(_signer));
+        }
+    }
+
+    private sealed class SigningClient : ICultNetSchemaClient
+    {
+        private readonly CultMeshSessionProofSigner _signer;
+        private Action<CultMeshSessionAcceptedMessage>? _accepted;
+        public SigningClient(CultMeshSessionProofSigner signer) => _signer = signer;
+        public bool Connected => true;
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (message is not CultMeshSessionOpenMessage request) return;
+            _accepted?.Invoke(new CultMeshSessionAcceptedMessage
+            {
+                MessageId = request.MessageId,
+                Accepted = true,
+                VerseId = request.VerseId,
+                AuthorityRuntimeId = request.AuthorityRuntimeId,
+                ProtocolId = request.ProtocolId,
+                RouteGeneration = request.RouteGeneration,
+                ClientNonce = request.ClientNonce,
+                ProviderKeyId = _signer.ProviderKeyId,
+                ProviderSignature = _signer.Sign(request)
             });
         }
         public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
