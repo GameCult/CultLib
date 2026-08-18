@@ -2595,23 +2595,27 @@ class CultCacheTests(unittest.TestCase):
 
             scheduled_timers: list[Any] = []
 
-            class FakeTimer:
-                def __init__(self, interval: float, callback: Callable[[], None]) -> None:
-                    self.interval = interval
+            class FakeScheduledCall:
+                def __init__(self, delay_seconds: float, callback: Callable[[], None]) -> None:
+                    self.delay_seconds = delay_seconds
                     self.callback = callback
-                    self.daemon = False
                     self.cancelled = False
-                    self.started = False
-                    scheduled_timers.append(self)
-
-                def start(self) -> None:
-                    self.started = True
 
                 def cancel(self) -> None:
                     self.cancelled = True
 
+            class FakeScheduler:
+                def schedule(
+                    self,
+                    delay_seconds: float,
+                    callback: Callable[[], None],
+                ) -> FakeScheduledCall:
+                    call = FakeScheduledCall(delay_seconds, callback)
+                    scheduled_timers.append(call)
+                    return call
+
             reactive_documents: list[Any] = []
-            with patch("cultmesh_py.node.threading.Timer", FakeTimer):
+            with patch("cultmesh_py.node._REACTIVE_SCHEDULER", FakeScheduler()):
                 try:
                     for index in range(document_count):
                         reactive_documents.append(
@@ -2634,7 +2638,6 @@ class CultCacheTests(unittest.TestCase):
                         )
 
                     self.assertEqual(len(scheduled_timers), changed_document_count)
-                    self.assertTrue(all(timer.started for timer in scheduled_timers))
                     self.assertEqual(
                         sum(reactive.is_dirty for reactive in reactive_documents),
                         changed_document_count,
@@ -2644,6 +2647,46 @@ class CultCacheTests(unittest.TestCase):
                         reactive.dispose()
 
             self.assertTrue(all(timer.cancelled for timer in scheduled_timers))
+
+    def test_cultmesh_reactive_documents_share_one_lazy_scheduler_thread(self) -> None:
+        document = define_document_type(
+            "mesh.reactive_shared_scheduler_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-reactive-shared-scheduler")
+        node.register_document(document)
+        reactive_documents: list[Any] = []
+        try:
+            for index in range(100):
+                node.put(document, f"note:{index}", {"body": "initial", "revision": 1})
+                reactive_documents.append(
+                    node.authoritative_writer(document, f"note:{index}").reactive(
+                        CultMeshReactiveDocumentOptions(flush_delay_seconds=60.0)
+                    )
+                )
+
+            before = sum(
+                thread.name == "cultmesh-reactive-scheduler"
+                for thread in threading.enumerate()
+            )
+            for index, reactive in enumerate(reactive_documents):
+                reactive.update(
+                    lambda draft, changed=index: draft.update(
+                        body=f"changed-{changed}",
+                        revision=2,
+                    )
+                )
+            after = sum(
+                thread.name == "cultmesh-reactive-scheduler"
+                for thread in threading.enumerate()
+            )
+
+            self.assertLessEqual(before, 1)
+            self.assertEqual(after, 1)
+        finally:
+            for reactive in reactive_documents:
+                reactive.dispose()
 
     def test_cultmesh_observed_document_cannot_publish_borrowed_mutation(self) -> None:
         document = define_document_type(

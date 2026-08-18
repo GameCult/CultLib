@@ -1,12 +1,22 @@
 param(
-    [string] $PythonPath = ""
+    [string] $PythonPath = "",
+    [string] $NodePath = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$node = Get-Command node -ErrorAction Stop
+$nodeExecutable = if ([string]::IsNullOrWhiteSpace($NodePath)) {
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if ($node) { $node.Source } else { Join-Path $env:ProgramFiles "nodejs\node.exe" }
+}
+else {
+    [IO.Path]::GetFullPath($NodePath)
+}
+if (-not (Test-Path -LiteralPath $nodeExecutable -PathType Leaf)) {
+    throw "Node.js executable not found: $nodeExecutable"
+}
 $pythonExecutable = if ([string]::IsNullOrWhiteSpace($PythonPath)) {
     (Get-Command python -ErrorAction Stop).Source
 }
@@ -31,18 +41,18 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location (Join-Path $root "packages\cultmesh-ts")
 try {
-    & $node.Source $typescript -p tsconfig.json --pretty false
+    & $nodeExecutable $typescript -p tsconfig.json --pretty false
     if ($LASTEXITCODE -ne 0) {
         throw "CultMesh TypeScript source build failed."
     }
-    & $node.Source $typescript -p tsconfig.test.json --pretty false
+    & $nodeExecutable $typescript -p tsconfig.test.json --pretty false
     if ($LASTEXITCODE -ne 0) {
         throw "CultMesh TypeScript test build failed."
     }
     $testFiles = Get-ChildItem -LiteralPath .\dist-test\test -Filter "*.test.js" |
         Sort-Object Name |
         ForEach-Object FullName
-    & $node.Source --test @testFiles
+    & $nodeExecutable --test @testFiles
     if ($LASTEXITCODE -ne 0) {
         throw "CultMesh TypeScript reactive scaling verification failed."
     }

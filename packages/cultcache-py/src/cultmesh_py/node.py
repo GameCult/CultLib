@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import threading
+import heapq
+import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +88,87 @@ class CultMeshReactiveDocumentReconciliation:
 class CultMeshReactiveDocumentOptions:
     flush_delay_seconds: float = 0.016
     replace_dirty_current_on_canonical_snapshot: bool = False
+
+
+class _CultMeshScheduledCall:
+    def __init__(self, callback: Callable[[], None], wake: Callable[[], None]) -> None:
+        self._callback: Callable[[], None] | None = callback
+        self._wake = wake
+        self._lock = threading.Lock()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._callback = None
+        self._wake()
+
+    def take(self) -> Callable[[], None] | None:
+        with self._lock:
+            callback = self._callback
+            self._callback = None
+            return callback
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._callback is None
+
+
+class _CultMeshReactiveScheduler:
+    """One lazy daemon worker owns delayed reactive flushes for the process."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._queue: list[tuple[float, int, _CultMeshScheduledCall]] = []
+        self._sequence = 0
+        self._worker: threading.Thread | None = None
+
+    def schedule(self, delay_seconds: float, callback: Callable[[], None]) -> _CultMeshScheduledCall:
+        call = _CultMeshScheduledCall(callback, self._wake)
+        with self._condition:
+            self._sequence += 1
+            heapq.heappush(
+                self._queue,
+                (time.monotonic() + max(0.0, delay_seconds), self._sequence, call),
+            )
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._run,
+                    name="cultmesh-reactive-scheduler",
+                    daemon=True,
+                )
+                self._worker.start()
+            self._condition.notify()
+        return call
+
+    def _wake(self) -> None:
+        with self._condition:
+            self._condition.notify()
+
+    def _run(self) -> None:
+        while True:
+            callback: Callable[[], None] | None = None
+            with self._condition:
+                while callback is None:
+                    while self._queue and self._queue[0][2].cancelled:
+                        heapq.heappop(self._queue)
+                    if not self._queue:
+                        self._condition.wait()
+                        continue
+                    deadline, _, call = self._queue[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._condition.wait(remaining)
+                        continue
+                    heapq.heappop(self._queue)
+                    callback = call.take()
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    traceback.print_exc()
+
+
+_REACTIVE_SCHEDULER = _CultMeshReactiveScheduler()
 
 
 @dataclass
@@ -1373,7 +1457,7 @@ class CultMeshReactiveDocument:
         self._dirty = False
         self._flushing = False
         self._flush_queued = False
-        self._flush_timer: threading.Timer | None = None
+        self._flush_timer: _CultMeshScheduledCall | None = None
         self._reconciliation_version = 0
         self.reconciliation: CultMeshReactiveDocumentReconciliation | None = None
         self._current = self._clone(self._database.get_required(self._document, self._key))
@@ -1503,15 +1587,12 @@ class CultMeshReactiveDocument:
             self.reconciliation = None
 
     def _schedule_flush_locked(self) -> None:
-        if self._options.flush_delay_seconds <= 0:
-            threading.Thread(target=self.flush, daemon=True).start()
-            return
         if self._flush_timer is not None:
             self._flush_timer.cancel()
-        timer = threading.Timer(self._options.flush_delay_seconds, self.flush)
-        timer.daemon = True
-        self._flush_timer = timer
-        timer.start()
+        self._flush_timer = _REACTIVE_SCHEDULER.schedule(
+            self._options.flush_delay_seconds,
+            self.flush,
+        )
 
     def _clone(self, value: Any) -> Any:
         return self._document.decode_payload(self._document.encode_payload(value))
