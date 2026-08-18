@@ -22,9 +22,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <summary>Fault-probe stage emitted after all pages exist and before manifest finality.</summary>
     public const string BeforeManifestCommitStage = "before-manifest-commit";
     private const string LegacyIndexedFormatVersion = "cultcache.store.v2.directory-indexed";
-    private const string IndexedFormatVersion = "cultcache.store.v3.directory-immutable-pages";
+    private const string LegacyMetadataPageFormatVersion = "cultcache.store.v3.directory-immutable-pages";
+    private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
     private readonly FileInfo _manifestFile;
     private readonly DirectoryInfo _recordDirectory;
+    private readonly object _mutationGate = new();
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _deletedKeys = new(StringComparer.Ordinal);
     private readonly HashSet<string> _hydratedKeys = new(StringComparer.Ordinal);
@@ -33,6 +35,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
     private bool _needsIndexUpgrade;
     private bool _manifestUsesImmutablePages;
+    private bool _manifestUsesMetadataPages;
 
     /// <summary>
     /// Gets or sets the predicate that selects indexed record payloads for hydration.
@@ -65,6 +68,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PullAll()
     {
+        lock (_mutationGate)
+            PullAllCore();
+    }
+
+    private void PullAllCore()
+    {
         var traceStartup = string.Equals(
             Environment.GetEnvironmentVariable("CULTCACHE_TRACE_STARTUP_PHASES"),
             "1",
@@ -91,10 +100,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         var indexed = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) ||
+            string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) ||
             string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
         if (indexed)
         {
             _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
+            _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
             _needsIndexUpgrade = !_manifestUsesImmutablePages;
             _durableIndex = manifest.Records
                 .Where(record => !string.IsNullOrWhiteSpace(record.Key))
@@ -157,16 +168,24 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void PullSelected(Func<CultPersistedRecordMetadata, bool> selector)
     {
+        lock (_mutationGate)
+            PullSelectedCore(selector);
+    }
+
+    private void PullSelectedCore(Func<CultPersistedRecordMetadata, bool> selector)
+    {
         if (selector == null) throw new ArgumentNullException(nameof(selector));
         var manifest = ReadManifest();
         if (!string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
+            !string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) &&
             !string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal))
         {
-            PullAll();
+            PullAllCore();
             return;
         }
 
         _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
+        _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
         _needsIndexUpgrade = !_manifestUsesImmutablePages;
         _durableCatalog = manifest.SchemaCatalog;
         _durableIndex = manifest.Records
@@ -188,29 +207,42 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override bool ContainsDurableRecord(CultRecordKey key)
     {
-        return _durableIndex.ContainsKey(key.Value) || base.ContainsDurableRecord(key);
+        lock (_mutationGate)
+            return _durableIndex.ContainsKey(key.Value) || base.ContainsDurableRecord(key);
     }
 
     /// <inheritdoc />
     public override void Push(CultStoredDocument entry)
     {
-        Entries[entry.Key.Value] = entry;
-        _dirtyKeys[entry.Key.Value] = true;
-        _deletedKeys.TryRemove(entry.Key.Value, out _);
-        IsDirty = true;
+        lock (_mutationGate)
+        {
+            Entries[entry.Key.Value] = entry;
+            _dirtyKeys[entry.Key.Value] = true;
+            _deletedKeys.TryRemove(entry.Key.Value, out _);
+            IsDirty = true;
+        }
     }
 
     /// <inheritdoc />
     public override void Delete(CultStoredDocument entry)
     {
-        Entries.TryRemove(entry.Key.Value, out _);
-        _dirtyKeys.TryRemove(entry.Key.Value, out _);
-        _deletedKeys[entry.Key.Value] = true;
-        IsDirty = true;
+        lock (_mutationGate)
+        {
+            Entries.TryRemove(entry.Key.Value, out _);
+            _dirtyKeys.TryRemove(entry.Key.Value, out _);
+            _deletedKeys[entry.Key.Value] = true;
+            IsDirty = true;
+        }
     }
 
     /// <inheritdoc />
     public override void PushAll(bool soft = false)
+    {
+        lock (_mutationGate)
+            PushAllCore(soft);
+    }
+
+    private void PushAllCore(bool soft)
     {
         if (!IsDirty && !_needsIndexUpgrade)
         {
@@ -219,11 +251,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         Directory.CreateDirectory(_manifestFile.DirectoryName!);
         Directory.CreateDirectory(_recordDirectory.FullName);
+        using var commitLease = AcquireCommitLease();
 
         var currentManifest = ReadManifest();
         var currentManifestIsIndexed = string.Equals(currentManifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) ||
+            string.Equals(currentManifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) ||
             string.Equals(currentManifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
         var currentManifestUsesImmutablePages = string.Equals(currentManifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
+        var currentManifestUsesMetadataPages = string.Equals(currentManifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
         var currentIndex = currentManifestIsIndexed
             ? currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal)
             : new Dictionary<string, CultPersistedRecord>(_durableIndex, StringComparer.Ordinal);
@@ -262,10 +297,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     document,
                     stored.Descriptor.DocumentType,
                     Registry));
+            var pagePayload = CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
+            var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
+            currentIndex[key] = indexRecord;
             FlushStageProbe?.Invoke(BeforeRecordPageWriteStage, pageWriteIndex++);
             WriteFileAtomically(
-                ImmutableRecordPath(ToIndexRecord(record)),
-                CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
+                ContentAddressedRecordPath(indexRecord),
+                pagePayload);
         }
 
         if (!currentManifestUsesImmutablePages)
@@ -274,10 +312,17 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                          .Where(record => !_deletedKeys.ContainsKey(record.Key) && !_dirtyKeys.ContainsKey(record.Key))
                          .OrderBy(record => record.Key, StringComparer.Ordinal))
             {
-                var sourcePath = LegacyRecordPath(metadata.Key);
-                var targetPath = ImmutableRecordPath(ToIndexRecord(metadata));
-                if (File.Exists(sourcePath) && !File.Exists(targetPath))
-                    WriteFileAtomically(targetPath, ReadAllBytesShared(sourcePath));
+                var sourcePath = currentManifestUsesMetadataPages
+                    ? MetadataRecordPath(metadata)
+                    : LegacyRecordPath(metadata.Key);
+                if (!File.Exists(sourcePath))
+                    continue;
+                var pagePayload = ReadAllBytesShared(sourcePath);
+                var indexRecord = ToContentAddressedIndexRecord(metadata, pagePayload);
+                currentIndex[metadata.Key] = indexRecord;
+                var targetPath = ContentAddressedRecordPath(indexRecord);
+                if (!File.Exists(targetPath))
+                    WriteFileAtomically(targetPath, pagePayload);
             }
         }
 
@@ -285,9 +330,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         {
             if (_deletedKeys.ContainsKey(pair.Key) || _dirtyKeys.ContainsKey(pair.Key))
                 continue;
+            var pagePayload = CultDocumentMessagePackSerialization.SerializePersistedRecord(pair.Value);
+            var indexRecord = ToContentAddressedIndexRecord(pair.Value, pagePayload);
+            currentIndex[pair.Key] = indexRecord;
             WriteFileAtomically(
-                ImmutableRecordPath(ToIndexRecord(pair.Value)),
-                CultDocumentMessagePackSerialization.SerializePersistedRecord(pair.Value));
+                ContentAddressedRecordPath(indexRecord),
+                pagePayload);
         }
 
         FlushStageProbe?.Invoke(BeforeManifestCommitStage, pageWriteIndex);
@@ -296,6 +344,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             .ToArray());
 
         _manifestUsesImmutablePages = true;
+        _manifestUsesMetadataPages = false;
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
         _durableCatalog = targetCatalog;
@@ -384,11 +433,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var path = _manifestUsesImmutablePages
-                    ? ImmutableRecordPath(metadata)
-                    : LegacyRecordPath(metadata.Key);
+                    ? ContentAddressedRecordPath(metadata)
+                    : _manifestUsesMetadataPages
+                        ? MetadataRecordPath(metadata)
+                        : LegacyRecordPath(metadata.Key);
                 if (!File.Exists(path))
                     return;
                 var pagePayload = ReadAllBytesShared(path);
+                if (_manifestUsesImmutablePages &&
+                    !HashPayload(pagePayload).SequenceEqual(metadata.Payload))
+                    throw new InvalidDataException($"Record page '{path}' does not match its committed content hash.");
                 var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
                 if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
                     throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
@@ -527,6 +581,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Payload = Array.Empty<byte>()
     };
 
+    private static CultPersistedRecord ToContentAddressedIndexRecord(
+        CultPersistedRecord record,
+        byte[] pagePayload) => new()
+    {
+        Key = record.Key,
+        SchemaId = record.SchemaId,
+        StoredAt = record.StoredAt,
+        Payload = HashPayload(pagePayload)
+    };
+
     private CultPersistedStoreSnapshot ReadManifest()
     {
         if (File.Exists(_manifestFile.FullName))
@@ -627,14 +691,28 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     private string LegacyRecordPath(string key) => Path.Combine(_recordDirectory.FullName, $"{HashKey(key)}.msgpack");
 
-    private string ImmutableRecordPath(CultPersistedRecord metadata) => Path.Combine(
+    private string MetadataRecordPath(CultPersistedRecord metadata) => Path.Combine(
         _recordDirectory.FullName,
         $"{HashKey(metadata.Key + "\0" + metadata.SchemaId + "\0" + metadata.StoredAt)}.msgpack");
+
+    private string ContentAddressedRecordPath(CultPersistedRecord metadata)
+    {
+        if (metadata.Payload == null || metadata.Payload.Length != 32)
+            throw new InvalidDataException($"Record '{metadata.Key}' has no committed SHA-256 page identity.");
+        var hash = BitConverter.ToString(metadata.Payload).Replace("-", string.Empty).ToLowerInvariant();
+        return Path.Combine(_recordDirectory.FullName, $"{hash}.msgpack");
+    }
+
+    private static byte[] HashPayload(byte[] payload)
+    {
+        using var sha256 = SHA256.Create();
+        return sha256.ComputeHash(payload);
+    }
 
     private void DeleteUnreferencedRecordPages(IEnumerable<CultPersistedRecord> durableRecords)
     {
         var referenced = durableRecords
-            .Select(ImmutableRecordPath)
+            .Select(ContentAddressedRecordPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var file in _recordDirectory.EnumerateFiles("*.msgpack"))
         {
@@ -706,6 +784,29 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         using var buffer = new MemoryStream();
         stream.CopyTo(buffer);
         return buffer.ToArray();
+    }
+
+    private FileStream AcquireCommitLease()
+    {
+        var lockPath = Path.Combine(_recordDirectory.FullName, ".commit.lock");
+        var started = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                return new FileStream(
+                    lockPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.WriteThrough);
+            }
+            catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
+            {
+                Thread.Sleep(10);
+            }
+        }
     }
 
     private static void ReplaceExistingFile(string sourcePath, string destinationPath)

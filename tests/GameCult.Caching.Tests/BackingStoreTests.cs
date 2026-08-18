@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -434,9 +435,10 @@ namespace GameCult.Caching.Tests
                 }
 
                 var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
-                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v3.directory-immutable-pages"));
+                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
                 Assert.That(manifest.Records, Has.Length.EqualTo(2));
-                Assert.That(manifest.Records.All(record => record.Payload.Length == 0), Is.True);
+                Assert.That(manifest.Records.All(record => record.Payload.Length == 32), Is.True,
+                    "the hot index carries only the SHA-256 page identity, never the document body");
 
                 var coldPath = Directory.GetFiles(recordsPath, "*.msgpack")
                     .Single(path => string.Equals(
@@ -469,7 +471,7 @@ namespace GameCult.Caching.Tests
                 var finalManifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(finalManifest.Records, Has.Length.EqualTo(3));
                 Assert.That(finalManifest.Records.Any(record => record.Key == cold.Key.Value), Is.True);
-                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 0), Is.True);
+                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 32), Is.True);
             }
             finally
             {
@@ -705,6 +707,130 @@ namespace GameCult.Caching.Tests
                     foreach (var handle in handles)
                         Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("new"));
                 }
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_SameTimestampPayload_CannotOverwriteCommittedPageBeforeManifest()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                const string storedAt = "2026-08-19T00:00:00.0000000+00:00";
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var key = new CultRecordKey("record:atomic:same-timestamp");
+                var descriptor = CultDocumentRegistry.Shared.GetRequired<NamedTestEntry>();
+                store.Push(new CultStoredDocument(
+                    key,
+                    storedAt,
+                    descriptor,
+                    new NamedTestEntry { Name = "same", Value = "old" }));
+                store.PushAll();
+
+                store.Push(new CultStoredDocument(
+                    key,
+                    storedAt,
+                    descriptor,
+                    new NamedTestEntry { Name = "same", Value = "new" }));
+                store.FlushStageProbe = (stage, _) =>
+                {
+                    if (string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        throw new IOException("injected crash before same-timestamp manifest commit");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("old"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_MutationDuringFlush_RemainsDirtyAndCommitsNextGeneration()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var first = await cache.UpsertAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                using var flushEntered = new ManualResetEventSlim();
+                using var writerAttempting = new ManualResetEventSlim();
+                store.FlushStageProbe = (stage, _) =>
+                {
+                    if (!string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        return;
+                    flushEntered.Set();
+                    Assert.That(writerAttempting.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                };
+
+                var flush = Task.Run(() => store.PushAll());
+                var writer = Task.Run(async () =>
+                {
+                    Assert.That(flushEntered.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                    writerAttempting.Set();
+                    return await cache.UpsertAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                });
+                await flush;
+                var second = await writer;
+
+                Assert.That(store.IsDirty, Is.True, "the mutation blocked behind flush must remain pending");
+                store.FlushStageProbe = null;
+                store.PushAll();
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(first.Key)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(second.Key)?.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_ConcurrentInstances_MergeUnderOneCommitLease()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var firstStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var firstCache = new CultCache();
+                firstCache.AddBackingStore(firstStore);
+                var secondStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var secondCache = new CultCache();
+                secondCache.AddBackingStore(secondStore);
+                var first = await firstCache.UpsertAsync(new NamedTestEntry { Name = "first-process", Value = "one" });
+                var second = await secondCache.UpsertAsync(new NamedTestEntry { Name = "second-process", Value = "two" });
+
+                await Task.WhenAll(
+                    Task.Run(() => firstStore.PushAll()),
+                    Task.Run(() => secondStore.PushAll()));
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(first.Key)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(second.Key)?.Value, Is.EqualTo("two"));
             }
             finally
             {
