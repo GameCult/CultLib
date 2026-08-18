@@ -52,18 +52,18 @@ namespace GameCult.Mesh
         private bool _disposed;
 
         internal CultMeshContentSession(
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             ICultMeshContentTransport transport,
             CultMeshSessionState state,
             Action<CultMeshContentSession> onTransportFailure)
         {
-            EndpointId = endpointId ?? throw new ArgumentNullException(nameof(endpointId));
+            Target = target ?? throw new ArgumentNullException(nameof(target));
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             State = state ?? throw new ArgumentNullException(nameof(state));
             _onTransportFailure = onTransportFailure ?? throw new ArgumentNullException(nameof(onTransportFailure));
         }
 
-        public CultMeshEndpointId EndpointId { get; }
+        public CultMeshSessionTarget Target { get; }
         public CultMeshSessionState State { get; private set; }
         public string TransportId { get { lock (_gate) return _transport.TransportId; } }
 
@@ -138,18 +138,18 @@ namespace GameCult.Mesh
     public sealed class CultMeshSessionContentProvider : ICultMeshContentProvider
     {
         private readonly CultMeshSessionManager _sessions;
-        private readonly CultMeshEndpointId _endpointId;
+        private readonly CultMeshSessionTarget _target;
 
         public CultMeshSessionContentProvider(
             string providerId,
             CultMeshSessionManager sessions,
-            CultMeshEndpointId endpointId)
+            CultMeshSessionTarget target)
         {
             ProviderId = string.IsNullOrWhiteSpace(providerId)
                 ? throw new ArgumentException("Provider identity is required.", nameof(providerId))
                 : providerId;
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
-            _endpointId = endpointId ?? throw new ArgumentNullException(nameof(endpointId));
+            _target = target ?? throw new ArgumentNullException(nameof(target));
         }
 
         public string ProviderId { get; }
@@ -159,7 +159,7 @@ namespace GameCult.Mesh
             Stream destination,
             CancellationToken cancellationToken = default)
         {
-            var session = await _sessions.ConnectContentAsync(_endpointId, cancellationToken).ConfigureAwait(false);
+            var session = await _sessions.ConnectContentAsync(_target, cancellationToken).ConfigureAwait(false);
             await session.CopyChunkToAsync(chunk, destination, cancellationToken).ConfigureAwait(false);
         }
     }

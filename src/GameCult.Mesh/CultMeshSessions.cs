@@ -21,6 +21,40 @@ namespace GameCult.Mesh
         public override string ToString() => Value;
     }
 
+    /// <summary>
+    /// Identifies one provider inside one Verse. Odin resolves this stable pair to
+    /// disposable physical routes; neither value is a socket address.
+    /// </summary>
+    public sealed class CultMeshSessionTarget : IEquatable<CultMeshSessionTarget>
+    {
+        /// <summary>Creates one stable provider target inside one Verse.</summary>
+        public CultMeshSessionTarget(string verseId, string providerRuntimeId)
+        {
+            VerseId = string.IsNullOrWhiteSpace(verseId)
+                ? throw new ArgumentException("Verse identity is required.", nameof(verseId))
+                : verseId.Trim();
+            ProviderEndpointId = CultMeshEndpointId.Parse(providerRuntimeId);
+            ProviderRuntimeId = ProviderEndpointId.Value;
+        }
+
+        /// <summary>Gets the stable Verse identity.</summary>
+        public string VerseId { get; }
+        /// <summary>Gets the stable provider runtime identity advertised by that Verse.</summary>
+        public string ProviderRuntimeId { get; }
+        internal CultMeshEndpointId ProviderEndpointId { get; }
+        internal string SessionKey => VerseId + "\u001f" + ProviderRuntimeId;
+
+        public bool Equals(CultMeshSessionTarget? other) =>
+            other != null &&
+            string.Equals(VerseId, other.VerseId, StringComparison.Ordinal) &&
+            string.Equals(ProviderRuntimeId, other.ProviderRuntimeId, StringComparison.Ordinal);
+        public override bool Equals(object? obj) => Equals(obj as CultMeshSessionTarget);
+        public override int GetHashCode() => HashCode.Combine(
+            StringComparer.Ordinal.GetHashCode(VerseId),
+            StringComparer.Ordinal.GetHashCode(ProviderRuntimeId));
+        public override string ToString() => VerseId + "/" + ProviderRuntimeId;
+    }
+
     public sealed class CultMeshProtocolId : IEquatable<CultMeshProtocolId>
     {
         public CultMeshProtocolId(string value) { Value = string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("Protocol identity is required.", nameof(value)) : value; }
@@ -285,14 +319,14 @@ namespace GameCult.Mesh
         private readonly ManagedSchemaChannel _channel;
         private long _physicalGeneration;
         private bool _disposed;
-        internal CultMeshSession(CultMeshEndpointId endpointId, CultMeshProtocolId protocol, ICultNetSchemaClient channel, CultMeshSessionState state)
+        internal CultMeshSession(CultMeshSessionTarget target, CultMeshProtocolId protocol, ICultNetSchemaClient channel, CultMeshSessionState state)
         {
-            EndpointId = endpointId;
+            Target = target;
             Protocol = protocol;
             _channel = new ManagedSchemaChannel(channel);
             State = state;
         }
-        public CultMeshEndpointId EndpointId { get; }
+        public CultMeshSessionTarget Target { get; }
         public CultMeshProtocolId Protocol { get; }
         internal ICultNetSchemaClient Channel => _channel;
         public CultMeshSessionState State { get; private set; }
@@ -550,18 +584,18 @@ namespace GameCult.Mesh
         }
 
         public async Task<CultMeshSession> ConnectAsync(
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CultMeshProtocolId protocol,
             CancellationToken cancellationToken = default)
         {
-            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (protocol == null) throw new ArgumentNullException(nameof(protocol));
             ThrowIfDisposed();
-            var key = endpointId.Value + "\u001f" + protocol.Value;
+            var key = target.SessionKey + "\u001f" + protocol.Value;
             while (true)
             {
                 var lazy = _sessions.GetOrAdd(key, _ => new Lazy<Task<CultMeshSession>>(
-                    () => ConnectOwnedAsync(key, endpointId, protocol), LazyThreadSafetyMode.ExecutionAndPublication));
+                    () => ConnectOwnedAsync(key, target, protocol), LazyThreadSafetyMode.ExecutionAndPublication));
                 try
                 {
                     var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
@@ -577,20 +611,20 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
-        /// Connects one reusable streaming content plane by stable endpoint identity.
+        /// Connects one reusable streaming content plane by stable Verse/provider identity.
         /// Preferred connector tiers are exhausted before legacy fallback tiers are attempted.
         /// </summary>
         public async Task<CultMeshContentSession> ConnectContentAsync(
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
-            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             ThrowIfDisposed();
-            var key = endpointId.Value;
+            var key = target.SessionKey;
             while (true)
             {
                 var lazy = _contentSessions.GetOrAdd(key, _ => new Lazy<Task<CultMeshContentSession>>(
-                    () => ConnectContentOwnedAsync(key, endpointId), LazyThreadSafetyMode.ExecutionAndPublication));
+                    () => ConnectContentOwnedAsync(key, target), LazyThreadSafetyMode.ExecutionAndPublication));
                 try
                 {
                     var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
@@ -607,19 +641,19 @@ namespace GameCult.Mesh
 
         private async Task<CultMeshContentSession> ConnectContentOwnedAsync(
             string key,
-            CultMeshEndpointId endpointId)
+            CultMeshSessionTarget target)
         {
-            var result = await ResolveContentPathAsync(endpointId).ConfigureAwait(false);
+            var result = await ResolveContentPathAsync(target).ConfigureAwait(false);
             var session = new CultMeshContentSession(
-                endpointId,
+                target,
                 result.Transport,
                 new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate),
                 failed => InvalidateContentSession(key, failed));
-            Emit(endpointId, CultMeshProtocols.Content, "online", result.Candidate.Endpoint);
+            Emit(target, CultMeshProtocols.Content, "online", result.Candidate.Endpoint);
             return session;
         }
 
-        private async Task<ConnectedContentPath> ResolveContentPathAsync(CultMeshEndpointId endpointId)
+        private async Task<ConnectedContentPath> ResolveContentPathAsync(CultMeshSessionTarget target)
         {
             if (_contentConnectors.Length == 0)
                 throw Failure(
@@ -627,8 +661,9 @@ namespace GameCult.Mesh
                     "No streaming content connectors are configured. Register the TCP content connector or the explicit legacy RUDP connector.");
 
             var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
-                endpointId.Value,
-                new[] { endpointId.Value })).ConfigureAwait(false);
+                target.ProviderRuntimeId,
+                new[] { target.VerseId },
+                target.ProviderRuntimeId)).ConfigureAwait(false);
             var candidates = discovery.Candidates
                 .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
@@ -644,13 +679,13 @@ namespace GameCult.Mesh
             if (routes.Length == 0)
                 throw Failure(
                     CultMeshSessionFailureReason.UnsupportedPath,
-                    $"No streaming content connector supports an advertised route for '{endpointId}'.");
+                    $"No streaming content connector supports an advertised route for '{target}'.");
 
             var failures = new List<Exception>();
             foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
             {
                 var attempts = tier.Take(_options.MaxRacedCandidates)
-                    .Select(route => ConnectContentCandidateAsync(endpointId, route))
+                    .Select(route => ConnectContentCandidateAsync(target.ProviderEndpointId, route))
                     .ToList();
                 while (attempts.Count > 0)
                 {
@@ -676,7 +711,7 @@ namespace GameCult.Mesh
             var last = failures.LastOrDefault();
             throw Failure(
                 last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
-                $"No streaming content path connected for '{endpointId}'.",
+                $"No streaming content path connected for '{target}'.",
                 last);
         }
 
@@ -701,7 +736,7 @@ namespace GameCult.Mesh
             if (_contentSessions.TryRemove(key, out var removed) &&
                 removed.IsValueCreated && removed.Value.Status == TaskStatus.RanToCompletion)
                 removed.Value.Result.Dispose();
-            Emit(session.EndpointId, CultMeshProtocols.Content, "offline", session.State.Path?.Endpoint ?? string.Empty);
+            Emit(session.Target, CultMeshProtocols.Content, "offline", session.State.Path?.Endpoint ?? string.Empty);
         }
 
         /// <summary>
@@ -709,16 +744,16 @@ namespace GameCult.Mesh
         /// register QUIC explicitly, while RUDP compatibility remains opt-in.
         /// </summary>
         public async Task<CultMeshRealtimeSession> ConnectRealtimeAsync(
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
-            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             ThrowIfDisposed();
-            var key = endpointId.Value;
+            var key = target.SessionKey;
             while (true)
             {
                 var lazy = _realtimeSessions.GetOrAdd(key, _ => new Lazy<Task<CultMeshRealtimeSession>>(
-                    () => ConnectRealtimeOwnedAsync(key, endpointId), LazyThreadSafetyMode.ExecutionAndPublication));
+                    () => ConnectRealtimeOwnedAsync(key, target), LazyThreadSafetyMode.ExecutionAndPublication));
                 try
                 {
                     var session = await AwaitForCallerAsync(lazy.Value, cancellationToken).ConfigureAwait(false);
@@ -735,19 +770,19 @@ namespace GameCult.Mesh
 
         private async Task<CultMeshRealtimeSession> ConnectRealtimeOwnedAsync(
             string key,
-            CultMeshEndpointId endpointId)
+            CultMeshSessionTarget target)
         {
-            var result = await ResolveRealtimePathAsync(endpointId).ConfigureAwait(false);
+            var result = await ResolveRealtimePathAsync(target).ConfigureAwait(false);
             var session = new CultMeshRealtimeSession(
-                endpointId,
+                target,
                 result.Transport,
                 new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate),
                 failed => InvalidateRealtimeSession(key, failed));
-            Emit(endpointId, CultMeshProtocols.RealtimeState, "online", result.Candidate.Endpoint);
+            Emit(target, CultMeshProtocols.RealtimeState, "online", result.Candidate.Endpoint);
             return session;
         }
 
-        private async Task<ConnectedRealtimePath> ResolveRealtimePathAsync(CultMeshEndpointId endpointId)
+        private async Task<ConnectedRealtimePath> ResolveRealtimePathAsync(CultMeshSessionTarget target)
         {
             if (_realtimeConnectors.Length == 0)
                 throw Failure(
@@ -755,8 +790,9 @@ namespace GameCult.Mesh
                     "No realtime state connectors are configured. Register a QUIC connector explicitly.");
 
             var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
-                endpointId.Value,
-                new[] { endpointId.Value })).ConfigureAwait(false);
+                target.ProviderRuntimeId,
+                new[] { target.VerseId },
+                target.ProviderRuntimeId)).ConfigureAwait(false);
             var routes = discovery.Candidates
                 .SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
@@ -770,13 +806,13 @@ namespace GameCult.Mesh
             if (routes.Length == 0)
                 throw Failure(
                     CultMeshSessionFailureReason.UnsupportedPath,
-                    $"No realtime connector supports an advertised route for '{endpointId}'.");
+                    $"No realtime connector supports an advertised route for '{target}'.");
 
             var failures = new List<Exception>();
             foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
             {
                 var attempts = tier.Take(_options.MaxRacedCandidates)
-                    .Select(route => ConnectRealtimeCandidateAsync(endpointId, route))
+                    .Select(route => ConnectRealtimeCandidateAsync(target.ProviderEndpointId, route))
                     .ToList();
                 while (attempts.Count > 0)
                 {
@@ -802,7 +838,7 @@ namespace GameCult.Mesh
             var last = failures.LastOrDefault();
             throw Failure(
                 last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
-                $"No realtime state path connected for '{endpointId}'.",
+                $"No realtime state path connected for '{target}'.",
                 last);
         }
 
@@ -828,24 +864,25 @@ namespace GameCult.Mesh
             if (_realtimeSessions.TryRemove(key, out var removed) &&
                 removed.IsValueCreated && removed.Value.Status == TaskStatus.RanToCompletion)
                 removed.Value.Result.Dispose();
-            Emit(session.EndpointId, CultMeshProtocols.RealtimeState, "offline", endpoint);
+            Emit(session.Target, CultMeshProtocols.RealtimeState, "offline", endpoint);
         }
 
-        private async Task<CultMeshSession> ConnectOwnedAsync(string key, CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
+        private async Task<CultMeshSession> ConnectOwnedAsync(string key, CultMeshSessionTarget target, CultMeshProtocolId protocol)
         {
-            var result = await ResolveConnectedPathAsync(endpointId, protocol).ConfigureAwait(false);
-            var session = new CultMeshSession(endpointId, protocol, result.Client,
+            var result = await ResolveConnectedPathAsync(target, protocol).ConfigureAwait(false);
+            var session = new CultMeshSession(target, protocol, result.Client,
                 new CultMeshSessionState(CultMeshSessionStatus.Online, _options.Clock.UtcNow, result.Candidate));
             ObservePhysicalFailure(key, session, result);
-            Emit(endpointId, protocol, "online", result.Candidate.Endpoint);
+            Emit(target, protocol, "online", result.Candidate.Endpoint);
             return session;
         }
 
-        private async Task<ConnectedPath> ResolveConnectedPathAsync(CultMeshEndpointId endpointId, CultMeshProtocolId protocol)
+        private async Task<ConnectedPath> ResolveConnectedPathAsync(CultMeshSessionTarget target, CultMeshProtocolId protocol)
         {
             var discovery = await _discovery.ResolveAsync(new CultMeshDiscoveryQuery(
-                endpointId.Value,
-                new[] { endpointId.Value })).ConfigureAwait(false);
+                target.ProviderRuntimeId,
+                new[] { target.VerseId },
+                target.ProviderRuntimeId)).ConfigureAwait(false);
             var candidates = discovery.Candidates.SelectMany(candidate => candidate.Descriptor.DiscoveryEndpoints)
                 .Distinct(StringComparer.Ordinal)
                 .Select(endpoint => new CultMeshTransportCandidate(endpoint))
@@ -858,14 +895,14 @@ namespace GameCult.Mesh
                 .ThenBy(route => route.Candidate.Priority)
                 .ToArray();
             if (candidates.Length == 0)
-                throw Failure(CultMeshSessionFailureReason.Resolution, $"No route candidates for '{endpointId}'.");
+                throw Failure(CultMeshSessionFailureReason.Resolution, $"No route candidates for '{target}'.");
             if (routes.Length == 0)
                 throw Failure(
                     CultMeshSessionFailureReason.Transport,
-                    $"No transport path connected for '{endpointId}' and protocol '{protocol}'.",
+                    $"No transport path connected for '{target}' and protocol '{protocol}'.",
                     Failure(
                         CultMeshSessionFailureReason.UnsupportedPath,
-                        $"No registered connector supports an advertised route for '{endpointId}'."));
+                        $"No registered connector supports an advertised route for '{target}'."));
 
             var failures = new List<Exception>();
             foreach (var tier in routes.GroupBy(route => route.Connector.Priority).OrderBy(group => group.Key))
@@ -889,7 +926,7 @@ namespace GameCult.Mesh
             }
             var last = failures.LastOrDefault();
             throw Failure(last is TimeoutException ? CultMeshSessionFailureReason.Timeout : CultMeshSessionFailureReason.Transport,
-                $"No transport path connected for '{endpointId}' and protocol '{protocol}'.", last);
+                $"No transport path connected for '{target}' and protocol '{protocol}'.", last);
         }
 
         private void ObservePhysicalFailure(string key, CultMeshSession session, ConnectedPath path)
@@ -919,20 +956,21 @@ namespace GameCult.Mesh
                 _options.Clock.UtcNow,
                 failedPath.Candidate,
                 failure));
-            Emit(session.EndpointId, session.Protocol, "reconnecting", failedPath.Candidate.Endpoint);
+            Emit(session.Target, session.Protocol, "reconnecting", failedPath.Candidate.Endpoint);
             try
             {
                 _discovery.Invalidate(new CultMeshDiscoveryQuery(
-                    session.EndpointId.Value,
-                    new[] { session.EndpointId.Value }));
-                var replacement = await ResolveConnectedPathAsync(session.EndpointId, session.Protocol).ConfigureAwait(false);
+                    session.Target.ProviderRuntimeId,
+                    new[] { session.Target.VerseId },
+                    session.Target.ProviderRuntimeId));
+                var replacement = await ResolveConnectedPathAsync(session.Target, session.Protocol).ConfigureAwait(false);
                 session.ReplacePhysicalChannel(replacement.Client);
                 session.Transition(new CultMeshSessionState(
                     CultMeshSessionStatus.Online,
                     _options.Clock.UtcNow,
                     replacement.Candidate));
                 ObservePhysicalFailure(key, session, replacement);
-                Emit(session.EndpointId, session.Protocol, "online", replacement.Candidate.Endpoint);
+                Emit(session.Target, session.Protocol, "online", replacement.Candidate.Endpoint);
             }
             catch (Exception reconnectError)
             {
@@ -945,7 +983,7 @@ namespace GameCult.Mesh
                         reconnectError.Message,
                         failedPath.Candidate.Endpoint)));
                 _sessions.TryRemove(key, out _);
-                Emit(session.EndpointId, session.Protocol, "offline", failedPath.Candidate.Endpoint);
+                Emit(session.Target, session.Protocol, "offline", failedPath.Candidate.Endpoint);
             }
         }
 
@@ -970,12 +1008,12 @@ namespace GameCult.Mesh
         private CultMeshSessionException Failure(CultMeshSessionFailureReason reason, string message, Exception? inner = null) =>
             new CultMeshSessionException(new CultMeshSessionFailure(reason, message), inner);
 
-        private void Emit(CultMeshEndpointId endpoint, CultMeshProtocolId protocol, string state, string path)
+        private void Emit(CultMeshSessionTarget target, CultMeshProtocolId protocol, string state, string path)
         {
             _options.Diagnostics.Emit(new CultMeshDiagnosticEvent(
                 Interlocked.Increment(ref _diagnosticSequence), _options.Clock.UtcNow,
                 CultMeshReliabilityOrgan.Session, CultMeshDiagnosticKind.PathChanged,
-                endpoint.Value + ":" + protocol.Value, endpoint.Value, state,
+                target.SessionKey + ":" + protocol.Value, target.ProviderRuntimeId, state,
                 sourceId: "session-manager", endpoint: path));
         }
 

@@ -17,6 +17,18 @@ foreach ($requiredPrimitive in @("CultNetOperationServer", "EveSurface.Create"))
         throw "The getting-started provider is missing the public primitive '$requiredPrimitive'."
     }
 }
+if ($networkSampleSource -notmatch 'new\s+CultMeshSessionTarget\s*\(') {
+    throw "The getting-started client must address one explicit Verse/provider target."
+}
+$cultMeshClientSource = Get-Content -LiteralPath (Join-Path $cultLibRoot "src\GameCult.Mesh\CultMeshClient.cs") -Raw
+if ($cultMeshClientSource -match 'ConnectAsync\s*\(\s*string\s+(endpointId|verseId)' -or
+    $cultMeshClientSource -match 'Lease(Document|Collection)Async[^\(]*\(\s*string\s+(endpointId|verseId)') {
+    throw "CultMeshClient must not expose an ambiguous one-string session identity."
+}
+$discoverySource = Get-Content -LiteralPath (Join-Path $cultLibRoot "src\GameCult.Mesh\CultMeshDiscoveryService.cs") -Raw
+if ($discoverySource -notmatch 'AuthorityRuntimeIds\.Contains\(query\.AuthorityRuntimeId') {
+    throw "CultMesh discovery must prove that a selected Verse route advertises the requested provider runtime."
+}
 
 $dotnetPackageRoot = Join-Path ([IO.Path]::GetTempPath()) `
     ("eve-getting-started-nuget-" + [guid]::NewGuid().ToString("N"))

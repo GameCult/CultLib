@@ -39,7 +39,7 @@ public sealed class CultMeshTransportModularityTests
             });
 
         var session = await sessions.ConnectAsync(
-            CultMeshEndpointId.Parse("aetheria"),
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"),
             CultMeshProtocols.Documents);
         var response = new TaskCompletionSource<CultNetErrorMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var subscription = session.OnCultNet<CultNetErrorMessage>(message => response.TrySetResult(message));
@@ -77,7 +77,7 @@ public sealed class CultMeshTransportModularityTests
                 new CultMeshTcpContentTransportConnector()
             });
 
-        var session = await sessions.ConnectContentAsync(CultMeshEndpointId.Parse("aetheria"));
+        var session = await sessions.ConnectContentAsync(new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         using var destination = new MemoryStream();
         await session.CopyChunkToAsync(artifact.Manifest.Chunks[0], destination);
 
@@ -98,7 +98,7 @@ public sealed class CultMeshTransportModularityTests
             Array.Empty<ICultMeshTransportConnector>());
 
         Func<Task> connect = async () => await sessions.ConnectContentAsync(
-            CultMeshEndpointId.Parse("aetheria"));
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
 
         await connect.Should().ThrowAsync<CultMeshSessionException>()
             .WithMessage("*No streaming content connectors are configured*");
@@ -118,7 +118,7 @@ public sealed class CultMeshTransportModularityTests
             Array.Empty<ICultMeshContentTransportConnector>(),
             new ICultMeshRealtimeTransportConnector[] { connector });
         var session = await sessions.ConnectRealtimeAsync(
-            CultMeshEndpointId.Parse("aetheria"));
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         var sent = new CultMeshRealtimeFrame
         {
             ChannelId = "aetheria.entities",
@@ -150,7 +150,7 @@ public sealed class CultMeshTransportModularityTests
             Array.Empty<ICultMeshTransportConnector>());
 
         Func<Task> connect = async () => await sessions.ConnectRealtimeAsync(
-            CultMeshEndpointId.Parse("aetheria"));
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
 
         await connect.Should().ThrowAsync<CultMeshSessionException>()
             .WithMessage("*No realtime state connectors are configured*");
@@ -176,7 +176,8 @@ public sealed class CultMeshTransportModularityTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "rules"),
-                        _endpoints),
+                        _endpoints,
+                        new[] { "aetheria.daemon" }),
                     SourceId,
                     now,
                     now.AddMinutes(1),

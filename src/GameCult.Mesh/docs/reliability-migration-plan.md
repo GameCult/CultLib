@@ -101,8 +101,9 @@ state for inspection and compatibility.
 
 **Owner:** `CultMeshSessionManager`.
 
-**Inputs:** stable endpoint identity, application protocol identity, discovery
-candidate stream, transport connectors, path policy, clock, and retry policy.
+**Inputs:** stable Verse/provider identity, application protocol identity,
+discovery candidate stream, transport connectors, path policy, clock, and retry
+policy.
 
 **Outputs:** a reusable `CultMeshSession` with typed connection state, chosen
 path, protocol channel, diagnostics, and watches for state/path changes.
@@ -249,7 +250,7 @@ The target API is identity-first and watchable:
 
 ```csharp
 await using var session = await mesh.ConnectAsync(
-    CultMeshEndpointId.Parse("odin:yggdrasil"),
+    new CultMeshSessionTarget("yggdrasil.public", "odin:yggdrasil"),
     CultMeshProtocols.Documents,
     cancellationToken);
 

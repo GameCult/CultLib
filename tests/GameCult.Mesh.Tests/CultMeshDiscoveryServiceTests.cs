@@ -263,6 +263,25 @@ public sealed class CultMeshDiscoveryServiceTests
         source.LookupCount.Should().Be(2);
     }
 
+    [Test]
+    public async Task Resolve_RejectsVerseRouteThatDoesNotAdvertiseRequestedProvider()
+    {
+        var clock = new ManualClock(new DateTimeOffset(2026, 8, 18, 0, 0, 0, TimeSpan.Zero));
+        var source = new DelegateSource("odin", _ => Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(
+            new[] { Observation("aetheria", "odin", clock, TimeSpan.FromMinutes(1), CultMeshDiscoveryTrust.Signed) }));
+        using var service = new CultMeshDiscoveryService(
+            new[] { source },
+            new CultMeshDiscoveryServiceOptions { Clock = clock });
+
+        var state = await service.ResolveAsync(new CultMeshDiscoveryQuery(
+            "forged-provider",
+            new[] { "aetheria" },
+            "forged-provider"));
+
+        state.Freshness.Should().Be(CultMeshDiscoveryFreshness.Unavailable);
+        state.Candidates.Should().BeEmpty();
+    }
+
     private static CultMeshDiscoveryObservation Observation(
         string verseId,
         string sourceId,
@@ -275,7 +294,8 @@ public sealed class CultMeshDiscoveryServiceTests
             "Aetheria",
             CultMeshVerseAuthorityModel.OperatorCluster,
             new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
-            new[] { endpoint }),
+            new[] { endpoint },
+            new[] { "odin:aetheria", "odin:games", "aetheria" }),
         sourceId,
         clock.UtcNow,
         clock.UtcNow + ttl,

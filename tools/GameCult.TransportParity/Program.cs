@@ -202,7 +202,8 @@ static async Task<StateResult> MeasureCultMeshQuicStateAsync(int payloadBytes, i
         {
             ValidateProviderCertificate = (_, _, _, _) => true
         })]);
-    var session = await sessions.ConnectRealtimeAsync(CultMeshEndpointId.Parse("service:parity.provider"));
+    var session = await sessions.ConnectRealtimeAsync(
+        new CultMeshSessionTarget("parity", "service:parity.provider"));
     var deadline = DateTime.UtcNow.AddSeconds(5);
     while (server.ConnectionCount == 0)
     {
@@ -478,7 +479,8 @@ internal sealed class RouteSource(string endpoint) : ICultMeshLookupSource
             new(
                 new CultMeshVerseDescriptor(
                     "parity", "Transport parity", CultMeshVerseAuthorityModel.OperatorCluster,
-                    new CultMeshVerseCompatibility("cultmesh.v1", "parity"), [endpoint]),
+                    new CultMeshVerseCompatibility("cultmesh.v1", "parity"), [endpoint],
+                    ["service:parity.provider"]),
                 SourceId, now, now.AddMinutes(1), CultMeshDiscoveryTrust.Signed)
         ];
         return Task.FromResult(observations);

@@ -8,8 +8,8 @@ The counter is now one small multiplayer game:
   invokes Increment;
 - an independent C# client leases the same counter and invokes through the same
   typed operation boundary;
-- both clients remain attached when Odin moves the provider identity to a new
-  physical route.
+- both clients remain attached when Odin moves the Verse to a replacement
+  physical provider route.
 
 Run the whole chronology from the CultLib checkout:
 

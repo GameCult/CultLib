@@ -33,16 +33,25 @@ namespace GameCult.Mesh
 
     public sealed class CultMeshDiscoveryQuery
     {
-        public CultMeshDiscoveryQuery(string endpointId, IEnumerable<string>? verseIds = null)
+        /// <param name="endpointId">Stable lookup identity used for caching and diagnostics, never a physical route.</param>
+        /// <param name="verseIds">Optional Verse filter.</param>
+        /// <param name="authorityRuntimeId">Optional provider runtime that each accepted Verse must advertise.</param>
+        public CultMeshDiscoveryQuery(
+            string endpointId,
+            IEnumerable<string>? verseIds = null,
+            string? authorityRuntimeId = null)
         {
             EndpointId = Require(endpointId, nameof(endpointId));
             VerseIds = verseIds?.Where(value => !string.IsNullOrWhiteSpace(value))
                 .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray()
                 ?? Array.Empty<string>();
+            AuthorityRuntimeId = string.IsNullOrWhiteSpace(authorityRuntimeId) ? null : authorityRuntimeId.Trim();
         }
 
         public string EndpointId { get; }
         public IReadOnlyList<string> VerseIds { get; }
+        /// <summary>Gets the optional provider runtime constraint for authority-sensitive resolution.</summary>
+        public string? AuthorityRuntimeId { get; }
 
         private static string Require(string value, string name) =>
             string.IsNullOrWhiteSpace(value) ? throw new ArgumentException("Value must be non-empty.", name) : value;
@@ -219,9 +228,11 @@ namespace GameCult.Mesh
         }
 
         private static string QueryKey(CultMeshDiscoveryQuery query) =>
-            query.VerseIds.Count == 0
+            query.AuthorityRuntimeId == null && query.VerseIds.Count == 0
                 ? query.EndpointId
-                : query.EndpointId + "\u001f" + string.Join("\u001f", query.VerseIds);
+                : string.Join(
+                    "\u001f",
+                    new[] { query.EndpointId, query.AuthorityRuntimeId ?? "" }.Concat(query.VerseIds));
 
         private static async Task<T> AwaitForCallerAsync<T>(Task<T> shared, CancellationToken cancellationToken)
         {
@@ -255,6 +266,8 @@ namespace GameCult.Mesh
             var failures = results.Where(result => result.Error != null).Select(result => result.SourceId).ToArray();
             var observations = results.SelectMany(result => result.Observations)
                 .Where(observation => query.VerseIds.Count == 0 || query.VerseIds.Contains(observation.Candidate.VerseId, StringComparer.Ordinal))
+                .Where(observation => query.AuthorityRuntimeId == null ||
+                    observation.Candidate.AuthorityRuntimeIds.Contains(query.AuthorityRuntimeId, StringComparer.Ordinal))
                 .ToArray();
 
             foreach (var rejected in observations.Where(observation => observation.Trust == CultMeshDiscoveryTrust.Rejected))

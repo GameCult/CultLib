@@ -278,15 +278,15 @@ namespace GameCult.Mesh
     public sealed class CultMeshSessionBodyProvider
     {
         private readonly CultMeshSessionManager _sessions;
-        private readonly CultMeshEndpointId _endpointId;
+        private readonly CultMeshSessionTarget _target;
         private readonly CultMeshSessionBodyProviderOptions _options;
 
         public CultMeshSessionBodyProvider(string providerId, CultMeshSessionManager sessions,
-            CultMeshEndpointId endpointId, CultMeshSessionBodyProviderOptions? options = null)
+            CultMeshSessionTarget target, CultMeshSessionBodyProviderOptions? options = null)
         {
             ProviderId = string.IsNullOrWhiteSpace(providerId) ? throw new ArgumentException("Provider identity is required.", nameof(providerId)) : providerId;
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
-            _endpointId = endpointId ?? throw new ArgumentNullException(nameof(endpointId));
+            _target = target ?? throw new ArgumentNullException(nameof(target));
             _options = options ?? new CultMeshSessionBodyProviderOptions();
             if (_options.ResponseTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(options));
         }
@@ -300,7 +300,7 @@ namespace GameCult.Mesh
             if (descriptor == null) throw new ArgumentNullException(nameof(descriptor));
             if (descriptor.TransportKind != CultMeshBodyTransportKind.Network)
                 throw new NotSupportedException("Direct body provider requires a network descriptor.");
-            var session = await _sessions.ConnectAsync(_endpointId, CultMeshProtocols.Bodies, cancellationToken).ConfigureAwait(false);
+            var session = await _sessions.ConnectAsync(_target, CultMeshProtocols.Bodies, cancellationToken).ConfigureAwait(false);
             var messageId = Guid.NewGuid().ToString("N");
             var completion = new TaskCompletionSource<CultMeshBodyReadResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var responseSubscription = session.OnCultNet<CultMeshBodyReadResponseMessage>(response =>

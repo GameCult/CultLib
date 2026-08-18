@@ -1,21 +1,28 @@
 # 2. Connect A Client By Stable Identity
 
-Clients address a Verse session by stable identity. In this tutorial,
-`sample.counter-provider` is the sole authority runtime Odin advertises for the
-`sample.counter` Verse; neither identity is a socket address. Discovery owns
-current physical candidates and the session manager owns connection reuse,
-path rotation, and transport failure state.
+Clients address a live session by stable Verse/provider identity. In this tutorial,
+`sample.counter` is the Verse id and `sample.counter-provider` is the authority
+runtime Odin currently advertises for it. Application clients pass that typed
+pair, never a socket address and never one ambiguous string that might mean
+either identity. A product may expose only a Verse choice to its user; its
+selection owner then resolves the provider runtime from Odin's descriptor before
+opening the session. Discovery owns the current physical routes, and the session
+manager owns connection reuse, path rotation, and transport failure state.
 
 ```csharp
 using GameCult.Mesh;
 
+var odinEndpoint = Environment.GetEnvironmentVariable("ODIN_ENDPOINT")
+    ?? throw new InvalidOperationException("Set ODIN_ENDPOINT to the configured rendezvous route.");
+const string verseId = "sample.counter";
+var target = new CultMeshSessionTarget(verseId, "sample.counter-provider");
 using var mesh = new CultMeshClient(new CultMeshClientOptions
 {
-    RendezvousEndpoints = new[] { "rudp://odin.gamecult.net:3076" }
+    RendezvousEndpoints = new[] { odinEndpoint }
 });
 
 using var counterLease = await mesh.LeaseDocumentAsync<CounterState>(
-    "sample.counter",
+    target,
     "counter:main",
     cancellationToken);
 var counter = counterLease.Handle;
@@ -40,7 +47,7 @@ protocol-level state or diagnostics:
 
 ```csharp
 var session = await mesh.ConnectAsync(
-    "aetheria.daemon",
+    target,
     CultMeshProtocols.Documents,
     cancellationToken);
 

@@ -13,6 +13,8 @@ namespace GameCult.Mesh.Tests;
 
 public sealed class CultMeshClientTests
 {
+    private static CultMeshSessionTarget Target => new("aetheria", "aetheria-daemon");
+
     [Test]
     public void Construction_RequiresOneRendezvousEndpoint()
     {
@@ -41,14 +43,35 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        var first = await mesh.ConnectAsync("aetheria", CultMeshProtocols.Documents);
-        var second = await mesh.ConnectAsync("aetheria", CultMeshProtocols.Documents);
+        var first = await mesh.ConnectAsync(Target, CultMeshProtocols.Documents);
+        var second = await mesh.ConnectAsync(Target, CultMeshProtocols.Documents);
 
         first.Should().BeSameAs(second);
-        first.EndpointId.Value.Should().Be("aetheria");
+        first.Target.Should().Be(Target);
         first.State.Path!.Endpoint.Should().Be("rudp://aetheria:3081");
         discoveryClients.Should().Be(1);
         connector.ConnectCount.Should().Be(1);
+    }
+
+    [Test]
+    public async Task Connect_RejectsProviderNotAdvertisedBySelectedVerseBeforeTransport()
+    {
+        var connector = new RecordingConnector();
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        Func<Task> connect = async () => await mesh.ConnectAsync(
+            new CultMeshSessionTarget("aetheria", "forged-provider"),
+            CultMeshProtocols.Documents);
+
+        var failure = await connect.Should().ThrowAsync<CultMeshSessionException>();
+        failure.Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Resolution);
+        connector.ConnectCount.Should().Be(0,
+            "a valid Verse route must not authorize an unadvertised provider identity");
     }
 
     [Test]
@@ -62,8 +85,8 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        using var firstLease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
-        using var secondLease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        using var firstLease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
+        using var secondLease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         var first = firstLease.Handle;
         var second = secondLease.Handle;
 
@@ -82,7 +105,7 @@ public sealed class CultMeshClientTests
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
             Connectors = new[] { connector }
         });
-        using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         var document = lease.Handle;
 
         connector.Clients[0].Fail(new InvalidOperationException("path lost"));
@@ -105,7 +128,7 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        var opening = mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        var opening = mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
         connector.Clients[0].Fail(new InvalidOperationException("path lost before initial snapshot"));
 
@@ -129,7 +152,7 @@ public sealed class CultMeshClientTests
             SubscriptionResponseTimeout = TimeSpan.FromMilliseconds(20)
         });
 
-        using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         var document = lease.Handle;
 
         (await document.LatestAsync()).Text.Should().Be("pilot surface 1");
@@ -148,7 +171,7 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        using var lease = await mesh.LeaseCollectionAsync<ClientTestDocument>("aetheria");
+        using var lease = await mesh.LeaseCollectionAsync<ClientTestDocument>(Target);
         var collection = lease.Handle;
 
         (await collection.LatestAsync()).Should().ContainSingle()
@@ -167,7 +190,7 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        var opening = mesh.LeaseCollectionAsync<ClientTestDocument>("aetheria");
+        var opening = mesh.LeaseCollectionAsync<ClientTestDocument>(Target);
         await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
         connector.Clients[0].Fail(new InvalidOperationException("path lost before initial collection snapshot"));
 
@@ -191,8 +214,8 @@ public sealed class CultMeshClientTests
             Connectors = new[] { connector }
         });
 
-        var first = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
-        var second = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        var first = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
+        var second = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         mesh.ActiveDocumentResourceCount.Should().Be(1);
 
         first.Dispose();
@@ -200,7 +223,7 @@ public sealed class CultMeshClientTests
         second.Dispose();
         mesh.ActiveDocumentResourceCount.Should().Be(0);
 
-        using var replacement = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        using var replacement = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         replacement.Handle.Should().NotBeSameAs(first.Handle);
         connector.SubscribeCount.Should().Be(2);
     }
@@ -220,7 +243,7 @@ public sealed class CultMeshClientTests
         for (var index = 0; index < leaseCount; index++)
         {
             var recordKey = "surface:churn:" + index;
-            using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", recordKey);
+            using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, recordKey);
             (await lease.Handle.LatestAsync()).Id.Should().Be(recordKey);
         }
 
@@ -244,7 +267,7 @@ public sealed class CultMeshClientTests
         var request = new ClientTestDocument { Id = "command:1", Text = "move" };
 
         await mesh.SubmitDocumentAsync(
-            "aetheria",
+            Target,
             request.Id,
             request,
             sourceRuntimeId: "pilot-one",
@@ -269,7 +292,7 @@ public sealed class CultMeshClientTests
         });
 
         var result = await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
-            "aetheria",
+            Target,
             "tests.counter",
             "tests.counter.increment",
             "tests.counter.increment_request.v1",
@@ -301,7 +324,7 @@ public sealed class CultMeshClientTests
         });
 
         Func<Task> invoke = async () => await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
-            "aetheria",
+            Target,
             "tests.counter",
             "tests.counter.increment",
             "wrong.request.v1",
@@ -328,7 +351,7 @@ public sealed class CultMeshClientTests
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
             Connectors = new[] { connector }
         });
-        var opening = mesh.LeaseDocumentAsync<ClientTestDocument>("aetheria", "surface:pilot");
+        var opening = mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
         await WaitUntilAsync(() => connector.Clients.Count == 1 && connector.Clients[0].SubscribeCount == 1);
 
         mesh.Dispose();
@@ -355,7 +378,8 @@ public sealed class CultMeshClientTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
-                        new[] { "rudp://aetheria:3081" }).ToMessage()
+                        new[] { "rudp://aetheria:3081" },
+                        new[] { "aetheria-daemon" }).ToMessage()
                 }
             };
             foreach (var handler in _handlers.ToArray()) handler(response);

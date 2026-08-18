@@ -9,9 +9,9 @@ be equally good at files, realtime state, and same-machine memory access.
 registered connector for each traffic class. A connector owns only its physical
 connection and byte movement.
 
-**Inputs:** stable endpoint identity, advertised physical candidates, connector
-support and priority, caller cancellation, and locality evidence for body
-negotiation.
+**Inputs:** stable Verse/provider identity, advertised physical candidates,
+connector support and priority, caller cancellation, and locality evidence for
+body negotiation.
 
 **Outputs:**
 

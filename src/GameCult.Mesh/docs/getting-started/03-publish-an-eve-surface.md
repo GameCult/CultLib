@@ -118,8 +118,8 @@ survive reopening the `.cc` store.
 
 The second layer runs a durable C# provider, a separate local Odin fixture, a
 real Chromium Eve lowerer, and an independent C# headless observer over binary
-CultNet WebSocket lanes. The open browser resolves provider identity through
-the canonical Verse catalog, survives a provider restart on a different route,
+CultNet WebSocket lanes. The open browser resolves the `sample.counter` Verse
+through the canonical catalog, survives its provider restarting on a different route,
 and resubscribes. The retained C# client then invokes a second typed operation
 through `CultMeshClient.InvokeAsync`; Chromium and C# observe the same
 provider-authored state and receipt chronology. The same retained C# session

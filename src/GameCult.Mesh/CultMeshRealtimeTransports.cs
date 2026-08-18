@@ -72,18 +72,18 @@ namespace GameCult.Mesh
         private bool _disposed;
 
         internal CultMeshRealtimeSession(
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             ICultMeshRealtimeTransport transport,
             CultMeshSessionState state,
             Action<CultMeshRealtimeSession> onTransportFailure)
         {
-            EndpointId = endpointId ?? throw new ArgumentNullException(nameof(endpointId));
+            Target = target ?? throw new ArgumentNullException(nameof(target));
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             State = state ?? throw new ArgumentNullException(nameof(state));
             _onTransportFailure = onTransportFailure ?? throw new ArgumentNullException(nameof(onTransportFailure));
         }
 
-        public CultMeshEndpointId EndpointId { get; }
+        public CultMeshSessionTarget Target { get; }
         public CultMeshSessionState State { get; private set; }
         public string TransportId { get { lock (_gate) return _transport.TransportId; } }
 

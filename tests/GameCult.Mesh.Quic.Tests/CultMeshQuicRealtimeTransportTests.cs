@@ -79,11 +79,12 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ServerCertificate = certificate
         });
         var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
         using var sessions = CreateSessions(server, out var validatedIdentity);
         CultMeshRealtimeSession session;
         try
         {
-            session = await sessions.ConnectRealtimeAsync(endpointId);
+            session = await sessions.ConnectRealtimeAsync(target);
         }
         catch when (server.BackgroundFailure.IsCompleted)
         {
@@ -118,8 +119,9 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ServerCertificate = certificate
         });
         var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
         using var sessions = CreateSessions(server, out _);
-        var session = await sessions.ConnectRealtimeAsync(endpointId);
+        var session = await sessions.ConnectRealtimeAsync(target);
         await WaitUntilAsync(() => server.ConnectionCount == 1);
 
         await server.BroadcastAsync(Frame(100, CultMeshRealtimeDelivery.LatestOnly, producerEpoch: 7));
@@ -147,8 +149,9 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ServerCertificate = certificate
         });
         var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
         using var sessions = CreateSessions(server, out _);
-        var session = await sessions.ConnectRealtimeAsync(endpointId);
+        var session = await sessions.ConnectRealtimeAsync(target);
 
         Func<Task> send = () => session.SendAsync(Frame(1, CultMeshRealtimeDelivery.Unreliable));
 
@@ -244,7 +247,8 @@ public sealed class CultMeshQuicRealtimeTransportTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "test"),
-                        new[] { endpoint }),
+                        new[] { endpoint },
+                        new[] { "service:aetheria.daemon" }),
                     SourceId,
                     now,
                     now.AddMinutes(1),

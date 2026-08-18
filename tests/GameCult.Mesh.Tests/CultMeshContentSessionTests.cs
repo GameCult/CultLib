@@ -52,7 +52,7 @@ public sealed class CultMeshContentSessionTests
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
-            CultMeshEndpointId.Parse("aetheria"));
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshContentTransferStateDocument)));
         var transfer = new CultMeshContentTransferService(
@@ -114,7 +114,7 @@ public sealed class CultMeshContentSessionTests
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
-            CultMeshEndpointId.Parse("aetheria"));
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
         using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshContentTransferStateDocument)));
         var transfer = new CultMeshContentTransferService(
@@ -196,7 +196,8 @@ public sealed class CultMeshContentSessionTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "rules"),
-                        new[] { _endpoint }),
+                        new[] { _endpoint },
+                        new[] { "aetheria.daemon" }),
                     SourceId,
                     now,
                     now.AddMinutes(1),

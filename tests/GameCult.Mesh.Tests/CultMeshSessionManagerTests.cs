@@ -13,6 +13,8 @@ namespace GameCult.Mesh.Tests;
 
 public sealed class CultMeshSessionManagerTests
 {
+    private static CultMeshSessionTarget Target => new("aetheria", "aetheria-daemon");
+
     [Test]
     public async Task Connect_ResolvesOnlyTheRequestedVerseIdentity()
     {
@@ -28,7 +30,7 @@ public sealed class CultMeshSessionManagerTests
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
 
-        await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents);
+        await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
 
         connected.Should().NotBeNull();
         connected!.Endpoint.Should().Be("rudp://aetheria:3076");
@@ -42,14 +44,14 @@ public sealed class CultMeshSessionManagerTests
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var connector = new FakeConnector(async (_, _) => { await release.Task; return new FakeSchemaClient(); });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("aetheria");
+        var target = Target;
 
-        var first = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
-        var second = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var first = manager.ConnectAsync(target, CultMeshProtocols.Documents);
+        var second = manager.ConnectAsync(target, CultMeshProtocols.Documents);
         await WaitUntilAsync(() => connector.ConnectCount == 1);
         release.TrySetResult();
         var sessions = await Task.WhenAll(first, second);
-        var third = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var third = await manager.ConnectAsync(target, CultMeshProtocols.Documents);
 
         sessions[0].Should().BeSameAs(sessions[1]).And.BeSameAs(third);
         connector.ConnectCount.Should().Be(1);
@@ -70,7 +72,7 @@ public sealed class CultMeshSessionManagerTests
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
 
-        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents);
+        var session = await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
         session.State.Path!.Endpoint.Should().Be("rudp://fast:3076");
         slowRelease.TrySetResult();
         await WaitUntilAsync(() => slowClient.DisposeCount == 1);
@@ -91,10 +93,10 @@ public sealed class CultMeshSessionManagerTests
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
         using var cancellation = new CancellationTokenSource();
-        var endpoint = CultMeshEndpointId.Parse("aetheria");
+        var target = Target;
 
-        var cancelled = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents, cancellation.Token);
-        var survivor = manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var cancelled = manager.ConnectAsync(target, CultMeshProtocols.Documents, cancellation.Token);
+        var survivor = manager.ConnectAsync(target, CultMeshProtocols.Documents);
         await WaitUntilAsync(() => connector.ConnectCount == 1);
         cancellation.Cancel();
         Assert.ThrowsAsync<OperationCanceledException>(async () => await cancelled);
@@ -118,8 +120,8 @@ public sealed class CultMeshSessionManagerTests
             return Task.FromResult<ICultNetSchemaClient>(client);
         });
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("aetheria");
-        var first = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var target = Target;
+        var first = await manager.ConnectAsync(target, CultMeshProtocols.Documents);
         var states = new List<CultMeshSessionStatus>();
         using var stateWatch = first.WatchState().Subscribe(state => states.Add(state.Status));
         using var schemaLease = first.OpenSchemaClient();
@@ -130,7 +132,7 @@ public sealed class CultMeshSessionManagerTests
         route = "rudp://second:3076";
         clients[0].Fail(new IOException("partition"));
         await WaitUntilAsync(() => first.State.Status == CultMeshSessionStatus.Online && connector.ConnectCount == 2);
-        var second = await manager.ConnectAsync(endpoint, CultMeshProtocols.Documents);
+        var second = await manager.ConnectAsync(target, CultMeshProtocols.Documents);
         clients[1].Emit(new CultNetErrorMessage { Error = "after rotation" });
 
         second.Should().BeSameAs(first);
@@ -165,7 +167,7 @@ public sealed class CultMeshSessionManagerTests
         using var manager = new CultMeshSessionManager(discovery, Array.Empty<ICultMeshTransportConnector>(), new CultMeshSessionManagerOptions { Clock = clock });
 
         var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
-            manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Documents));
+            manager.ConnectAsync(Target, CultMeshProtocols.Documents));
 
         error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Transport);
         error.InnerException.Should().BeOfType<CultMeshSessionException>()
@@ -180,9 +182,9 @@ public sealed class CultMeshSessionManagerTests
         var client = new RespondingSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("aetheria");
-        using var first = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
-        using var second = await CultMeshSnapshotSession.ConnectAsync(manager, endpoint, new CultMeshSnapshotRequestOptions());
+        var target = Target;
+        using var first = await CultMeshSnapshotSession.ConnectAsync(manager, target, new CultMeshSnapshotRequestOptions());
+        using var second = await CultMeshSnapshotSession.ConnectAsync(manager, target, new CultMeshSnapshotRequestOptions());
 
         (await first.FetchSnapshotAsync()).MessageId.Should().NotBeEmpty();
         first.Dispose();
@@ -202,10 +204,10 @@ public sealed class CultMeshSessionManagerTests
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
         var exchange = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions { Sessions = manager, Clock = clock });
-        var endpoint = CultMeshEndpointId.Parse("aetheria");
+        var target = Target;
 
-        var first = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
-        var second = await exchange.FetchAsync(endpoint, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
+        var first = await exchange.FetchAsync(target, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
+        var second = await exchange.FetchAsync(target, new CultMeshPeerExchangeRequestMessage { VerseId = "aetheria" });
 
         first.Peers.Single().PeerId.Should().Be("peer-a");
         second.Peers.Single().PeerId.Should().Be("peer-a");
@@ -221,7 +223,7 @@ public sealed class CultMeshSessionManagerTests
         var client = new LeaseSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
         using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
-        var session = await manager.ConnectAsync(CultMeshEndpointId.Parse("aetheria"), CultMeshProtocols.Subscriptions);
+        var session = await manager.ConnectAsync(Target, CultMeshProtocols.Subscriptions);
         using var first = session.OpenSchemaClient();
         using var second = session.OpenSchemaClient();
         var firstCount = 0;
@@ -268,7 +270,7 @@ public sealed class CultMeshSessionManagerTests
             {
                 new CultMeshDiscoveryObservation(
                     new CultMeshVerseDescriptor("aetheria", "Aetheria", CultMeshVerseAuthorityModel.OperatorCluster,
-                        new CultMeshVerseCompatibility("cultmesh.v0", "rules"), _endpoints()),
+                        new CultMeshVerseCompatibility("cultmesh.v0", "rules"), _endpoints(), new[] { "aetheria-daemon" }),
                     SourceId, _clock.UtcNow, _clock.UtcNow + _ttl, CultMeshDiscoveryTrust.Signed)
             });
     }
@@ -298,7 +300,8 @@ public sealed class CultMeshSessionManagerTests
                     verseId,
                     CultMeshVerseAuthorityModel.OperatorCluster,
                     new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
-                    new[] { endpoint }),
+                    new[] { endpoint },
+                    new[] { "aetheria-daemon" }),
                 SourceId,
                 _clock.UtcNow,
                 expires,

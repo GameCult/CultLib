@@ -183,7 +183,8 @@ static async Task RunHeadlessAsync(Args arguments)
                 _ => CreateClient())
         ]
     });
-    using var lease = await mesh.LeaseDocumentAsync<CounterState>(arguments.VerseId, counterKey);
+    var target = new CultMeshSessionTarget(arguments.VerseId, arguments.AuthorityRuntimeId);
+    using var lease = await mesh.LeaseDocumentAsync<CounterState>(target, counterKey);
     var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var lastCount = -1;
     using var watch = lease.Handle.Watch(counter =>
@@ -217,7 +218,7 @@ static async Task RunHeadlessAsync(Args arguments)
             throw new InvalidOperationException("The headless sample expected 'INVOKE <idempotency-key>' on stdin.");
         var commandId = line["INVOKE ".Length..].Trim();
         var result = await mesh.InvokeAsync<IncrementRequest, IncrementReceipt>(
-            arguments.VerseId,
+            target,
             "sample.counter",
             "sample.counter.increment",
             "sample.increment.v1",
@@ -232,18 +233,21 @@ static async Task RunHeadlessAsync(Args arguments)
             status = result.Status
         }));
         Console.WriteLine("HEADLESS_NETWORK_BENCHMARK " + JsonSerializer.Serialize(
-            await MeasureOperationSessionAsync(mesh, arguments)));
+            await MeasureOperationSessionAsync(mesh, target, arguments)));
     });
     await Task.WhenAll(completion.Task, commandTask).WaitAsync(TimeSpan.FromSeconds(45));
 }
 
-static async Task<object> MeasureOperationSessionAsync(CultMeshClient mesh, Args arguments)
+static async Task<object> MeasureOperationSessionAsync(
+    CultMeshClient mesh,
+    CultMeshSessionTarget target,
+    Args arguments)
 {
     const int warmupOperations = 100;
     if (arguments.BenchmarkOperations <= 0)
         throw new ArgumentOutOfRangeException(nameof(arguments.BenchmarkOperations));
     for (var index = 0; index < warmupOperations; index++)
-        await PingAsync(mesh, arguments, "warmup:" + index, index);
+        await PingAsync(mesh, target, "warmup:" + index, index);
 
     ForceCollection();
     using var process = Process.GetCurrentProcess();
@@ -255,7 +259,7 @@ static async Task<object> MeasureOperationSessionAsync(CultMeshClient mesh, Args
     for (var index = 0; index < arguments.BenchmarkOperations; index++)
     {
         var started = Stopwatch.GetTimestamp();
-        await PingAsync(mesh, arguments, "benchmark:" + index, index);
+        await PingAsync(mesh, target, "benchmark:" + index, index);
         latencies[index] = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
     }
     clock.Stop();
@@ -284,10 +288,14 @@ static async Task<object> MeasureOperationSessionAsync(CultMeshClient mesh, Args
     };
 }
 
-static async Task PingAsync(CultMeshClient mesh, Args arguments, string idempotencyKey, int sequence)
+static async Task PingAsync(
+    CultMeshClient mesh,
+    CultMeshSessionTarget target,
+    string idempotencyKey,
+    int sequence)
 {
     var result = await mesh.InvokeAsync<PingRequest, PingReceipt>(
-        arguments.VerseId,
+        target,
         "sample.counter",
         "sample.counter.ping",
         "sample.ping_request.v1",

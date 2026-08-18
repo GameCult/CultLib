@@ -102,7 +102,7 @@ namespace GameCult.Mesh
             CultNetDocumentRegistry? registry)
         {
             _sharedSession = session ?? throw new ArgumentNullException(nameof(session));
-            _endpoint = session.State.Path?.Endpoint ?? session.EndpointId.Value;
+            _endpoint = session.State.Path?.Endpoint ?? session.Target.ProviderRuntimeId;
             _defaults = CultMesh.CloneSnapshotRequestOptions(options);
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = session.Channel;
@@ -112,26 +112,26 @@ namespace GameCult.Mesh
 
         public static async Task<CultMeshSnapshotSession> ConnectAsync(
             CultMeshSessionManager sessions,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CultMeshSnapshotRequestOptions options,
             CultNetDocumentRegistry? registry = null,
             CancellationToken cancellationToken = default)
         {
             if (sessions == null) throw new ArgumentNullException(nameof(sessions));
-            var session = await sessions.ConnectAsync(endpointId, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
+            var session = await sessions.ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
             return new CultMeshSnapshotSession(session, options ?? new CultMeshSnapshotRequestOptions(), registry);
         }
 
         public static async Task<CultMeshSnapshotSession> ConnectAsync(
             CultMeshSessionManager sessions,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CultMeshProtocolId protocol,
             CultMeshSnapshotRequestOptions options,
             CultNetDocumentRegistry? registry = null,
             CancellationToken cancellationToken = default)
         {
             if (sessions == null) throw new ArgumentNullException(nameof(sessions));
-            var session = await sessions.ConnectAsync(endpointId, protocol, cancellationToken).ConfigureAwait(false);
+            var session = await sessions.ConnectAsync(target, protocol, cancellationToken).ConfigureAwait(false);
             return new CultMeshSnapshotSession(session, options ?? new CultMeshSnapshotRequestOptions(), registry);
         }
 

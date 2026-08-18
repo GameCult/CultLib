@@ -192,76 +192,66 @@ namespace GameCult.Mesh
             _operationResponseTimeout = options.OperationResponseTimeout;
         }
 
-        /// <summary>Connects to a stable endpoint identity using one application protocol.</summary>
+        /// <summary>Connects to one stable Verse/provider target using one application protocol.</summary>
         public Task<CultMeshSession> ConnectAsync(
-            string endpointId,
+            CultMeshSessionTarget target,
             CultMeshProtocolId protocol,
             CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
-            return _sessions.ConnectAsync(CultMeshEndpointId.Parse(endpointId), protocol, cancellationToken);
+            return _sessions.ConnectAsync(target, protocol, cancellationToken);
         }
 
-        /// <summary>Connects the reusable realtime state plane by stable endpoint identity.</summary>
+        /// <summary>Connects the reusable realtime state plane for one stable Verse/provider target.</summary>
         public Task<CultMeshRealtimeSession> ConnectRealtimeAsync(
-            string endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
-            return _sessions.ConnectRealtimeAsync(CultMeshEndpointId.Parse(endpointId), cancellationToken);
-        }
-
-        /// <summary>Connects to a stable endpoint identity using one application protocol.</summary>
-        public Task<CultMeshSession> ConnectAsync(
-            CultMeshEndpointId endpointId,
-            CultMeshProtocolId protocol,
-            CancellationToken cancellationToken = default)
-        {
-            ThrowIfDisposed();
-            return _sessions.ConnectAsync(endpointId, protocol, cancellationToken);
+            return _sessions.ConnectRealtimeAsync(target, cancellationToken);
         }
 
         /// <summary>Creates a verified-transfer provider over this client's reusable content session owner.</summary>
         public CultMeshSessionContentProvider ContentProvider(
             string providerId,
-            string endpointId)
+            CultMeshSessionTarget target)
         {
             ThrowIfDisposed();
             return new CultMeshSessionContentProvider(
                 providerId,
                 _sessions,
-                CultMeshEndpointId.Parse(endpointId));
+                target);
         }
 
         /// <summary>Creates a direct body provider over this client's reusable negotiated session owner.</summary>
         public CultMeshSessionBodyProvider BodyProvider(
             string providerId,
-            string endpointId,
+            CultMeshSessionTarget target,
             CultMeshSessionBodyProviderOptions? options = null)
         {
             ThrowIfDisposed();
             return new CultMeshSessionBodyProvider(
                 providerId,
                 _sessions,
-                CultMeshEndpointId.Parse(endpointId),
+                target,
                 options);
         }
 
-        /// <summary>Leases one shared live typed document by stable provider identity and record key.</summary>
+        /// <summary>Leases one shared live typed document by stable Verse/provider identity and record key.</summary>
         public async Task<CultMeshDocumentLease<TDocument>> LeaseDocumentAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string recordKey,
             CancellationToken cancellationToken = default)
             where TDocument : class
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
-            var key = endpointId.Trim() + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + recordKey.Trim();
+            var key = target.SessionKey + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + recordKey.Trim();
             while (true)
             {
                 var resource = _documents.GetOrAdd(key, _ => new SharedResource(
-                    async owner => await OpenDocumentAsync<TDocument>(endpointId.Trim(), recordKey.Trim(), owner).ConfigureAwait(false)));
+                    async owner => await OpenDocumentAsync<TDocument>(target, recordKey.Trim(), owner).ConfigureAwait(false)));
                 if (!resource.TryAcquire())
                 {
                     RemoveExact(_documents, key, resource);
@@ -283,28 +273,28 @@ namespace GameCult.Mesh
             }
         }
 
-        /// <summary>Leases a shared live collection of one typed schema by stable provider identity.</summary>
+        /// <summary>Leases a shared live collection by stable Verse/provider identity.</summary>
         public Task<CultMeshCollectionLease<TDocument>> LeaseCollectionAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken)
             where TDocument : class =>
-            LeaseCollectionAsync<TDocument>(endpointId, includeInitialSnapshot: true, cancellationToken);
+            LeaseCollectionAsync<TDocument>(target, includeInitialSnapshot: true, cancellationToken);
 
         /// <summary>Leases a live collection and optionally skips replaying its initial snapshot.</summary>
         public async Task<CultMeshCollectionLease<TDocument>> LeaseCollectionAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             bool includeInitialSnapshot = true,
             CancellationToken cancellationToken = default)
             where TDocument : class
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
-            var identity = endpointId.Trim();
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            var identity = target.SessionKey;
             var key = identity + "\u001f" + typeof(TDocument).AssemblyQualifiedName + "\u001f" + includeInitialSnapshot;
             while (true)
             {
                 var resource = _collections.GetOrAdd(key, _ => new SharedResource(
-                    async owner => await OpenCollectionAsync<TDocument>(identity, includeInitialSnapshot, owner).ConfigureAwait(false)));
+                    async owner => await OpenCollectionAsync<TDocument>(target, includeInitialSnapshot, owner).ConfigureAwait(false)));
                 if (!resource.TryAcquire())
                 {
                     RemoveExact(_collections, key, resource);
@@ -331,7 +321,7 @@ namespace GameCult.Mesh
         /// only a provider-authored receipt or resulting state can establish acceptance.
         /// </summary>
         public async Task SubmitDocumentAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string recordKey,
             TDocument document,
             string sourceRuntimeId,
@@ -340,7 +330,7 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
             if (document == null) throw new ArgumentNullException(nameof(document));
             if (string.IsNullOrWhiteSpace(sourceRuntimeId)) throw new ArgumentException("Source runtime identity is required.", nameof(sourceRuntimeId));
@@ -357,7 +347,7 @@ namespace GameCult.Mesh
                     SourceRuntimeId = sourceRuntimeId.Trim(),
                     SourceRole = sourceRole.Trim()
                 });
-            var session = await ConnectAsync(endpointId.Trim(), CultMeshProtocols.Documents, cancellationToken)
+            var session = await ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken)
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             session.OpenSchemaClient().SendCultNet(message);
@@ -369,7 +359,7 @@ namespace GameCult.Mesh
         /// provider-authored evidence rather than client-side authority over canonical state.
         /// </summary>
         public async Task<CultMeshOperationResult<TResponse>> InvokeAsync<TRequest, TResponse>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string serviceId,
             string operation,
             string requestSchema,
@@ -380,7 +370,7 @@ namespace GameCult.Mesh
             CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (string.IsNullOrWhiteSpace(serviceId)) throw new ArgumentException("Service identity is required.", nameof(serviceId));
             if (string.IsNullOrWhiteSpace(operation)) throw new ArgumentException("Operation identity is required.", nameof(operation));
             if (string.IsNullOrWhiteSpace(requestSchema)) throw new ArgumentException("Request schema is required.", nameof(requestSchema));
@@ -389,12 +379,11 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(sourceRuntimeId)) throw new ArgumentException("Source runtime identity is required.", nameof(sourceRuntimeId));
             if (string.IsNullOrWhiteSpace(idempotencyKey)) throw new ArgumentException("A durable idempotency key is required.", nameof(idempotencyKey));
 
-            var identity = endpointId.Trim();
             var expectedService = serviceId.Trim();
             var expectedOperation = operation.Trim();
             var expectedResponseSchema = responseSchema.Trim();
             var messageId = idempotencyKey.Trim();
-            var session = await ConnectAsync(identity, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
+            var session = await ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
             var completion = new TaskCompletionSource<CultNetOperationResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var subscription = session.OnCultNet<CultNetOperationResponseMessage>(response =>
             {
@@ -481,69 +470,69 @@ namespace GameCult.Mesh
 
         /// <summary>Reads one typed record once through the reusable document session.</summary>
         public async Task<TDocument> ReadAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string recordKey,
             CancellationToken cancellationToken = default)
             where TDocument : class
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Record key is required.", nameof(recordKey));
-            var documents = await ReadManyAsync<TDocument>(endpointId, new[] { recordKey }, cancellationToken)
+            var documents = await ReadManyAsync<TDocument>(target, new[] { recordKey }, cancellationToken)
                 .ConfigureAwait(false);
             return documents.FirstOrDefault()
                 ?? throw new InvalidOperationException(
-                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
+                    $"CultMesh target '{target}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
         }
 
         /// <summary>Reads one typed record once with an explicit response deadline.</summary>
         public async Task<TDocument> ReadAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string recordKey,
             TimeSpan responseTimeout,
             CancellationToken cancellationToken = default)
             where TDocument : class
         {
             var documents = await ReadManyCoreAsync<TDocument>(
-                    endpointId,
+                    target,
                     new[] { recordKey },
                     responseTimeout,
                     cancellationToken)
                 .ConfigureAwait(false);
             return documents.FirstOrDefault()
                 ?? throw new InvalidOperationException(
-                    $"CultMesh endpoint '{endpointId}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
+                    $"CultMesh target '{target}' did not publish {typeof(TDocument).FullName} record '{recordKey}'.");
         }
 
         /// <summary>Reads typed records once in one request through the reusable document session.</summary>
         public async Task<IReadOnlyList<TDocument>> ReadManyAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             IReadOnlyList<string> recordKeys,
             CancellationToken cancellationToken = default)
             where TDocument : class
             => await ReadManyCoreAsync<TDocument>(
-                    endpointId,
+                    target,
                     recordKeys,
                     TimeSpan.FromSeconds(10),
                     cancellationToken)
                 .ConfigureAwait(false);
 
         private async Task<IReadOnlyList<TDocument>> ReadManyCoreAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             IReadOnlyList<string> recordKeys,
             TimeSpan responseTimeout,
             CancellationToken cancellationToken)
             where TDocument : class
         {
             ThrowIfDisposed();
-            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (recordKeys == null || recordKeys.Count == 0 || recordKeys.Any(string.IsNullOrWhiteSpace))
                 throw new ArgumentException("At least one non-empty record key is required.", nameof(recordKeys));
             var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
             var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
             using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
                     _sessions,
-                    CultMeshEndpointId.Parse(endpointId),
+                    target,
                     CultMeshProtocols.Content,
                     new CultMeshSnapshotRequestOptions
                     {
@@ -577,13 +566,13 @@ namespace GameCult.Mesh
         }
 
         private async Task<object> OpenDocumentAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             string recordKey,
             SharedResource owner)
             where TDocument : class
         {
-            var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
-            var binding = new RemoteDocumentBinding<TDocument>(session, endpointId, recordKey, _subscriptionResponseTimeout);
+            var session = await ConnectAsync(target, CultMeshProtocols.Documents).ConfigureAwait(false);
+            var binding = new RemoteDocumentBinding<TDocument>(session, target, recordKey, _subscriptionResponseTimeout);
             owner.Attach(binding);
             try
             {
@@ -599,13 +588,13 @@ namespace GameCult.Mesh
         }
 
         private async Task<object> OpenCollectionAsync<TDocument>(
-            string endpointId,
+            CultMeshSessionTarget target,
             bool includeInitialSnapshot,
             SharedResource owner)
             where TDocument : class
         {
-            var session = await ConnectAsync(endpointId, CultMeshProtocols.Documents).ConfigureAwait(false);
-            var binding = new RemoteCollectionBinding<TDocument>(session, endpointId, includeInitialSnapshot, _subscriptionResponseTimeout);
+            var session = await ConnectAsync(target, CultMeshProtocols.Documents).ConfigureAwait(false);
+            var binding = new RemoteCollectionBinding<TDocument>(session, target, includeInitialSnapshot, _subscriptionResponseTimeout);
             owner.Attach(binding);
             try
             {
@@ -743,14 +732,14 @@ namespace GameCult.Mesh
 
             public RemoteDocumentBinding(
                 CultMeshSession session,
-                string endpointId,
+                CultMeshSessionTarget target,
                 string recordKey,
                 TimeSpan responseTimeout)
             {
                 _session = session;
                 _responseTimeout = responseTimeout;
                 _recordKey = recordKey;
-                _subscriptionId = "cultmesh-document:" + endpointId + ":" + recordKey;
+                _subscriptionId = "cultmesh-document:" + target.SessionKey + ":" + recordKey;
                 var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
                 var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
                 _cache = new CultCache(cacheRegistry);
@@ -758,8 +747,8 @@ namespace GameCult.Mesh
                 Handle = CultMesh.Document<TDocument>(
                     _cache,
                     new CultRecordKey(recordKey),
-                    CultMesh.Verse(endpointId, "cultmesh-client").Context,
-                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, endpointId));
+                    CultMesh.Verse(target.VerseId, "cultmesh-client").Context,
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.ProviderRuntimeId));
             }
 
             public CultMeshDocumentHandle<TDocument> Handle { get; }
@@ -847,13 +836,13 @@ namespace GameCult.Mesh
 
             public RemoteCollectionBinding(
                 CultMeshSession session,
-                string endpointId,
+                CultMeshSessionTarget target,
                 bool includeInitialSnapshot,
                 TimeSpan responseTimeout)
             {
                 _session = session;
                 _responseTimeout = responseTimeout;
-                _subscriptionId = "cultmesh-collection:" + endpointId + ":" + typeof(TDocument).FullName;
+                _subscriptionId = "cultmesh-collection:" + target.SessionKey + ":" + typeof(TDocument).FullName;
                 _includeInitialSnapshot = includeInitialSnapshot;
                 var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(typeof(TDocument));
                 var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(TDocument) }, cacheRegistry);
@@ -861,7 +850,7 @@ namespace GameCult.Mesh
                 _subscription = new CultNetDatabaseSubscriptionClient(session.OpenSchemaClient(), _cache, networkRegistry);
                 Handle = CultMesh.Collection<TDocument>(
                     _cache,
-                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, endpointId));
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.ProviderRuntimeId));
             }
 
             public CultMeshCollectionHandle<TDocument> Handle { get; }
