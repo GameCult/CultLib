@@ -21,17 +21,20 @@ The command owns setup and teardown. Do not start Odin, the provider, or the
 browser by hand. A successful run prints two JSON records followed by:
 
 ```text
-Eve getting-started verification passed: clean artifacts, DOM and headless convergence, real Chromium and C# clients, Odin discovery, receipts, persistence, and route replacement.
+Eve getting-started verification passed: clean .NET and TypeScript artifacts, DOM and headless convergence, real Chromium and C# clients, Odin discovery, receipts, persistence, and route replacement.
 ```
 
 ## What The Command Proves
 
-The first checkpoint packs the TypeScript CultCache, CultNet, CultMesh, and Eve
+The first checkpoint packs the CultLib managed dependency closure and Eve's C#
+surface contract, then restores and runs an empty .NET project using only the
+resulting `GameCult.Eve.Surface` package. The second checkpoint packs the
+TypeScript CultCache, CultNet, CultMesh, and Eve
 packages, installs those artifacts into an empty temporary consumer, and proves
 DOM/headless convergence plus `.cc` reopen. This rejects a sample that only
 works through repository-relative source imports.
 
-The second checkpoint boots separate Odin, provider, Chromium, and C# headless
+The third checkpoint boots separate Odin, provider, Chromium, and C# headless
 processes. Chromium performs the first increment. The provider then restarts on
 a different route, Odin advertises the replacement, and the retained clients
 resubscribe without application reconnect code. C# performs the second

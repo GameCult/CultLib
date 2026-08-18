@@ -94,9 +94,16 @@ cd CultLib
 pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
 
-This one command runs the clean package-artifact checkpoint and then the real
-browser/C# network checkpoint. They remain separate programs because they prove
-different boundaries; the developer should not have to orchestrate them.
+This one command runs clean .NET and TypeScript package-artifact checkpoints,
+then the real browser/C# network checkpoint. They remain separate programs
+because they prove different boundaries; the developer should not have to
+orchestrate them.
+
+The .NET layer packs CultLib's managed dependency graph and
+`GameCult.Eve.Surface`, then restores and runs an empty project whose only
+GameCult dependency is `PackageReference Include="GameCult.Eve.Surface"`.
+This proves the renderer-neutral provider contract does not require a sibling
+Eve or CultLib source tree after packaging.
 
 The first layer builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
 `@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the

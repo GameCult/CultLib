@@ -18,6 +18,21 @@ foreach ($requiredPrimitive in @("CultNetOperationServer", "EveSurface.Create"))
     }
 }
 
+$dotnetPackageRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ("eve-getting-started-nuget-" + [guid]::NewGuid().ToString("N"))
+try {
+    & (Join-Path $EveRoot "scripts\pack-dotnet-surface.ps1") `
+        -CultLibRoot $cultLibRoot `
+        -OutputDirectory $dotnetPackageRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "The clean .NET package-consumer checkpoint failed."
+    }
+} finally {
+    if (Test-Path -LiteralPath $dotnetPackageRoot) {
+        Remove-Item -LiteralPath $dotnetPackageRoot -Recurse -Force
+    }
+}
+
 & (Join-Path $PSScriptRoot "verify-eve-two-runtime-sample.ps1") `
     -EveRoot $EveRoot `
     -SkipDependencyInstall:$SkipDependencyInstall
@@ -37,4 +52,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "The real browser/C# network checkpoint failed."
 }
 
-Write-Host "Eve getting-started verification passed: clean artifacts, DOM and headless convergence, real Chromium and C# clients, Odin discovery, receipts, persistence, and route replacement."
+Write-Host "Eve getting-started verification passed: clean .NET and TypeScript artifacts, DOM and headless convergence, real Chromium and C# clients, Odin discovery, receipts, persistence, and route replacement."

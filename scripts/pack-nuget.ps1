@@ -27,7 +27,8 @@ if (Test-Path -LiteralPath $outputRoot) {
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
 foreach ($project in $projects) {
-  dotnet pack (Join-Path $repoRoot $project) -c $Configuration -o $outputRoot
+  dotnet pack (Join-Path $repoRoot $project) -c $Configuration -o $outputRoot `
+    --nologo --verbosity quiet -p:NoWarn=1591%3BCS8632
   if ($LASTEXITCODE -ne 0) {
     throw "NuGet pack failed for $project with exit code $LASTEXITCODE"
   }
@@ -82,7 +83,8 @@ Console.WriteLine(verse.Context.VerseId);
 "@
   [IO.File]::WriteAllText((Join-Path $smokeRoot "Consumer.csproj"), $projectDocument, [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText((Join-Path $smokeRoot "Program.cs"), $program, [Text.UTF8Encoding]::new($false))
-  dotnet run --project (Join-Path $smokeRoot "Consumer.csproj") -c Release
+  dotnet run --project (Join-Path $smokeRoot "Consumer.csproj") -c Release `
+    --nologo --verbosity quiet
   if ($LASTEXITCODE -ne 0) {
     throw "GameCult.Mesh NuGet consumer smoke failed with exit code $LASTEXITCODE"
   }

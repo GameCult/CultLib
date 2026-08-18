@@ -11,8 +11,10 @@ pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
 
 With clean sibling CultLib and Eve checkouts, the command installs missing build
-dependencies and runs two explicit evidence layers. First it packs the five
-TypeScript packages into an empty temporary consumer, validates the Eve surface
+dependencies and runs three explicit evidence layers. First it packs the
+CultLib managed dependency closure plus `GameCult.Eve.Surface`, then restores
+and runs an empty .NET consumer using only `PackageReference`. Next it packs the five
+TypeScript packages into another empty temporary consumer, validates the Eve surface
 and receipt, executes one idempotent counter command, proves a DOM lowerer and
 headless observer converge, and reopens the durable `.cc` store. Then it boots a
 durable C# provider, local Odin fixture, real Chromium lowerer, and independent
