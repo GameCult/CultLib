@@ -36,12 +36,12 @@ static async Task RunOdinAsync(Args arguments)
         throw new ArgumentException("The Odin fixture requires --provider-endpoint.");
     using var catalog = new CultMeshVerseCatalog();
     catalog.Upsert(new CultMeshVerseDescriptor(
-        "sample.counter",
-        "CultMesh browser counter",
+        arguments.VerseId,
+        arguments.VerseName,
         CultMeshVerseAuthorityModel.OperatorCluster,
-        new CultMeshVerseCompatibility("cultmesh.v1", "sample-counter-v1"),
+        new CultMeshVerseCompatibility(arguments.TransportVersion, arguments.RulesHash),
         discoveryEndpoints: [arguments.ProviderEndpoint],
-        authorityRuntimeIds: ["sample.counter-provider"],
+        authorityRuntimeIds: [arguments.AuthorityRuntimeId],
         description: "Local executable Odin fixture for the browser/network onboarding witness."));
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
@@ -192,6 +192,11 @@ sealed class Args
     public string Endpoint { get; private init; } = "";
     public string ProviderEndpoint { get; private init; } = "";
     public string Token { get; private init; } = "sample-session";
+    public string VerseId { get; private init; } = "sample.counter";
+    public string VerseName { get; private init; } = "CultMesh browser counter";
+    public string AuthorityRuntimeId { get; private init; } = "sample.counter-provider";
+    public string TransportVersion { get; private init; } = "cultmesh.v1";
+    public string RulesHash { get; private init; } = "sample-counter-v1";
 
     public static Args Parse(string[] values)
     {
@@ -206,7 +211,12 @@ sealed class Args
             StatePath = named.GetValueOrDefault("--state", "sample-counter.cc"),
             Endpoint = named.GetValueOrDefault("--endpoint", ""),
             ProviderEndpoint = named.GetValueOrDefault("--provider-endpoint", ""),
-            Token = named.GetValueOrDefault("--token", "sample-session")
+            Token = named.GetValueOrDefault("--token", "sample-session"),
+            VerseId = named.GetValueOrDefault("--verse-id", "sample.counter"),
+            VerseName = named.GetValueOrDefault("--verse-name", "CultMesh browser counter"),
+            AuthorityRuntimeId = named.GetValueOrDefault("--authority-runtime-id", "sample.counter-provider"),
+            TransportVersion = named.GetValueOrDefault("--transport-version", "cultmesh.v1"),
+            RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1")
         };
     }
 }

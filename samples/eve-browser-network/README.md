@@ -24,3 +24,9 @@ the local Odin fixture, and requires the still-open browser to rediscover the
 route, resubscribe, execute a second command, and preserve the durable count.
 The fixture speaks the production Verse-catalog contract; a deployment smoke
 against the full Odin daemon remains a separate infrastructure gate.
+
+The `odin` fixture defaults to this sample's Verse, but its `--verse-id`,
+`--verse-name`, `--authority-runtime-id`, `--transport-version`, and
+`--rules-hash` arguments can advertise another real provider during a product
+route-rotation witness. The provider endpoint remains data owned by Odin; the
+consumer still connects only by stable Verse and provider identity.
