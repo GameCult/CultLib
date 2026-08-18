@@ -1,0 +1,55 @@
+name: CultMesh portability and performance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  reactive-and-resource-lifetime:
+    name: ${{ matrix.os }} reactive semantics and leases
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install TypeScript workspace dependencies
+        run: npm install --no-package-lock
+
+      - name: Install Python CultCache package
+        run: python -m pip install -e packages/cultcache-py
+
+      - name: Verify explicit reactive scheduling across runtimes
+        shell: pwsh
+        run: ./scripts/verify-reactive-document-scaling.ps1
+
+      - name: Measure representative reactive workload
+        shell: pwsh
+        run: ./scripts/measure-reactive-document-performance.ps1 -Quick
+
+      - name: Churn 100,000 distinct document leases
+        run: >-
+          dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
+          --filter FullyQualifiedName~Document_OneHundredThousandDistinctLeaseCyclesLeaveNoResourcesOrCallbacks
+          --logger "console;verbosity=minimal"

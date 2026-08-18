@@ -15,10 +15,16 @@ $packageRoots = @(
     $eveContractsPackage,
     $eveBrowserPackage
 )
+$onWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 
-$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCommand) {
-    $standardNode = Join-Path $env:ProgramFiles "nodejs\node.exe"
+    $standardNode = if ($onWindows -and $env:ProgramFiles) {
+        Join-Path $env:ProgramFiles "nodejs\node.exe"
+    }
+    else {
+        ""
+    }
     if (Test-Path -LiteralPath $standardNode) {
         $nodeCommand = Get-Item -LiteralPath $standardNode
     }
@@ -28,7 +34,12 @@ if (-not $nodeCommand) {
 }
 $nodePath = $nodeCommand.Source
 $nodeDirectory = Split-Path -Parent $nodePath
-$npmPath = Join-Path $nodeDirectory "npm.cmd"
+$npmPath = if ($onWindows) {
+    Join-Path $nodeDirectory "npm.cmd"
+}
+else {
+    (Get-Command npm -ErrorAction Stop).Source
+}
 if (-not (Test-Path -LiteralPath $npmPath)) {
     throw "npm was not found beside Node.js: $npmPath"
 }
