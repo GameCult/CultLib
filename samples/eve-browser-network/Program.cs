@@ -72,29 +72,32 @@ static async Task RunOdinAsync(Args arguments)
 
 static async Task RunProviderAsync(Args arguments)
 {
-    var registry = CultDocumentRegistry.ForTypes([typeof(CounterState), typeof(EveSurfaceDocument)]);
-    using var cache = await CultCacheMessagePack.OpenAsync(arguments.StatePath, new CultCacheOpenOptions
+    var documentTypes = new[] { typeof(CounterState), typeof(EveSurfaceDocument) };
+    var registry = CultMesh.CreateCultCacheDocumentRegistry(documentTypes);
+    var documents = CultMesh.CreateCultNetDocumentRegistry(documentTypes, registry);
+    using var node = await CultMesh.CreateNodeAsync(arguments.StatePath, new CultMeshNodeOptions
     {
-        Registry = registry,
-        FlushOnDispose = true,
-        StoreFlushOnDispose = true
+        StartServer = false,
+        CacheOptions = new CultCacheOpenOptions
+        {
+            Registry = registry,
+            FlushOnDispose = true,
+            StoreFlushOnDispose = true
+        },
+        DatabaseOptions = new CultNetDatabaseOptions
+        {
+            RuntimeId = "sample.counter-provider",
+            DocumentRegistry = documents
+        }
     });
-    var documents = new CultNetDocumentRegistry(registry)
-        .Register(CultNetDocumentBinding.ForDocument<CounterState>(registry, "sample.counter_state.v1"))
-        .Register(CultNetDocumentBinding.ForDocument<EveSurfaceDocument>(registry, EveSurfaceDocument.SchemaId));
-    using var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
-    {
-        RuntimeId = "sample.counter-provider",
-        DocumentRegistry = documents
-    });
-    if (cache.Get<CounterState>(new CultRecordKey(counterKey)) == null)
-        await database.PutAsync(new CultRecordKey(counterKey), CounterState.Initial(counterKey));
-    if (cache.Get<EveSurfaceDocument>(new CultRecordKey(surfaceKey)) == null)
-        await database.PutAsync(new CultRecordKey(surfaceKey), CreateCounterSurface());
-    await cache.FlushAsync();
+    if (node.Cache.Get<CounterState>(new CultRecordKey(counterKey)) == null)
+        await node.Database.PutAsync(new CultRecordKey(counterKey), CounterState.Initial(counterKey));
+    if (node.Cache.Get<EveSurfaceDocument>(new CultRecordKey(surfaceKey)) == null)
+        await node.Database.PutAsync(new CultRecordKey(surfaceKey), CreateCounterSurface());
+    await node.FlushAsync();
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
-    using var subscriptions = new CultNetDatabaseSubscriptionServer(schemaServer, database);
+    using var subscriptions = new CultNetDatabaseSubscriptionServer(schemaServer, node.Database);
     using var operationGate = new SemaphoreSlim(1, 1);
     using var operations = new CultNetOperationServer(schemaServer, "sample.counter-provider")
         .Register<PingRequest, PingReceipt>(
@@ -113,7 +116,7 @@ static async Task RunProviderAsync(Args arguments)
                 await operationGate.WaitAsync();
                 try
                 {
-                    var current = cache.Get<CounterState>(new CultRecordKey(counterKey))
+                    var current = node.Cache.Get<CounterState>(new CultRecordKey(counterKey))
                         ?? throw new InvalidOperationException("Counter state is unavailable.");
                     if (current.Receipts.TryGetValue(context.IdempotencyKey, out var existing))
                         return existing;
@@ -125,13 +128,13 @@ static async Task RunProviderAsync(Args arguments)
                     {
                         [context.IdempotencyKey] = receipt
                     };
-                    await database.PutAsync(new CultRecordKey(counterKey), new CounterState
+                    await node.Database.PutAsync(new CultRecordKey(counterKey), new CounterState
                     {
                         CounterId = counterKey,
                         Count = receipt.Count,
                         Receipts = receipts
                     });
-                    await cache.FlushAsync();
+                    await node.FlushAsync();
                     return receipt;
                 }
                 finally

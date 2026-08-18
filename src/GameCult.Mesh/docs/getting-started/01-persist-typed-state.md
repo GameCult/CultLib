@@ -7,6 +7,7 @@ client. Start with the state the provider actually owns.
 ```csharp
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
+using GameCult.Mesh;
 using GameCult.Networking;
 using MessagePack;
 
@@ -19,35 +20,31 @@ public sealed class CounterState
 }
 ```
 
-Open a `.cc` store, register the document once, and write through the CultMesh
-database boundary:
+Open a `.cc` node, register the document once, and write through its database
+boundary:
 
 ```csharp
 var key = new CultRecordKey("counter:main");
-var registry = CultDocumentRegistry.ForTypes([typeof(CounterState)]);
-
-using var cache = await CultCacheMessagePack.OpenAsync("counter.cc", new CultCacheOpenOptions
+var documentTypes = new[] { typeof(CounterState) };
+var registry = CultMesh.CreateCultCacheDocumentRegistry(documentTypes);
+var documents = CultMesh.CreateCultNetDocumentRegistry(documentTypes, registry);
+using var node = await CultMesh.CreateNodeAsync("counter.cc", new CultMeshNodeOptions
 {
-    Registry = registry,
-    FlushOnDispose = true,
-    StoreFlushOnDispose = true
-});
-var documents = new CultNetDocumentRegistry(registry)
-    .Register(CultNetDocumentBinding.ForDocument<CounterState>(
-        registry,
-        "sample.counter_state.v1"));
-using var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
-{
-    RuntimeId = "sample.counter-provider",
-    DocumentRegistry = documents
+    StartServer = false,
+    CacheOptions = new CultCacheOpenOptions { Registry = registry },
+    DatabaseOptions = new CultNetDatabaseOptions
+    {
+        RuntimeId = "sample.counter-provider",
+        DocumentRegistry = documents
+    }
 });
 
-await database.PutAsync(key, new CounterState
+await node.Database.PutAsync(key, new CounterState
 {
     CounterId = key.Value,
     Count = 0
 });
-await cache.FlushAsync();
+await node.FlushAsync();
 ```
 
 CultCache owns durable local truth. CultNet owns the portable schema mapping.

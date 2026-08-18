@@ -19,7 +19,8 @@ The provider registers typed commands through `CultNetOperationServer`.
 Application code receives `CultNetOperationContext<TRequest>` and returns a
 typed receipt; it does not parse base64, switch on wire envelopes, or construct
 correlation responses. The counter's durable transaction still owns
-idempotency and state mutation.
+idempotency and state mutation. The provider opens one public `CultMeshNode`;
+it does not assemble a parallel CultCache/CultNet database host by hand.
 
 Run the proof from the CultLib repository:
 
