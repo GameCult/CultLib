@@ -4,18 +4,22 @@ This series builds one typed application state and presents it through multiple
 Eve runtimes. It is maintained as an API acceptance test: examples use public
 APIs, name the owner of each decision, and include a verification checkpoint.
 
-Run the current clean-consumer checkpoint first:
+Run the complete getting-started checkpoint:
 
 ```powershell
-pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
+pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
 
-From clean CultLib and Eve checkouts, the command installs the package build
-dependencies when absent, packs the five TypeScript packages, installs only
-those artifacts into an empty temporary project, validates the Eve
-surface and receipt, executes one idempotent counter command, proves two local
-consumers converge, and reopens the durable `.cc` store. It is deliberately not
-called a networked-browser proof; chapter 3 names that remaining boundary.
+With clean sibling CultLib and Eve checkouts, the command installs missing build
+dependencies and runs two explicit evidence layers. First it packs the five
+TypeScript packages into an empty temporary consumer, validates the Eve surface
+and receipt, executes one idempotent counter command, proves a DOM lowerer and
+headless observer converge, and reopens the durable `.cc` store. Then it boots a
+durable C# provider, local Odin fixture, real Chromium lowerer, and independent
+C# observer; it proves discovery by identity, commands, canonical receipts,
+provider restart on another route, resubscription, and durable convergence.
+Set `CHROME_PATH` only when no installed Chrome, Chromium, Edge, or Playwright
+Chromium can be found automatically.
 
 Follow the chapters in order:
 

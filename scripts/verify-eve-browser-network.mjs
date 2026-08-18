@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
@@ -45,7 +46,12 @@ try {
   const bundle = await readFile(bundlePath, "utf8");
   assert.doesNotMatch(bundle, /(?:from\s*["']node:|require\(["']node:)/u, "browser bundle contains a Node builtin import");
 
-  await run("dotnet", ["build", join(sampleRoot, "EveBrowserNetworkSample.csproj"), "--verbosity", "quiet"]);
+  await run("dotnet", [
+    "build",
+    join(sampleRoot, "EveBrowserNetworkSample.csproj"),
+    "--verbosity", "quiet",
+    "-p:NoWarn=1591%3BCS8632",
+  ]);
   const providerPort = await freePort();
   const replacementProviderPort = await freePort();
   const odinPort = await freePort();
@@ -58,8 +64,7 @@ try {
   await headless.waitFor("HEADLESS_READY ");
   httpServer = await serve(httpPort, sampleRoot, bundlePath);
 
-  const executablePath = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-  browser = await chromium.launch({ executablePath, headless: true });
+  browser = await chromium.launch({ executablePath: resolveChromiumExecutable(), headless: true });
   let page = await browser.newPage();
   const url = `http://127.0.0.1:${httpPort}/?odin=${encodeURIComponent(odinEndpoint)}&token=${token}`;
   await page.goto(url);
@@ -220,4 +225,37 @@ async function stop(process) {
     new Promise(resolvePromise => setTimeout(resolvePromise, 2_000)),
   ]);
   if (process.exitCode === null) process.kill("SIGKILL");
+}
+
+function resolveChromiumExecutable() {
+  const candidates = [process.env.CHROME_PATH];
+  if (process.platform === "win32") {
+    for (const root of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA]) {
+      if (!root) continue;
+      candidates.push(
+        join(root, "Google", "Chrome", "Application", "chrome.exe"),
+        join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+      );
+    }
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    );
+  } else {
+    candidates.push(
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/opt/google/chrome/chrome",
+    );
+  }
+  candidates.push(chromium.executablePath());
+  const executablePath = candidates.find(candidate => candidate && existsSync(candidate));
+  if (executablePath) return executablePath;
+  throw new Error(
+    "No Chromium-family browser was found. Set CHROME_PATH or run "
+    + "'node node_modules/playwright-core/cli.js install chromium'.",
+  );
 }

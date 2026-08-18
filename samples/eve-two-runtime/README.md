@@ -12,8 +12,12 @@ Eve. It intentionally has one owner for each decision:
 Run it from the CultLib repository:
 
 ```powershell
-pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
+pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
+
+That command continues into the real Chromium/C# network checkpoint after this
+artifact layer passes. Run `verify-eve-two-runtime-sample.ps1` directly only to
+diagnose clean package consumption in isolation.
 
 From clean CultLib and Eve checkouts, the verifier installs missing build
 dependencies, builds package artifacts, installs them into a new empty

@@ -15,8 +15,14 @@ This is the real-process continuation of `samples/eve-two-runtime`:
 Run the proof from the CultLib repository:
 
 ```powershell
-node scripts/verify-eve-browser-network.mjs --eve-root ..\Eve
+pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
+
+The wrapper first proves clean package consumption, then runs this real-process
+checkpoint. Run `node scripts/verify-eve-browser-network.mjs --eve-root ../Eve`
+directly only to diagnose the network layer. Browser discovery is portable:
+`CHROME_PATH` wins when configured, then common Chrome/Chromium/Edge locations
+and Playwright's installed Chromium are checked.
 
 The verifier clicks the Eve button twice with one idempotency key, requires one
 state transition, restarts the provider on a different physical port, updates

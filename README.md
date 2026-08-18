@@ -70,8 +70,14 @@ series. Its first executable package-consumer checkpoint is
 [`samples/eve-two-runtime`](samples/eve-two-runtime/README.md).
 The real-process browser continuation is
 [`samples/eve-browser-network`](samples/eve-browser-network/README.md).
-The implemented browser client boundary and remaining real-network gate are
-mapped explicitly in
+One documented command runs both layers:
+
+```powershell
+pwsh -File ./scripts/verify-eve-getting-started.ps1
+```
+
+The implemented browser client boundary and remaining deployed-infrastructure
+gates are mapped explicitly in
 [`browser-verse-transport.md`](src/GameCult.Mesh/docs/browser-verse-transport.md).
 
 If you want only the smallest durable "open node -> put typed doc -> get typed doc"

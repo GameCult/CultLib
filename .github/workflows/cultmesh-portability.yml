@@ -9,6 +9,42 @@ on:
   workflow_dispatch:
 
 jobs:
+  getting-started:
+    name: ${{ matrix.os }} one-command multiplayer onboarding
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+        with:
+          path: CultLib
+
+      - name: Check out the matching Eve contract
+        uses: actions/checkout@v4
+        with:
+          repository: GameCult/Eve
+          ref: ${{ vars.EVE_INTEGRATION_REF || 'codex/eve-browser-host-isolation' }}
+          path: Eve
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run the documented one-command checkpoint
+        shell: pwsh
+        run: ./CultLib/scripts/verify-eve-getting-started.ps1 -EveRoot ./Eve
+
   reactive-and-resource-lifetime:
     name: ${{ matrix.os }} reactive semantics and leases
     runs-on: ${{ matrix.os }}

@@ -35,14 +35,18 @@ Run the same provider and connect at least two lowerers. Both must report the
 same provider id, surface id, surface version, and command receipt ids. Native
 pixels may differ; provider truth may not.
 
-The package-artifact DOM-lowerer/headless checkpoint is executable from CultLib:
+The complete checkpoint is executable from CultLib:
 
 ```powershell
 cd CultLib
-pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
+pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
 
-The verifier builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
+This one command runs the clean package-artifact checkpoint and then the real
+browser/C# network checkpoint. They remain separate programs because they prove
+different boundaries; the developer should not have to orchestrate them.
+
+The first layer builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
 `@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the
 tarballs into an empty temporary consumer, and runs
 `samples/eve-two-runtime/sample.mjs`. Eve's generated runtime validators reject
@@ -53,6 +57,12 @@ both consumers converge on the same state and canonical receipt identity, a
 duplicate idempotency key is not applied twice, and the state plus receipt
 survive reopening the `.cc` store.
 
+The second layer runs a durable C# provider, a separate local Odin fixture, a
+real Chromium Eve lowerer, and an independent C# headless observer over binary
+CultNet WebSocket lanes. The open browser resolves provider identity through
+the canonical Verse catalog, survives a provider restart on a different route,
+resubscribes, and commits another canonical receipt.
+
 Current verification for the Unity consumer remains:
 
 ```powershell
@@ -60,19 +70,14 @@ cd ../EveUnity
 pwsh -File ./scripts/run-release-consumer-tests.ps1
 ```
 
-This first checkpoint proves clean package consumption, canonical Eve contract
+The artifact layer proves clean package consumption, canonical Eve contract
 validation, and two independent lowering/observation consumers inside Node. It
-does **not** claim a real browser process, an Odin-discovered network hop, or
-cross-language command execution. Do not cite it as evidence for those layers.
+does **not** prove the network layer; the second program owns that evidence.
 
-The next executable checkpoint is
+The network program is
 [`samples/eve-browser-network`](../../../../samples/eve-browser-network/README.md).
-It runs a durable C# provider, a separate local Odin fixture, a real Chromium
-Eve lowerer, and an independent C# headless observer over authenticated binary
-CultNet WebSocket lanes. The still-open browser resolves stable identity through
-the canonical Verse catalog, survives a provider restart on a different
-physical route, resubscribes, and commits another canonical receipt. A smoke
-against the deployed Odin daemon and retained C# lease reconnection remain
-separate infrastructure gates. Their owner map and full acceptance contract are recorded in
+Run it separately only while diagnosing that layer. A smoke against the
+deployed Odin daemon and retained C# lease reconnection remain separate
+infrastructure gates. Their owner map and full acceptance contract are recorded in
 [`browser-verse-transport.md`](../browser-verse-transport.md).
 
