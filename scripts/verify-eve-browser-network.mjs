@@ -50,6 +50,7 @@ try {
   await run("dotnet", [
     "build",
     join(sampleRoot, "EveBrowserNetworkSample.csproj"),
+    "-m:1",
     "--verbosity", "quiet",
     "-p:NoWarn=1591%3BCS8632",
     `-p:EveRoot=${eveRoot}`,
