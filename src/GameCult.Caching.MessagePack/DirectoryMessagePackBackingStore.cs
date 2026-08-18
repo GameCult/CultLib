@@ -21,6 +21,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public const string BeforeRecordPageWriteStage = "before-record-page-write";
     /// <summary>Fault-probe stage emitted after all pages exist and before manifest finality.</summary>
     public const string BeforeManifestCommitStage = "before-manifest-commit";
+    /// <summary>Read-probe stage emitted while the selected manifest generation is leased.</summary>
+    public const string AfterManifestReadStage = "after-manifest-read";
     private const string LegacyIndexedFormatVersion = "cultcache.store.v2.directory-indexed";
     private const string LegacyMetadataPageFormatVersion = "cultcache.store.v3.directory-immutable-pages";
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
@@ -45,6 +47,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     /// <summary>Optional deterministic fault/progress hook for durability tests and host diagnostics.</summary>
     public Action<string, int>? FlushStageProbe { get; set; }
+
+    /// <summary>Optional deterministic read hook for generation-consistency tests and host diagnostics.</summary>
+    public Action<string>? ReadStageProbe { get; set; }
 
     /// <summary>
     /// Creates a paged MessagePack backing store.
@@ -86,46 +91,50 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             startupPhase.Restart();
         }
 
-        _recordDirectory.Refresh();
-        if (!File.Exists(_manifestFile.FullName) && !_recordDirectory.Exists)
-        {
-            SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
-            IsDirty = false;
-            return;
-        }
-
-        var manifest = ReadManifest();
-        Trace($"manifest records={manifest.Records.Length}");
-        _durableCatalog = manifest.SchemaCatalog;
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-        var indexed = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) ||
-            string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) ||
-            string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
-        if (indexed)
+        using (AcquireCommitLease())
         {
-            _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
-            _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
-            _needsIndexUpgrade = !_manifestUsesImmutablePages;
-            _durableIndex = manifest.Records
-                .Where(record => !string.IsNullOrWhiteSpace(record.Key))
-                .GroupBy(record => record.Key, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+            _recordDirectory.Refresh();
+            if (!File.Exists(_manifestFile.FullName) && !_recordDirectory.Exists)
+            {
+                SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
+                IsDirty = false;
+                return;
+            }
 
-            LoadIndexedRecords(manifest, loaded, reports);
-            Trace($"indexed-pages loaded={loaded.Count}");
-        }
-        else
-        {
-            // V1 manifests have no page index. Hydrate once to discover the durable keys;
-            // the next flush replaces this compatibility path with the indexed manifest.
-            _needsIndexUpgrade = true;
-            var legacyRecords = LoadLegacyRecords(manifest, loaded, reports);
-            _durableIndex = legacyRecords
-                .Where(record => !string.IsNullOrWhiteSpace(record.Key))
-                .GroupBy(record => record.Key, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => ToIndexRecord(group.Last()), StringComparer.Ordinal);
-            Trace($"legacy-pages loaded={loaded.Count}");
+            var manifest = ReadManifest();
+            ReadStageProbe?.Invoke(AfterManifestReadStage);
+            Trace($"manifest records={manifest.Records.Length}");
+            _durableCatalog = manifest.SchemaCatalog;
+            var indexed = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) ||
+                string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) ||
+                string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
+            if (indexed)
+            {
+                _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
+                _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
+                _needsIndexUpgrade = !_manifestUsesImmutablePages;
+                _durableIndex = manifest.Records
+                    .Where(record => !string.IsNullOrWhiteSpace(record.Key))
+                    .GroupBy(record => record.Key, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+
+                LoadIndexedRecords(manifest, loaded, reports);
+                Trace($"indexed-pages loaded={loaded.Count}");
+            }
+            else
+            {
+                // V1 manifests have no page index. Hydrate once to discover the durable keys;
+                // the next flush replaces this compatibility path with the indexed manifest.
+                _needsIndexUpgrade = true;
+                var legacyRecords = LoadLegacyRecords(manifest, loaded, reports);
+                _durableIndex = legacyRecords
+                    .Where(record => !string.IsNullOrWhiteSpace(record.Key))
+                    .GroupBy(record => record.Key, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => ToIndexRecord(group.Last()), StringComparer.Ordinal);
+                Trace($"legacy-pages loaded={loaded.Count}");
+            }
         }
 
         foreach (var pair in loaded)
@@ -175,30 +184,39 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private void PullSelectedCore(Func<CultPersistedRecordMetadata, bool> selector)
     {
         if (selector == null) throw new ArgumentNullException(nameof(selector));
-        var manifest = ReadManifest();
-        if (!string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
-            !string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) &&
-            !string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal))
+        var fallbackToFullPull = false;
+        CultPersistedRecord[] selected = Array.Empty<CultPersistedRecord>();
+        var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+        var reports = new List<CultSchemaMigrationReport>();
+        using (AcquireCommitLease())
+        {
+            var manifest = ReadManifest();
+            ReadStageProbe?.Invoke(AfterManifestReadStage);
+            fallbackToFullPull = !string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
+                !string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) &&
+                !string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
+            if (!fallbackToFullPull)
+            {
+                _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
+                _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
+                _needsIndexUpgrade = !_manifestUsesImmutablePages;
+                _durableCatalog = manifest.SchemaCatalog;
+                _durableIndex = manifest.Records
+                    .Where(record => !string.IsNullOrWhiteSpace(record.Key))
+                    .GroupBy(record => record.Key, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+                selected = manifest.Records
+                    .Where(record => selector(ToMetadata(record)))
+                    .OrderBy(record => record.Key, StringComparer.Ordinal)
+                    .ToArray();
+                LoadRecordPages(selected, manifest.SchemaCatalog, loaded, reports);
+            }
+        }
+        if (fallbackToFullPull)
         {
             PullAllCore();
             return;
         }
-
-        _manifestUsesImmutablePages = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal);
-        _manifestUsesMetadataPages = string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal);
-        _needsIndexUpgrade = !_manifestUsesImmutablePages;
-        _durableCatalog = manifest.SchemaCatalog;
-        _durableIndex = manifest.Records
-            .Where(record => !string.IsNullOrWhiteSpace(record.Key))
-            .GroupBy(record => record.Key, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
-        var selected = manifest.Records
-            .Where(record => selector(ToMetadata(record)))
-            .OrderBy(record => record.Key, StringComparer.Ordinal)
-            .ToArray();
-        var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-        var reports = new List<CultSchemaMigrationReport>();
-        LoadRecordPages(selected, manifest.SchemaCatalog, loaded, reports);
         PublishSelected(loaded, selected.Select(record => record.Key).ToHashSet(StringComparer.Ordinal));
         SetLastSchemaMigrationReports(reports);
         IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
@@ -438,7 +456,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                         ? MetadataRecordPath(metadata)
                         : LegacyRecordPath(metadata.Key);
                 if (!File.Exists(path))
-                    return;
+                    throw new InvalidDataException($"Committed record page '{path}' is missing from the selected manifest generation.");
                 var pagePayload = ReadAllBytesShared(path);
                 if (_manifestUsesImmutablePages &&
                     !HashPayload(pagePayload).SequenceEqual(metadata.Payload))
@@ -788,6 +806,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     private FileStream AcquireCommitLease()
     {
+        Directory.CreateDirectory(_recordDirectory.FullName);
         var lockPath = Path.Combine(_recordDirectory.FullName, ".commit.lock");
         var started = Stopwatch.StartNew();
         while (true)

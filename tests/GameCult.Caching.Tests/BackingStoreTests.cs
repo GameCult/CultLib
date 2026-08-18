@@ -840,6 +840,103 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_ReaderLeasesManifestUntilEveryReferencedPageIsHydrated()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var key = new CultRecordKey("record:reader-generation");
+                var writerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var writerCache = new CultCache();
+                writerCache.AddBackingStore(writerStore);
+                await writerCache.UpsertAsync(
+                    new NamedTestEntry { Name = "generation", Value = "old" },
+                    new CultRecordHandle<NamedTestEntry>(key));
+                writerStore.PushAll();
+
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var readerCache = new CultCache();
+                readerCache.AddBackingStore(readerStore);
+                using var manifestRead = new ManualResetEventSlim();
+                using var releaseReader = new ManualResetEventSlim();
+                readerStore.ReadStageProbe = stage =>
+                {
+                    if (!string.Equals(stage, DirectoryMessagePackBackingStore.AfterManifestReadStage, StringComparison.Ordinal))
+                        return;
+                    manifestRead.Set();
+                    Assert.That(releaseReader.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                };
+
+                var read = Task.Run(() => readerStore.PullAll());
+                Assert.That(manifestRead.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                await writerCache.UpsertAsync(
+                    new NamedTestEntry { Name = "generation", Value = "new" },
+                    new CultRecordHandle<NamedTestEntry>(key));
+                var write = Task.Run(() => writerStore.PushAll());
+                Assert.That(write.Wait(TimeSpan.FromMilliseconds(100)), Is.False,
+                    "writer must wait while a reader hydrates its selected manifest generation");
+
+                releaseReader.Set();
+                await Task.WhenAll(read, write);
+                Assert.That(readerCache.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("old"));
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("new"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_ReleasesGenerationLeaseBeforePublishingObservers()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var writerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var writerCache = new CultCache();
+                writerCache.AddBackingStore(writerStore);
+                await writerCache.UpsertAsync(new NamedTestEntry { Name = "source", Value = "one" });
+                writerStore.PushAll();
+
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var readerCache = new CultCache();
+                readerCache.AddBackingStore(readerStore);
+                var observerRan = false;
+                using var subscription = readerStore.EntryAdded.Subscribe(_ =>
+                {
+                    if (observerRan)
+                        return;
+                    observerRan = true;
+                    readerCache.UpsertAsync(new NamedTestEntry { Name = "observer", Value = "two" })
+                        .GetAwaiter()
+                        .GetResult();
+                    readerStore.PushAll();
+                });
+
+                Assert.That(() => readerStore.PullAll(), Throws.Nothing);
+                Assert.That(observerRan, Is.True);
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.GetAll<NamedTestEntry>().Select(value => value.Name),
+                    Is.EquivalentTo(new[] { "source", "observer" }));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
         public async Task DirectoryMessagePackBackingStore_PullsOnlyExternalRecordDeltas()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
