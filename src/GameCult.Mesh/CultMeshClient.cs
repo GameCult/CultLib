@@ -587,7 +587,7 @@ namespace GameCult.Mesh
             using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
                     _sessions,
                     target,
-                    CultMeshProtocols.Content,
+                    CultMeshProtocols.Documents,
                     new CultMeshSnapshotRequestOptions
                     {
                         ConnectTimeout = TimeSpan.FromSeconds(5),

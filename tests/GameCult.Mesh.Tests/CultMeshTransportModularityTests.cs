@@ -29,7 +29,9 @@ public sealed class CultMeshTransportModularityTests
             new[] { RouteGeneration });
         server.OnCultNet<CultNetHelloMessage>((message, peer) =>
         {
-            peer.SendCultNet(new CultNetErrorMessage { Error = "tcp:" + message.RuntimeId });
+            identity.TryGetSourceRuntimeId(peer, out var sourceRuntimeId).Should().BeTrue(
+                "application ingress must only trust a runtime identity bound by the session-open handshake");
+            peer.SendCultNet(new CultNetErrorMessage { Error = $"tcp:{message.RuntimeId}:{sourceRuntimeId}" });
             return Task.CompletedTask;
         });
         var tcpEndpoint = $"cultnet+tcp://127.0.0.1:{server.LocalEndPoint.Port}";
@@ -55,7 +57,7 @@ public sealed class CultMeshTransportModularityTests
         var received = await response.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         session.State.Path!.Endpoint.Should().Be(tcpEndpoint);
-        received.Error.Should().Be("tcp:eve-unity");
+        received.Error.Should().Be("tcp:eve-unity:cultmesh-client");
         legacy.ConnectCount.Should().Be(0,
             "a lower transport tier is fallback, not a race against the preferred TCP tier");
     }

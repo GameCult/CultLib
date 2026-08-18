@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
@@ -70,7 +71,9 @@ namespace GameCult.Mesh
         private readonly HashSet<string> _protocolIds;
         private readonly HashSet<string> _routeGenerations;
         private readonly Dictionary<string, CultMeshSessionProofSigner> _proofSigners;
+        private readonly ConcurrentDictionary<ICultNetSchemaServerPeer, string> _acceptedPeers = new();
         private readonly Func<CultMeshSessionOpenMessage, ICultNetSchemaServerPeer, Task> _handler;
+        private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private bool _disposed;
 
         public CultMeshSessionIdentityServer(
@@ -90,18 +93,33 @@ namespace GameCult.Mesh
                 .ToDictionary(signer => signer.Route.Generation, StringComparer.Ordinal);
             _handler = HandleAsync;
             _server.OnCultNet(_handler);
+            _peerLifecycle = server as ICultNetSchemaServerPeerLifecycle;
+            if (_peerLifecycle != null)
+                _peerLifecycle.PeerDisconnected += ForgetPeer;
         }
+
+        /// <summary>
+        /// Resolves the runtime identity established by this peer's accepted session-open handshake.
+        /// Application ingress must use this transport-bound value instead of trusting payload identity fields.
+        /// </summary>
+        public bool TryGetSourceRuntimeId(ICultNetSchemaServerPeer peer, out string sourceRuntimeId) =>
+            _acceptedPeers.TryGetValue(peer, out sourceRuntimeId!);
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultMeshSessionOpenMessage>(_handler);
+            if (_peerLifecycle != null)
+                _peerLifecycle.PeerDisconnected -= ForgetPeer;
+            _acceptedPeers.Clear();
         }
 
         private Task HandleAsync(CultMeshSessionOpenMessage request, ICultNetSchemaServerPeer peer)
         {
             var error = Validate(request);
+            if (error == null)
+                error = BindPeer(peer, request.SourceRuntimeId);
             _proofSigners.TryGetValue(request.RouteGeneration ?? string.Empty, out var signer);
             peer.SendCultNet(new CultMeshSessionAcceptedMessage
             {
@@ -117,6 +135,19 @@ namespace GameCult.Mesh
                 Error = error
             });
             return Task.CompletedTask;
+        }
+
+        private void ForgetPeer(ICultNetSchemaServerPeer peer) => _acceptedPeers.TryRemove(peer, out _);
+
+        private string? BindPeer(ICultNetSchemaServerPeer peer, string sourceRuntimeId)
+        {
+            if (_acceptedPeers.TryGetValue(peer, out var established))
+                return string.Equals(established, sourceRuntimeId, StringComparison.Ordinal)
+                    ? null
+                    : "session-source-runtime-rebind-forbidden";
+            return _acceptedPeers.TryAdd(peer, sourceRuntimeId)
+                ? null
+                : BindPeer(peer, sourceRuntimeId);
         }
 
         private string? Validate(CultMeshSessionOpenMessage request)
