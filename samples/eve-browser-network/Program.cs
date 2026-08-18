@@ -208,7 +208,29 @@ static async Task RunHeadlessAsync(Args arguments)
         Console.WriteLine("HEADLESS_READY " + JsonSerializer.Serialize(new { count = initial.Count }));
     }
     if (initial.Count >= arguments.ExpectedCount) completion.TrySetResult();
-    await completion.Task.WaitAsync(TimeSpan.FromSeconds(45));
+    var commandTask = Task.Run(async () =>
+    {
+        var line = await Console.In.ReadLineAsync();
+        if (line == null || !line.StartsWith("INVOKE ", StringComparison.Ordinal))
+            throw new InvalidOperationException("The headless sample expected 'INVOKE <idempotency-key>' on stdin.");
+        var commandId = line["INVOKE ".Length..].Trim();
+        var result = await mesh.InvokeAsync<IncrementRequest, IncrementReceipt>(
+            arguments.VerseId,
+            "sample.counter",
+            "sample.counter.increment",
+            "sample.increment.v1",
+            "gamecult.eve.command_receipt.v1",
+            new IncrementRequest { Amount = 1 },
+            sourceRuntimeId: "sample.csharp",
+            idempotencyKey: commandId);
+        Console.WriteLine("HEADLESS_RECEIPT " + JsonSerializer.Serialize(new
+        {
+            receiptId = result.Value.ReceiptId,
+            count = result.Value.Count,
+            status = result.Status
+        }));
+    });
+    await Task.WhenAll(completion.Task, commandTask).WaitAsync(TimeSpan.FromSeconds(45));
 }
 
 static EveSurfaceDocument CreateCounterSurface()

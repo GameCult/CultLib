@@ -99,10 +99,12 @@ try {
   await page.waitForFunction(() =>
     window.__sampleConnectionStates?.includes("reconnecting")
     && window.__sampleConnectionStates.at(-1) === "connected");
-  await page.evaluate(() => { window.__sampleCommandId = "browser-click-2"; });
-  await page.locator("button").click();
-  await page.waitForFunction(() => window.__sampleReceipt?.count === 2 && window.__sampleCount === 2);
-  const secondReceipt = await page.evaluate(() => window.__sampleReceipt?.receiptId);
+  headless.sendLine("INVOKE headless-command-2");
+  const headlessReceipt = JSON.parse(await headless.waitFor("HEADLESS_RECEIPT "));
+  assert.equal(headlessReceipt.status, "accepted");
+  assert.equal(headlessReceipt.count, 2);
+  await page.waitForFunction(() => window.__sampleCount === 2);
+  const secondReceipt = headlessReceipt.receiptId;
   const secondHeadlessUpdate = JSON.parse(await headless.waitFor("HEADLESS_UPDATE_2 "));
   assert.equal(secondHeadlessUpdate.count, 2);
   assert.ok(secondHeadlessUpdate.receiptIds.includes(firstReceipt));
@@ -151,7 +153,7 @@ async function startOdin(port, providerEndpoint) {
 function startDotnet(arguments_) {
   const process = spawn("dotnet", [
     "run", "--no-build", "--project", join(sampleRoot, "EveBrowserNetworkSample.csproj"), "--", ...arguments_,
-  ], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+  ], { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
   let output = "";
   let error = "";
   const waiters = [];
@@ -177,6 +179,9 @@ function startDotnet(arguments_) {
   }
   return {
     process,
+    sendLine(line) {
+      process.stdin.write(`${line}\n`);
+    },
     waitFor(prefix, timeoutMs = 30_000) {
       const existing = output.split(/\r?\n/u).find(value => value.startsWith(prefix));
       if (existing) return Promise.resolve(existing.slice(prefix.length));

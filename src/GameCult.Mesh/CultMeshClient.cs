@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Networking;
+using MessagePack;
 using R3;
 
 namespace GameCult.Mesh
@@ -40,6 +41,45 @@ namespace GameCult.Mesh
 
         /// <summary>Gets or sets the deadline before an unanswered subscription intent is replayed.</summary>
         public TimeSpan SubscriptionResponseTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+        /// <summary>Gets or sets the deadline for one correlated typed operation response.</summary>
+        public TimeSpan OperationResponseTimeout { get; set; } = TimeSpan.FromSeconds(10);
+    }
+
+    /// <summary>
+    /// Carries one provider-authored operation response. Transport delivery does not by itself
+    /// establish that the provider accepted or committed the requested gameplay change.
+    /// </summary>
+    public sealed class CultMeshOperationResult<TResponse>
+    {
+        internal CultMeshOperationResult(CultNetOperationResponseMessage envelope, TResponse value)
+        {
+            MessageId = envelope.MessageId;
+            ServiceId = envelope.ServiceId;
+            Operation = envelope.Operation;
+            Status = envelope.Status;
+            PayloadSchema = envelope.PayloadSchema;
+            SourceRuntimeId = envelope.SourceRuntimeId;
+            Diagnostics = envelope.Diagnostics ?? Array.Empty<string>();
+            Value = value;
+        }
+
+        /// <summary>Gets the durable caller-supplied idempotency key.</summary>
+        public string MessageId { get; }
+        /// <summary>Gets the provider service that answered.</summary>
+        public string ServiceId { get; }
+        /// <summary>Gets the operation that answered.</summary>
+        public string Operation { get; }
+        /// <summary>Gets the provider-authored operation status.</summary>
+        public string Status { get; }
+        /// <summary>Gets the portable response payload schema.</summary>
+        public string PayloadSchema { get; }
+        /// <summary>Gets the responding runtime identity, when supplied.</summary>
+        public string? SourceRuntimeId { get; }
+        /// <summary>Gets provider or transport diagnostics carried by the response.</summary>
+        public IReadOnlyList<string> Diagnostics { get; }
+        /// <summary>Gets the decoded typed response payload.</summary>
+        public TResponse Value { get; }
     }
 
     /// <summary>Owns one shared live document subscription until disposed.</summary>
@@ -85,6 +125,7 @@ namespace GameCult.Mesh
         private readonly CultMeshDiscoveryService _discovery;
         private readonly CultMeshSessionManager _sessions;
         private readonly TimeSpan _subscriptionResponseTimeout;
+        private readonly TimeSpan _operationResponseTimeout;
         private readonly ConcurrentDictionary<string, SharedResource> _documents = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, SharedResource> _collections = new(StringComparer.Ordinal);
         private bool _disposed;
@@ -94,6 +135,8 @@ namespace GameCult.Mesh
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (options.SubscriptionResponseTimeout <= TimeSpan.Zero)
                 throw new ArgumentOutOfRangeException(nameof(options.SubscriptionResponseTimeout));
+            if (options.OperationResponseTimeout <= TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(options.OperationResponseTimeout));
             var endpoints = options.RendezvousEndpoints
                 .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint))
                 .Distinct(StringComparer.Ordinal)
@@ -123,6 +166,7 @@ namespace GameCult.Mesh
                 options.RealtimeConnectors,
                 options.Sessions);
             _subscriptionResponseTimeout = options.SubscriptionResponseTimeout;
+            _operationResponseTimeout = options.OperationResponseTimeout;
         }
 
         /// <summary>Connects to a stable endpoint identity using one application protocol.</summary>
@@ -294,6 +338,98 @@ namespace GameCult.Mesh
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             session.OpenSchemaClient().SendCultNet(message);
+        }
+
+        /// <summary>
+        /// Invokes one typed provider operation through the reusable identity-owned session.
+        /// The caller supplies a durable idempotency key; the returned status and payload remain
+        /// provider-authored evidence rather than client-side authority over canonical state.
+        /// </summary>
+        public async Task<CultMeshOperationResult<TResponse>> InvokeAsync<TRequest, TResponse>(
+            string endpointId,
+            string serviceId,
+            string operation,
+            string requestSchema,
+            string responseSchema,
+            TRequest request,
+            string sourceRuntimeId,
+            string idempotencyKey,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(endpointId)) throw new ArgumentException("Endpoint identity is required.", nameof(endpointId));
+            if (string.IsNullOrWhiteSpace(serviceId)) throw new ArgumentException("Service identity is required.", nameof(serviceId));
+            if (string.IsNullOrWhiteSpace(operation)) throw new ArgumentException("Operation identity is required.", nameof(operation));
+            if (string.IsNullOrWhiteSpace(requestSchema)) throw new ArgumentException("Request schema is required.", nameof(requestSchema));
+            if (string.IsNullOrWhiteSpace(responseSchema)) throw new ArgumentException("Response schema is required.", nameof(responseSchema));
+            if (request is null) throw new ArgumentNullException(nameof(request));
+            if (string.IsNullOrWhiteSpace(sourceRuntimeId)) throw new ArgumentException("Source runtime identity is required.", nameof(sourceRuntimeId));
+            if (string.IsNullOrWhiteSpace(idempotencyKey)) throw new ArgumentException("A durable idempotency key is required.", nameof(idempotencyKey));
+
+            var identity = endpointId.Trim();
+            var expectedService = serviceId.Trim();
+            var expectedOperation = operation.Trim();
+            var expectedResponseSchema = responseSchema.Trim();
+            var messageId = idempotencyKey.Trim();
+            var session = await ConnectAsync(identity, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
+            var completion = new TaskCompletionSource<CultNetOperationResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var subscription = session.OnCultNet<CultNetOperationResponseMessage>(response =>
+            {
+                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                    completion.TrySetResult(response);
+            });
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_operationResponseTimeout);
+            using var cancellation = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
+
+            session.SendCultNet(new CultNetOperationRequestMessage
+            {
+                MessageId = messageId,
+                ServiceId = expectedService,
+                Operation = expectedOperation,
+                PayloadSchema = requestSchema.Trim(),
+                PayloadEncoding = "messagepack-base64",
+                Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(request, CultNetSchemaMessageSerialization.Options)),
+                SourceRuntimeId = sourceRuntimeId.Trim()
+            });
+
+            CultNetOperationResponseMessage envelope;
+            try
+            {
+                envelope = await completion.Task.ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"CultMesh operation '{expectedService}/{expectedOperation}' did not answer idempotency key '{messageId}' " +
+                    $"within {_operationResponseTimeout}.");
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!string.Equals(envelope.ServiceId, expectedService, StringComparison.Ordinal) ||
+                !string.Equals(envelope.Operation, expectedOperation, StringComparison.Ordinal))
+                throw new InvalidOperationException("CultMesh operation response did not match the requested service and operation.");
+            if (!string.Equals(envelope.PayloadSchema, expectedResponseSchema, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"CultMesh operation returned payload schema '{envelope.PayloadSchema}', expected '{expectedResponseSchema}'.");
+            if (!string.Equals(envelope.PayloadEncoding, "messagepack-base64", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"CultMesh operation returned unsupported payload encoding '{envelope.PayloadEncoding}'.");
+            if (string.IsNullOrWhiteSpace(envelope.Status))
+                throw new InvalidOperationException("CultMesh operation response omitted its provider-authored status.");
+
+            TResponse value;
+            try
+            {
+                value = MessagePackSerializer.Deserialize<TResponse>(
+                    Convert.FromBase64String(envelope.Payload),
+                    CultNetSchemaMessageSerialization.Options);
+            }
+            catch (FormatException error)
+            {
+                throw new InvalidOperationException("CultMesh operation response payload was not valid base64.", error);
+            }
+            if (value is null) throw new InvalidOperationException("CultMesh operation response decoded to null.");
+            return new CultMeshOperationResult<TResponse>(envelope, value);
         }
 
         /// <summary>Gets the number of currently leased shared document subscriptions.</summary>

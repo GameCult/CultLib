@@ -258,6 +258,37 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task InvokeOperation_CorrelatesProviderReceiptThroughStableIdentitySession()
+    {
+        var connector = new DocumentConnector();
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        var result = await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
+            "aetheria",
+            "tests.counter",
+            "tests.counter.increment",
+            "tests.counter.increment_request.v1",
+            "tests.counter.increment_receipt.v1",
+            new ClientOperationRequest { Amount = 2 },
+            sourceRuntimeId: "pilot-one",
+            idempotencyKey: "pilot-command-1");
+
+        result.MessageId.Should().Be("pilot-command-1");
+        result.Status.Should().Be("accepted");
+        result.SourceRuntimeId.Should().Be("provider-daemon");
+        result.Value.ReceiptId.Should().Be("receipt:pilot-command-1");
+        result.Value.Count.Should().Be(2);
+        connector.Clients.Should().ContainSingle();
+        connector.Clients[0].Operations.Should().ContainSingle()
+            .Which.SourceRuntimeId.Should().Be("pilot-one");
+    }
+
+    [Test]
     public async Task Dispose_TerminatesDocumentWaitingForInitialSnapshot()
     {
         var connector = new DocumentConnector { SuppressFirstSnapshot = true };
@@ -360,6 +391,7 @@ public sealed class CultMeshClientTests
     private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
     {
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
+        private readonly List<Action<CultNetOperationResponseMessage>> _operationResponses = new();
         private readonly CultNetDocumentRegistry _documents;
         private readonly string _text;
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -376,12 +408,39 @@ public sealed class CultMeshClientTests
         public int SubscribeCount { get; private set; }
         public int HandlerRegistrationCount { get; private set; }
         public List<CultNetDocumentPutRawMessage> Submitted { get; } = new();
+        public List<CultNetOperationRequestMessage> Operations { get; } = new();
         public void Connect(string host, int port) { }
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
         {
             if (message is CultNetDocumentPutRawMessage submitted)
             {
                 Submitted.Add(submitted);
+                return;
+            }
+            if (message is CultNetOperationRequestMessage operation)
+            {
+                Operations.Add(operation);
+                var decodedRequest = MessagePackSerializer.Deserialize<ClientOperationRequest>(
+                    Convert.FromBase64String(operation.Payload),
+                    CultNetSchemaMessageSerialization.Options);
+                var receipt = new ClientOperationReceipt
+                {
+                    ReceiptId = "receipt:" + operation.MessageId,
+                    Count = decodedRequest.Amount
+                };
+                var operationResponse = new CultNetOperationResponseMessage
+                {
+                    MessageId = operation.MessageId,
+                    ServiceId = operation.ServiceId,
+                    Operation = operation.Operation,
+                    Status = "accepted",
+                    PayloadSchema = "tests.counter.increment_receipt.v1",
+                    Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
+                        receipt,
+                        CultNetSchemaMessageSerialization.Options)),
+                    SourceRuntimeId = "provider-daemon"
+                };
+                foreach (var handler in _operationResponses.ToArray()) handler(operationResponse);
                 return;
             }
             if (message is not CultNetDatabaseSubscribeMessage request) return;
@@ -408,6 +467,8 @@ public sealed class CultMeshClientTests
             HandlerRegistrationCount++;
             if (typeof(T) == typeof(CultNetSnapshotResponseRawMessage))
                 _snapshots.Add(response => callback((T)(object)response));
+            if (typeof(T) == typeof(CultNetOperationResponseMessage))
+                _operationResponses.Add(response => callback((T)(object)response));
         }
         public void Dispose() { }
         public void Fail(Exception error) => _failure.TrySetResult(error);
@@ -439,5 +500,18 @@ public sealed class CultMeshClientTests
     {
         [Key(0), CultName] public string Id { get; set; } = string.Empty;
         [Key(1)] public string Text { get; set; } = string.Empty;
+    }
+
+    [MessagePackObject]
+    public sealed class ClientOperationRequest
+    {
+        [Key("amount")] public int Amount { get; set; }
+    }
+
+    [MessagePackObject]
+    public sealed class ClientOperationReceipt
+    {
+        [Key("receiptId")] public string ReceiptId { get; set; } = string.Empty;
+        [Key("count")] public int Count { get; set; }
     }
 }

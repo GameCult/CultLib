@@ -16,8 +16,9 @@ TypeScript packages into an empty temporary consumer, validates the Eve surface
 and receipt, executes one idempotent counter command, proves a DOM lowerer and
 headless observer converge, and reopens the durable `.cc` store. Then it boots a
 durable C# provider, local Odin fixture, real Chromium lowerer, and independent
-C# observer; it proves discovery by identity, commands, canonical receipts,
-provider restart on another route, resubscription, and durable convergence.
+C# client. Chromium invokes before provider replacement; C# invokes afterward.
+Both retained clients prove discovery by identity, canonical receipts, provider
+restart on another route, resubscription, and durable convergence.
 Set `CHROME_PATH` only when no installed Chrome, Chromium, Edge, or Playwright
 Chromium can be found automatically.
 

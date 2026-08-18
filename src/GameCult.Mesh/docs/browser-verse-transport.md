@@ -178,10 +178,11 @@ Current executable coverage from `scripts/verify-eve-browser-network.mjs`:
 - Eve button to typed operation to provider receipt to shared state;
 - duplicate idempotency key produces one effect;
 - provider restart on a different physical port rehydrates the `.cc` state;
-- the retained browser lease rediscovers through Odin, resubscribes, and
-  commits a second provider-authored receipt;
-- the retained C# lease independently rediscovers, resubscribes, and observes
-  both canonical receipt ids without application reconnect code;
+- the retained browser lease rediscovers through Odin and resubscribes;
+- the retained C# client independently rediscovers, resubscribes, invokes the
+  second command through `CultMeshClient.InvokeAsync`, and receives the
+  provider-authored receipt without application transport or reconnect code;
+- Chromium observes the C# command's canonical state and receipt chronology;
 - generated browser bundle contains no `node:` builtin import.
 
 The full public Verse gate still requires the deployed Odin daemon rather than
@@ -199,10 +200,12 @@ From an empty temporary consumer using packed/released artifacts only:
 6. observe the same state version and receipt id in both clients;
 7. disconnect or rotate the physical WebSocket endpoint, then require both
    leases to resume without application reconnect code;
-8. restart the provider and prove state plus receipt persistence;
-9. reject malformed schemas, direct document writes, duplicate command
+8. invoke from C# after route replacement and require Chromium to observe the
+   same provider-authored state and receipt;
+9. restart the provider and prove state plus receipt persistence;
+10. reject malformed schemas, direct document writes, duplicate command
    effects, stale subscription generations, and unsupported authority;
-10. inspect the browser bundle and fail if it contains Node builtin imports.
+11. inspect the browser bundle and fail if it contains Node builtin imports.
 
 The gate runs on Windows and Linux. A screenshot is useful presentation
 evidence, but the receipt/state chronology is the authority proof.

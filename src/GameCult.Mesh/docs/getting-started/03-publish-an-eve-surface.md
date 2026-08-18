@@ -61,7 +61,9 @@ The second layer runs a durable C# provider, a separate local Odin fixture, a
 real Chromium Eve lowerer, and an independent C# headless observer over binary
 CultNet WebSocket lanes. The open browser resolves provider identity through
 the canonical Verse catalog, survives a provider restart on a different route,
-resubscribes, and commits another canonical receipt.
+and resubscribes. The retained C# client then invokes a second typed operation
+through `CultMeshClient.InvokeAsync`; Chromium and C# observe the same
+provider-authored state and receipt chronology.
 
 Current verification for the Unity consumer remains:
 
