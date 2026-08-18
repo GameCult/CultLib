@@ -434,7 +434,7 @@ namespace GameCult.Caching.Tests
                 }
 
                 var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
-                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v2.directory-indexed"));
+                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v3.directory-immutable-pages"));
                 Assert.That(manifest.Records, Has.Length.EqualTo(2));
                 Assert.That(manifest.Records.All(record => record.Payload.Length == 0), Is.True);
 
@@ -599,7 +599,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task DirectoryMessagePackBackingStore_Precommits_Catalog_And_Remains_Dirty_When_Record_Write_Fails()
+        public async Task DirectoryMessagePackBackingStore_Does_Not_Expose_New_Pages_Before_Manifest_Commit()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
             var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
@@ -624,23 +624,87 @@ namespace GameCult.Caching.Tests
                     alternateDescriptor,
                     new AlternateNamedTestEntry { Name = "new" }));
 
-                using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                store.FlushStageProbe = (stage, _) =>
                 {
-                    Assert.That(() => store.PushAll(), Throws.Exception);
-                }
+                    if (string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        throw new IOException("injected crash before manifest commit");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
 
                 var precommit = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 var alternateSchema = alternateDescriptor.SchemaId;
                 Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(durableSchema));
-                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(alternateSchema));
+                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Not.Contain(alternateSchema));
                 Assert.That(store.IsDirty, Is.True);
                 Assert.That(CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordPath)).SchemaId, Is.EqualTo(durableSchema));
 
+                store.FlushStageProbe = null;
                 store.PushAll();
 
                 var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog.Select(entry => entry.SchemaId), Is.EqualTo(new[] { alternateSchema }));
                 Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        public async Task DirectoryMessagePackBackingStore_Fault_Before_Manifest_Leaves_Entire_Previous_Generation(int writtenPageCount)
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var handles = new[]
+                {
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:a")),
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:b")),
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:c"))
+                };
+                foreach (var handle in handles)
+                    await cache.UpsertAsync(new NamedTestEntry { Name = handle.Key.Value, Value = "old" }, handle);
+                store.PushAll();
+
+                foreach (var handle in handles)
+                    await cache.UpsertAsync(new NamedTestEntry { Name = handle.Key.Value, Value = "new" }, handle);
+                store.FlushStageProbe = (stage, index) =>
+                {
+                    if ((writtenPageCount < handles.Length &&
+                         string.Equals(stage, DirectoryMessagePackBackingStore.BeforeRecordPageWriteStage, StringComparison.Ordinal) &&
+                         index == writtenPageCount) ||
+                        (writtenPageCount == handles.Length &&
+                         string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal)))
+                        throw new IOException($"injected crash after {writtenPageCount} pages");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
+
+                using (var reopened = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    foreach (var handle in handles)
+                        Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("old"));
+                }
+
+                store.FlushStageProbe = null;
+                store.PushAll();
+                using (var reopened = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    foreach (var handle in handles)
+                        Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("new"));
+                }
             }
             finally
             {
@@ -743,7 +807,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task DirectoryMessagePackBackingStore_Remains_Dirty_When_Deletion_Fails()
+        public async Task DirectoryMessagePackBackingStore_Deletion_Commits_While_Locked_Old_Page_Remains_An_Orphan()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
             var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
@@ -760,18 +824,14 @@ namespace GameCult.Caching.Tests
 
                 using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    Assert.That(() => store.PushAll(), Throws.Exception);
+                    Assert.That(() => store.PushAll(), Throws.Nothing);
+                    Assert.That(File.Exists(recordPath), Is.True);
                 }
 
-                Assert.That(File.Exists(recordPath), Is.True);
-                Assert.That(store.IsDirty, Is.True);
-
-                store.PushAll();
-
-                Assert.That(File.Exists(recordPath), Is.False);
                 Assert.That(store.IsDirty, Is.False);
                 var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog, Is.Empty);
+                Assert.That(compacted.Records, Is.Empty);
             }
             finally
             {
