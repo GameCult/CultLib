@@ -12,12 +12,12 @@ Eve. It intentionally has one owner for each decision:
 Run it from the CultLib repository:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
-  -EveRoot ..\Eve
+pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
 ```
 
-The verifier builds package artifacts, installs them into a new empty temporary
-consumer, and runs `sample.mjs`. Success proves:
+From clean CultLib and Eve checkouts, the verifier installs missing build
+dependencies, builds package artifacts, installs them into a new empty
+temporary consumer, and runs `sample.mjs`. Success proves:
 
 1. no source-tree import is required by the consumer;
 2. the provider surface and receipt pass Eve's generated runtime validators;

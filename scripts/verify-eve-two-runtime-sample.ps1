@@ -1,5 +1,6 @@
 param(
-    [string] $EveRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "..\Eve")
+    [string] $EveRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "..\Eve"),
+    [switch] $SkipDependencyInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,6 +51,26 @@ if (-not (Test-Path -LiteralPath $samplePath)) {
 foreach ($packageRoot in $packageRoots) {
     if (-not (Test-Path -LiteralPath (Join-Path $packageRoot "package.json"))) {
         throw "Package root not found: $packageRoot"
+    }
+}
+
+if (-not $SkipDependencyInstall) {
+    $dependencyRoots = @($cultLibRoot, $eveContractsPackage, $eveBrowserPackage)
+    foreach ($dependencyRoot in $dependencyRoots) {
+        $typescript = Join-Path $dependencyRoot "node_modules\typescript\bin\tsc"
+        if (Test-Path -LiteralPath $typescript -PathType Leaf) {
+            continue
+        }
+        Push-Location $dependencyRoot
+        try {
+            & $npmPath ci --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) {
+                throw "Dependency installation failed: $dependencyRoot"
+            }
+        }
+        finally {
+            Pop-Location
+        }
     }
 }
 

@@ -39,8 +39,7 @@ The package-artifact DOM-lowerer/headless checkpoint is executable from CultLib:
 
 ```powershell
 cd CultLib
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
-  -EveRoot ..\Eve
+pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
 ```
 
 The verifier builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
@@ -57,8 +56,8 @@ survive reopening the `.cc` store.
 Current verification for the Unity consumer remains:
 
 ```powershell
-cd E:\Projects\EveUnity
-powershell -ExecutionPolicy Bypass -File .\scripts\run-release-consumer-tests.ps1
+cd ../EveUnity
+pwsh -File ./scripts/run-release-consumer-tests.ps1
 ```
 
 This first checkpoint proves clean package consumption, canonical Eve contract

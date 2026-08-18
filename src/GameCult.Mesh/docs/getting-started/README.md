@@ -7,11 +7,12 @@ APIs, name the owner of each decision, and include a verification checkpoint.
 Run the current clean-consumer checkpoint first:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\verify-eve-two-runtime-sample.ps1 `
-  -EveRoot ..\Eve
+pwsh -File ./scripts/verify-eve-two-runtime-sample.ps1 -EveRoot ../Eve
 ```
 
-It installs packed artifacts into an empty temporary project, validates the Eve
+From clean CultLib and Eve checkouts, the command installs the package build
+dependencies when absent, packs the five TypeScript packages, installs only
+those artifacts into an empty temporary project, validates the Eve
 surface and receipt, executes one idempotent counter command, proves two local
 consumers converge, and reopens the durable `.cc` store. It is deliberately not
 called a networked-browser proof; chapter 3 names that remaining boundary.
