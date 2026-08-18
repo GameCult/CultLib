@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <EveRoot Condition="'$(EveRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\Eve</EveRoot>
     <UsePackageArtifacts Condition="'$(UsePackageArtifacts)' == ''">false</UsePackageArtifacts>
-    <CultLibPackageVersion Condition="'$(CultLibPackageVersion)' == ''">1.0.34</CultLibPackageVersion>
+    <CultLibPackageVersion Condition="'$(CultLibPackageVersion)' == ''">1.0.35</CultLibPackageVersion>
     <EveSurfacePackageVersion Condition="'$(EveSurfacePackageVersion)' == ''">0.3.3</EveSurfacePackageVersion>
     <RestoreAdditionalProjectSources Condition="'$(PackageFeed)' != ''">$(PackageFeed)</RestoreAdditionalProjectSources>
   </PropertyGroup>

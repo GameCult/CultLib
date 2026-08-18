@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -173,6 +177,54 @@ public sealed class CultMeshAuthorityProofTests
         connector.Attempts.Should().Equal(valid.Endpoint);
     }
 
+    [Test]
+    public async Task AuthenticatedRemoteContentUsesCertifiedHttpsAndStreamsTheAdvertisedChunk()
+    {
+        using var odin = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var provider = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var payload = Encoding.UTF8.GetBytes("certified-content");
+        var route = CultMeshAuthorityProof.CreateSignedRoute(
+            "aetheria", "aetheria-daemon", "https://provider.example/cultmesh/content",
+            new[] { CultMeshProtocols.Content.Value }, 0, "content-generation",
+            CultMeshEcdsaP256PublicKey.From("provider-content", provider), "odin-content",
+            Now.AddMinutes(-1), Now.AddMinutes(5), odin);
+        var descriptor = new CultMeshVerseDescriptor(
+            "aetheria", "Aetheria", CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            authorityRoutes: new[] { route });
+        using var discovery = new CultMeshDiscoveryService(new[] { new SignedRouteSource(descriptor) });
+        var handler = new FixedContentHandler(payload);
+        using var manager = new CultMeshSessionManager(
+            discovery,
+            Array.Empty<ICultMeshTransportConnector>(),
+            new ICultMeshContentTransportConnector[]
+            {
+                new CultMeshHttpsContentTransportConnector(() => handler)
+            },
+            new CultMeshSessionManagerOptions
+            {
+                Trust = new CultMeshAuthorityTrustPolicy(
+                    CultMeshAuthorityTrustMode.AuthenticatedRemote,
+                    new[] { CultMeshEcdsaP256PublicKey.From("odin-content", odin) }),
+                Clock = new FixedClock(Now)
+            });
+
+        var session = await manager.ConnectContentAsync(
+            new CultMeshSessionTarget("aetheria", "aetheria-daemon"));
+        using var destination = new MemoryStream();
+        await session.CopyChunkToAsync(new CultMeshCdnChunkRef
+        {
+            ChunkHash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant(),
+            RecordKey = "cdn:chunk:certified",
+            SizeBytes = payload.Length
+        }, destination);
+
+        destination.ToArray().Should().Equal(payload);
+        handler.RequestUri.Should().NotBeNull();
+        handler.RequestUri!.Scheme.Should().Be(Uri.UriSchemeHttps);
+        handler.RequestUri.Query.Should().Contain("chunkHash=").And.Contain("recordKey=");
+    }
+
     private static CultMeshAuthorityRoute SignedRoute(ECDsa odin, ECDsa provider) =>
         CultMeshAuthorityProof.CreateSignedRoute(
             "aetheria",
@@ -325,5 +377,31 @@ public sealed class CultMeshAuthorityProofTests
                 _accepted = response => callback((T)(object)response);
         }
         public void Dispose() { }
+    }
+
+    private sealed class FixedContentHandler : HttpMessageHandler
+    {
+        private readonly byte[] _payload;
+        public FixedContentHandler(byte[] payload) => _payload = payload;
+        public Uri? RequestUri { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestUri = request.RequestUri;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(_payload)
+            });
+        }
+    }
+
+    private sealed class FixedClock : ICultMeshClock
+    {
+        public FixedClock(DateTimeOffset now) => UtcNow = now;
+        public DateTimeOffset UtcNow { get; }
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default) =>
+            Task.Delay(delay, cancellationToken);
     }
 }

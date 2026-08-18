@@ -178,44 +178,6 @@ public sealed class CultNetWebSocketSchemaServer :
     }
 }
 
-internal static class CultNetWebSocketMessageIO
-{
-    public static Task SendAsync(WebSocket socket, byte[] payload, CancellationToken cancellationToken) =>
-        socket.SendAsync(payload, WebSocketMessageType.Binary, true, cancellationToken);
-
-    public static async Task<byte[]?> ReceiveAsync(
-        WebSocket socket,
-        int maxMessageBytes,
-        CancellationToken cancellationToken)
-    {
-        var segment = new byte[Math.Min(16 * 1024, maxMessageBytes)];
-        using var message = new MemoryStream();
-        while (true)
-        {
-            var result = await socket.ReceiveAsync(segment, cancellationToken).ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close) return null;
-            if (result.MessageType != WebSocketMessageType.Binary)
-            {
-                await socket.CloseAsync(
-                    WebSocketCloseStatus.InvalidMessageType,
-                    "CultNet requires binary MessagePack WebSocket messages.",
-                    cancellationToken).ConfigureAwait(false);
-                return null;
-            }
-            if (message.Length + result.Count > maxMessageBytes)
-            {
-                await socket.CloseAsync(
-                    WebSocketCloseStatus.MessageTooBig,
-                    "CultNet message exceeds the configured maximum.",
-                    cancellationToken).ConfigureAwait(false);
-                return null;
-            }
-            message.Write(segment, 0, result.Count);
-            if (result.EndOfMessage) return message.ToArray();
-        }
-    }
-}
-
 /// <summary>ASP.NET Core endpoint mapping for the CultNet WebSocket schema server.</summary>
 public static class CultNetWebSocketEndpointRouteBuilderExtensions
 {

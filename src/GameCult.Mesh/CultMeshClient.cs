@@ -27,8 +27,8 @@ namespace GameCult.Mesh
         public IReadOnlyList<ICultMeshTransportConnector>? Connectors { get; set; }
 
         /// <summary>
-        /// Gets or sets streaming content connectors. TCP content delivery is used by default;
-        /// applications may replace it or explicitly add legacy RUDP.
+        /// Gets or sets streaming content connectors. HTTPS and loopback TCP content
+        /// delivery are used by default; applications may replace them or explicitly add legacy RUDP.
         /// </summary>
         public IReadOnlyList<ICultMeshContentTransportConnector>? ContentConnectors { get; set; }
 
@@ -184,6 +184,7 @@ namespace GameCult.Mesh
                 },
                 options.ContentConnectors ?? new ICultMeshContentTransportConnector[]
                 {
+                    new CultMeshHttpsContentTransportConnector(),
                     new CultMeshTcpContentTransportConnector()
                 },
                 options.RealtimeConnectors,
