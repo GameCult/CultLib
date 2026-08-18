@@ -39,6 +39,21 @@ These are **not** domain fields and should not be exposed on app-facing types:
 
 Those belong to the CultCache persistence layer.
 
+## Transaction Visibility
+
+An authoritative multi-record change uses `CultCache.ExecuteTransactionAsync`.
+The executing async flow sees its buffered overlay while staging; other readers
+and all observers continue to see the prior committed generation. The backing
+store commits the complete batch before the live cache swaps to it. Observer
+notifications run only after the transaction context and commit lock have been
+released, so an observer-triggered write begins a separate transaction.
+
+An exception before durable finality discards the overlay. It cannot become
+visible through a later flush. A transaction currently permits at most one
+durable backing store because independent stores cannot provide one atomic
+commit boundary. Applications that require authoritative writes may configure
+`CultNetDatabase` to reject record-at-a-time writes outside this primitive.
+
 ## Canonical Store Shape
 
 A persisted CultCache file should contain:

@@ -1335,6 +1335,146 @@ namespace GameCult.Caching.Tests
                 Throws.TypeOf<InvalidOperationException>().With.Message.Contains("changed target schema"));
         }
 
+        [Test]
+        public async Task CultCache_Transaction_Hides_Staged_Records_Until_Whole_Batch_Is_Durable()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var firstKey = new CultRecordKey("transaction:first");
+                var secondKey = new CultRecordKey("transaction:second");
+                var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var observed = 0;
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                var transaction = cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "first", Value = "one" },
+                        new CultRecordHandle<NamedTestEntry>(firstKey));
+                    staged.SetResult(true);
+                    await release.Task;
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "second", Value = "two" },
+                        new CultRecordHandle<NamedTestEntry>(secondKey));
+                });
+
+                await staged.Task;
+                Assert.That(cache.Get<NamedTestEntry>(firstKey), Is.Null);
+                Assert.That(observed, Is.Zero);
+
+                release.SetResult(true);
+                await transaction;
+                Assert.That(cache.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("one"));
+                Assert.That(cache.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("two"));
+                Assert.That(observed, Is.EqualTo(2));
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Abort_Cannot_Leak_Into_Later_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-abort-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var abortedKey = new CultRecordKey("transaction:aborted");
+                var committedKey = new CultRecordKey("transaction:committed");
+                var observed = 0;
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await cache.ExecuteTransactionAsync(async () =>
+                    {
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "aborted", Value = "must-not-leak" },
+                            new CultRecordHandle<NamedTestEntry>(abortedKey));
+                        throw new InvalidOperationException("abort probe");
+                    }));
+
+                Assert.That(cache.Get<NamedTestEntry>(abortedKey), Is.Null);
+                Assert.That(observed, Is.Zero);
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "committed", Value = "survives" },
+                        new CultRecordHandle<NamedTestEntry>(committedKey));
+                });
+                Assert.That(observed, Is.EqualTo(1));
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(abortedKey), Is.Null);
+                Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("survives"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Observer_Writes_In_A_New_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-observer-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var firstKey = new CultRecordKey("transaction:observer-source");
+                var secondKey = new CultRecordKey("transaction:observer-write");
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(change =>
+                {
+                    if (!change.Key.Equals(firstKey)) return;
+                    cache.ExecuteTransactionAsync(async () =>
+                    {
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "observer", Value = "separate-commit" },
+                            new CultRecordHandle<NamedTestEntry>(secondKey));
+                    }).GetAwaiter().GetResult();
+                });
+
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "source", Value = "committed-first" },
+                        new CultRecordHandle<NamedTestEntry>(firstKey));
+                });
+
+                Assert.That(cache.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("separate-commit"));
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("committed-first"));
+                Assert.That(reopened.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("separate-commit"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
         private const string NamedFixtureCanonicalSchemaJson =
             "{\"schemaName\":\"tests.named_entry\",\"schemaVersion\":\"tests.named_entry.v1\",\"members\":[{\"slot\":0,\"name\":\"Name\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":true},{\"slot\":1,\"name\":\"Value\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false}]}";
         private const string NamedFixtureSchemaId = "sha256:e7b97801b94190f3159012ede45b0069bb09ebf7920f7432c971bc86a0e08de8";

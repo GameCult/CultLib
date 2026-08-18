@@ -254,6 +254,52 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     /// <inheritdoc />
+    public override void CommitBatch(
+        IReadOnlyCollection<CultStoredDocument> upserts,
+        IReadOnlyCollection<CultStoredDocument> deletes,
+        bool soft)
+    {
+        lock (_mutationGate)
+        {
+            var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
+            var previousDeletedKeys = _deletedKeys.Keys.ToArray();
+            var wasDirty = IsDirty;
+            try
+            {
+                foreach (var entry in deletes)
+                {
+                    Entries.TryRemove(entry.Key.Value, out _);
+                    _dirtyKeys.TryRemove(entry.Key.Value, out _);
+                    _deletedKeys[entry.Key.Value] = true;
+                }
+                foreach (var entry in upserts)
+                {
+                    Entries[entry.Key.Value] = entry;
+                    _dirtyKeys[entry.Key.Value] = true;
+                    _deletedKeys.TryRemove(entry.Key.Value, out _);
+                }
+                IsDirty = true;
+                PushAllCore(soft);
+            }
+            catch
+            {
+                Entries.Clear();
+                foreach (var pair in previousEntries)
+                    Entries[pair.Key] = pair.Value;
+                _dirtyKeys.Clear();
+                foreach (var key in previousDirtyKeys)
+                    _dirtyKeys[key] = true;
+                _deletedKeys.Clear();
+                foreach (var key in previousDeletedKeys)
+                    _deletedKeys[key] = true;
+                IsDirty = wasDirty;
+                throw;
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public override void PushAll(bool soft = false)
     {
         lock (_mutationGate)

@@ -2702,6 +2702,60 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_RequiredTransaction_DefersRawPutPublicationUntilCommit()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                RequireTransactionsForAuthoritativeWrites = true
+            });
+            var key = new CultRecordKey("player:transactional-raw");
+            var message = registry.CreateRawDocumentPutMessage(
+                "put-transactional-raw",
+                new CultRecordHandle<PlayerData>(key),
+                new PlayerData
+                {
+                    PlayerId = Guid.NewGuid(),
+                    Email = "transactional@example.test",
+                    PasswordHash = "hash",
+                    Username = "Transactional"
+                });
+            var changes = new List<CultNetDatabaseChange<PlayerData>>();
+            using var subscription = database.WatchRecord<PlayerData>(key)
+                .Subscribe(change => changes.Add(change));
+
+            Assert.That(
+                async () => await database.ApplyPutAsync(message),
+                Throws.TypeOf<InvalidOperationException>());
+
+            var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var transaction = database.ExecuteTransactionAsync(async () =>
+            {
+                await database.ApplyPutAsync(message);
+                staged.SetResult(true);
+                await release.Task;
+            });
+            await staged.Task;
+
+            Assert.That(cache.Get<PlayerData>(key), Is.Null);
+            Assert.That(changes, Is.Empty);
+
+            release.SetResult(true);
+            await transaction;
+
+            Assert.That(cache.Get<PlayerData>(key)?.Username, Is.EqualTo("Transactional"));
+            Assert.That(changes, Has.Count.EqualTo(1));
+            Assert.That(changes[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+        }
+
+        [Test]
         public async Task CultNetDatabase_ApplyRawPut_ResolvesForeignSchemaIdFromPayload()
         {
             var cache = new CultCache();
