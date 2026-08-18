@@ -29,7 +29,7 @@ Follow the chapters in order:
 1. [Persist typed application state](01-persist-typed-state.md)
 2. [Connect a client by stable identity](02-connect-by-identity.md)
 3. [Publish one Eve surface to multiple runtimes](03-publish-an-eve-surface.md)
-4. [Keep a TypeScript provider alive](04-keep-a-typescript-provider-alive.md)
+4. [Run the multi-runtime game](04-run-the-multiruntime-game.md)
 
 The intended application shape is small:
 
@@ -39,6 +39,8 @@ provider daemon -> typed CultCache documents -> CultMesh advertisement
                       +------------------------+--------------------+
                       |                        |                    |
                  Eve browser              EveUnity          another lowerer
+                      |                        |                    |
+                 player input             player input       headless / AI
 ```
 
 The provider owns live truth. Eve owns the surface contract. Each runtime owns

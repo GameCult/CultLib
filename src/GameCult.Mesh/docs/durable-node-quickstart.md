@@ -55,7 +55,7 @@ var key = new CultRecordKey("note:intro");
 var documents = new CultNetDocumentRegistry()
     .Register(CultNetDocumentBinding.ForDocument<MeshNote>());
 
-using (var node = await CultMesh.CreateNodeAsync("world.ccmp", new CultMeshNodeOptions
+using (var node = await CultMesh.CreateNodeAsync("world.cc", new CultMeshNodeOptions
 {
     DatabaseOptions = new CultNetDatabaseOptions
     {
@@ -76,7 +76,7 @@ using (var node = await CultMesh.CreateNodeAsync("world.ccmp", new CultMeshNodeO
     await node.FlushAsync();
 }
 
-using (var reopened = await CultMesh.CreateNodeAsync("world.ccmp", new CultMeshNodeOptions
+using (var reopened = await CultMesh.CreateNodeAsync("world.cc", new CultMeshNodeOptions
 {
     DatabaseOptions = new CultNetDatabaseOptions
     {
@@ -92,7 +92,7 @@ using (var reopened = await CultMesh.CreateNodeAsync("world.ccmp", new CultMeshN
 
 What happened:
 
-1. `CultMesh.CreateNodeAsync("world.ccmp", ...)` opened a durable CultCache
+1. `CultMesh.CreateNodeAsync("world.cc", ...)` opened a durable CultCache
    snapshot file and wrapped it in a CultMesh node.
 2. `node.Database.PutAsync(...)` wrote a typed document through the public
    CultMesh database surface.
@@ -105,7 +105,7 @@ What happened:
 
 If you peel this path apart, the authority split stays simple:
 
-- CultCache: `world.ccmp`, schema ids, record keys, typed document payloads,
+- CultCache: `world.cc`, schema ids, record keys, typed document payloads,
   local indexes, flush/load
 - CultNet: `CultNetDocumentRegistry`, raw document puts/snapshots,
   subscriptions, shard routing, transport-facing replication

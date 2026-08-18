@@ -1,6 +1,8 @@
 # 2. Connect A Client By Stable Identity
 
-Clients address a provider or Verse by stable identity. Discovery owns the
+Clients address a Verse session by stable identity. In this tutorial,
+`sample.counter-provider` is the sole authority runtime Odin advertises for the
+`sample.counter` Verse; neither identity is a socket address. Discovery owns
 current physical candidates and the session manager owns connection reuse,
 path rotation, and transport failure state.
 
@@ -13,7 +15,7 @@ using var mesh = new CultMeshClient(new CultMeshClientOptions
 });
 
 using var counterLease = await mesh.LeaseDocumentAsync<CounterState>(
-    "sample.counter-provider",
+    "sample.counter",
     "counter:main",
     cancellationToken);
 var counter = counterLease.Handle;
@@ -49,7 +51,8 @@ using var stateWatch = session.WatchState().Subscribe(state =>
 Application code does not reconnect, sleep, rank endpoints, or replace the
 session. Those decisions belong to CultMesh.
 
-Verification:
+Fast session-management check (this uses controlled transports; it is not the
+network proof):
 
 ```powershell
 dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj --filter FullyQualifiedName~CultMeshSessionManagerTests
@@ -58,5 +61,8 @@ dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj --filter FullyQ
 Advanced hosts may inject lookup sources, connectors, clocks, persistence, and
 diagnostics through the lower-level discovery and session APIs. Application
 features should not need them.
+
+Chapter 4 runs the real network chronology and proves that the retained lease
+survives Odin moving `sample.counter` to a new physical provider route.
 
 Next: [publish one Eve surface to multiple runtimes](03-publish-an-eve-surface.md).

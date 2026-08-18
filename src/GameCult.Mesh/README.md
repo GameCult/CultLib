@@ -18,12 +18,25 @@ simulation observations.
 ## First Node
 
 ```csharp
+using GameCult.Caching;
 using GameCult.Mesh;
+using GameCult.Networking;
 
-using var node = await CultMesh.StartNodeAsync("world.ccmp");
+// CounterState is the typed document defined in the getting-started tutorial.
+var documents = new CultNetDocumentRegistry()
+    .Register(CultNetDocumentBinding.ForDocument<CounterState>());
+using var node = await CultMesh.StartNodeAsync("world.cc", new CultMeshNodeOptions
+{
+    DatabaseOptions = new CultNetDatabaseOptions
+    {
+        RuntimeId = "counter-provider",
+        DocumentRegistry = documents
+    }
+});
 
-var player = await node.Database.GetAsync<PlayerData>(playerKey);
-await node.Database.PutAsync(playerKey, player);
+var key = new CultRecordKey("counter:main");
+await node.Database.PutAsync(key, new CounterState { CounterId = key.Value });
+var counter = await node.Database.GetAsync<CounterState>(key);
 ```
 
 If you want one inspectable path that starts with a durable local cache file and
@@ -88,7 +101,7 @@ Enable durable authoritative shard logs when a node should serve replica
 catch-up after restart:
 
 ```csharp
-using var node = await CultMesh.StartNodeAsync("world.ccmp", new CultMeshNodeOptions
+using var node = await CultMesh.StartNodeAsync("world.cc", new CultMeshNodeOptions
 {
     EnableDurableShardLogs = true
 });
@@ -240,7 +253,7 @@ shape without local store plumbing:
 
 ```csharp
 var health = CultMesh.DocumentFromSingleFile<DaemonHealth>(
-    "daemon-publication.ccmp",
+    "daemon-publication.cc",
     new CultRecordKey("daemon:aetheria.health.v1"),
     verse);
 

@@ -109,7 +109,7 @@ messages directly.
 ```csharp
 using GameCult.Mesh;
 
-using var node = await CultMesh.CreateNodeAsync("world.ccmp", new CultMeshNodeOptions
+using var node = await CultMesh.CreateNodeAsync("world.cc", new CultMeshNodeOptions
 {
     DatabaseOptions = new CultNetDatabaseOptions
     {

@@ -29,8 +29,9 @@ temporary consumer, and runs `sample.mjs`. Success proves:
 4. the DOM binding and a separate headless observer converge on the same count;
 5. the canonical receipt and state survive reopening the `.cc` store.
 
-This is not yet the promised networked multiplayer tutorial. The DOM lowerer is
-hosted by jsdom in Node and both consumers share one local CultMesh node. A real
-browser transport, Odin discovery, process separation, and a second language
-runtime require distinct executable gates. Keeping that limitation visible is
-part of the sample contract.
+This artifact checkpoint is deliberately not the network proof. The DOM lowerer
+is hosted by jsdom in Node and both consumers share one local CultMesh node. The
+same wrapper continues into a separate real Chromium/C# process chronology with
+Odin discovery, route replacement, and persistent provider state. Keeping those
+evidence layers separate prevents a fast package test from impersonating the
+network.
