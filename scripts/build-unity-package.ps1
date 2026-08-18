@@ -1,6 +1,7 @@
 param(
   [string] $Configuration = "Release",
   [string] $OutputDirectory = "artifacts\unity\org.gamecult.cultlib",
+  [string] $NuGetConfig = "",
   [switch] $UpdateTemplate
 )
 
@@ -30,11 +31,19 @@ if (Test-Path -LiteralPath $outputRoot) {
   Remove-Item -LiteralPath $outputRoot -Recurse -Force
 }
 
-dotnet publish $projectPath -c $Configuration -o $publishRoot
+$publishArguments = @("publish", $projectPath, "-c", $Configuration, "-o", $publishRoot)
+if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
+  $publishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
+}
+& dotnet @publishArguments
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib publish failed with exit code $LASTEXITCODE"
 }
-dotnet publish $quicProjectPath -c $Configuration -o $quicPublishRoot
+$quicPublishArguments = @("publish", $quicProjectPath, "-c", $Configuration, "-o", $quicPublishRoot)
+if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
+  $quicPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
+}
+& dotnet @quicPublishArguments
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib native QUIC managed publish failed with exit code $LASTEXITCODE"
 }

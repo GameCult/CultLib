@@ -14,6 +14,14 @@ import { chromium } from "playwright-core";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const eveFlag = process.argv.indexOf("--eve-root");
 const eveRoot = resolve(eveFlag >= 0 ? process.argv[eveFlag + 1] : join(repoRoot, "..", "Eve"));
+const packageFeedFlag = process.argv.indexOf("--package-feed");
+const packageFeed = packageFeedFlag >= 0 ? resolve(process.argv[packageFeedFlag + 1]) : undefined;
+const cultLibVersionFlag = process.argv.indexOf("--cultlib-package-version");
+const cultLibPackageVersion = cultLibVersionFlag >= 0 ? process.argv[cultLibVersionFlag + 1] : undefined;
+const eveSurfaceVersionFlag = process.argv.indexOf("--eve-surface-package-version");
+const eveSurfacePackageVersion = eveSurfaceVersionFlag >= 0 ? process.argv[eveSurfaceVersionFlag + 1] : undefined;
+const nugetConfigFlag = process.argv.indexOf("--nuget-config");
+const nugetConfig = nugetConfigFlag >= 0 ? resolve(process.argv[nugetConfigFlag + 1]) : undefined;
 const sampleRoot = join(repoRoot, "samples", "eve-browser-network");
 const workRoot = await mkdtemp(join(tmpdir(), "cultmesh-browser-network-"));
 const statePath = join(workRoot, "counter.cc");
@@ -51,15 +59,30 @@ try {
   const bundle = await readFile(bundlePath, "utf8");
   assert.doesNotMatch(bundle, /(?:from\s*["']node:|require\(["']node:)/u, "browser bundle contains a Node builtin import");
 
-  await run("dotnet", [
+  const dotnetBuildArguments = [
     "build",
     join(sampleRoot, "EveBrowserNetworkSample.csproj"),
     "-m:1",
     "--verbosity", "quiet",
     "-p:NoWarn=1591%3BCS8632",
-    `-p:EveRoot=${eveRoot}`,
-    `-p:CultLibRoot=${repoRoot}`,
-  ]);
+    "-p:NuGetAudit=false",
+    "-p:RestoreIgnoreFailedSources=true",
+  ];
+  if (nugetConfig) dotnetBuildArguments.push(`-p:RestoreConfigFile=${nugetConfig}`);
+  if (packageFeed) {
+    if (!cultLibPackageVersion || !eveSurfacePackageVersion) {
+      throw new Error("Package artifact builds require both CultLib and Eve surface package versions.");
+    }
+    dotnetBuildArguments.push(
+      "-p:UsePackageArtifacts=true",
+      `-p:PackageFeed=${packageFeed}`,
+      `-p:CultLibPackageVersion=${cultLibPackageVersion}`,
+      `-p:EveSurfacePackageVersion=${eveSurfacePackageVersion}`,
+    );
+  } else {
+    dotnetBuildArguments.push(`-p:EveRoot=${eveRoot}`, `-p:CultLibRoot=${repoRoot}`);
+  }
+  await run("dotnet", dotnetBuildArguments);
   const providerPort = await freePort();
   const decoyProviderPort = await freePort();
   const replacementProviderPort = await freePort();

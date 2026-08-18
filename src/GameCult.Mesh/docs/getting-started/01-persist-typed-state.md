@@ -34,7 +34,7 @@ using var node = await CultMesh.CreateNodeAsync("counter.cc", new CultMeshNodeOp
     CacheOptions = new CultCacheOpenOptions { Registry = registry },
     DatabaseOptions = new CultNetDatabaseOptions
     {
-        RuntimeId = "sample.counter-provider",
+        RuntimeId = "sample.counter-daemon",
         DocumentRegistry = documents
     }
 });

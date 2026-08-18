@@ -1,13 +1,17 @@
 # 2. Connect A Client By Stable Identity
 
 Clients address a live session by stable Verse/provider identity. In this tutorial,
-`sample.counter` is the Verse id and `sample.counter-provider` is the authority
+`sample.counter` is the Verse id and `sample.counter-daemon` is the authority
 runtime Odin currently advertises for it. Application clients pass that typed
 pair, never a socket address and never one ambiguous string that might mean
 either identity. A product may expose only a Verse choice to its user; its
 selection owner then resolves the provider runtime from Odin's descriptor before
 opening the session. Discovery owns the current physical routes, and the session
 manager owns connection reuse, path rotation, and transport failure state.
+Each Odin route binds that authority runtime to one endpoint, protocol set, and
+generation. The client verifies the same tuple with the connected peer before
+the session becomes online; runtime membership and endpoint reachability are
+not independent routing evidence.
 
 ```csharp
 using GameCult.Mesh;
@@ -15,7 +19,9 @@ using GameCult.Mesh;
 var odinEndpoint = Environment.GetEnvironmentVariable("ODIN_ENDPOINT")
     ?? throw new InvalidOperationException("Set ODIN_ENDPOINT to the configured rendezvous route.");
 const string verseId = "sample.counter";
-var target = new CultMeshSessionTarget(verseId, "sample.counter-provider");
+var target = new CultMeshSessionTarget(verseId, "sample.counter-daemon");
+using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+var cancellationToken = timeout.Token;
 using var mesh = new CultMeshClient(new CultMeshClientOptions
 {
     RendezvousEndpoints = new[] { odinEndpoint }
@@ -64,6 +70,11 @@ network proof):
 ```powershell
 dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj --filter FullyQualifiedName~CultMeshSessionManagerTests
 ```
+
+The real checkpoint in chapter 4 additionally advertises a better-priority
+endpoint for the wrong authority runtime. Both the C# and browser clients must
+ignore it, verify the intended peer, survive route replacement, and reject
+wrong-source operation responses.
 
 Advanced hosts may inject lookup sources, connectors, clocks, persistence, and
 diagnostics through the lower-level discovery and session APIs. Application

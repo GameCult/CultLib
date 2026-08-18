@@ -4,6 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Description>CultNet schema-v0 WebSocket host adapter for browser and web runtimes</Description>
+    <PackageId>GameCult.Networking.WebSockets</PackageId>
+    <PackageTags>game;networking;websocket;cultnet;cultmesh</PackageTags>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\GameCult.Networking\GameCult.Networking.csproj" />

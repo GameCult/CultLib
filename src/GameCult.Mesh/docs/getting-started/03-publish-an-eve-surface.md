@@ -97,6 +97,10 @@ GameCult dependency is `PackageReference Include="GameCult.Eve.Surface"`.
 This proves the renderer-neutral provider contract does not require a sibling
 Eve or CultLib source tree after packaging.
 
+The real-process C# sample is then rebuilt from that same temporary NuGet feed.
+The source project references in its `.csproj` are contributor convenience only
+and are disabled by the checkpoint; they are not the consumer contract.
+
 The first layer builds and packs `cultcache-ts`, `cultnet-ts`, `cultmesh-ts`,
 `@gamecult/eve-contracts`, and `@gamecult/eve-browser-lowering`, installs the
 tarballs into an empty temporary consumer, and runs
@@ -108,11 +112,11 @@ both consumers converge on the same state and canonical receipt identity, a
 duplicate idempotency key is not applied twice, and the state plus receipt
 survive reopening the `.cc` store.
 
-The second layer runs a durable C# provider, a separate local Odin fixture, a
-real Chromium Eve lowerer, and an independent C# headless observer over binary
+The second layer runs a durable C# provider, a wrong-authority decoy, a separate
+local Odin fixture, a real Chromium Eve lowerer, and an independent C# headless observer over binary
 CultNet WebSocket lanes. The open browser resolves the `sample.counter` Verse
-through the canonical catalog, survives its provider restarting on a different route,
-and resubscribes. The retained C# client then invokes a second typed operation
+through the canonical catalog, rejects the decoy route, survives its provider
+restarting on a different route, and resubscribes. The retained C# client then invokes a second typed operation
 through `CultMeshClient.InvokeAsync`; Chromium and C# observe the same
 provider-authored state and receipt chronology. The same retained C# session
 then completes 10,000 typed no-op operations under explicit p99 and post-GC
