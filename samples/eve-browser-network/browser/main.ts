@@ -30,7 +30,7 @@ const receiptOutput = document.querySelector<HTMLOutputElement>("#receipt")!;
 try {
   const mesh = await CultMeshBrowserClient.connect({
     verseId: "sample.counter",
-    providerId: "sample.counter-provider",
+    authorityRuntimeId: "sample.counter-daemon",
     runtimeId: "sample.chromium",
     rendezvous: new CultMeshBrowserOdinRendezvous({
       endpoints: [odinEndpoint],

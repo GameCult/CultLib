@@ -1,7 +1,7 @@
 # CultMesh Browser
 
 `cultmesh-browser` is the browser-safe CultMesh client boundary. It owns one
-WebSocket session for a stable Verse/provider identity, retains explicit raw
+WebSocket session for a stable Verse/authority-runtime target, retains explicit raw
 document leases across route replacement, and correlates typed CultNet
 operations with provider receipts.
 
@@ -17,7 +17,7 @@ const odin = new CultMeshBrowserOdinRendezvous({
 
 const mesh = await CultMeshBrowserClient.connect({
   verseId: "sample.counter",
-  providerId: "sample.counter-provider",
+  authorityRuntimeId: "sample.counter-daemon",
   runtimeId: "counter-browser",
   rendezvous: odin,
 });
@@ -38,9 +38,10 @@ responses because the domain still owns their receipt schema.
 
 `CultMeshBrowserOdinRendezvous` speaks the canonical CultNet Verse-catalog
 messages to one or more configured Odin WebSocket endpoints. Application code
-supplies stable identity; it does not own endpoint selection, reconnect, or
-resubscription. The physical provider socket is a replaceable route, not the
-provider identity.
+supplies the Verse and authority-runtime identity; it does not own endpoint
+selection, reconnect, or resubscription. This is deliberately distinct from an
+Eve surface's `providerId`, which identifies the UI provider inside the Verse.
+The physical socket is a replaceable route, not either stable identity.
 
 The browser handshake carries authentication through the host application's
 ordinary secure cookie or equivalent upgrade credential. The C# host adapter

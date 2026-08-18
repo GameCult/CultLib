@@ -18,7 +18,7 @@ foreach ($requiredPrimitive in @("CultNetOperationServer", "EveSurface.Create"))
     }
 }
 if ($networkSampleSource -notmatch 'new\s+CultMeshSessionTarget\s*\(') {
-    throw "The getting-started client must address one explicit Verse/provider target."
+    throw "The getting-started client must address one explicit Verse/authority-runtime target."
 }
 $cultMeshClientSource = Get-Content -LiteralPath (Join-Path $cultLibRoot "src\GameCult.Mesh\CultMeshClient.cs") -Raw
 if ($cultMeshClientSource -match 'ConnectAsync\s*\(\s*string\s+(endpointId|verseId)' -or
@@ -27,7 +27,7 @@ if ($cultMeshClientSource -match 'ConnectAsync\s*\(\s*string\s+(endpointId|verse
 }
 $discoverySource = Get-Content -LiteralPath (Join-Path $cultLibRoot "src\GameCult.Mesh\CultMeshDiscoveryService.cs") -Raw
 if ($discoverySource -notmatch 'AuthorityRuntimeIds\.Contains\(query\.AuthorityRuntimeId') {
-    throw "CultMesh discovery must prove that a selected Verse route advertises the requested provider runtime."
+    throw "CultMesh discovery must prove that a selected Verse route advertises the requested authority runtime."
 }
 
 $dotnetPackageRoot = Join-Path ([IO.Path]::GetTempPath()) `

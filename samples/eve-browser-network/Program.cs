@@ -86,7 +86,7 @@ static async Task RunProviderAsync(Args arguments)
         },
         DatabaseOptions = new CultNetDatabaseOptions
         {
-            RuntimeId = "sample.counter-provider",
+            RuntimeId = arguments.AuthorityRuntimeId,
             DocumentRegistry = documents
         }
     });
@@ -99,7 +99,7 @@ static async Task RunProviderAsync(Args arguments)
     await using var schemaServer = new CultNetWebSocketSchemaServer();
     using var subscriptions = new CultNetDatabaseSubscriptionServer(schemaServer, node.Database);
     using var operationGate = new SemaphoreSlim(1, 1);
-    using var operations = new CultNetOperationServer(schemaServer, "sample.counter-provider")
+    using var operations = new CultNetOperationServer(schemaServer, arguments.AuthorityRuntimeId)
         .Register<PingRequest, PingReceipt>(
             "sample.counter",
             "sample.counter.ping",
@@ -329,7 +329,7 @@ static EveSurfaceDocument CreateCounterSurface()
         "sample.increment.v1",
         networkRoute);
     return EveSurface.Create(surfaceKey)
-        .Provider("sample.counter-provider", "sample.daemon")
+        .Provider("sample.counter-ui", "sample.daemon")
         .Title("CultMesh browser counter")
         .Version(1)
         .UpdatedAtUtc("2026-08-17T00:00:00Z")
@@ -350,7 +350,7 @@ sealed class Args
     public string Token { get; private init; } = "sample-session";
     public string VerseId { get; private init; } = "sample.counter";
     public string VerseName { get; private init; } = "CultMesh browser counter";
-    public string AuthorityRuntimeId { get; private init; } = "sample.counter-provider";
+    public string AuthorityRuntimeId { get; private init; } = "sample.counter-daemon";
     public string TransportVersion { get; private init; } = "cultmesh.v0";
     public string RulesHash { get; private init; } = "sample-counter-v1";
     public int ExpectedCount { get; private init; } = 2;
@@ -372,7 +372,7 @@ sealed class Args
             Token = named.GetValueOrDefault("--token", "sample-session"),
             VerseId = named.GetValueOrDefault("--verse-id", "sample.counter"),
             VerseName = named.GetValueOrDefault("--verse-name", "CultMesh browser counter"),
-            AuthorityRuntimeId = named.GetValueOrDefault("--authority-runtime-id", "sample.counter-provider"),
+            AuthorityRuntimeId = named.GetValueOrDefault("--authority-runtime-id", "sample.counter-daemon"),
             TransportVersion = named.GetValueOrDefault("--transport-version", "cultmesh.v0"),
             RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1"),
             ExpectedCount = named.TryGetValue("--expected-count", out var expectedCount)
@@ -411,7 +411,7 @@ public sealed class IncrementReceipt
     [Key("state")] public string State { get; set; } = "accepted";
     [Key("ownerRepo")] public string OwnerRepo { get; set; } = "CultLib";
     [Key("authority")] public string Authority { get; set; } = "provider-daemon";
-    [Key("providerId")] public string ProviderId { get; set; } = "sample.counter-provider";
+    [Key("providerId")] public string ProviderId { get; set; } = "sample.counter-ui";
     [Key("surfaceId")] public string SurfaceId { get; set; } = "sample.counter";
     [Key("issuedAtUtc")] public string IssuedAtUtc { get; set; } = "";
     [Key("sourceVersion")] public int SourceVersion { get; set; }

@@ -16,7 +16,7 @@ import {
 
 export interface CultMeshBrowserIdentity {
   verseId: string;
-  providerId: string;
+  authorityRuntimeId: string;
 }
 
 export interface CultMeshBrowserRoute extends CultMeshBrowserIdentity {
@@ -49,7 +49,7 @@ export interface CultMeshBrowserSocket {
   close(code?: number, reason?: string): void;
 }
 
-/** Resolves stable Verse/provider identity through Odin's canonical CultNet Verse catalog. */
+/** Resolves a stable Verse/authority-runtime target through Odin's canonical CultNet Verse catalog. */
 export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous {
   #options: Required<Omit<CultMeshBrowserOdinRendezvousOptions, "transportVersion" | "socketFactory">> & {
     transportVersion?: string;
@@ -75,7 +75,7 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
 
   async resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
     requireText(identity.verseId, "verseId");
-    requireText(identity.providerId, "providerId");
+    requireText(identity.authorityRuntimeId, "authorityRuntimeId");
     const failures: Error[] = [];
     for (const endpoint of this.#options.endpoints) {
       try {
@@ -86,7 +86,7 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
     }
     throw new AggregateError(
       failures,
-      `Odin could not resolve Verse '${identity.verseId}' provider '${identity.providerId}'.`,
+      `Odin could not resolve Verse '${identity.verseId}' authority runtime '${identity.authorityRuntimeId}'.`,
     );
   }
 
@@ -281,9 +281,9 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 
   private constructor(options: CultMeshBrowserClientOptions) {
     requireText(options.verseId, "verseId");
-    requireText(options.providerId, "providerId");
+    requireText(options.authorityRuntimeId, "authorityRuntimeId");
     requireText(options.runtimeId, "runtimeId");
-    this.identity = { verseId: options.verseId, providerId: options.providerId };
+    this.identity = { verseId: options.verseId, authorityRuntimeId: options.authorityRuntimeId };
     this.runtimeId = options.runtimeId;
     this.#options = {
       ...options,
@@ -477,7 +477,8 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 
   private async openSocket(generation: number): Promise<void> {
     const route = await this.#options.rendezvous.resolve(this.identity);
-    if (route.verseId !== this.identity.verseId || route.providerId !== this.identity.providerId) {
+    if (route.verseId !== this.identity.verseId ||
+        route.authorityRuntimeId !== this.identity.authorityRuntimeId) {
       throw new Error("CultMesh rendezvous returned a route for the wrong stable identity.");
     }
     const endpoint = new URL(route.endpoint);
@@ -733,10 +734,11 @@ function selectOdinRoute(
   identity: CultMeshBrowserIdentity,
 ): CultMeshBrowserRoute {
   const matchingVerses = response.verses.filter(verse =>
-    verse.verseId === identity.verseId && verse.authorityRuntimeIds.includes(identity.providerId));
+    verse.verseId === identity.verseId &&
+      verse.authorityRuntimeIds.includes(identity.authorityRuntimeId));
   if (matchingVerses.length !== 1) {
     throw new Error(
-      `Odin returned ${matchingVerses.length} routes for Verse '${identity.verseId}' provider '${identity.providerId}'.`,
+      `Odin returned ${matchingVerses.length} routes for Verse '${identity.verseId}' authority runtime '${identity.authorityRuntimeId}'.`,
     );
   }
   const verse = matchingVerses[0];
@@ -749,7 +751,7 @@ function selectOdinRoute(
     }
   });
   if (endpoints.length === 0) {
-    throw new Error(`Odin advertised no browser-compatible route for '${identity.providerId}'.`);
+    throw new Error(`Odin advertised no browser-compatible route for authority runtime '${identity.authorityRuntimeId}'.`);
   }
   return {
     ...identity,

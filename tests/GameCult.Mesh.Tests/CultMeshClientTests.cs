@@ -312,6 +312,35 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task InvokeOperation_ReplaysSameIdempotencyKeyAfterRouteLossBeforeReceipt()
+    {
+        var connector = new DocumentConnector { FailFirstOperationBeforeResponse = true };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector },
+            OperationResponseTimeout = TimeSpan.FromSeconds(2)
+        });
+
+        var result = await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
+            Target,
+            "tests.counter",
+            "tests.counter.increment",
+            "tests.counter.increment_request.v1",
+            "tests.counter.increment_receipt.v1",
+            new ClientOperationRequest { Amount = 2 },
+            sourceRuntimeId: "pilot-one",
+            idempotencyKey: "pilot-command-route-loss");
+
+        result.Value.ReceiptId.Should().Be("receipt:pilot-command-route-loss");
+        connector.Clients.Should().HaveCount(2);
+        connector.Clients.SelectMany(client => client.Operations)
+            .Select(operation => operation.MessageId)
+            .Should().Equal("pilot-command-route-loss", "pilot-command-route-loss");
+    }
+
+    [Test]
     public async Task InvokeOperation_ThrowsCorrelatedFrameworkFailureWithoutTimingOut()
     {
         var connector = new DocumentConnector { RejectOperations = true };
@@ -424,6 +453,7 @@ public sealed class CultMeshClientTests
         public bool SuppressFirstSnapshot { get; set; }
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public bool RejectOperations { get; set; }
+        public bool FailFirstOperationBeforeResponse { get; set; }
         public string ConnectorId => "document-test";
         public int Priority => 0;
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
@@ -438,7 +468,8 @@ public sealed class CultMeshClientTests
                 snapshotsToSuppress: SuppressFirstSnapshot && Clients.Count == 0
                     ? int.MaxValue
                     : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0,
-                rejectOperations: RejectOperations);
+                rejectOperations: RejectOperations,
+                failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
@@ -452,12 +483,18 @@ public sealed class CultMeshClientTests
         private readonly string _text;
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly bool _rejectOperations;
+        private bool _failOperationBeforeResponse;
         private int _snapshotsToSuppress;
-        public DocumentClient(string text, int snapshotsToSuppress = 0, bool rejectOperations = false)
+        public DocumentClient(
+            string text,
+            int snapshotsToSuppress = 0,
+            bool rejectOperations = false,
+            bool failOperationBeforeResponse = false)
         {
             _text = text;
             _snapshotsToSuppress = snapshotsToSuppress;
             _rejectOperations = rejectOperations;
+            _failOperationBeforeResponse = failOperationBeforeResponse;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -478,6 +515,12 @@ public sealed class CultMeshClientTests
             if (message is CultNetOperationRequestMessage operation)
             {
                 Operations.Add(operation);
+                if (_failOperationBeforeResponse)
+                {
+                    _failOperationBeforeResponse = false;
+                    Fail(new InvalidOperationException("path lost before operation receipt"));
+                    return;
+                }
                 if (_rejectOperations)
                 {
                     var failure = new CultNetOperationFailure

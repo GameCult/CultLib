@@ -383,18 +383,7 @@ namespace GameCult.Mesh
             var expectedOperation = operation.Trim();
             var expectedResponseSchema = responseSchema.Trim();
             var messageId = idempotencyKey.Trim();
-            var session = await ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken).ConfigureAwait(false);
-            var completion = new TaskCompletionSource<CultNetOperationResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var subscription = session.OnCultNet<CultNetOperationResponseMessage>(response =>
-            {
-                if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
-                    completion.TrySetResult(response);
-            });
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(_operationResponseTimeout);
-            using var cancellation = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
-
-            session.SendCultNet(new CultNetOperationRequestMessage
+            var message = new CultNetOperationRequestMessage
             {
                 MessageId = messageId,
                 ServiceId = expectedService,
@@ -403,14 +392,46 @@ namespace GameCult.Mesh
                 PayloadEncoding = "messagepack-base64",
                 Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(request, CultNetSchemaMessageSerialization.Options)),
                 SourceRuntimeId = sourceRuntimeId.Trim()
-            });
-
+            };
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_operationResponseTimeout);
             CultNetOperationResponseMessage envelope;
             try
             {
-                envelope = await completion.Task.ConfigureAwait(false);
+                while (true)
+                {
+                    var session = await ConnectOnlineAsync(target, timeout.Token).ConfigureAwait(false);
+                    var completion = new TaskCompletionSource<CultNetOperationResponseMessage>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    var pathChanged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var generation = session.PhysicalGeneration;
+                    using var responseSubscription = session.OnCultNet<CultNetOperationResponseMessage>(response =>
+                    {
+                        if (string.Equals(response.MessageId, messageId, StringComparison.Ordinal))
+                            completion.TrySetResult(response);
+                    });
+                    using var stateSubscription = session.WatchState().Subscribe(state =>
+                    {
+                        if (state.Status != CultMeshSessionStatus.Online || session.PhysicalGeneration != generation)
+                            pathChanged.TrySetResult(true);
+                    });
+                    using var cancellation = timeout.Token.Register(() => completion.TrySetCanceled(timeout.Token));
+                    if (session.State.Status != CultMeshSessionStatus.Online ||
+                        session.PhysicalGeneration != generation)
+                        continue;
+
+                    session.SendCultNet(message);
+                    var finished = await Task.WhenAny(completion.Task, pathChanged.Task).ConfigureAwait(false);
+                    if (finished == completion.Task)
+                    {
+                        envelope = await completion.Task.ConfigureAwait(false);
+                        break;
+                    }
+                    // The operation has a durable idempotency key. A route loss before a
+                    // correlated response replays the same request after replacement finality.
+                }
             }
-            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
                     $"CultMesh operation '{expectedService}/{expectedOperation}' did not answer idempotency key '{messageId}' " +
@@ -460,6 +481,32 @@ namespace GameCult.Mesh
             }
             if (value is null) throw new InvalidOperationException("CultMesh operation response decoded to null.");
             return new CultMeshOperationResult<TResponse>(envelope, value);
+        }
+
+        private async Task<CultMeshSession> ConnectOnlineAsync(
+            CultMeshSessionTarget target,
+            CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                var session = await ConnectAsync(target, CultMeshProtocols.Documents, cancellationToken)
+                    .ConfigureAwait(false);
+                if (session.State.Status == CultMeshSessionStatus.Online)
+                    return session;
+
+                var changed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var subscription = session.WatchState().Subscribe(state =>
+                {
+                    if (state.Status == CultMeshSessionStatus.Online || state.Status == CultMeshSessionStatus.Offline)
+                        changed.TrySetResult(true);
+                });
+                using var cancellation = cancellationToken.Register(() => changed.TrySetCanceled(cancellationToken));
+                if (session.State.Status != CultMeshSessionStatus.Reconnecting)
+                    continue;
+                await changed.Task.ConfigureAwait(false);
+                if (session.State.Status == CultMeshSessionStatus.Online)
+                    return session;
+            }
         }
 
         /// <summary>Gets the number of currently leased shared document subscriptions.</summary>

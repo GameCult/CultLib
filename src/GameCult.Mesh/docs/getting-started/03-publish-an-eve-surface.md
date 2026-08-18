@@ -34,50 +34,42 @@ import provider internals.
 Install the renderer-neutral `GameCult.Eve.Surface` package in the provider.
 Do not install EveUnity or the browser lowerer there. A provider defines typed
 state, one typed operation transaction, and one Eve surface. CultNet envelope
-encoding is framework work:
+encoding is framework work. This complete method builds the surface document;
+it has no hidden transport or state variables:
 
 ```csharp
 using GameCult.Eve.Surface;
 using GameCult.Mesh;
-using GameCult.Networking;
 
-using var operations = new CultNetOperationServer(schemaServer, "sample.counter-provider")
-    .Register<IncrementRequest, IncrementReceipt>(
-        "sample.counter",
+static EveSurfaceDocument CreateCounterSurface()
+{
+    var route = new CultMeshRouteHint(CultMeshLocalityKind.Network, "cultmesh");
+    var count = new CultMeshStateBindingDescriptor(
+        "value",
+        "sample.counter.count",
+        "sample.counter_state:counter:main",
+        "sample.counter_state.v1",
+        route);
+    var increment = CultMesh.OperationBinding(
         "sample.counter.increment",
+        "Increment",
         "sample.increment.v1",
-        "gamecult.eve.command_receipt.v1",
-        async command => await IncrementExactlyOnceAsync(
-            command.IdempotencyKey,
-            command.Value));
+        route);
 
-var route = new CultMeshRouteHint(CultMeshLocalityKind.Network, "cultmesh");
-var count = new CultMeshStateBindingDescriptor(
-    "value",
-    "sample.counter.count",
-    "sample.counter_state:counter:main",
-    "sample.counter_state.v1",
-    route);
-var increment = CultMesh.OperationBinding(
-    "sample.counter.increment",
-    "Increment",
-    "sample.increment.v1",
-    route);
-
-var surface = EveSurface.Create("sample.counter")
-    .Provider("sample.counter-provider", "sample.daemon")
-    .Title("CultMesh browser counter")
-    .RootColumn("counter.root", root => root
-        .Metric("counter.value", "Canonical count", "0", count)
-        .Button("counter.increment", "Increment", increment))
-    .Build();
+    return EveSurface.Create("sample.counter")
+        .Provider("sample.counter-ui", "sample.daemon")
+        .Title("CultMesh browser counter")
+        .RootColumn("counter.root", root => root
+            .Metric("counter.value", "Canonical count", "0", count)
+            .Button("counter.increment", "Increment", increment))
+        .Build();
+}
 ```
 
-`schemaServer` is a transport-neutral CultNet server port. WebSocket, RUDP, and
-test transports attach the same dispatcher. The handler owns validation,
-idempotency, state mutation, and its durable receipt. `CultNetOperationServer`
-owns only route/schema checks and typed envelope serialization. The complete
-provider transaction is in
+The operation handler owns validation, idempotency, state mutation, and its
+durable receipt. `CultNetOperationServer` owns only route/schema checks and
+typed envelope serialization. The complete, compiling provider transaction—including
+the schema server, typed request/receipt types, and exactly-once mutation—is in
 [`samples/eve-browser-network/Program.cs`](../../../../samples/eve-browser-network/Program.cs);
 it contains no hand-written operation base64 or MessagePack dispatch switch.
 

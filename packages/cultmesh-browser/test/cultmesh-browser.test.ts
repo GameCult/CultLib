@@ -21,7 +21,7 @@ import {
   type CultMeshBrowserSocket,
 } from "../src/index.js";
 
-test("Odin rendezvous resolves stable provider identity and observes route rotation", async () => {
+test("Odin rendezvous resolves stable authority-runtime identity and observes route rotation", async () => {
   const odin = new FakeOdin("ws://127.0.0.1:4050/mesh");
   let id = 0;
   const rendezvous = new CultMeshBrowserOdinRendezvous({
@@ -33,17 +33,17 @@ test("Odin rendezvous resolves stable provider identity and observes route rotat
 
   assert.equal((await rendezvous.resolve({
     verseId: "sample.counter",
-    providerId: "sample.counter-provider",
+    authorityRuntimeId: "sample.counter-daemon",
   })).endpoint, "ws://127.0.0.1:4050/mesh");
 
   odin.providerEndpoint = "ws://127.0.0.1:4060/mesh";
   assert.equal((await rendezvous.resolve({
     verseId: "sample.counter",
-    providerId: "sample.counter-provider",
+    authorityRuntimeId: "sample.counter-daemon",
   })).endpoint, "ws://127.0.0.1:4060/mesh");
 
   await assert.rejects(
-    rendezvous.resolve({ verseId: "sample.counter", providerId: "other-provider" }),
+    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "other-runtime" }),
     /could not resolve/,
   );
 });
@@ -55,7 +55,7 @@ test("browser client leases provider state, invokes an operation, and follows ro
   let id = 0;
   const client = await CultMeshBrowserClient.connect({
     verseId: route.verseId,
-    providerId: route.providerId,
+    authorityRuntimeId: route.authorityRuntimeId,
     runtimeId: "browser-test",
     rendezvous: { resolve: async () => route },
     createId: () => `id-${++id}`,
@@ -101,12 +101,12 @@ test("browser client rejects wrong rendezvous identity and has no document write
   await assert.rejects(
     CultMeshBrowserClient.connect({
       verseId: "sample.counter",
-      providerId: "sample.counter-provider",
+      authorityRuntimeId: "sample.counter-daemon",
       runtimeId: "browser-test",
       rendezvous: {
         resolve: async () => ({
           ...provider.route,
-          providerId: "intruder-provider",
+          authorityRuntimeId: "intruder-runtime",
         }),
       },
       socketFactory: () => provider.open(),
@@ -120,7 +120,7 @@ test("browser client rejects wrong rendezvous identity and has no document write
 test("browser client bounds unanswered provider operations", async () => {
   const route = {
     verseId: "sample.counter",
-    providerId: "sample.counter-provider",
+    authorityRuntimeId: "sample.counter-daemon",
     endpoint: "ws://127.0.0.1:4301/mesh",
   };
   const client = await CultMeshBrowserClient.connect({
@@ -175,7 +175,7 @@ test("browser client rejects a correlated framework failure without waiting for 
 test("browser client rejects oversized outbound schema messages", async () => {
   const route = {
     verseId: "sample.counter",
-    providerId: "sample.counter-provider",
+    authorityRuntimeId: "sample.counter-daemon",
     endpoint: "ws://127.0.0.1:4401/mesh",
   };
   await assert.rejects(
@@ -224,7 +224,7 @@ class FakeProvider {
   constructor(endpoint: string, count: number, rejectOperations = false) {
     this.route = {
       verseId: "sample.counter",
-      providerId: "sample.counter-provider",
+      authorityRuntimeId: "sample.counter-daemon",
       endpoint,
       generation: endpoint,
     };
@@ -288,7 +288,7 @@ class FakeProvider {
           message: "Expected payload schema 'sample.increment.v1'.",
         })),
         diagnostics: ["Request schema did not match."],
-        sourceRuntimeId: "sample.counter-provider",
+        sourceRuntimeId: "sample.counter-daemon",
       });
       return;
     }
@@ -314,7 +314,7 @@ class FakeProvider {
       payloadSchema: "sample.increment_receipt.v1",
       payloadEncoding: "messagepack-base64",
       payload: bytesToBase64(encode({ count: this.#count })),
-      sourceRuntimeId: "sample.counter-provider",
+      sourceRuntimeId: "sample.counter-daemon",
     });
   }
 
@@ -328,7 +328,7 @@ class FakeProvider {
       storedAt: "2026-08-17T00:00:00Z",
       payloadEncoding: "messagepack",
       payload: encode({ count: this.#count }),
-      sourceRuntimeId: "sample.counter-provider",
+      sourceRuntimeId: "sample.counter-daemon",
     };
   }
 }
@@ -359,7 +359,7 @@ class FakeOdin {
             optionalPluginIds: [],
           },
           discoveryEndpoints: [this.providerEndpoint],
-          authorityRuntimeIds: ["sample.counter-provider"],
+          authorityRuntimeIds: ["sample.counter-daemon"],
         }],
       });
     }, () => undefined);
