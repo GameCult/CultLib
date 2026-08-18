@@ -12,6 +12,27 @@ using Microsoft.Win32.SafeHandles;
 
 namespace GameCult.Mesh
 {
+    /// <summary>Reports bounded shared-memory frame publication and explicit copy telemetry.</summary>
+    public sealed class CultMeshFrameBodyPublisherStats
+    {
+        internal CultMeshFrameBodyPublisherStats(
+            ulong publishedFrames,
+            ulong blockedWrites,
+            ulong unavoidableCopyCount)
+        {
+            PublishedFrames = publishedFrames;
+            BlockedWrites = blockedWrites;
+            UnavoidableCopyCount = unavoidableCopyCount;
+        }
+
+        /// <summary>Gets the number of atomically committed generations.</summary>
+        public ulong PublishedFrames { get; }
+        /// <summary>Gets the number of write reservations refused by bounded slots.</summary>
+        public ulong BlockedWrites { get; }
+        /// <summary>Gets copies explicitly declared by copy-fallback publication.</summary>
+        public ulong UnavoidableCopyCount { get; }
+    }
+
     // Owner: this publisher owns mapping lifetime, logical generation, and slot commit.
     // Consumers own only read leases; mappings, capabilities, and slot selection remain CultMesh state.
     public sealed class CultMeshFrameBodyPublisher : IDisposable
@@ -34,6 +55,9 @@ namespace GameCult.Mesh
         private readonly string _token;
         private int _cursor;
         private long _nextSequence;
+        private ulong _publishedFrames;
+        private ulong _blockedWrites;
+        private ulong _unavoidableCopyCount;
         private CultMeshFrameBodyWriteLease? _activeWrite;
         private bool _disposed;
 
@@ -88,7 +112,7 @@ namespace GameCult.Mesh
             using (write)
             {
                 body.CopyTo(write.Span);
-                descriptor = write.Commit(body.Length, nowUtc);
+                descriptor = write.Commit(body.Length, nowUtc, unavoidableCopyCount: 1);
                 return true;
             }
         }
@@ -103,6 +127,7 @@ namespace GameCult.Mesh
                 ThrowIfDisposed();
                 if (_activeWrite != null)
                 {
+                    _blockedWrites++;
                     lease = null!;
                     return false;
                 }
@@ -124,6 +149,7 @@ namespace GameCult.Mesh
                 });
                 if (slot < 0)
                 {
+                    _blockedWrites++;
                     lease = null!;
                     return false;
                 }
@@ -149,7 +175,8 @@ namespace GameCult.Mesh
         internal CultMeshBodyDescriptor Commit(
             CultMeshFrameBodyWriteLease lease,
             int byteLength,
-            DateTimeOffset nowUtc)
+            DateTimeOffset nowUtc,
+            int unavoidableCopyCount)
         {
             lock (_gate)
             {
@@ -158,6 +185,8 @@ namespace GameCult.Mesh
                     throw new InvalidOperationException("The CultMesh frame write lease is stale or is not owned by this publisher.");
                 if (byteLength < 0 || byteLength > SlotByteLength)
                     throw new ArgumentOutOfRangeException(nameof(byteLength));
+                if (unavoidableCopyCount < 0)
+                    throw new ArgumentOutOfRangeException(nameof(unavoidableCopyCount));
                 var semanticHash = CultMeshBodyDescriptorValidator.ComputeSemanticHash(lease.Span[..byteLength]);
                 WithMutex(() =>
                 {
@@ -174,6 +203,8 @@ namespace GameCult.Mesh
                 });
                 var descriptor = Descriptor(lease.SlotIndex, byteLength, lease.Sequence, semanticHash, nowUtc);
                 _nextSequence++;
+                _publishedFrames++;
+                _unavoidableCopyCount += (ulong)Math.Max(0, unavoidableCopyCount);
                 _activeWrite = null;
                 lease.Complete();
                 return descriptor;
@@ -191,6 +222,19 @@ namespace GameCult.Mesh
                         _control.Write(WriterCountOffset + lease.SlotIndex * sizeof(int), 0));
                 }
                 _activeWrite = null;
+            }
+        }
+
+        /// <summary>Gets current publication, backpressure, and explicit fallback-copy counters.</summary>
+        public CultMeshFrameBodyPublisherStats Stats()
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                return new CultMeshFrameBodyPublisherStats(
+                    _publishedFrames,
+                    _blockedWrites,
+                    _unavoidableCopyCount);
             }
         }
 
@@ -514,9 +558,12 @@ namespace GameCult.Mesh
         public Memory<byte> Memory => _memory.Memory;
         public Span<byte> Span => Memory.Span;
 
-        public CultMeshBodyDescriptor Commit(int byteLength, DateTimeOffset nowUtc) =>
+        public CultMeshBodyDescriptor Commit(
+            int byteLength,
+            DateTimeOffset nowUtc,
+            int unavoidableCopyCount = 0) =>
             (_owner ?? throw new ObjectDisposedException(nameof(CultMeshFrameBodyWriteLease)))
-            .Commit(this, byteLength, nowUtc);
+            .Commit(this, byteLength, nowUtc, unavoidableCopyCount);
 
         internal void Complete()
         {

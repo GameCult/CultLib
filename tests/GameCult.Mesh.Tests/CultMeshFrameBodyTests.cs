@@ -31,6 +31,22 @@ public sealed class CultMeshFrameBodyTests
     }
 
     [Test]
+    public void PublisherTelemetryDistinguishesDirectWritesFromCopyFallback()
+    {
+        using var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 1, 2, 3 }, DateTimeOffset.UtcNow, out _).Should().BeTrue();
+
+        publisher.TryAcquireWrite(out var direct).Should().BeTrue();
+        direct.Span[..3].Fill(7);
+        direct.Commit(3, DateTimeOffset.UtcNow);
+
+        var stats = publisher.Stats();
+        stats.PublishedFrames.Should().Be(2);
+        stats.BlockedWrites.Should().Be(0);
+        stats.UnavoidableCopyCount.Should().Be(1);
+    }
+
+    [Test]
     public void MappedCursorObservesNewGenerationsWithoutNewControlDescriptors()
     {
         using var publisher = Publisher();

@@ -14,6 +14,7 @@ var results = new List<ProbeResult>();
 
 foreach (var documentCount in documentCounts)
     results.Add(await MeasureAsync(documentCount, idleDuration, activeDuration));
+var hotBody = await MeasureHotBodyAsync(activeDuration);
 
 Console.WriteLine(JsonSerializer.Serialize(new
 {
@@ -26,16 +27,97 @@ Console.WriteLine(JsonSerializer.Serialize(new
         updateRateHz = 60,
         changedFraction = 0.01
     },
-    results
+    results,
+    hotBody
 }, new JsonSerializerOptions { WriteIndented = true }));
 
 return results.All(result =>
         result.ActualPublishes == result.ExpectedPublishes &&
         result.PayloadBytesPublished > 0 &&
         result.AllocationToPayloadRatio < 10 &&
-        result.P99PublishLatencyMilliseconds < 250)
+        result.P99PublishLatencyMilliseconds < 250) &&
+    hotBody.ActualFrames == hotBody.ExpectedFrames &&
+    hotBody.UnavoidableCopyCount == 0 &&
+    hotBody.BlockedWrites == 0 &&
+    hotBody.P99RoundTripMilliseconds < 250
     ? 0
     : 1;
+
+static async Task<HotBodyProbeResult> MeasureHotBodyAsync(TimeSpan activeDuration)
+{
+    const int payloadBytes = 16 * 1024;
+    using var publisher = new CultMeshFrameBodyPublisher(
+        "performance:hot-body",
+        "gamecult.mesh.performance_hot_body.v1",
+        layoutVersion: 1,
+        capacity: payloadBytes,
+        producerEpoch: 1,
+        slotByteLength: payloadBytes,
+        leaseDuration: TimeSpan.FromMinutes(1));
+    if (!publisher.TryAcquireWrite(out var bootstrapWrite))
+        throw new InvalidOperationException("Hot-body probe could not reserve its bootstrap slot.");
+    CultMeshBodyDescriptor bootstrap;
+    using (bootstrapWrite)
+    {
+        bootstrapWrite.Span[..payloadBytes].Fill(1);
+        bootstrap = bootstrapWrite.Commit(payloadBytes, DateTimeOffset.UtcNow);
+    }
+    using var cursor = new CultMeshMappedFrameBodyCursor(bootstrap);
+    if (!cursor.TryAcquireLatest(out var bootstrapRead))
+        throw new InvalidOperationException("Hot-body probe could not acquire its bootstrap generation.");
+    bootstrapRead.Dispose();
+
+    ForceCollection();
+    using var process = Process.GetCurrentProcess();
+    process.Refresh();
+    var allocatedStart = GC.GetTotalAllocatedBytes(precise: true);
+    var privateBytesStart = process.PrivateMemorySize64;
+    var cpuStart = process.TotalProcessorTime;
+    var clock = Stopwatch.StartNew();
+    var frameInterval = TimeSpan.FromSeconds(1.0 / 60.0);
+    var latencies = new List<double>();
+    var frames = 0;
+    while (clock.Elapsed < activeDuration)
+    {
+        var started = Stopwatch.GetTimestamp();
+        if (!publisher.TryAcquireWrite(out var write))
+            throw new InvalidOperationException("Hot-body probe encountered unexpected write backpressure.");
+        var marker = (byte)(frames % 251 + 1);
+        using (write)
+        {
+            write.Span[..payloadBytes].Fill(marker);
+            write.Commit(payloadBytes, DateTimeOffset.UtcNow);
+        }
+        if (!cursor.TryAcquireLatest(out var read))
+            throw new InvalidOperationException("Hot-body cursor missed a committed generation.");
+        using (read)
+        {
+            if (read.Descriptor.ByteSize != payloadBytes || read.ReadByte(0) != marker || read.ReadByte(payloadBytes - 1) != marker)
+                throw new InvalidOperationException("Hot-body cursor observed torn or mismatched bytes.");
+        }
+        latencies.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        frames++;
+        var remaining = frameInterval * frames - clock.Elapsed;
+        if (remaining > TimeSpan.Zero) await Task.Delay(remaining);
+    }
+
+    process.Refresh();
+    var stats = publisher.Stats();
+    var ordered = latencies.OrderBy(value => value).ToArray();
+    return new HotBodyProbeResult(
+        ExpectedFrames: frames + 1,
+        ActualFrames: checked((int)stats.PublishedFrames),
+        PayloadBytes: payloadBytes,
+        P50RoundTripMilliseconds: Percentile(ordered, 0.50),
+        P95RoundTripMilliseconds: Percentile(ordered, 0.95),
+        P99RoundTripMilliseconds: Percentile(ordered, 0.99),
+        AllocatedBytes: GC.GetTotalAllocatedBytes(precise: true) - allocatedStart,
+        PrivateBytesBefore: privateBytesStart,
+        PrivateBytesAfter: process.PrivateMemorySize64,
+        CpuMilliseconds: (process.TotalProcessorTime - cpuStart).TotalMilliseconds,
+        BlockedWrites: stats.BlockedWrites,
+        UnavoidableCopyCount: stats.UnavoidableCopyCount);
+}
 
 static async Task<ProbeResult> MeasureAsync(
     int documentCount,
@@ -200,6 +282,20 @@ internal sealed record ProbeResult(
     double P95PublishLatencyMilliseconds,
     double P99PublishLatencyMilliseconds,
     double ScenarioWallSeconds);
+
+internal sealed record HotBodyProbeResult(
+    int ExpectedFrames,
+    int ActualFrames,
+    int PayloadBytes,
+    double P50RoundTripMilliseconds,
+    double P95RoundTripMilliseconds,
+    double P99RoundTripMilliseconds,
+    long AllocatedBytes,
+    long PrivateBytesBefore,
+    long PrivateBytesAfter,
+    double CpuMilliseconds,
+    ulong BlockedWrites,
+    ulong UnavoidableCopyCount);
 
 [CultDocument("gamecult.mesh.performance_probe", "gamecult.mesh.performance_probe.v1")]
 [MessagePackObject]

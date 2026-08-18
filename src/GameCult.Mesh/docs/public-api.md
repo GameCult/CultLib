@@ -208,6 +208,13 @@ portable machinery that makes it feel native.
   slices, or browser typed arrays. `CultMesh.DescribeNativeSliceView(...)`
   exposes the full view id, schema id, row count, columns, route, native handle,
   and dense stride for tools and adapters.
+- `CultMeshFrameBodyPublisher` and `CultMeshMappedFrameBodyCursor` carry
+  fixed-layout hot bodies through a triple-buffered memory mapping. Producers
+  reserve a writable slot and commit in place; consumers retain one bootstrap
+  capability and acquire only newer read leases. `Stats()` reports committed
+  frames, blocked writes, and unavoidable copies. Direct slot writes report
+  zero copies; the convenience `TryPublish(ReadOnlySpan<byte>)` path reports
+  one explicit fallback copy instead of laundering it as zero-copy transport.
 - `CultMeshRouteHint`, `CultMeshRouteRecord`, and `CultMeshLocalityKind` name
   locality choices without forcing application code to choose transport-specific
   APIs. `CultMesh.RouteRecord(...)` is the shared way to flatten and rehydrate
