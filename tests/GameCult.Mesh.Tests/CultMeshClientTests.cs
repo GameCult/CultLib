@@ -303,7 +303,7 @@ public sealed class CultMeshClientTests
 
         result.MessageId.Should().Be("pilot-command-1");
         result.Status.Should().Be("accepted");
-        result.SourceRuntimeId.Should().Be("provider-daemon");
+        result.SourceRuntimeId.Should().Be("aetheria-daemon");
         result.Value.ReceiptId.Should().Be("receipt:pilot-command-1");
         result.Value.Count.Should().Be(2);
         connector.Clients.Should().ContainSingle();
@@ -368,6 +368,31 @@ public sealed class CultMeshClientTests
         failure.Which.Message.Should().Contain("expected payload schema");
         connector.Clients.Should().ContainSingle();
         connector.Clients[0].Operations.Should().ContainSingle();
+    }
+
+    [Test]
+    public async Task InvokeOperation_RejectsReceiptFromAnotherRuntime()
+    {
+        var connector = new DocumentConnector { ResponseSourceRuntimeId = "intruder-daemon" };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Connectors = new[] { connector }
+        });
+
+        Func<Task> invoke = async () => await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
+            Target,
+            "tests.counter",
+            "tests.counter.increment",
+            "tests.counter.increment_request.v1",
+            "tests.counter.increment_receipt.v1",
+            new ClientOperationRequest { Amount = 2 },
+            sourceRuntimeId: "pilot-one",
+            idempotencyKey: "pilot-command-wrong-source");
+
+        var failure = await invoke.Should().ThrowAsync<CultMeshSessionException>();
+        failure.Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
     }
 
     [Test]
@@ -438,13 +463,15 @@ public sealed class CultMeshClientTests
         }
     }
 
-    private sealed class ConnectedClient : ICultNetSchemaClient
+    private sealed class ConnectedClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         public bool Connected => true;
         public void Connect(string host, int port) { }
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
         public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private sealed class DocumentConnector : ICultMeshTransportConnector
@@ -454,6 +481,7 @@ public sealed class CultMeshClientTests
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public bool RejectOperations { get; set; }
         public bool FailFirstOperationBeforeResponse { get; set; }
+        public string ResponseSourceRuntimeId { get; set; } = "aetheria-daemon";
         public string ConnectorId => "document-test";
         public int Priority => 0;
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
@@ -469,13 +497,14 @@ public sealed class CultMeshClientTests
                     ? int.MaxValue
                     : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0,
                 rejectOperations: RejectOperations,
-                failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0);
+                failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0,
+                responseSourceRuntimeId: ResponseSourceRuntimeId);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
     }
 
-    private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+    private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
         private readonly List<Action<CultNetOperationResponseMessage>> _operationResponses = new();
@@ -484,17 +513,20 @@ public sealed class CultMeshClientTests
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly bool _rejectOperations;
         private bool _failOperationBeforeResponse;
+        private readonly string _responseSourceRuntimeId;
         private int _snapshotsToSuppress;
         public DocumentClient(
             string text,
             int snapshotsToSuppress = 0,
             bool rejectOperations = false,
-            bool failOperationBeforeResponse = false)
+            bool failOperationBeforeResponse = false,
+            string responseSourceRuntimeId = "aetheria-daemon")
         {
             _text = text;
             _snapshotsToSuppress = snapshotsToSuppress;
             _rejectOperations = rejectOperations;
             _failOperationBeforeResponse = failOperationBeforeResponse;
+            _responseSourceRuntimeId = responseSourceRuntimeId;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -514,6 +546,7 @@ public sealed class CultMeshClientTests
             }
             if (message is CultNetOperationRequestMessage operation)
             {
+                operation.TargetRuntimeId.Should().Be("aetheria-daemon");
                 Operations.Add(operation);
                 if (_failOperationBeforeResponse)
                 {
@@ -539,7 +572,7 @@ public sealed class CultMeshClientTests
                             failure,
                             CultNetSchemaMessageSerialization.Options)),
                         Diagnostics = new[] { failure.Message },
-                        SourceRuntimeId = "provider-daemon"
+                        SourceRuntimeId = _responseSourceRuntimeId
                     };
                     foreach (var handler in _operationResponses.ToArray()) handler(rejected);
                     return;
@@ -562,7 +595,7 @@ public sealed class CultMeshClientTests
                     Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
                         receipt,
                         CultNetSchemaMessageSerialization.Options)),
-                    SourceRuntimeId = "provider-daemon"
+                    SourceRuntimeId = _responseSourceRuntimeId
                 };
                 foreach (var handler in _operationResponses.ToArray()) handler(operationResponse);
                 return;
@@ -596,6 +629,8 @@ public sealed class CultMeshClientTests
         }
         public void Dispose() { }
         public void Fail(Exception error) => _failure.TrySetResult(error);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

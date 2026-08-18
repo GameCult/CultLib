@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.session-accepted.schema.json",
+  "title": "CultMesh Session Accepted",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "accepted", "verseId", "authorityRuntimeId", "protocolId", "routeGeneration"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultmesh.session_accepted.v1" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "accepted": { "type": "boolean" },
+    "verseId": { "type": "string", "minLength": 1 },
+    "authorityRuntimeId": { "type": "string", "minLength": 1 },
+    "protocolId": { "type": "string", "minLength": 1 },
+    "routeGeneration": { "type": "string" },
+    "error": { "type": "string", "minLength": 1 }
+  }
+}

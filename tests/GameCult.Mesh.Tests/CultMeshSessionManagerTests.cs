@@ -80,6 +80,81 @@ public sealed class CultMeshSessionManagerTests
     }
 
     [Test]
+    public async Task Connect_NeverAttemptsRouteBoundToAnotherAuthority()
+    {
+        var clock = new ManualSessionClock();
+        var descriptor = new CultMeshVerseDescriptor(
+            "aetheria",
+            "Aetheria",
+            CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            authorityRoutes: new[]
+            {
+                new CultMeshAuthorityRoute("decoy-daemon", "rudp://decoy:3076"),
+                new CultMeshAuthorityRoute("aetheria-daemon", "rudp://authority:3076")
+            });
+        using var discovery = new CultMeshDiscoveryService(
+            new[] { new StaticRouteSource(clock, descriptor) },
+            new CultMeshDiscoveryServiceOptions { Clock = clock });
+        var attempts = new List<string>();
+        var connector = new FakeConnector((candidate, _) =>
+        {
+            attempts.Add(candidate.Endpoint);
+            return Task.FromResult<ICultNetSchemaClient>(new FakeSchemaClient());
+        });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector });
+
+        var session = await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
+
+        session.State.Path!.Endpoint.Should().Be("rudp://authority:3076");
+        attempts.Should().Equal("rudp://authority:3076");
+    }
+
+    [Test]
+    public void Connect_RejectsRouteWhoseNativeIdentityDoesNotMatchTarget()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://decoy:3076" });
+        var connector = new FakeConnector((_, _) =>
+            Task.FromResult<ICultNetSchemaClient>(new NativeMismatchClient()));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector });
+
+        var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
+            manager.ConnectAsync(Target, CultMeshProtocols.Documents));
+
+        error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
+    public void Connect_RejectsPortableHandshakeFromWrongRuntime()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://decoy:3076" });
+        var connector = new FakeConnector((_, _) =>
+            Task.FromResult<ICultNetSchemaClient>(new HandshakeSchemaClient("decoy-daemon")));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector });
+
+        var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
+            manager.ConnectAsync(Target, CultMeshProtocols.Documents));
+
+        error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
+    public void Descriptor_RejectsAmbiguousLegacyMultiAuthorityRoutes()
+    {
+        var action = () => new CultMeshVerseDescriptor(
+            "aetheria",
+            "Aetheria",
+            CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            discoveryEndpoints: new[] { "rudp://shared:3076" },
+            authorityRuntimeIds: new[] { "authority-a", "authority-b" });
+
+        action.Should().Throw<InvalidOperationException>().WithMessage("*ambiguous*");
+    }
+
+    [Test]
     public async Task Connect_CallerCancellationDoesNotCancelSharedAttempt()
     {
         var clock = new ManualSessionClock();
@@ -308,6 +383,30 @@ public sealed class CultMeshSessionManagerTests
                 CultMeshDiscoveryTrust.Signed);
     }
 
+    private sealed class StaticRouteSource : ICultMeshLookupSource
+    {
+        private readonly ManualSessionClock _clock;
+        private readonly CultMeshVerseDescriptor _descriptor;
+        public StaticRouteSource(ManualSessionClock clock, CultMeshVerseDescriptor descriptor)
+        {
+            _clock = clock;
+            _descriptor = descriptor;
+        }
+        public string SourceId => "odin";
+        public Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(
+            CultMeshDiscoveryQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(new[]
+            {
+                new CultMeshDiscoveryObservation(
+                    _descriptor,
+                    SourceId,
+                    _clock.UtcNow,
+                    _clock.UtcNow.AddMinutes(1),
+                    CultMeshDiscoveryTrust.Signed)
+            });
+    }
+
     private sealed class FakeConnector : ICultMeshTransportConnector
     {
         private readonly Func<CultMeshTransportCandidate, CancellationToken, Task<ICultNetSchemaClient>> _connect;
@@ -324,7 +423,7 @@ public sealed class CultMeshSessionManagerTests
         }
     }
 
-    private sealed class FakeSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+    private sealed class FakeSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth, ICultMeshVerifiedSchemaClient
     {
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly List<Action<CultNetErrorMessage>> _handlers = new();
@@ -340,6 +439,8 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
         public void Fail(Exception error) => _failure.TrySetResult(error);
         public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
     }
@@ -360,7 +461,46 @@ public sealed class CultMeshSessionManagerTests
         public void Dispose() { }
     }
 
-    private sealed class RespondingSchemaClient : ICultNetSchemaClient
+    private sealed class NativeMismatchClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
+    {
+        public bool Connected => true;
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) => false;
+        public void Dispose() { }
+    }
+
+    private sealed class HandshakeSchemaClient : ICultNetSchemaClient
+    {
+        private readonly string _actualRuntimeId;
+        private readonly List<Action<CultMeshSessionAcceptedMessage>> _handlers = new();
+        public HandshakeSchemaClient(string actualRuntimeId) => _actualRuntimeId = actualRuntimeId;
+        public bool Connected => true;
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (message is not CultMeshSessionOpenMessage request) return;
+            var response = new CultMeshSessionAcceptedMessage
+            {
+                MessageId = request.MessageId,
+                Accepted = true,
+                VerseId = request.VerseId,
+                AuthorityRuntimeId = _actualRuntimeId,
+                ProtocolId = request.ProtocolId,
+                RouteGeneration = request.RouteGeneration
+            };
+            foreach (var handler in _handlers.ToArray()) handler(response);
+        }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultMeshSessionAcceptedMessage))
+                _handlers.Add(message => callback((T)(object)message));
+        }
+        public void Dispose() { }
+    }
+
+    private sealed class RespondingSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _handlers = new();
         private int _disposeCount;
@@ -385,9 +525,11 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
-    private sealed class PeerExchangeSchemaClient : ICultNetSchemaClient
+    private sealed class PeerExchangeSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultMeshPeerExchangeResponseMessage>> _handlers = new();
         public bool Connected => true;
@@ -413,9 +555,11 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
-    private sealed class LeaseSchemaClient : ICultNetSchemaClient
+    private sealed class LeaseSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetErrorMessage>> _handlers = new();
         private int _disposeCount;
@@ -430,6 +574,8 @@ public sealed class CultMeshSessionManagerTests
         }
         public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private sealed class ManualSessionClock : ICultMeshClock

@@ -164,6 +164,16 @@ namespace GameCult.Networking
             if (_disposed) return;
             if (request == null) throw new ArgumentNullException(nameof(request));
             if (peer == null) throw new ArgumentNullException(nameof(peer));
+            if (_sourceRuntimeId != null &&
+                !string.Equals(request.TargetRuntimeId, _sourceRuntimeId, StringComparison.Ordinal))
+            {
+                peer.SendCultNet(Failure(
+                    request,
+                    "denied",
+                    "target-runtime-mismatch",
+                    $"Operation targeted runtime '{request.TargetRuntimeId ?? "(missing)"}', not '{_sourceRuntimeId}'."));
+                return;
+            }
 
             Route route;
             try

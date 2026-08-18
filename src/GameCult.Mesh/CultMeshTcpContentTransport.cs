@@ -11,6 +11,21 @@ using GameCult.Networking;
 
 namespace GameCult.Mesh
 {
+    /// <summary>Identity served by one dedicated content listener.</summary>
+    public sealed class CultMeshTcpContentServerOptions
+    {
+        public string VerseId { get; set; } = string.Empty;
+        public string AuthorityRuntimeId { get; set; } = string.Empty;
+        public string RouteGeneration { get; set; } = string.Empty;
+
+        internal void Validate()
+        {
+            if (string.IsNullOrWhiteSpace(VerseId)) throw new InvalidOperationException("Content Verse identity is required.");
+            if (string.IsNullOrWhiteSpace(AuthorityRuntimeId)) throw new InvalidOperationException("Content authority runtime identity is required.");
+            if (string.IsNullOrWhiteSpace(RouteGeneration)) throw new InvalidOperationException("Content route generation is required.");
+        }
+    }
+
     /// <summary>Creates dedicated TCP streams for immutable CultMesh content.</summary>
     public sealed class CultMeshTcpContentTransportConnector : ICultMeshContentTransportConnector
     {
@@ -33,11 +48,11 @@ namespace GameCult.Mesh
 
         public async Task<ICultMeshContentTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             if (candidate == null) throw new ArgumentNullException(nameof(candidate));
-            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (!TryParseEndpoint(candidate.Endpoint, out var host, out var port))
                 throw new NotSupportedException($"TCP content connector does not support '{candidate.Endpoint}'.");
 
@@ -48,8 +63,10 @@ namespace GameCult.Mesh
             {
                 await CultMeshTcpContentWire.AwaitAsync(client.ConnectAsync(host, port), timeout.Token)
                     .ConfigureAwait(false);
+                await CultMeshTcpContentWire.VerifyAuthorityAsync(
+                    client.GetStream(), target, candidate, timeout.Token).ConfigureAwait(false);
                 Interlocked.Increment(ref _connectCount);
-                return new CultMeshTcpContentTransport(candidate.Endpoint, client);
+                return new CultMeshTcpContentTransport(candidate.Endpoint, client, target, candidate.Generation);
             }
             catch
             {
@@ -72,7 +89,7 @@ namespace GameCult.Mesh
         }
     }
 
-    internal sealed class CultMeshTcpContentTransport : ICultMeshContentTransport
+    internal sealed class CultMeshTcpContentTransport : ICultMeshContentTransport, ICultMeshVerifiedTransport
     {
         private readonly TcpClient _client;
         private readonly NetworkStream _stream;
@@ -80,18 +97,38 @@ namespace GameCult.Mesh
         private readonly ConcurrentDictionary<string, PendingCopy> _pending = new(StringComparer.Ordinal);
         private readonly CancellationTokenSource _shutdown = new();
         private readonly Task _receiveLoop;
+        private readonly string _verseId;
+        private readonly string _authorityRuntimeId;
+        private readonly string _routeGeneration;
         private bool _disposed;
 
-        public CultMeshTcpContentTransport(string endpoint, TcpClient client)
+        public CultMeshTcpContentTransport(
+            string endpoint,
+            TcpClient client,
+            CultMeshSessionTarget target,
+            string routeGeneration)
         {
             Endpoint = endpoint;
             _client = client ?? throw new ArgumentNullException(nameof(client));
+            _verseId = target?.VerseId ?? throw new ArgumentNullException(nameof(target));
+            _authorityRuntimeId = target.AuthorityRuntimeId;
+            _routeGeneration = routeGeneration ?? string.Empty;
             _stream = client.GetStream();
             _receiveLoop = ReceiveLoopAsync(_shutdown.Token);
         }
 
         public string TransportId => "tcp-content";
         public string Endpoint { get; }
+
+        public bool IsVerifiedFor(
+            string verseId,
+            string authorityRuntimeId,
+            string protocolId,
+            string routeGeneration) =>
+            string.Equals(_verseId, verseId, StringComparison.Ordinal) &&
+            string.Equals(_authorityRuntimeId, authorityRuntimeId, StringComparison.Ordinal) &&
+            string.Equals(CultMeshProtocols.Content.Value, protocolId, StringComparison.Ordinal) &&
+            string.Equals(_routeGeneration, routeGeneration, StringComparison.Ordinal);
 
         public async Task CopyChunkToAsync(
             CultMeshCdnChunkRef chunk,
@@ -212,6 +249,7 @@ namespace GameCult.Mesh
         private readonly TcpListener _listener;
         private readonly Func<string, CultMeshCdnArtifactChunk?> _resolveChunk;
         private readonly Func<string, bool> _canServeHash;
+        private readonly CultMeshTcpContentServerOptions _options;
         private readonly CancellationTokenSource _shutdown = new();
         private readonly ConcurrentDictionary<TcpClient, byte> _clients = new();
         private readonly Task _acceptLoop;
@@ -221,8 +259,9 @@ namespace GameCult.Mesh
         public CultMeshTcpContentServer(
             TcpListener listener,
             CultCache content,
+            CultMeshTcpContentServerOptions options,
             Func<string, bool>? canServeHash = null)
-            : this(listener, CreateCacheResolver(content), canServeHash)
+            : this(listener, CreateCacheResolver(content), options, canServeHash)
         {
         }
 
@@ -234,10 +273,13 @@ namespace GameCult.Mesh
         public CultMeshTcpContentServer(
             TcpListener listener,
             Func<string, CultMeshCdnArtifactChunk?> resolveChunk,
+            CultMeshTcpContentServerOptions options,
             Func<string, bool>? canServeHash = null)
         {
             _listener = listener ?? throw new ArgumentNullException(nameof(listener));
             _resolveChunk = resolveChunk ?? throw new ArgumentNullException(nameof(resolveChunk));
+            _options = options ?? throw new ArgumentNullException(nameof(options));
+            _options.Validate();
             _canServeHash = canServeHash ?? (_ => true);
             _listener.Start();
             _acceptLoop = AcceptLoopAsync(_shutdown.Token);
@@ -278,6 +320,7 @@ namespace GameCult.Mesh
             try
             {
                 using var stream = client.GetStream();
+                if (!await AcceptAuthorityAsync(stream, cancellationToken).ConfigureAwait(false)) return;
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     var requestBytes = await CultMeshTcpContentWire.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
@@ -294,6 +337,32 @@ namespace GameCult.Mesh
                 _clients.TryRemove(client, out _);
                 client.Dispose();
             }
+        }
+
+        private async Task<bool> AcceptAuthorityAsync(Stream stream, CancellationToken cancellationToken)
+        {
+            var requestBytes = await CultMeshTcpContentWire.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
+            var request = CultNetSchemaMessageSerialization.Deserialize(requestBytes) as CultMeshSessionOpenMessage
+                ?? throw new InvalidDataException("TCP content session did not begin with an authority handshake.");
+            var accepted = string.Equals(request.VerseId, _options.VerseId, StringComparison.Ordinal) &&
+                string.Equals(request.AuthorityRuntimeId, _options.AuthorityRuntimeId, StringComparison.Ordinal) &&
+                string.Equals(request.ProtocolId, CultMeshProtocols.Content.Value, StringComparison.Ordinal) &&
+                string.Equals(request.RouteGeneration, _options.RouteGeneration, StringComparison.Ordinal);
+            var response = new CultMeshSessionAcceptedMessage
+            {
+                MessageId = request.MessageId,
+                Accepted = accepted,
+                VerseId = _options.VerseId,
+                AuthorityRuntimeId = _options.AuthorityRuntimeId,
+                ProtocolId = CultMeshProtocols.Content.Value,
+                RouteGeneration = _options.RouteGeneration,
+                Error = accepted ? null : "Content session target does not match this authority route."
+            };
+            await CultMeshTcpContentWire.WriteFrameAsync(
+                stream,
+                CultNetSchemaMessageSerialization.Serialize(response),
+                cancellationToken).ConfigureAwait(false);
+            return accepted;
         }
 
         private async Task SendChunkAsync(
@@ -389,6 +458,38 @@ namespace GameCult.Mesh
             await stream.WriteAsync(header, 0, header.Length, cancellationToken).ConfigureAwait(false);
             await stream.WriteAsync(payload, 0, payload.Length, cancellationToken).ConfigureAwait(false);
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        public static async Task VerifyAuthorityAsync(
+            Stream stream,
+            CultMeshSessionTarget target,
+            CultMeshTransportCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            var request = new CultMeshSessionOpenMessage
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                SourceRuntimeId = "cultmesh-content-client",
+                VerseId = target.VerseId,
+                AuthorityRuntimeId = target.AuthorityRuntimeId,
+                ProtocolId = CultMeshProtocols.Content.Value,
+                RouteGeneration = candidate.Generation
+            };
+            await WriteFrameAsync(stream, CultNetSchemaMessageSerialization.Serialize(request), cancellationToken)
+                .ConfigureAwait(false);
+            var responseBytes = await ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
+            var response = CultNetSchemaMessageSerialization.Deserialize(responseBytes) as CultMeshSessionAcceptedMessage
+                ?? throw new InvalidDataException("TCP content authority handshake returned an unexpected schema.");
+            if (!string.Equals(response.MessageId, request.MessageId, StringComparison.Ordinal) ||
+                !response.Accepted ||
+                !string.Equals(response.VerseId, target.VerseId, StringComparison.Ordinal) ||
+                !string.Equals(response.AuthorityRuntimeId, target.AuthorityRuntimeId, StringComparison.Ordinal) ||
+                !string.Equals(response.ProtocolId, CultMeshProtocols.Content.Value, StringComparison.Ordinal) ||
+                !string.Equals(response.RouteGeneration, candidate.Generation, StringComparison.Ordinal))
+                throw new CultMeshSessionException(new CultMeshSessionFailure(
+                    CultMeshSessionFailureReason.Authority,
+                    response.Error ?? "TCP content endpoint did not prove the selected authority route.",
+                    candidate.Endpoint));
         }
 
         public static async Task<byte[]> ReadFrameAsync(Stream stream, CancellationToken cancellationToken)

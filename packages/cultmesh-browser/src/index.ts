@@ -12,6 +12,8 @@ import {
   type CultNetSnapshotResponseRawMessage,
   type CultMeshVerseCatalogRequestMessage,
   type CultMeshVerseCatalogResponseMessage,
+  type CultMeshSessionAcceptedMessage,
+  type CultMeshSessionOpenMessage,
 } from "cultnet-ts/contracts";
 
 export interface CultMeshBrowserIdentity {
@@ -21,7 +23,8 @@ export interface CultMeshBrowserIdentity {
 
 export interface CultMeshBrowserRoute extends CultMeshBrowserIdentity {
   endpoint: string;
-  generation?: string;
+  protocolId?: string;
+  generation: string;
 }
 
 export interface CultMeshBrowserRendezvous {
@@ -173,6 +176,7 @@ export interface CultMeshOperationOptions {
   payloadSchema: string;
   payload: unknown;
   idempotencyKey?: string;
+  /** @deprecated The connected authority is the operation target. A different value is rejected. */
   targetRuntimeId?: string;
 }
 
@@ -338,6 +342,11 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     requireText(options.serviceId, "serviceId");
     requireText(options.operation, "operation");
     requireText(options.payloadSchema, "payloadSchema");
+    if (options.targetRuntimeId && options.targetRuntimeId !== this.identity.authorityRuntimeId) {
+      throw new Error(
+        `CultMesh operation target '${options.targetRuntimeId}' does not match connected authority '${this.identity.authorityRuntimeId}'.`,
+      );
+    }
     await this.ensureConnected();
     const messageId = options.idempotencyKey ?? this.#options.createId();
     requireText(messageId, "operation idempotencyKey");
@@ -353,7 +362,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       payloadEncoding: "messagepack-base64",
       payload: bytesToBase64(encode(options.payload)),
       sourceRuntimeId: this.runtimeId,
-      ...(options.targetRuntimeId ? { targetRuntimeId: options.targetRuntimeId } : {}),
+      targetRuntimeId: this.identity.authorityRuntimeId,
     };
     const response = new Promise<CultNetOperationResponseMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -489,13 +498,67 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     socket.binaryType = "arraybuffer";
     try {
       await new Promise<void>((resolve, reject) => {
+        let opened = false;
+        let settled = false;
+        const handshakeId = this.#options.createId();
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
         const timer = setTimeout(
-          () => reject(new Error(`CultMesh WebSocket open timed out for '${route.endpoint}'.`)),
+          () => finish(new Error(
+            opened
+              ? `CultMesh authority handshake timed out for '${route.endpoint}'.`
+              : `CultMesh WebSocket open timed out for '${route.endpoint}'.`,
+          )),
           this.#options.connectTimeoutMs,
         );
-        socket.onopen = () => { clearTimeout(timer); resolve(); };
-        socket.onerror = () => { clearTimeout(timer); reject(new Error(`CultMesh WebSocket could not open '${route.endpoint}'.`)); };
-        socket.onclose = () => { clearTimeout(timer); reject(new Error(`CultMesh WebSocket closed while opening '${route.endpoint}'.`)); };
+        socket.onopen = () => {
+          opened = true;
+          try {
+            sendSocketMessage(socket, {
+              schemaVersion: "cultnet.hello.v0",
+              runtimeId: this.runtimeId,
+              runtimeKind: "browser",
+              supportedMessageVersions: [
+                "cultmesh.session_open.v1",
+                "cultmesh.session_accepted.v1",
+                "cultnet.database_subscribe.v0",
+                "cultnet.database_unsubscribe.v0",
+                "cultnet.database_change_raw.v0",
+                "cultnet.operation_request.v0",
+                "cultnet.operation_response.v0",
+              ],
+            }, this.#options.maxFrameBytes);
+            const request: CultMeshSessionOpenMessage = {
+              schemaVersion: "cultmesh.session_open.v1",
+              messageId: handshakeId,
+              sourceRuntimeId: this.runtimeId,
+              verseId: this.identity.verseId,
+              authorityRuntimeId: this.identity.authorityRuntimeId,
+              protocolId: route.protocolId ?? "cultmesh.documents.v1",
+              routeGeneration: route.generation,
+            };
+            sendSocketMessage(socket, request, this.#options.maxFrameBytes);
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        socket.onmessage = event => {
+          void decodeSocketMessage(event, this.#options.maxFrameBytes).then(message => {
+            if (message.schemaVersion === "cultnet.error.v0") {
+              finish(new Error(message.error));
+              return;
+            }
+            if (message.schemaVersion !== "cultmesh.session_accepted.v1" || message.messageId !== handshakeId) return;
+            finish(validateSessionAcceptance(message, this.identity, route));
+          }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+        };
+        socket.onerror = () => finish(new Error(`CultMesh WebSocket could not open '${route.endpoint}'.`));
+        socket.onclose = () => finish(new Error(`CultMesh WebSocket closed before proving authority at '${route.endpoint}'.`));
       });
     } catch (error) {
       socket.close(1000, "CultMesh route open failed");
@@ -511,18 +574,6 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     socket.onclose = () => this.handleClosed(generation);
     this.setState("connected");
     try {
-      this.send({
-        schemaVersion: "cultnet.hello.v0",
-        runtimeId: this.runtimeId,
-        runtimeKind: "browser",
-        supportedMessageVersions: [
-          "cultnet.database_subscribe.v0",
-          "cultnet.database_unsubscribe.v0",
-          "cultnet.database_change_raw.v0",
-          "cultnet.operation_request.v0",
-          "cultnet.operation_response.v0",
-        ],
-      });
       await Promise.all([...this.#leases.values()].map(lease => this.subscribe(lease)));
     } catch (error) {
       if (this.#socket === socket) this.#socket = undefined;
@@ -576,6 +627,15 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       case "cultnet.operation_response.v0": {
         const pending = this.#pendingOperations.get(message.messageId);
         if (!pending) return;
+        if (message.sourceRuntimeId !== this.identity.authorityRuntimeId) {
+          this.#pendingOperations.delete(message.messageId);
+          clearTimeout(pending.timer);
+          pending.reject(new Error(
+            `CultMesh operation response came from '${message.sourceRuntimeId ?? "unknown"}', expected '${this.identity.authorityRuntimeId}'.`,
+          ));
+          this.#socket?.close(1008, "CultMesh authority identity changed");
+          return;
+        }
         this.#pendingOperations.delete(message.messageId);
         clearTimeout(pending.timer);
         if (message.payloadSchema === cultNetOperationFailureSchema) {
@@ -733,31 +793,70 @@ function selectOdinRoute(
   response: CultMeshVerseCatalogResponseMessage,
   identity: CultMeshBrowserIdentity,
 ): CultMeshBrowserRoute {
-  const matchingVerses = response.verses.filter(verse =>
-    verse.verseId === identity.verseId &&
-      verse.authorityRuntimeIds.includes(identity.authorityRuntimeId));
+  const matchingVerses = response.verses.filter(verse => verse.verseId === identity.verseId);
   if (matchingVerses.length !== 1) {
     throw new Error(
       `Odin returned ${matchingVerses.length} routes for Verse '${identity.verseId}' authority runtime '${identity.authorityRuntimeId}'.`,
     );
   }
   const verse = matchingVerses[0];
-  const endpoints = verse.discoveryEndpoints.filter(endpoint => {
+  if (verse.authorityRoutes == null && verse.authorityRuntimeIds.length !== 1) {
+    throw new Error(
+      `Odin returned ambiguous legacy routes for Verse '${identity.verseId}'. Explicit authority route bindings are required.`,
+    );
+  }
+  if (verse.authorityRoutes == null && verse.authorityRuntimeIds[0] !== identity.authorityRuntimeId) {
+    throw new Error(
+      `Odin advertised no route for authority runtime '${identity.authorityRuntimeId}'.`,
+    );
+  }
+  const boundRoutes = verse.authorityRoutes ?? verse.discoveryEndpoints.map(endpoint => ({
+    authorityRuntimeId: verse.authorityRuntimeIds[0],
+    endpoint,
+    protocolIds: ["cultmesh.documents.v1"],
+    priority: 0,
+    generation: [verse.compatibility.transportVersion, verse.compatibility.rulesHash, endpoint].join(":"),
+  }));
+  const routes = boundRoutes.filter(route =>
+    route.authorityRuntimeId === identity.authorityRuntimeId &&
+    route.protocolIds.includes("cultmesh.documents.v1") &&
+    (() => {
     try {
-      requireWebSocketEndpoint(endpoint, "Odin provider route");
+      requireWebSocketEndpoint(route.endpoint, "Odin provider route");
       return true;
     } catch {
       return false;
     }
-  });
-  if (endpoints.length === 0) {
+  })()).sort((left, right) => left.priority - right.priority || left.endpoint.localeCompare(right.endpoint));
+  if (routes.length === 0) {
     throw new Error(`Odin advertised no browser-compatible route for authority runtime '${identity.authorityRuntimeId}'.`);
   }
+  const route = routes[0];
   return {
     ...identity,
-    endpoint: endpoints[0],
-    generation: [verse.compatibility.transportVersion, verse.compatibility.rulesHash, endpoints[0]].join(":"),
+    endpoint: route.endpoint,
+    protocolId: "cultmesh.documents.v1",
+    generation: route.generation,
   };
+}
+
+function validateSessionAcceptance(
+  message: CultMeshSessionAcceptedMessage,
+  identity: CultMeshBrowserIdentity,
+  route: CultMeshBrowserRoute,
+): Error | undefined {
+  if (!message.accepted) return new Error(message.error ?? "CultMesh authority rejected the session.");
+  const protocolId = route.protocolId ?? "cultmesh.documents.v1";
+  if (message.verseId !== identity.verseId ||
+      message.authorityRuntimeId !== identity.authorityRuntimeId ||
+      message.protocolId !== protocolId ||
+      message.routeGeneration !== route.generation) {
+    return new Error(
+      `CultMesh route proved '${message.verseId}/${message.authorityRuntimeId}/${message.protocolId}/${message.routeGeneration}', ` +
+      `expected '${identity.verseId}/${identity.authorityRuntimeId}/${protocolId}/${route.generation}'.`,
+    );
+  }
+  return undefined;
 }
 
 function requireText(value: string, field: string): void {

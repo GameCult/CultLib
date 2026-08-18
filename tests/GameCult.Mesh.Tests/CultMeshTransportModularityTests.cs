@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -15,10 +16,17 @@ namespace GameCult.Mesh.Tests;
 [TestFixture]
 public sealed class CultMeshTransportModularityTests
 {
+    private const string RouteGeneration = "transport-modularity-route-1";
     [Test]
     public async Task SchemaSessionPrefersTcpTierWithoutTouchingLegacyDatagrams()
     {
         using var server = new TcpFramedCultNetSchemaServer(new TcpListener(IPAddress.Loopback, 0));
+        using var identity = new CultMeshSessionIdentityServer(
+            server,
+            "aetheria.daemon",
+            new[] { "aetheria" },
+            new[] { CultMeshProtocols.Documents.Value },
+            new[] { RouteGeneration });
         server.OnCultNet<CultNetHelloMessage>((message, peer) =>
         {
             peer.SendCultNet(new CultNetErrorMessage { Error = "tcp:" + message.RuntimeId });
@@ -61,7 +69,15 @@ public sealed class CultMeshTransportModularityTests
         using var content = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
             typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
         await CultMeshCdn.PublishAsync(content, artifact);
-        using var server = new CultMeshTcpContentServer(new TcpListener(IPAddress.Loopback, 0), content);
+        using var server = new CultMeshTcpContentServer(
+            new TcpListener(IPAddress.Loopback, 0),
+            content,
+            new CultMeshTcpContentServerOptions
+            {
+                VerseId = "aetheria",
+                AuthorityRuntimeId = "aetheria.daemon",
+                RouteGeneration = RouteGeneration
+            });
         var tcpEndpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{server.LocalEndPoint.Port}";
         var legacy = new RejectingLegacyContentConnector();
         using var discovery = new CultMeshDiscoveryService(new[]
@@ -156,6 +172,26 @@ public sealed class CultMeshTransportModularityTests
             .WithMessage("*No realtime state connectors are configured*");
     }
 
+    [Test]
+    public async Task RealtimeSessionRejectsConnectedTransportWithoutAuthorityProof()
+    {
+        using var discovery = new CultMeshDiscoveryService(new[]
+        {
+            new RouteSource("cultmesh-state+quic://127.0.0.1:3076")
+        });
+        using var sessions = new CultMeshSessionManager(
+            discovery,
+            Array.Empty<ICultMeshTransportConnector>(),
+            Array.Empty<ICultMeshContentTransportConnector>(),
+            new ICultMeshRealtimeTransportConnector[] { new UnverifiedRealtimeConnector() });
+
+        Func<Task> connect = async () => await sessions.ConnectRealtimeAsync(
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
+
+        var error = await connect.Should().ThrowAsync<CultMeshSessionException>();
+        error.Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
     private sealed class RouteSource : ICultMeshLookupSource
     {
         private readonly string[] _endpoints;
@@ -176,8 +212,11 @@ public sealed class CultMeshTransportModularityTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "rules"),
-                        _endpoints,
-                        new[] { "aetheria.daemon" }),
+                        authorityRoutes: _endpoints.Select(endpoint => new CultMeshAuthorityRoute(
+                            "aetheria.daemon",
+                            endpoint,
+                            protocolIds: null,
+                            generation: RouteGeneration))),
                     SourceId,
                     now,
                     now.AddMinutes(1),
@@ -214,7 +253,7 @@ public sealed class CultMeshTransportModularityTests
             candidate.Endpoint.StartsWith("rudp://", StringComparison.OrdinalIgnoreCase);
         public Task<ICultMeshContentTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _connectCount);
@@ -232,23 +271,69 @@ public sealed class CultMeshTransportModularityTests
             candidate.Endpoint.StartsWith("cultmesh-state+quic://", StringComparison.OrdinalIgnoreCase);
         public Task<ICultMeshRealtimeTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _connectCount);
-            return Task.FromResult<ICultMeshRealtimeTransport>(new LoopbackRealtimeTransport(candidate.Endpoint));
+            return Task.FromResult<ICultMeshRealtimeTransport>(
+                new LoopbackRealtimeTransport(candidate.Endpoint, target, candidate.Generation));
         }
     }
 
-    private sealed class LoopbackRealtimeTransport : ICultMeshRealtimeTransport
+    private sealed class UnverifiedRealtimeConnector : ICultMeshRealtimeTransportConnector
+    {
+        public string ConnectorId => "unverified-realtime";
+        public int Priority => 0;
+        public bool CanConnect(CultMeshTransportCandidate candidate) => true;
+        public Task<ICultMeshRealtimeTransport> ConnectAsync(
+            CultMeshTransportCandidate candidate,
+            CultMeshSessionTarget target,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ICultMeshRealtimeTransport>(new UnverifiedRealtimeTransport(candidate.Endpoint));
+    }
+
+    private sealed class UnverifiedRealtimeTransport : ICultMeshRealtimeTransport
+    {
+        public UnverifiedRealtimeTransport(string endpoint) => Endpoint = endpoint;
+        public string TransportId => "unverified-realtime";
+        public string Endpoint { get; }
+        public Task SendAsync(CultMeshRealtimeFrame frame, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+        public Task<CultMeshRealtimeFrame> ReceiveAsync(CancellationToken cancellationToken = default) =>
+            Task.FromException<CultMeshRealtimeFrame>(new InvalidOperationException());
+        public void Dispose() { }
+    }
+
+    private sealed class LoopbackRealtimeTransport : ICultMeshRealtimeTransport, ICultMeshVerifiedTransport
     {
         private readonly Queue<CultMeshRealtimeFrame> _frames = new();
         private readonly SemaphoreSlim _available = new(0);
         private bool _disposed;
 
-        public LoopbackRealtimeTransport(string endpoint) => Endpoint = endpoint;
+        private readonly CultMeshSessionTarget _target;
+        private readonly string _routeGeneration;
+
+        public LoopbackRealtimeTransport(
+            string endpoint,
+            CultMeshSessionTarget target,
+            string routeGeneration)
+        {
+            Endpoint = endpoint;
+            _target = target;
+            _routeGeneration = routeGeneration;
+        }
         public string TransportId => "test-quic-state";
         public string Endpoint { get; }
+
+        public bool IsVerifiedFor(
+            string verseId,
+            string authorityRuntimeId,
+            string protocolId,
+            string routeGeneration) =>
+            string.Equals(_target.VerseId, verseId, StringComparison.Ordinal) &&
+            string.Equals(_target.AuthorityRuntimeId, authorityRuntimeId, StringComparison.Ordinal) &&
+            string.Equals(CultMeshProtocols.RealtimeState.Value, protocolId, StringComparison.Ordinal) &&
+            string.Equals(_routeGeneration, routeGeneration, StringComparison.Ordinal);
 
         public Task SendAsync(CultMeshRealtimeFrame frame, CancellationToken cancellationToken = default)
         {

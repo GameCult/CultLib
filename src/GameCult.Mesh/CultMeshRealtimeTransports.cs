@@ -59,7 +59,7 @@ namespace GameCult.Mesh
         bool CanConnect(CultMeshTransportCandidate candidate);
         Task<ICultMeshRealtimeTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default);
     }
 

@@ -18,6 +18,18 @@
         "optionalPluginIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
       }
     },
+    "authorityRoute": {
+      "type": "object",
+      "required": ["authorityRuntimeId", "endpoint", "protocolIds", "priority", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "authorityRuntimeId": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "minLength": 1 },
+        "protocolIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "priority": { "type": "integer", "minimum": 0 },
+        "generation": { "type": "string", "minLength": 1 }
+      }
+    },
     "verse": {
       "type": "object",
       "required": ["verseId", "displayName", "authorityModel", "compatibility", "discoveryEndpoints", "authorityRuntimeIds"],
@@ -29,6 +41,7 @@
         "compatibility": { "$ref": "#/$defs/compatibility" },
         "discoveryEndpoints": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "authorityRuntimeIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "authorityRoutes": { "type": "array", "items": { "$ref": "#/$defs/authorityRoute" } },
         "parentVerseId": { "type": "string", "minLength": 1 },
         "description": { "type": "string" }
       }

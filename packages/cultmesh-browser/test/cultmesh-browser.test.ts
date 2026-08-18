@@ -9,6 +9,7 @@ import {
   type CultNetMessage,
   type CultNetOperationRequestMessage,
   type CultNetRawDocumentRecord,
+  type CultMeshSessionOpenMessage,
 } from "cultnet-ts/contracts";
 
 import {
@@ -45,6 +46,46 @@ test("Odin rendezvous resolves stable authority-runtime identity and observes ro
   await assert.rejects(
     rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "other-runtime" }),
     /could not resolve/,
+  );
+});
+
+test("Odin rendezvous never selects another authority's faster endpoint", async () => {
+  const odin = new FakeOdin("ws://127.0.0.1:4050/mesh");
+  odin.decoyEndpoint = "ws://127.0.0.1:4049/decoy";
+  const rendezvous = new CultMeshBrowserOdinRendezvous({
+    endpoints: ["ws://127.0.0.1:4040/odin"],
+    runtimeId: "browser-route-binding-test",
+    socketFactory: () => odin.open(),
+  });
+
+  const route = await rendezvous.resolve({
+    verseId: "sample.counter",
+    authorityRuntimeId: "sample.counter-daemon",
+  });
+  assert.equal(route.endpoint, "ws://127.0.0.1:4050/mesh");
+});
+
+test("Odin rendezvous accepts one-authority legacy routes and rejects ambiguous legacy catalogs", async () => {
+  const odin = new FakeOdin("ws://127.0.0.1:4070/mesh");
+  odin.omitAuthorityRoutes = true;
+  const rendezvous = new CultMeshBrowserOdinRendezvous({
+    endpoints: ["ws://127.0.0.1:4040/odin"],
+    runtimeId: "browser-legacy-route-test",
+    socketFactory: () => odin.open(),
+  });
+
+  const route = await rendezvous.resolve({
+    verseId: "sample.counter",
+    authorityRuntimeId: "sample.counter-daemon",
+  });
+  assert.equal(route.endpoint, "ws://127.0.0.1:4070/mesh");
+
+  odin.decoyEndpoint = "ws://127.0.0.1:4069/decoy";
+  await assert.rejects(
+    rendezvous.resolve({ verseId: "sample.counter", authorityRuntimeId: "sample.counter-daemon" }),
+    (error: unknown) =>
+      error instanceof AggregateError &&
+      error.errors.some(inner => inner instanceof Error && /ambiguous legacy routes/.test(inner.message)),
   );
 });
 
@@ -117,18 +158,33 @@ test("browser client rejects wrong rendezvous identity and has no document write
   assert.equal("setDocument" in CultMeshBrowserClient.prototype, false);
 });
 
+test("browser client rejects a route whose peer proves the wrong authority", async () => {
+  const provider = new FakeProvider("ws://127.0.0.1:4251/mesh", 1, false, "intruder-runtime");
+  await assert.rejects(
+    CultMeshBrowserClient.connect({
+      verseId: "sample.counter",
+      authorityRuntimeId: "sample.counter-daemon",
+      runtimeId: "browser-peer-proof-test",
+      rendezvous: { resolve: async () => ({ ...provider.route, authorityRuntimeId: "sample.counter-daemon" }) },
+      socketFactory: () => provider.open(),
+    }),
+    /proved .*intruder-runtime.*expected .*sample.counter-daemon/,
+  );
+});
+
 test("browser client bounds unanswered provider operations", async () => {
   const route = {
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
     endpoint: "ws://127.0.0.1:4301/mesh",
+    generation: "route-4301",
   };
   const client = await CultMeshBrowserClient.connect({
     ...route,
     runtimeId: "browser-timeout-test",
     rendezvous: { resolve: async () => route },
     requestTimeoutMs: 5,
-    socketFactory: () => new FakeSocket(() => undefined, () => undefined),
+    socketFactory: () => handshakeOnlySocket(route),
   });
   await assert.rejects(
     client.invoke({
@@ -172,11 +228,39 @@ test("browser client rejects a correlated framework failure without waiting for 
   await client.dispose();
 });
 
+test("browser client rejects an operation response from another runtime", async () => {
+  const provider = new FakeProvider(
+    "ws://127.0.0.1:4371/mesh",
+    1,
+    false,
+    "sample.counter-daemon",
+    "intruder-runtime",
+  );
+  const client = await CultMeshBrowserClient.connect({
+    ...provider.route,
+    runtimeId: "browser-response-authority-test",
+    rendezvous: { resolve: async () => provider.route },
+    socketFactory: () => provider.open(),
+  });
+
+  await assert.rejects(
+    client.invoke({
+      serviceId: "sample.counter",
+      operation: "increment",
+      payloadSchema: "sample.increment.v1",
+      payload: { amount: 1 },
+    }),
+    /response came from 'intruder-runtime'/,
+  );
+  await client.dispose();
+});
+
 test("browser client rejects oversized outbound schema messages", async () => {
   const route = {
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
     endpoint: "ws://127.0.0.1:4401/mesh",
+    generation: "route-4401",
   };
   await assert.rejects(
     CultMeshBrowserClient.connect({
@@ -220,8 +304,16 @@ class FakeProvider {
   #count: number;
   #subscriptions = new Map<FakeSocket, Map<string, CultNetDatabaseSubscribeMessage>>();
   #rejectOperations: boolean;
+  #runtimeId: string;
+  #responseRuntimeId: string;
 
-  constructor(endpoint: string, count: number, rejectOperations = false) {
+  constructor(
+    endpoint: string,
+    count: number,
+    rejectOperations = false,
+    runtimeId = "sample.counter-daemon",
+    responseRuntimeId = runtimeId,
+  ) {
     this.route = {
       verseId: "sample.counter",
       authorityRuntimeId: "sample.counter-daemon",
@@ -230,6 +322,8 @@ class FakeProvider {
     };
     this.#count = count;
     this.#rejectOperations = rejectOperations;
+    this.#runtimeId = runtimeId;
+    this.#responseRuntimeId = responseRuntimeId;
   }
 
   get activeSubscriptionCount(): number {
@@ -250,6 +344,9 @@ class FakeProvider {
   private receive(socket: FakeSocket, wire: Uint8Array): void {
     const message = parseCultNetMessage(decode(wire));
     switch (message.schemaVersion) {
+      case "cultmesh.session_open.v1":
+        this.acceptSession(socket, message);
+        return;
       case "cultnet.database_subscribe.v0":
         this.subscribe(socket, message);
         return;
@@ -264,6 +361,18 @@ class FakeProvider {
     }
   }
 
+  private acceptSession(socket: FakeSocket, message: CultMeshSessionOpenMessage): void {
+    socket.deliver({
+      schemaVersion: "cultmesh.session_accepted.v1",
+      messageId: message.messageId,
+      accepted: true,
+      verseId: message.verseId,
+      authorityRuntimeId: this.#runtimeId,
+      protocolId: message.protocolId,
+      routeGeneration: message.routeGeneration,
+    });
+  }
+
   private subscribe(socket: FakeSocket, message: CultNetDatabaseSubscribeMessage): void {
     this.#subscriptions.get(socket)!.set(message.subscriptionId, message);
     socket.deliver({
@@ -274,6 +383,7 @@ class FakeProvider {
   }
 
   private invoke(socket: FakeSocket, message: CultNetOperationRequestMessage): void {
+    assert.equal(message.targetRuntimeId, this.#runtimeId);
     if (this.#rejectOperations) {
       socket.deliver({
         schemaVersion: "cultnet.operation_response.v0",
@@ -288,7 +398,7 @@ class FakeProvider {
           message: "Expected payload schema 'sample.increment.v1'.",
         })),
         diagnostics: ["Request schema did not match."],
-        sourceRuntimeId: "sample.counter-daemon",
+        sourceRuntimeId: this.#responseRuntimeId,
       });
       return;
     }
@@ -314,7 +424,7 @@ class FakeProvider {
       payloadSchema: "sample.increment_receipt.v1",
       payloadEncoding: "messagepack-base64",
       payload: bytesToBase64(encode({ count: this.#count })),
-      sourceRuntimeId: "sample.counter-daemon",
+      sourceRuntimeId: this.#responseRuntimeId,
     });
   }
 
@@ -328,13 +438,15 @@ class FakeProvider {
       storedAt: "2026-08-17T00:00:00Z",
       payloadEncoding: "messagepack",
       payload: encode({ count: this.#count }),
-      sourceRuntimeId: "sample.counter-daemon",
+      sourceRuntimeId: this.#runtimeId,
     };
   }
 }
 
 class FakeOdin {
   providerEndpoint: string;
+  decoyEndpoint: string | undefined;
+  omitAuthorityRoutes = false;
 
   constructor(providerEndpoint: string) {
     this.providerEndpoint = providerEndpoint;
@@ -359,12 +471,48 @@ class FakeOdin {
             optionalPluginIds: [],
           },
           discoveryEndpoints: [this.providerEndpoint],
-          authorityRuntimeIds: ["sample.counter-daemon"],
+          authorityRuntimeIds: this.decoyEndpoint
+            ? ["sample.counter-daemon", "sample.decoy-daemon"]
+            : ["sample.counter-daemon"],
+          ...(!this.omitAuthorityRoutes ? { authorityRoutes: [
+            ...(this.decoyEndpoint ? [{
+              authorityRuntimeId: "sample.decoy-daemon",
+              endpoint: this.decoyEndpoint,
+              protocolIds: ["cultmesh.documents.v1"],
+              priority: 0,
+              generation: "decoy-generation",
+            }] : []),
+            {
+              authorityRuntimeId: "sample.counter-daemon",
+              endpoint: this.providerEndpoint,
+              protocolIds: ["cultmesh.documents.v1"],
+              priority: 10,
+              generation: this.providerEndpoint,
+            },
+          ] } : {}),
         }],
       });
     }, () => undefined);
     return socket;
   }
+}
+
+function handshakeOnlySocket(route: CultMeshBrowserRoute): FakeSocket {
+  let socket: FakeSocket;
+  socket = new FakeSocket(wire => {
+    const message = parseCultNetMessage(decode(wire));
+    if (message.schemaVersion !== "cultmesh.session_open.v1") return;
+    socket.deliver({
+      schemaVersion: "cultmesh.session_accepted.v1",
+      messageId: message.messageId,
+      accepted: true,
+      verseId: route.verseId,
+      authorityRuntimeId: route.authorityRuntimeId,
+      protocolId: message.protocolId,
+      routeGeneration: message.routeGeneration,
+    });
+  }, () => undefined);
+  return socket;
 }
 
 class FakeSocket implements CultMeshBrowserSocket {

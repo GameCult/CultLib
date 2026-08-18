@@ -9,7 +9,8 @@ be equally good at files, realtime state, and same-machine memory access.
 registered connector for each traffic class. A connector owns only its physical
 connection and byte movement.
 
-**Inputs:** stable Verse/provider identity, advertised physical candidates,
+**Inputs:** stable Verse/authority-runtime identity, exact Odin-bound physical
+routes with protocol and generation,
 connector support and priority, caller cancellation, and locality evidence for
 body negotiation.
 
@@ -63,13 +64,22 @@ operation.
 transport diagnostics. None of these grant provider authority or become content
 identity.
 
+Before a schema, content, or realtime session becomes online, the transport
+must prove that the connected peer matches the selected Verse, authority
+runtime, protocol, and route generation. TCP schema and content lanes use the
+portable CultNet session-open handshake. QUIC uses the exact Odin-bound route
+plus its TLS endpoint/certificate proof. A connector that returns bytes without
+authority proof is rejected; racing every endpoint in a Verse descriptor is
+not route selection.
+
 **Forbidden writers:** applications and renderers do not choose unadvertised
 endpoints, implement reconnect loops, or bypass verification. Schema messages
 must not carry bulk bodies. RUDP/LiteNetLib cannot become an implicit default
 for any traffic class. QUIC does not own schemas or immutable files merely
 because it can transport bytes.
 
-**Shared paths:** discovery and identity resolution remain common. Each traffic
+**Shared paths:** exact route resolution and peer verification remain common.
+Each traffic
 class has its own connector set, connection cache, priority tiers, and failure
 state. All content connectors feed the same transfer and promotion owner.
 

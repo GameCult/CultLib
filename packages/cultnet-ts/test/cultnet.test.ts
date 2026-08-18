@@ -83,10 +83,29 @@ test("CultNet validates the canonical CultMesh Verse catalog messages", () => {
       },
       discoveryEndpoints: ["wss://provider.example/cultmesh"],
       authorityRuntimeIds: ["sample.counter-provider"],
+      authorityRoutes: [{
+        authorityRuntimeId: "sample.counter-provider",
+        endpoint: "wss://provider.example/cultmesh",
+        protocolIds: ["cultmesh.documents.v1"],
+        priority: 0,
+        generation: "provider-route-1",
+      }],
     }],
   });
   assert.equal(response.schemaVersion, "cultmesh.verse_catalog_response.v0");
   assert.equal(response.verses[0].authorityRuntimeIds[0], "sample.counter-provider");
+  assert.equal(response.verses[0].authorityRoutes![0].generation, "provider-route-1");
+
+  const session = parseCultNetMessage({
+    schemaVersion: "cultmesh.session_accepted.v1",
+    messageId: "session-1",
+    accepted: true,
+    verseId: "sample.counter",
+    authorityRuntimeId: "sample.counter-provider",
+    protocolId: "cultmesh.documents.v1",
+    routeGeneration: "provider-route-1",
+  });
+  assert.equal(session.schemaVersion, "cultmesh.session_accepted.v1");
 
   assert.throws(() => parseCultNetMessage({
     ...response,

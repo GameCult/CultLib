@@ -30,6 +30,8 @@ import operationRequestSchema from "../contracts/cultnet.operation-request.schem
 import operationResponseSchema from "../contracts/cultnet.operation-response.schema.json";
 import verseCatalogRequestSchema from "../contracts/cultmesh.verse-catalog-request.schema.json";
 import verseCatalogResponseSchema from "../contracts/cultmesh.verse-catalog-response.schema.json";
+import sessionOpenSchema from "../contracts/cultmesh.session-open.schema.json";
+import sessionAcceptedSchema from "../contracts/cultmesh.session-accepted.schema.json";
 import ghostlightAgentStateSchema from "../contracts/ghostlight.agent-state.schema.json";
 
 export type CultNetWireContract = "cultnet.schema.v0" | "gamecult.networking.v0";
@@ -59,7 +61,9 @@ export type CultNetSchemaVersion =
   | "cultnet.operation_request.v0"
   | "cultnet.operation_response.v0"
   | "cultmesh.verse_catalog_request.v0"
-  | "cultmesh.verse_catalog_response.v0";
+  | "cultmesh.verse_catalog_response.v0"
+  | "cultmesh.session_open.v1"
+  | "cultmesh.session_accepted.v1";
 
 export type CultNetSchemaKind = "wire_message" | "document_payload" | "shared_contract";
 export type CultNetRawPayloadEncoding = "messagepack";
@@ -350,8 +354,38 @@ export interface CultMeshVerseDescriptorMessage {
   compatibility: CultMeshVerseCompatibilityMessage;
   discoveryEndpoints: string[];
   authorityRuntimeIds: string[];
+  authorityRoutes?: CultMeshAuthorityRouteMessage[];
   parentVerseId?: string;
   description?: string;
+}
+
+export interface CultMeshAuthorityRouteMessage {
+  authorityRuntimeId: string;
+  endpoint: string;
+  protocolIds: string[];
+  priority: number;
+  generation: string;
+}
+
+export interface CultMeshSessionOpenMessage {
+  schemaVersion: "cultmesh.session_open.v1";
+  messageId: string;
+  sourceRuntimeId: string;
+  verseId: string;
+  authorityRuntimeId: string;
+  protocolId: string;
+  routeGeneration: string;
+}
+
+export interface CultMeshSessionAcceptedMessage {
+  schemaVersion: "cultmesh.session_accepted.v1";
+  messageId: string;
+  accepted: boolean;
+  verseId: string;
+  authorityRuntimeId: string;
+  protocolId: string;
+  routeGeneration: string;
+  error?: string;
 }
 
 export interface CultMeshVerseCatalogRequestMessage {
@@ -618,7 +652,9 @@ export type CultNetMessage =
   | CultNetOperationRequestMessage
   | CultNetOperationResponseMessage
   | CultMeshVerseCatalogRequestMessage
-  | CultMeshVerseCatalogResponseMessage;
+  | CultMeshVerseCatalogResponseMessage
+  | CultMeshSessionOpenMessage
+  | CultMeshSessionAcceptedMessage;
 
 const ajv = new Ajv2020({
   allErrors: true,
@@ -651,6 +687,8 @@ const CULTNET_MESSAGE_SCHEMAS = [
   operationResponseSchema,
   verseCatalogRequestSchema,
   verseCatalogResponseSchema,
+  sessionOpenSchema,
+  sessionAcceptedSchema,
 ] as const;
 
 const cultNetValidators = new Map<CultNetSchemaVersion, ValidateFunction>();
@@ -1197,6 +1235,9 @@ function normalizeCultNetOptionalNulls(
           stripNullProperties(verse as Record<string, unknown>, ["parentVerseId", "description"]);
         }
       }
+      return;
+    case "cultmesh.session_accepted.v1":
+      stripNullProperties(candidate, ["error"]);
       return;
     case "cultnet.schema_catalog_request.v0":
       stripNullProperties(candidate, ["schemaIds", "kinds"]);

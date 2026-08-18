@@ -21,8 +21,10 @@ The same transport can carry many Verses:
   subscribed overlay
 - `Compatibility`: transport version, rules hash, compatible Verse ids, and
   plugin requirements
-- `DiscoveryEndpoints`: endpoints where nodes for the Verse can be found
-- `AuthorityRuntimeIds`: known authoritative runtimes when cluster-shaped
+- `AuthorityRoutes`: exact authority-runtime, endpoint, protocol, priority, and
+  generation bindings. This is the routing authority.
+- `DiscoveryEndpoints`: read-only endpoint projection for legacy inspection
+- `AuthorityRuntimeIds`: read-only authority projection for legacy inspection
 - `ParentVerseId`: source Verse for overlays or branches
 
 ## Compatibility
@@ -56,6 +58,13 @@ Authority is a Verse-level policy, not a transport accident.
 static config, cloud discovery, peer gossip, or mod portals. It does not care
 where the descriptor came from. That keeps discovery pluggable while the Verse
 model stays stable.
+
+An endpoint and an authority id are not two independent facts. A descriptor
+with explicit routes binds them. The legacy parallel arrays are accepted only
+when exactly one authority runtime exists; a multi-authority legacy descriptor
+is ambiguous and fails closed. Session establishment then requires the selected
+physical route to prove the exact Verse, authority runtime, protocol, and route
+generation before the session becomes online.
 
 Peer exchange is the torrent-shaped layer under Verse discovery. A Verse
 catalog says which graph exists; a peer catalog says which nodes can currently

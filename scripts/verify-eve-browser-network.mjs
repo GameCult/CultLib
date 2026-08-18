@@ -17,9 +17,11 @@ const eveRoot = resolve(eveFlag >= 0 ? process.argv[eveFlag + 1] : join(repoRoot
 const sampleRoot = join(repoRoot, "samples", "eve-browser-network");
 const workRoot = await mkdtemp(join(tmpdir(), "cultmesh-browser-network-"));
 const statePath = join(workRoot, "counter.cc");
+const decoyStatePath = join(workRoot, "decoy-counter.cc");
 const bundlePath = join(workRoot, "bundle.js");
 const token = "sample-session";
 let provider;
+let decoyProvider;
 let replacementProvider;
 let odin;
 let headless;
@@ -41,6 +43,8 @@ try {
     alias: {
       "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
       "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
+      "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
+      "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
     },
     logLevel: "warning",
   });
@@ -54,14 +58,22 @@ try {
     "--verbosity", "quiet",
     "-p:NoWarn=1591%3BCS8632",
     `-p:EveRoot=${eveRoot}`,
+    `-p:CultLibRoot=${repoRoot}`,
   ]);
   const providerPort = await freePort();
+  const decoyProviderPort = await freePort();
   const replacementProviderPort = await freePort();
   const odinPort = await freePort();
   const httpPort = await freePort();
   provider = await startProvider(providerPort);
   const endpoint = await provider.waitFor("PROVIDER_READY ");
-  odin = await startOdin(odinPort, endpoint);
+  decoyProvider = await startProvider(decoyProviderPort, {
+    authorityRuntimeId: "sample.decoy-daemon",
+    routeGeneration: "sample-decoy-route-1",
+    statePath: decoyStatePath,
+  });
+  const decoyEndpoint = await decoyProvider.waitFor("PROVIDER_READY ");
+  odin = await startOdin(odinPort, endpoint, decoyEndpoint);
   const odinEndpoint = await odin.waitFor("ODIN_READY ");
   headless = startDotnet([
     "headless", "--odin", odinEndpoint, "--verse-id", "sample.counter",
@@ -91,7 +103,7 @@ try {
   const restartedEndpoint = await replacementProvider.waitFor("PROVIDER_READY ");
   assert.notEqual(restartedEndpoint, endpoint);
   await stop(odin.process);
-  odin = await startOdin(odinPort, restartedEndpoint);
+  odin = await startOdin(odinPort, restartedEndpoint, decoyEndpoint);
   assert.equal(await odin.waitFor("ODIN_READY "), odinEndpoint);
   await stop(provider.process);
   provider = replacementProvider;
@@ -122,6 +134,7 @@ try {
   console.log(JSON.stringify({
     providerEndpoint: endpoint,
     replacementProviderEndpoint: restartedEndpoint,
+    rejectedWrongAuthorityEndpoint: decoyEndpoint,
     odinEndpoint,
     browserRuntime: "chromium",
     headlessRuntime: "csharp",
@@ -136,21 +149,31 @@ try {
   if (browser) await browser.close().catch(() => undefined);
   if (headless) await stop(headless.process);
   if (provider) await stop(provider.process);
+  if (decoyProvider) await stop(decoyProvider.process);
   if (replacementProvider) await stop(replacementProvider.process);
   if (odin) await stop(odin.process);
   if (httpServer) await new Promise(resolve => httpServer.close(resolve));
   await rm(workRoot, { recursive: true, force: true });
 }
 
-async function startProvider(port) {
-  return startDotnet(["provider", "--port", String(port), "--state", statePath, "--token", token]);
+async function startProvider(port, options = {}) {
+  return startDotnet([
+    "provider", "--port", String(port),
+    "--state", options.statePath ?? statePath,
+    "--authority-runtime-id", options.authorityRuntimeId ?? "sample.counter-daemon",
+    "--route-generation", options.routeGeneration ?? "sample-counter-route-1",
+    "--token", token,
+  ]);
 }
 
-async function startOdin(port, providerEndpoint) {
+async function startOdin(port, providerEndpoint, decoyEndpoint) {
   return startDotnet([
     "odin",
     "--port", String(port),
     "--provider-endpoint", providerEndpoint,
+    "--decoy-endpoint", decoyEndpoint,
+    "--decoy-authority-runtime-id", "sample.decoy-daemon",
+    "--decoy-route-generation", "sample-decoy-route-1",
     "--token", token,
   ]);
 }

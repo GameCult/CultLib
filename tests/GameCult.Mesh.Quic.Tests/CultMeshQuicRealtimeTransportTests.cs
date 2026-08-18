@@ -40,7 +40,7 @@ public sealed class CultMeshQuicRealtimeTransportTests
         });
         using var client = await connector.ConnectAsync(
             new CultMeshTransportCandidate($"cultmesh-state+quic://127.0.0.1:{listener.LocalEndPoint.Port}"),
-            CultMeshEndpointId.Parse("service:aetheria.daemon"));
+            new CultMeshSessionTarget("aetheria", "service:aetheria.daemon"));
         await using var serverConnection = await accept;
 
         client.TransportId.Should().Be("msquic-realtime");
@@ -62,7 +62,7 @@ public sealed class CultMeshQuicRealtimeTransportTests
 
         using var client = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
-            CultMeshEndpointId.Parse("service:aetheria.daemon"));
+            new CultMeshSessionTarget("aetheria", "service:aetheria.daemon"));
 
         client.TransportId.Should().Be("msquic-realtime");
         await WaitUntilAsync(() => server.ConnectionCount == 1);
@@ -78,8 +78,8 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
             ServerCertificate = certificate
         });
-        var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
-        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
         using var sessions = CreateSessions(server, out var validatedIdentity);
         CultMeshRealtimeSession session;
         try
@@ -105,7 +105,7 @@ public sealed class CultMeshQuicRealtimeTransportTests
         new[] { firstAtServer.Sequence, secondAtServer.Sequence }.Should().Equal(1, 2);
         new[] { firstAtClient.Sequence, secondAtClient.Sequence }.Should().Equal(3, 4);
         firstAtClient.Payload.ToArray().Should().Equal(3, 4, 5);
-        validatedIdentity.Value.Should().Be(endpointId.Value);
+        validatedIdentity.Value.Should().Be(runtimeId.Value);
     }
 
     [Test]
@@ -118,8 +118,8 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
             ServerCertificate = certificate
         });
-        var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
-        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
         using var sessions = CreateSessions(server, out _);
         var session = await sessions.ConnectRealtimeAsync(target);
         await WaitUntilAsync(() => server.ConnectionCount == 1);
@@ -148,8 +148,8 @@ public sealed class CultMeshQuicRealtimeTransportTests
             ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
             ServerCertificate = certificate
         });
-        var endpointId = CultMeshEndpointId.Parse("service:aetheria.daemon");
-        var target = new CultMeshSessionTarget("aetheria", endpointId.Value);
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
         using var sessions = CreateSessions(server, out _);
         var session = await sessions.ConnectRealtimeAsync(target);
 

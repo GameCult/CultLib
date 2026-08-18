@@ -33,6 +33,14 @@ namespace GameCult.Mesh
                 },
                 DiscoveryEndpoints = verse.DiscoveryEndpoints.ToArray(),
                 AuthorityRuntimeIds = verse.AuthorityRuntimeIds.ToArray(),
+                AuthorityRoutes = verse.AuthorityRoutes.Select(route => new CultMeshAuthorityRouteMessage
+                {
+                    AuthorityRuntimeId = route.AuthorityRuntimeId,
+                    Endpoint = route.Endpoint,
+                    ProtocolIds = route.ProtocolIds.ToArray(),
+                    Priority = route.Priority,
+                    Generation = route.Generation
+                }).ToArray(),
                 ParentVerseId = verse.ParentVerseId,
                 Description = verse.Description
             };
@@ -50,6 +58,12 @@ namespace GameCult.Mesh
                 out var parsed)
                 ? parsed
                 : CultMeshVerseAuthorityModel.SubscribedOverlay;
+            var routes = message.AuthorityRoutes?.Select(route => new CultMeshAuthorityRoute(
+                route.AuthorityRuntimeId,
+                route.Endpoint,
+                route.ProtocolIds,
+                route.Priority,
+                route.Generation)).ToArray();
             return new CultMeshVerseDescriptor(
                 message.VerseId,
                 message.DisplayName,
@@ -60,10 +74,11 @@ namespace GameCult.Mesh
                     message.Compatibility.CompatibleVerseIds,
                     message.Compatibility.RequiredPluginIds,
                     message.Compatibility.OptionalPluginIds),
-                message.DiscoveryEndpoints,
-                message.AuthorityRuntimeIds,
+                routes is { Length: > 0 } ? null : message.DiscoveryEndpoints,
+                routes is { Length: > 0 } ? null : message.AuthorityRuntimeIds,
                 message.ParentVerseId,
-                message.Description);
+                message.Description,
+                routes is { Length: > 0 } ? routes : null);
         }
 
         /// <summary>Creates the canonical filtered Verse catalog response for any CultNet transport adapter.</summary>

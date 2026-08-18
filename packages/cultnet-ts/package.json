@@ -1,6 +1,6 @@
 {
   "name": "cultnet-ts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "CultNet-style typed direct-pipe messaging and state replication for TypeScript runtimes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

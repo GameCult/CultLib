@@ -78,6 +78,41 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task RejectsRequestAddressedToAnotherRuntimeBeforeApplicationHandler()
+        {
+            var transport = new FakeServer();
+            var peer = new FakePeer();
+            var calls = 0;
+            using var operations = new CultNetOperationServer(transport, "sample.provider")
+                .Register<AddRequest, AddReceipt>(
+                    "sample.counter",
+                    "sample.counter.add",
+                    "sample.add.v1",
+                    "sample.add_receipt.v1",
+                    context =>
+                    {
+                        calls++;
+                        return Task.FromResult(new AddReceipt { Count = context.Value.Amount });
+                    });
+            var request = Request(new AddRequest { Amount = 3 });
+            request.TargetRuntimeId = "other.provider";
+
+            await transport.DispatchAsync(request, peer);
+
+            Assert.That(calls, Is.Zero);
+            var response = peer.Messages.OfType<CultNetOperationResponseMessage>().Single();
+            var failure = MessagePackSerializer.Deserialize<CultNetOperationFailure>(
+                Convert.FromBase64String(response.Payload),
+                CultNetSchemaMessageSerialization.Options);
+            Assert.Multiple(() =>
+            {
+                Assert.That(response.Status, Is.EqualTo("denied"));
+                Assert.That(failure.Code, Is.EqualTo("target-runtime-mismatch"));
+                Assert.That(response.SourceRuntimeId, Is.EqualTo("sample.provider"));
+            });
+        }
+
+        [Test]
         public async Task RejectsWrongSchemaBeforeApplicationHandler()
         {
             var transport = new FakeServer();
@@ -157,7 +192,8 @@ namespace GameCult.Networking.Tests
             Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
                 value,
                 CultNetSchemaMessageSerialization.Options)),
-            SourceRuntimeId = "sample.browser"
+            SourceRuntimeId = "sample.browser",
+            TargetRuntimeId = "sample.provider"
         };
 
         [MessagePackObject]

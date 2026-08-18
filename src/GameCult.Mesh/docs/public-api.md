@@ -50,8 +50,12 @@ not the brand surface.
 ### Verses
 
 `CultMeshVerseDescriptor` describes a rule-bearing consensus graph. It includes
-transport compatibility, rules hash, authority model, discovery endpoints,
-known authority runtimes, optional parent Verse id, and plugin requirements.
+transport compatibility, rules hash, authority model, exact authority-route
+bindings, optional parent Verse id, and plugin requirements. Each route binds
+an authority runtime to one endpoint, protocol set, priority, and generation.
+The old endpoint/runtime arrays are derived projections; a legacy descriptor
+with several authority runtimes is rejected because it cannot identify which
+runtime owns which route.
 
 `CultMeshVerseCatalog` is the local reactive catalog for discovered Verses.
 It can publish discovery updates and find compatible transfer targets.

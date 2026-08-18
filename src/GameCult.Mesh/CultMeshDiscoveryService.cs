@@ -267,7 +267,8 @@ namespace GameCult.Mesh
             var observations = results.SelectMany(result => result.Observations)
                 .Where(observation => query.VerseIds.Count == 0 || query.VerseIds.Contains(observation.Candidate.VerseId, StringComparer.Ordinal))
                 .Where(observation => query.AuthorityRuntimeId == null ||
-                    observation.Candidate.AuthorityRuntimeIds.Contains(query.AuthorityRuntimeId, StringComparer.Ordinal))
+                    observation.Candidate.AuthorityRoutes.Any(route =>
+                        string.Equals(route.AuthorityRuntimeId, query.AuthorityRuntimeId, StringComparison.Ordinal)))
                 .ToArray();
 
             foreach (var rejected in observations.Where(observation => observation.Trust == CultMeshDiscoveryTrust.Rejected))

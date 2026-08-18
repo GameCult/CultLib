@@ -3627,8 +3627,19 @@ namespace GameCult.Networking.Tests
                 "Aetheria",
                 CultMeshVerseAuthorityModel.OperatorCluster,
                 new CultMeshVerseCompatibility("cultmesh.v0", vanillaRules),
-                discoveryEndpoints: ["cultmesh://aetheria.example.test:3075"],
-                authorityRuntimeIds: ["gc-us-east", "gc-eu-west"]);
+                authorityRoutes:
+                [
+                    new CultMeshAuthorityRoute(
+                        "gc-us-east",
+                        "cultmesh://us-east.aetheria.example.test:3075",
+                        [CultMeshProtocols.Documents.Value],
+                        generation: "east-1"),
+                    new CultMeshAuthorityRoute(
+                        "gc-eu-west",
+                        "cultmesh://eu-west.aetheria.example.test:3075",
+                        [CultMeshProtocols.Documents.Value],
+                        generation: "west-1")
+                ]);
             var modded = new CultMeshVerseDescriptor(
                 "aetheria-skylands",
                 "Aetheria: Skylands",

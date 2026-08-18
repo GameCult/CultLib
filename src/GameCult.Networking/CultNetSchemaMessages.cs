@@ -135,6 +135,10 @@ namespace GameCult.Networking
         /// CultMesh Verse catalog response contract identifier.
         /// </summary>
         public const string VerseCatalogResponse = "cultmesh.verse_catalog_response.v0";
+        /// <summary>CultMesh session identity request contract identifier.</summary>
+        public const string SessionOpen = "cultmesh.session_open.v1";
+        /// <summary>CultMesh verified session identity response contract identifier.</summary>
+        public const string SessionAccepted = "cultmesh.session_accepted.v1";
         /// <summary>
         /// CultMesh peer exchange request contract identifier.
         /// </summary>
@@ -1179,6 +1183,33 @@ namespace GameCult.Networking
         }
     }
 
+    /// <summary>Requests an identity-bound CultMesh session before application traffic begins.</summary>
+    [MessagePackObject]
+    public class CultMeshSessionOpenMessage : ICultNetSchemaMessage
+    {
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SessionOpen;
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        [Key("sourceRuntimeId")] public string SourceRuntimeId { get; set; } = string.Empty;
+        [Key("verseId")] public string VerseId { get; set; } = string.Empty;
+        [Key("authorityRuntimeId")] public string AuthorityRuntimeId { get; set; } = string.Empty;
+        [Key("protocolId")] public string ProtocolId { get; set; } = string.Empty;
+        [Key("routeGeneration")] public string RouteGeneration { get; set; } = string.Empty;
+    }
+
+    /// <summary>Accepts or rejects a CultMesh session with the server's actual identity.</summary>
+    [MessagePackObject]
+    public class CultMeshSessionAcceptedMessage : ICultNetSchemaMessage
+    {
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SessionAccepted;
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        [Key("accepted")] public bool Accepted { get; set; }
+        [Key("verseId")] public string VerseId { get; set; } = string.Empty;
+        [Key("authorityRuntimeId")] public string AuthorityRuntimeId { get; set; } = string.Empty;
+        [Key("protocolId")] public string ProtocolId { get; set; } = string.Empty;
+        [Key("routeGeneration")] public string RouteGeneration { get; set; } = string.Empty;
+        [Key("error")] public string? Error { get; set; }
+    }
+
     /// <summary>
     /// Requests known CultMesh Verses from a peer.
     /// </summary>
@@ -1254,6 +1285,11 @@ namespace GameCult.Networking
         /// </summary>
         [Key("authorityRuntimeIds")] public string[] AuthorityRuntimeIds { get; set; } = Array.Empty<string>();
         /// <summary>
+        /// Gets or sets exact authoritative-runtime route bindings. This is the
+        /// routing authority; the parallel legacy arrays are projections only.
+        /// </summary>
+        [Key("authorityRoutes")] public CultMeshAuthorityRouteMessage[] AuthorityRoutes { get; set; } = Array.Empty<CultMeshAuthorityRouteMessage>();
+        /// <summary>
         /// Gets or sets the parent Verse id for overlays or branches.
         /// </summary>
         [Key("parentVerseId")] public string? ParentVerseId { get; set; }
@@ -1261,6 +1297,17 @@ namespace GameCult.Networking
         /// Gets or sets an optional public description.
         /// </summary>
         [Key("description")] public string? Description { get; set; }
+    }
+
+    /// <summary>Wire representation of one authority-bound CultMesh route.</summary>
+    [MessagePackObject]
+    public class CultMeshAuthorityRouteMessage
+    {
+        [Key("authorityRuntimeId")] public string AuthorityRuntimeId { get; set; } = string.Empty;
+        [Key("endpoint")] public string Endpoint { get; set; } = string.Empty;
+        [Key("protocolIds")] public string[] ProtocolIds { get; set; } = Array.Empty<string>();
+        [Key("priority")] public int Priority { get; set; }
+        [Key("generation")] public string Generation { get; set; } = string.Empty;
     }
 
     /// <summary>
