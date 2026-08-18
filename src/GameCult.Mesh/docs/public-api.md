@@ -211,7 +211,10 @@ portable machinery that makes it feel native.
 - `CultMeshFrameBodyPublisher` and `CultMeshMappedFrameBodyCursor` carry
   fixed-layout hot bodies through a triple-buffered memory mapping. Producers
   reserve a writable slot and commit in place; consumers retain one bootstrap
-  capability and acquire only newer read leases. `Stats()` reports committed
+  capability and acquire only newer read leases. Windows uses a named memory
+  map; Unix uses a private file-backed map because .NET does not support named
+  maps there. The capability and cursor API is identical, and publisher
+  disposal revokes new opens and removes the Unix backing file. `Stats()` reports committed
   frames, blocked writes, and unavoidable copies. Direct slot writes report
   zero copies; the convenience `TryPublish(ReadOnlySpan<byte>)` path reports
   one explicit fallback copy instead of laundering it as zero-copy transport.

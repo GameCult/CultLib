@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -53,6 +54,7 @@ namespace GameCult.Mesh
         private readonly Mutex _mutex;
         private readonly TimeSpan _leaseDuration;
         private readonly string _token;
+        private readonly string? _mappingPath;
         private int _cursor;
         private long _nextSequence;
         private ulong _publishedFrames;
@@ -83,7 +85,21 @@ namespace GameCult.Mesh
             _leaseDuration = leaseDuration ?? TimeSpan.FromSeconds(5);
             if (_leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
             _token = CapabilityPrefix + RandomToken();
-            _mapping = MemoryMappedFile.CreateNew(MappingName(_token), checked(HeaderSize + CultMeshFrameRegion.SlotCount * slotByteLength));
+            var mappingByteLength = checked(HeaderSize + CultMeshFrameRegion.SlotCount * slotByteLength);
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                _mapping = MemoryMappedFile.CreateNew(MappingName(_token), mappingByteLength);
+            }
+            else
+            {
+                _mappingPath = MappingPath(_token);
+                _mapping = MemoryMappedFile.CreateFromFile(
+                    _mappingPath,
+                    FileMode.CreateNew,
+                    null,
+                    mappingByteLength,
+                    MemoryMappedFileAccess.ReadWrite);
+            }
             _control = _mapping.CreateViewAccessor(0, HeaderSize, MemoryMappedFileAccess.ReadWrite);
             _control.Write(0, slotByteLength);
             _control.Write(4, CultMeshFrameRegion.SlotCount);
@@ -263,7 +279,7 @@ namespace GameCult.Mesh
             Mutex mutex;
             try
             {
-                mapping = MemoryMappedFile.OpenExisting(MappingName(token), MemoryMappedFileRights.ReadWrite);
+                mapping = OpenMapping(token);
                 mutex = Mutex.OpenExisting(MutexName(token));
             }
             catch (Exception error) when (error is FileNotFoundException || error is WaitHandleCannotBeOpenedException)
@@ -307,7 +323,7 @@ namespace GameCult.Mesh
         {
             try
             {
-                using var mapping = MemoryMappedFile.OpenExisting(MappingName(token), MemoryMappedFileRights.ReadWrite);
+                using var mapping = OpenMapping(token);
                 using var mutex = Mutex.OpenExisting(MutexName(token));
                 WithMutex(mutex, () =>
                 {
@@ -331,6 +347,12 @@ namespace GameCult.Mesh
                 _control.Dispose();
                 _mapping.Dispose();
                 _mutex.Dispose();
+                if (_mappingPath != null)
+                {
+                    try { File.Delete(_mappingPath); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
             }
         }
 
@@ -343,6 +365,11 @@ namespace GameCult.Mesh
         }
         internal static long SlotOffset(int slot, int slotByteLength) => HeaderSize + (long)slot * slotByteLength;
         internal static string MappingName(string token) => "cultmesh-map-" + token;
+        internal static string MappingPath(string token) => Path.Combine(Path.GetTempPath(), MappingName(token) + ".map");
+        internal static MemoryMappedFile OpenMapping(string token) =>
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                ? MemoryMappedFile.OpenExisting(MappingName(token), MemoryMappedFileRights.ReadWrite)
+                : MemoryMappedFile.CreateFromFile(MappingPath(token), FileMode.Open, null, 0, MemoryMappedFileAccess.ReadWrite);
         internal static string MutexName(string token) => "cultmesh-lock-" + token;
         internal static void ParseCapability(string capability, out string token, out int slot)
         {
@@ -393,9 +420,7 @@ namespace GameCult.Mesh
             CultMeshFrameBodyPublisher.ParseCapability(descriptor.CapabilityToken, out _token, out _);
             try
             {
-                _mapping = MemoryMappedFile.OpenExisting(
-                    CultMeshFrameBodyPublisher.MappingName(_token),
-                    MemoryMappedFileRights.ReadWrite);
+                _mapping = CultMeshFrameBodyPublisher.OpenMapping(_token);
                 _mutex = Mutex.OpenExisting(CultMeshFrameBodyPublisher.MutexName(_token));
             }
             catch (Exception error) when (error is FileNotFoundException || error is WaitHandleCannotBeOpenedException)
@@ -503,9 +528,7 @@ namespace GameCult.Mesh
             };
             try
             {
-                var mapping = MemoryMappedFile.OpenExisting(
-                    CultMeshFrameBodyPublisher.MappingName(_token),
-                    MemoryMappedFileRights.ReadWrite);
+                var mapping = CultMeshFrameBodyPublisher.OpenMapping(_token);
                 lease = new CultMeshMappedBodyLease(
                     descriptor,
                     mapping,

@@ -168,6 +168,23 @@ public sealed class CultMeshFrameBodyTests
     }
 
     [Test]
+    public void UnixPublisherOwnsAndDeletesItsFileBackedMap()
+    {
+        if (OperatingSystem.IsWindows())
+            Assert.Ignore("Windows uses a named memory map rather than a backing file.");
+
+        var publisher = Publisher();
+        publisher.TryPublish(new byte[] { 42 }, DateTimeOffset.UtcNow, out var descriptor).Should().BeTrue();
+        var token = descriptor.CapabilityToken[..descriptor.CapabilityToken.LastIndexOf('.')];
+        var path = Path.Combine(Path.GetTempPath(), "cultmesh-map-" + token + ".map");
+        File.Exists(path).Should().BeTrue();
+
+        publisher.Dispose();
+
+        File.Exists(path).Should().BeFalse();
+    }
+
+    [Test]
     public void PublishesOneAtomicSchemaVersionedGenerationPerCommit()
     {
         using var region = Region();

@@ -388,6 +388,11 @@ receives one shared-memory bootstrap descriptor, then observes later commits
 through the mapped ring header. Per-frame CultNet documents are neither needed
 nor desirable.
 
+The mapped ring uses a named memory map on Windows and a capability-named,
+publisher-owned temporary backing file on Unix. This distinction belongs to
+the CultMesh adapter; providers and consumers use the same descriptor/cursor
+contract on both platforms.
+
 ```csharp
 using var entities = await CultMesh.SubscribeLiveBodyAsync(
     subscriptions,

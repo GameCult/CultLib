@@ -175,7 +175,8 @@ pwsh -File ./scripts/verify-eve-getting-started.ps1
 
 The first command measures the same 16 KiB document workload in C#,
 TypeScript, and Python and includes a mapped hot-body probe with explicit copy
-telemetry. The second includes 10,000 real WebSocket operations on one retained
+telemetry on Windows named maps and Unix file-backed maps. The second includes
+10,000 real WebSocket operations on one retained
 identity-owned C# session after provider route replacement.
 
 Rust package tests:
