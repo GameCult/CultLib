@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using NUnit.Framework;
@@ -345,6 +346,47 @@ public sealed class CultMeshBodyTransportTests
         tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(4);
         tracker.Observe(Demand("unity-local", "local", sameMachine: true));
         tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(5);
+    }
+
+    [Test]
+    public async Task BodyDemand_GenerationGuardLinearizesCommitAgainstWithdrawal()
+    {
+        const string bodyId = "eve:entity-soa:aetheria.daemon:pilot";
+        using var tracker = new CultMeshBodyDemandTracker();
+        tracker.Observe(Demand("unity-local", "local", sameMachine: true));
+        var activeGeneration = tracker.Plan(bodyId).Generation;
+        using var commitEntered = new ManualResetEventSlim();
+        using var releaseCommit = new ManualResetEventSlim();
+        var committed = false;
+
+        var commit = Task.Run(() => tracker.TryExecuteAtGeneration(
+            bodyId,
+            activeGeneration,
+            () =>
+            {
+                commitEntered.Set();
+                releaseCommit.Wait();
+                committed = true;
+            }));
+        commitEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        var withdrawal = Task.Run(() =>
+            tracker.Observe(Demand("unity-local", "local", sameMachine: true, active: false)));
+        await Task.Delay(50);
+        withdrawal.IsCompleted.Should().BeFalse(
+            "a withdrawal must serialize after an already-linearized synchronous commit");
+
+        releaseCommit.Set();
+        (await commit).Should().BeTrue();
+        await withdrawal;
+        committed.Should().BeTrue();
+        tracker.Plan(bodyId).Generation.Should().BeGreaterThan(activeGeneration);
+
+        var staleCallbackRan = false;
+        tracker.TryExecuteAtGeneration(bodyId, activeGeneration, () => staleCallbackRan = true)
+            .Should().BeFalse();
+        staleCallbackRan.Should().BeFalse(
+            "work prepared for a withdrawn demand generation must be discarded before commit");
     }
 
     [Test]

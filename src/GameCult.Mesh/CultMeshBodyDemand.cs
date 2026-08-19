@@ -357,6 +357,26 @@ namespace GameCult.Mesh
             }
         }
 
+        /// <summary>
+        /// Executes one synchronous capability commit only while the exact routed consumer
+        /// generation remains current. Demand transitions serialize against the callback, so
+        /// either this work linearizes before the transition or it is rejected without running.
+        /// </summary>
+        public bool TryExecuteAtGeneration(string bodyId, long generation, Action action)
+        {
+            if (string.IsNullOrWhiteSpace(bodyId)) throw new ArgumentException("Body identity is required.", nameof(bodyId));
+            if (generation < 0) throw new ArgumentOutOfRangeException(nameof(generation));
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                var current = _bodyGenerations.TryGetValue(bodyId, out var value) ? value : 0;
+                if (current != generation) return false;
+                action();
+                return true;
+            }
+        }
+
         private string RoutedConsumerSignature(string bodyId) => string.Join(
             "\u001e",
             _demands.Values
