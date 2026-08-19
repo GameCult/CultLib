@@ -318,7 +318,9 @@ public sealed class CultMeshBodyTransportTests
     public void BodyDemand_SelectsSharedMemoryLocallyAndNetworkRemotelyWithoutDuplicateFallbackWork()
     {
         using var tracker = new CultMeshBodyDemandTracker();
+        tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(0);
         tracker.Observe(Demand("unity-local", "local", sameMachine: true));
+        tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(1);
         tracker.Observe(Demand("unity-remote", "remote", sameMachine: false));
 
         var mixed = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
@@ -335,8 +337,14 @@ public sealed class CultMeshBodyTransportTests
 
         tracker.Observe(Demand("unity-remote", "remote", sameMachine: false, active: false));
         var localOnly = tracker.Plan("eve:entity-soa:aetheria.daemon:pilot");
+        localOnly.Generation.Should().Be(3);
         localOnly.RequiresSharedMemory.Should().BeTrue();
         localOnly.RequiresNetwork.Should().BeFalse();
+
+        tracker.Observe(Demand("unity-local", "local", sameMachine: true, active: false));
+        tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(4);
+        tracker.Observe(Demand("unity-local", "local", sameMachine: true));
+        tracker.Plan("eve:entity-soa:aetheria.daemon:pilot").Generation.Should().Be(5);
     }
 
     [Test]

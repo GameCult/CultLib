@@ -225,9 +225,11 @@ namespace GameCult.Mesh
     {
         internal CultMeshBodyDemandPlan(
             string bodyId,
+            long generation,
             IReadOnlyList<CultMeshBodyConsumerRoute> consumers)
         {
             BodyId = bodyId;
+            Generation = generation;
             Consumers = consumers;
             RequiresSharedMemory = consumers.Any(value => value.Transport == CultMeshBodyTransportKind.SharedMemory);
             RequiresSharedFileMapping = consumers.Any(value => value.Transport == CultMeshBodyTransportKind.SharedFileMapping);
@@ -235,6 +237,11 @@ namespace GameCult.Mesh
         }
 
         public string BodyId { get; }
+        /// <summary>
+        /// Monotone generation of the exact routed consumer set. Publishers must rotate any
+        /// retained capability before writing after this value changes.
+        /// </summary>
+        public long Generation { get; }
         public bool HasConsumers => Consumers.Count > 0;
         public bool RequiresSharedMemory { get; }
         public bool RequiresSharedFileMapping { get; }
@@ -271,6 +278,8 @@ namespace GameCult.Mesh
         private readonly object _gate = new();
         private readonly Dictionary<string, CultNetDatabaseSubscriptionDemand> _demands =
             new(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> _bodyGenerations =
+            new(StringComparer.Ordinal);
         private bool _disposed;
 
         public CultMeshBodyDemandTracker(CultNetDatabaseSubscriptionServer subscriptions)
@@ -298,7 +307,10 @@ namespace GameCult.Mesh
                     .OrderBy(value => value.ConsumerRuntimeId, StringComparer.Ordinal)
                     .ThenBy(value => value.SubscriptionId, StringComparer.Ordinal)
                     .ToArray();
-                return new CultMeshBodyDemandPlan(bodyId, routes);
+                return new CultMeshBodyDemandPlan(
+                    bodyId,
+                    _bodyGenerations.TryGetValue(bodyId, out var generation) ? generation : 0,
+                    routes);
             }
         }
 
@@ -310,6 +322,7 @@ namespace GameCult.Mesh
                 _disposed = true;
                 if (_subscriptions != null) _subscriptions.DemandChanged -= OnDemandChanged;
                 _demands.Clear();
+                _bodyGenerations.Clear();
             }
         }
 
@@ -322,10 +335,42 @@ namespace GameCult.Mesh
             lock (_gate)
             {
                 if (_disposed) return;
+                _demands.TryGetValue(key, out var previous);
+                var affectedBodyIds = (previous?.BodyIds ?? Array.Empty<string>())
+                    .Concat(demand.BodyIds)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                var before = affectedBodyIds.ToDictionary(
+                    bodyId => bodyId,
+                    RoutedConsumerSignature,
+                    StringComparer.Ordinal);
                 if (demand.Active) _demands[key] = demand;
                 else _demands.Remove(key);
+                foreach (var bodyId in affectedBodyIds)
+                {
+                    var after = RoutedConsumerSignature(bodyId);
+                    if (string.Equals(before[bodyId], after, StringComparison.Ordinal)) continue;
+                    _bodyGenerations[bodyId] = checked(
+                        (_bodyGenerations.TryGetValue(bodyId, out var generation) ? generation : 0) + 1);
+                }
             }
         }
+
+        private string RoutedConsumerSignature(string bodyId) => string.Join(
+            "\u001e",
+            _demands.Values
+                .Where(value => value.BodyIds.Contains(bodyId, StringComparer.Ordinal))
+                .Select(Route)
+                .Where(value => value != null)
+                .Cast<CultMeshBodyConsumerRoute>()
+                .OrderBy(value => value.ConsumerRuntimeId, StringComparer.Ordinal)
+                .ThenBy(value => value.SubscriptionId, StringComparer.Ordinal)
+                .Select(value => string.Join(
+                    "\u001f",
+                    value.ConsumerRuntimeId,
+                    value.SubscriptionId,
+                    value.Transport.ToString())));
 
         private void OnDemandChanged(CultNetDatabaseSubscriptionDemand demand) => Observe(demand);
 
