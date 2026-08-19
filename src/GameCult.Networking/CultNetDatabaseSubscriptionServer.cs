@@ -20,6 +20,8 @@ namespace GameCult.Networking
         private readonly CultNetDatabase _database;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, Task> _subscribe;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
+        private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? _authorizeRequest;
+        private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? _authorizeRecord;
         private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
@@ -28,10 +30,16 @@ namespace GameCult.Networking
         private bool _disposed;
 
         /// <summary>Attaches live database subscription handlers to a schema server.</summary>
-        public CultNetDatabaseSubscriptionServer(ICultNetSchemaServer server, CultNetDatabase database)
+        public CultNetDatabaseSubscriptionServer(
+            ICultNetSchemaServer server,
+            CultNetDatabase database,
+            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? authorizeRequest = null,
+            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null)
         {
             _server = server ?? throw new ArgumentNullException(nameof(server));
             _database = database ?? throw new ArgumentNullException(nameof(database));
+            _authorizeRequest = authorizeRequest;
+            _authorizeRecord = authorizeRecord;
             _subscribe = HandleSubscribeAsync;
             _unsubscribe = HandleUnsubscribeAsync;
             _server.OnCultNet(_subscribe);
@@ -89,6 +97,11 @@ namespace GameCult.Networking
                 peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
                 return Task.CompletedTask;
             }
+            if (_authorizeRequest?.Invoke(request, peer) == false)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription is not authorized for this peer." });
+                return Task.CompletedTask;
+            }
 
             var key = new SubscriptionKey(peer, subscriptionId);
             if (_requests.TryGetValue(key, out var previous))
@@ -105,7 +118,7 @@ namespace GameCult.Networking
             PublishDemand(request, key, active: true);
             if (request.IncludeSnapshot)
             {
-                peer.SendCultNet(_database.Documents.CreateRawSnapshotResponse(
+                var snapshot = _database.Documents.CreateRawSnapshotResponse(
                     _database.Cache,
                     request.MessageId,
                     new CultNetSnapshotRequestMessage
@@ -113,7 +126,15 @@ namespace GameCult.Networking
                         MessageId = request.MessageId,
                         SchemaIds = request.SchemaIds,
                         RecordKeys = request.RecordKeys
-                    }));
+                    });
+                if (_authorizeRecord != null)
+                {
+                    snapshot.Documents = snapshot.Documents
+                        .Where(document => _authorizeRecord(
+                            request, peer, document.RecordKey, document.SchemaId))
+                        .ToArray();
+                }
+                peer.SendCultNet(snapshot);
             }
             else
             {
@@ -183,15 +204,34 @@ namespace GameCult.Networking
         {
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                var message = CreateChange(change, request, subscriptionId);
+                var message = CreateAuthorizedChange(change, request, subscriptionId, peer);
                 if (message != null) peer.SendCultNet(message);
             });
+        }
+
+        private CultNetDatabaseChangeRawMessage? CreateAuthorizedChange(
+            object change,
+            CultNetDatabaseSubscribeMessage request,
+            string subscriptionId,
+            ICultNetSchemaServerPeer peer)
+        {
+            return CreateChangeCore(change, request, subscriptionId, (recordKey, schemaId) =>
+                _authorizeRecord?.Invoke(request, peer, recordKey, schemaId) != false);
         }
 
         private CultNetDatabaseChangeRawMessage? CreateChange(
             object change,
             CultNetDatabaseSubscribeMessage request,
             string subscriptionId)
+        {
+            return CreateChangeCore(change, request, subscriptionId, (_, _) => true);
+        }
+
+        private CultNetDatabaseChangeRawMessage? CreateChangeCore(
+            object change,
+            CultNetDatabaseSubscribeMessage request,
+            string subscriptionId,
+            Func<string, string, bool> authorizeRecord)
         {
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(""));
@@ -206,6 +246,8 @@ namespace GameCult.Networking
                 var schemaId = ResolveWireSchemaId(previous, (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? "");
                 if (!MatchesRequestedSchema(request.SchemaIds, previous, schemaId))
                     return null;
+                if (!authorizeRecord(key.Value, schemaId))
+                    return null;
                 return new CultNetDatabaseChangeRawMessage
                 {
                     MessageId = Guid.NewGuid().ToString("N"),
@@ -218,6 +260,8 @@ namespace GameCult.Networking
 
             var raw = CreateRawRecord(key, document);
             if (!MatchesRequestedSchema(request.SchemaIds, document, raw.SchemaId))
+                return null;
+            if (!authorizeRecord(key.Value, raw.SchemaId))
                 return null;
             return new CultNetDatabaseChangeRawMessage
             {

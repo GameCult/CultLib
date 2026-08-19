@@ -1463,6 +1463,81 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_AuthorizesRequestAndFiltersSnapshotAndLiveRecords()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-authorized-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (request, _) => request.ConsumerRuntimeId == "allowed-runtime",
+                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal));
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            await database.PutAsync(new CultRecordKey("tests:public:initial"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "public-initial"
+            });
+            await database.PutAsync(new CultRecordKey("tests:private:initial"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "private-initial"
+            });
+
+            using var client = CultNetSchemaClients.CreateRudp("database-authorized-subscription-client");
+            var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var changed = new TaskCompletionSource<CultNetDatabaseChangeRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+            client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changed.TrySetResult(message));
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-authorized",
+                SubscriptionId = "authorized",
+                ConsumerRuntimeId = "allowed-runtime",
+                IncludeSnapshot = true
+            });
+
+            var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+            Assert.That(snapshot.Documents.Select(document => document.RecordKey),
+                Is.EqualTo(new[] { "tests:public:initial" }));
+
+            await database.PutAsync(new CultRecordKey("tests:private:live"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "private-live"
+            });
+            await database.PutAsync(new CultRecordKey("tests:public:live"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "public-live"
+            });
+            var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(update.Document, Is.Not.Null);
+            Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionServer_ProjectsBodyDemandAndWithdrawalFromExactSubscription()
         {
             var database = new CultNetDatabase(new CultCache());
