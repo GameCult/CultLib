@@ -1476,7 +1476,12 @@ namespace GameCult.Networking.Tests
                 server,
                 database,
                 authorizeRequest: (request, _) => request.ConsumerRuntimeId == "allowed-runtime",
-                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal));
+                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal),
+                projectRecord: (request, _, record) =>
+                {
+                    record.SourceRuntimeId = "projection:" + request.ConsumerRuntimeId;
+                    return record;
+                });
             using var cancellation = new CancellationTokenSource();
             var serverThread = new Thread(() =>
             {
@@ -1519,6 +1524,7 @@ namespace GameCult.Networking.Tests
             var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
             Assert.That(snapshot.Documents.Select(document => document.RecordKey),
                 Is.EqualTo(new[] { "tests:public:initial" }));
+            Assert.That(snapshot.Documents.Single().SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
 
             await database.PutAsync(new CultRecordKey("tests:private:live"), new NetworkSchemaNote
             {
@@ -1535,6 +1541,7 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
+            Assert.That(update.Document.SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
         }
 
         [Test]

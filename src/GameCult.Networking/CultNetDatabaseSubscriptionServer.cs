@@ -13,6 +13,8 @@ namespace GameCult.Networking
 {
     /// <summary>
     /// Publishes live database changes through any schema-v0 server transport.
+    /// Optional record projection runs after authorization and owns both initial
+    /// snapshot and live-update delivery for a peer.
     /// </summary>
     public sealed class CultNetDatabaseSubscriptionServer : IDisposable
     {
@@ -22,6 +24,7 @@ namespace GameCult.Networking
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? _authorizeRequest;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? _authorizeRecord;
+        private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, CultNetRawDocumentRecord, CultNetRawDocumentRecord?>? _projectRecord;
         private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
@@ -34,12 +37,14 @@ namespace GameCult.Networking
             ICultNetSchemaServer server,
             CultNetDatabase database,
             Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? authorizeRequest = null,
-            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null)
+            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null,
+            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, CultNetRawDocumentRecord, CultNetRawDocumentRecord?>? projectRecord = null)
         {
             _server = server ?? throw new ArgumentNullException(nameof(server));
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _authorizeRequest = authorizeRequest;
             _authorizeRecord = authorizeRecord;
+            _projectRecord = projectRecord;
             _subscribe = HandleSubscribeAsync;
             _unsubscribe = HandleUnsubscribeAsync;
             _server.OnCultNet(_subscribe);
@@ -134,6 +139,14 @@ namespace GameCult.Networking
                             request, peer, document.RecordKey, document.SchemaId))
                         .ToArray();
                 }
+                if (_projectRecord != null)
+                {
+                    snapshot.Documents = snapshot.Documents
+                        .Select(document => _projectRecord(request, peer, document))
+                        .Where(document => document != null)
+                        .Cast<CultNetRawDocumentRecord>()
+                        .ToArray();
+                }
                 peer.SendCultNet(snapshot);
             }
             else
@@ -205,6 +218,11 @@ namespace GameCult.Networking
             return _database.WatchAllChanges().Subscribe(change =>
             {
                 var message = CreateAuthorizedChange(change, request, subscriptionId, peer);
+                if (message?.Document != null && _projectRecord != null)
+                {
+                    message.Document = _projectRecord(request, peer, message.Document);
+                    if (message.Document == null) return;
+                }
                 if (message != null) peer.SendCultNet(message);
             });
         }
