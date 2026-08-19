@@ -30,6 +30,9 @@ namespace GameCult.Networking
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
         private readonly ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage> _requests =
             new ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage>(SubscriptionKeyComparer.Instance);
+        private readonly ConcurrentDictionary<SubscriptionKey, SubscriptionProjectionState> _projections =
+            new ConcurrentDictionary<SubscriptionKey, SubscriptionProjectionState>(SubscriptionKeyComparer.Instance);
+        private readonly object _lifecycleGate = new();
         private bool _disposed;
 
         /// <summary>Attaches live database subscription handlers to a schema server.</summary>
@@ -61,34 +64,48 @@ namespace GameCult.Networking
         /// </summary>
         public event Action<CultNetDatabaseSubscriptionDemand>? DemandChanged;
 
+        /// <summary>
+        /// Re-evaluates every live peer projection against current authorization and source state.
+        /// Records that lost visibility are explicitly removed and body demand is withdrawn while
+        /// the request is unauthorized. The subscription intent remains available for a later
+        /// authorized generation on the same established peer.
+        /// </summary>
+        public void Reconcile()
+        {
+            lock (_lifecycleGate)
+            {
+                if (_disposed) return;
+                foreach (var entry in _requests.ToArray())
+                    Reconcile(entry.Key, entry.Value);
+            }
+        }
+
         /// <summary>Detaches handlers and releases all active watches.</summary>
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribe);
-            _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribe);
-            if (_peerLifecycle != null)
-                _peerLifecycle.PeerDisconnected -= HandlePeerDisconnected;
-            foreach (var entry in _subscriptions)
+            lock (_lifecycleGate)
             {
-                entry.Value.Dispose();
-                if (_requests.TryRemove(entry.Key, out var request))
-                    PublishDemand(request, entry.Key, active: false);
+                if (_disposed) return;
+                _disposed = true;
+                _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribe);
+                _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribe);
+                if (_peerLifecycle != null)
+                    _peerLifecycle.PeerDisconnected -= HandlePeerDisconnected;
+                foreach (var entry in _subscriptions.ToArray())
+                    Withdraw(entry.Key, sendRemovals: false, forgetRequest: true);
+                _subscriptions.Clear();
+                _requests.Clear();
+                _projections.Clear();
             }
-            _subscriptions.Clear();
-            _requests.Clear();
         }
 
         private void HandlePeerDisconnected(ICultNetSchemaServerPeer peer)
         {
-            foreach (var key in _subscriptions.Keys.Where(candidate =>
-                         SubscriptionKeyComparer.SamePeer(candidate.Peer, peer)).ToArray())
+            lock (_lifecycleGate)
             {
-                if (_subscriptions.TryRemove(key, out var subscription))
-                    subscription.Dispose();
-                if (_requests.TryRemove(key, out var request))
-                    PublishDemand(request, key, active: false);
+                foreach (var key in _subscriptions.Keys.Where(candidate =>
+                             SubscriptionKeyComparer.SamePeer(candidate.Peer, peer)).ToArray())
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
             }
         }
 
@@ -108,54 +125,43 @@ namespace GameCult.Networking
                 return Task.CompletedTask;
             }
 
-            var key = new SubscriptionKey(peer, subscriptionId);
-            if (_requests.TryGetValue(key, out var previous))
-                PublishDemand(previous, key, active: false);
-            _subscriptions.AddOrUpdate(
-                key,
-                _ => Watch(request, subscriptionId, peer),
-                (_, current) =>
-                {
-                    current.Dispose();
-                    return Watch(request, subscriptionId, peer);
-                });
-            _requests[key] = request;
-            PublishDemand(request, key, active: true);
-            if (request.IncludeSnapshot)
+            lock (_lifecycleGate)
             {
-                var snapshot = _database.Documents.CreateRawSnapshotResponse(
-                    _database.Cache,
-                    request.MessageId,
-                    new CultNetSnapshotRequestMessage
+                var key = new SubscriptionKey(peer, subscriptionId);
+                Withdraw(key, sendRemovals: true, forgetRequest: true);
+                var projection = new SubscriptionProjectionState();
+                _projections[key] = projection;
+                _requests[key] = request;
+                try
+                {
+                    _subscriptions[key] = Watch(request, subscriptionId, peer, key);
+                    if (request.IncludeSnapshot)
                     {
-                        MessageId = request.MessageId,
-                        SchemaIds = request.SchemaIds,
-                        RecordKeys = request.RecordKeys
-                    });
-                if (_authorizeRecord != null)
-                {
-                    snapshot.Documents = snapshot.Documents
-                        .Where(document => _authorizeRecord(
-                            request, peer, document.RecordKey, document.SchemaId))
-                        .ToArray();
+                        var snapshot = CreateProjectedSnapshot(request, peer);
+                        foreach (var entry in snapshot.BySourceRecordKey)
+                            projection.DeliveredBySourceRecordKey[entry.Key] = entry.Value;
+                        peer.SendCultNet(new CultNetSnapshotResponseRawMessage
+                        {
+                            MessageId = request.MessageId,
+                            Documents = snapshot.Documents
+                        });
+                    }
+                    else
+                    {
+                        peer.SendCultNet(new CultNetSnapshotResponseRawMessage
+                        {
+                            MessageId = request.MessageId,
+                            Documents = Array.Empty<CultNetRawDocumentRecord>()
+                        });
+                    }
+                    PublishDemand(request, key, active: true);
+                    projection.DemandActive = true;
                 }
-                if (_projectRecord != null)
+                catch
                 {
-                    snapshot.Documents = snapshot.Documents
-                        .Select(document => _projectRecord(request, peer, document))
-                        .Where(document => document != null)
-                        .Cast<CultNetRawDocumentRecord>()
-                        .ToArray();
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
+                    throw;
                 }
-                peer.SendCultNet(snapshot);
-            }
-            else
-            {
-                peer.SendCultNet(new CultNetSnapshotResponseRawMessage
-                {
-                    MessageId = request.MessageId,
-                    Documents = Array.Empty<CultNetRawDocumentRecord>()
-                });
             }
             return Task.CompletedTask;
         }
@@ -168,9 +174,8 @@ namespace GameCult.Networking
             if (!string.IsNullOrWhiteSpace(subscriptionId))
             {
                 var key = new SubscriptionKey(peer, subscriptionId);
-                if (_subscriptions.TryRemove(key, out var subscription)) subscription.Dispose();
-                if (_requests.TryRemove(key, out var subscribed))
-                    PublishDemand(subscribed, key, active: false);
+                lock (_lifecycleGate)
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
             }
             return Task.CompletedTask;
         }
@@ -213,18 +218,207 @@ namespace GameCult.Networking
         private IDisposable Watch(
             CultNetDatabaseSubscribeMessage request,
             string subscriptionId,
-            ICultNetSchemaServerPeer peer)
+            ICultNetSchemaServerPeer peer,
+            SubscriptionKey key)
         {
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                var message = CreateAuthorizedChange(change, request, subscriptionId, peer);
-                if (message?.Document != null && _projectRecord != null)
+                lock (_lifecycleGate)
                 {
-                    message.Document = _projectRecord(request, peer, message.Document);
-                    if (message.Document == null) return;
+                    if (_disposed || !_requests.ContainsKey(key) || !_projections.TryGetValue(key, out var projection))
+                        return;
+                    if (_authorizeRequest?.Invoke(request, peer) == false)
+                    {
+                        Reconcile(key, request);
+                        return;
+                    }
+
+                    var sourceRecordKey = ResolveChangeRecordKey(change);
+                    var message = CreateAuthorizedChange(change, request, subscriptionId, peer);
+                    var projected = message?.Document;
+                    if (projected != null && _projectRecord != null)
+                        projected = _projectRecord(request, peer, projected);
+                    ApplyProjectedChange(
+                        projection,
+                        sourceRecordKey,
+                        projected,
+                        peer,
+                        subscriptionId);
                 }
-                if (message != null) peer.SendCultNet(message);
             });
+        }
+
+        private void Reconcile(SubscriptionKey key, CultNetDatabaseSubscribeMessage request)
+        {
+            if (!_projections.TryGetValue(key, out var projection)) return;
+            var authorized = _authorizeRequest?.Invoke(request, key.Peer) != false;
+            var next = authorized
+                ? CreateProjectedSnapshot(request, key.Peer)
+                : ProjectedSnapshot.Empty;
+
+            foreach (var previous in projection.DeliveredBySourceRecordKey.ToArray())
+            {
+                if (!next.BySourceRecordKey.TryGetValue(previous.Key, out var current))
+                {
+                    SendRemoval(key.Peer, key.Id, previous.Value);
+                    continue;
+                }
+                if (!string.Equals(previous.Value.RecordKey, current.RecordKey, StringComparison.Ordinal) ||
+                    !string.Equals(previous.Value.SchemaId, current.SchemaId, StringComparison.Ordinal))
+                {
+                    SendRemoval(key.Peer, key.Id, previous.Value);
+                    SendUpsert(key.Peer, key.Id, current, added: true);
+                }
+                else if (!Equivalent(previous.Value, current))
+                {
+                    SendUpsert(key.Peer, key.Id, current, added: false);
+                }
+            }
+            foreach (var current in next.BySourceRecordKey)
+            {
+                if (!projection.DeliveredBySourceRecordKey.ContainsKey(current.Key))
+                    SendUpsert(key.Peer, key.Id, current.Value, added: true);
+            }
+
+            projection.DeliveredBySourceRecordKey.Clear();
+            foreach (var current in next.BySourceRecordKey)
+                projection.DeliveredBySourceRecordKey[current.Key] = current.Value;
+
+            if (projection.DemandActive != authorized)
+            {
+                projection.DemandActive = authorized;
+                PublishDemand(request, key, authorized);
+            }
+        }
+
+        private ProjectedSnapshot CreateProjectedSnapshot(
+            CultNetDatabaseSubscribeMessage request,
+            ICultNetSchemaServerPeer peer)
+        {
+            var snapshot = _database.Documents.CreateRawSnapshotResponse(
+                _database.Cache,
+                request.MessageId,
+                new CultNetSnapshotRequestMessage
+                {
+                    MessageId = request.MessageId,
+                    SchemaIds = request.SchemaIds,
+                    RecordKeys = request.RecordKeys
+                });
+            var bySourceRecordKey = new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal);
+            var projectedRecordKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var source in snapshot.Documents)
+            {
+                var sourceRecordKey = source.RecordKey;
+                if (_authorizeRecord?.Invoke(request, peer, sourceRecordKey, source.SchemaId) == false)
+                    continue;
+                var projected = _projectRecord == null ? source : _projectRecord(request, peer, source);
+                if (projected == null) continue;
+                if (!projectedRecordKeys.Add(projected.RecordKey))
+                    throw new InvalidOperationException(
+                        $"Database subscription projection produced duplicate record key '{projected.RecordKey}'.");
+                bySourceRecordKey[sourceRecordKey] = projected;
+            }
+            return new ProjectedSnapshot(bySourceRecordKey);
+        }
+
+        private void ApplyProjectedChange(
+            SubscriptionProjectionState projection,
+            string sourceRecordKey,
+            CultNetRawDocumentRecord? current,
+            ICultNetSchemaServerPeer peer,
+            string subscriptionId)
+        {
+            projection.DeliveredBySourceRecordKey.TryGetValue(sourceRecordKey, out var previous);
+            if (current == null)
+            {
+                if (previous != null)
+                {
+                    projection.DeliveredBySourceRecordKey.Remove(sourceRecordKey);
+                    SendRemoval(peer, subscriptionId, previous);
+                }
+                return;
+            }
+            if (previous == null)
+            {
+                projection.DeliveredBySourceRecordKey[sourceRecordKey] = current;
+                SendUpsert(peer, subscriptionId, current, added: true);
+                return;
+            }
+            if (!string.Equals(previous.RecordKey, current.RecordKey, StringComparison.Ordinal) ||
+                !string.Equals(previous.SchemaId, current.SchemaId, StringComparison.Ordinal))
+            {
+                SendRemoval(peer, subscriptionId, previous);
+                projection.DeliveredBySourceRecordKey[sourceRecordKey] = current;
+                SendUpsert(peer, subscriptionId, current, added: true);
+                return;
+            }
+            if (!Equivalent(previous, current))
+            {
+                projection.DeliveredBySourceRecordKey[sourceRecordKey] = current;
+                SendUpsert(peer, subscriptionId, current, added: false);
+            }
+        }
+
+        private static string ResolveChangeRecordKey(object change)
+        {
+            var value = change.GetType().GetProperty("Key")?.GetValue(change);
+            return value is CultRecordKey key ? key.Value : string.Empty;
+        }
+
+        private static bool Equivalent(CultNetRawDocumentRecord left, CultNetRawDocumentRecord right) =>
+            string.Equals(left.SchemaId, right.SchemaId, StringComparison.Ordinal) &&
+            string.Equals(left.SchemaName, right.SchemaName, StringComparison.Ordinal) &&
+            string.Equals(left.SchemaVersion, right.SchemaVersion, StringComparison.Ordinal) &&
+            string.Equals(left.SchemaContentHash, right.SchemaContentHash, StringComparison.Ordinal) &&
+            string.Equals(left.RecordKey, right.RecordKey, StringComparison.Ordinal) &&
+            string.Equals(left.PayloadEncoding, right.PayloadEncoding, StringComparison.Ordinal) &&
+            left.Payload.SequenceEqual(right.Payload) &&
+            string.Equals(left.SourceRuntimeId, right.SourceRuntimeId, StringComparison.Ordinal) &&
+            string.Equals(left.SourceAgentId, right.SourceAgentId, StringComparison.Ordinal) &&
+            string.Equals(left.SourceRole, right.SourceRole, StringComparison.Ordinal);
+
+        private static void SendUpsert(
+            ICultNetSchemaServerPeer peer,
+            string subscriptionId,
+            CultNetRawDocumentRecord document,
+            bool added) =>
+            peer.SendCultNet(new CultNetDatabaseChangeRawMessage
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                SubscriptionId = subscriptionId,
+                ChangeKind = added ? "added" : "updated",
+                Document = document
+            });
+
+        private static void SendRemoval(
+            ICultNetSchemaServerPeer peer,
+            string subscriptionId,
+            CultNetRawDocumentRecord document) =>
+            peer.SendCultNet(new CultNetDatabaseChangeRawMessage
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                SubscriptionId = subscriptionId,
+                ChangeKind = "removed",
+                RecordKey = document.RecordKey,
+                SchemaId = document.SchemaId
+            });
+
+        private void Withdraw(SubscriptionKey key, bool sendRemovals, bool forgetRequest)
+        {
+            if (_subscriptions.TryRemove(key, out var subscription))
+                subscription.Dispose();
+            if (_projections.TryRemove(key, out var projection))
+            {
+                if (sendRemovals)
+                {
+                    foreach (var delivered in projection.DeliveredBySourceRecordKey.Values)
+                        SendRemoval(key.Peer, key.Id, delivered);
+                }
+                if (projection.DemandActive && _requests.TryGetValue(key, out var activeRequest))
+                    PublishDemand(activeRequest, key, active: false);
+            }
+            if (forgetRequest)
+                _requests.TryRemove(key, out _);
         }
 
         private CultNetDatabaseChangeRawMessage? CreateAuthorizedChange(
@@ -318,6 +512,27 @@ namespace GameCult.Networking
             var put = method.MakeGenericMethod(documentType)
                 .Invoke(_database.Documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
             return ((CultNetDocumentPutRawMessage)put!).Document;
+        }
+
+        private sealed class SubscriptionProjectionState
+        {
+            public Dictionary<string, CultNetRawDocumentRecord> DeliveredBySourceRecordKey { get; } =
+                new(StringComparer.Ordinal);
+            public bool DemandActive { get; set; }
+        }
+
+        private sealed class ProjectedSnapshot
+        {
+            public ProjectedSnapshot(Dictionary<string, CultNetRawDocumentRecord> bySourceRecordKey)
+            {
+                BySourceRecordKey = bySourceRecordKey;
+                Documents = bySourceRecordKey.Values.ToArray();
+            }
+
+            public static ProjectedSnapshot Empty { get; } =
+                new(new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal));
+            public Dictionary<string, CultNetRawDocumentRecord> BySourceRecordKey { get; }
+            public CultNetRawDocumentRecord[] Documents { get; }
         }
 
         private sealed class SubscriptionKey

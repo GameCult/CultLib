@@ -1545,6 +1545,97 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_ReconcilesDeliveredProjectionAndBodyDemandWhenAuthorityChanges()
+        {
+            const string sourceRecordKey = "tests:authority:source";
+            const string bodyId = "tests:authority:body";
+            var authorized = true;
+            var projectionName = "one";
+            var sourceCache = new CultCache();
+            var sourceDatabase = new CultNetDatabase(sourceCache);
+            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "initial"
+            });
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-reconciled-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                sourceDatabase,
+                authorizeRequest: (_, _) => authorized,
+                authorizeRecord: (_, _, _, _) => authorized,
+                projectRecord: (_, _, record) =>
+                {
+                    record.RecordKey = $"tests:authority:projected:{projectionName}";
+                    return record;
+                });
+            using var bodyDemand = new CultMeshBodyDemandTracker(subscriptions);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            var targetCache = new CultCache();
+            var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(targetCache.Registry));
+            var transport = CultNetSchemaClients.CreateRudp("database-reconciled-subscription-client");
+            using var client = new CultNetDatabaseSubscriptionClient(transport, targetCache, targetDocuments);
+            var changes = new ConcurrentQueue<CultNetReplicatedDocumentChange>();
+            client.Changed += changes.Enqueue;
+            transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => transport.Connected, TimeSpan.FromSeconds(2));
+            await AwaitWithTimeout(
+                client.SubscribeAsync(
+                    "authority",
+                    recordKeys: [sourceRecordKey],
+                    consumerRuntimeId: "authority-client",
+                    bodyIds: [bodyId],
+                    supportedBodyTransports: [CultMeshBodyTransportKind.SharedMemory.ToString()]),
+                TimeSpan.FromSeconds(2));
+            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:one")), Is.Not.Null);
+            Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.True);
+
+            projectionName = "two";
+            subscriptions.Reconcile();
+            await WaitUntilAsync(
+                () => targetCache.Get(new CultRecordKey("tests:authority:projected:one")) == null &&
+                      targetCache.Get(new CultRecordKey("tests:authority:projected:two")) != null,
+                TimeSpan.FromSeconds(2));
+            Assert.That(changes.Any(change => change.ChangeKind == "removed" &&
+                change.RecordKey == "tests:authority:projected:one"), Is.True);
+            Assert.That(changes.Any(change => change.ChangeKind == "added" &&
+                change.RecordKey == "tests:authority:projected:two"), Is.True);
+
+            authorized = false;
+            subscriptions.Reconcile();
+            await WaitUntilAsync(
+                () => targetCache.Get(new CultRecordKey("tests:authority:projected:two")) == null,
+                TimeSpan.FromSeconds(2));
+            Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.False);
+            var changeCountAfterRevocation = changes.Count;
+            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "must-not-escape"
+            });
+            await Task.Delay(100);
+            cancellation.Cancel();
+
+            Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
+            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:two")), Is.Null);
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionServer_ProjectsBodyDemandAndWithdrawalFromExactSubscription()
         {
             var database = new CultNetDatabase(new CultCache());
