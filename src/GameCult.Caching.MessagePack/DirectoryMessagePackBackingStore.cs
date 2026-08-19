@@ -70,6 +70,37 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// </summary>
     public static string DefaultRecordDirectoryPath(string manifestPath) => manifestPath + ".records";
 
+    /// <summary>
+    /// Reads one complete persisted generation without deserializing documents through a
+    /// runtime registry. Indexed manifests are resolved only through the pages they name;
+    /// orphaned pages from older generations are never included.
+    /// </summary>
+    public CultPersistedStoreSnapshot ReadPersistedGeneration()
+    {
+        lock (_mutationGate)
+        using (AcquireCommitLease())
+        {
+            var manifest = ReadManifest();
+            var indexed = string.Equals(manifest.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) ||
+                string.Equals(manifest.FormatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal) ||
+                string.Equals(manifest.FormatVersion, LegacyIndexedFormatVersion, StringComparison.Ordinal);
+            var records = indexed
+                ? manifest.Records
+                    .OrderBy(record => record.Key, StringComparer.Ordinal)
+                    .Select(record => ReadPersistedRecordPage(record, manifest.FormatVersion, out _))
+                    .ToArray()
+                : manifest.Records
+                    .OrderBy(record => record.Key, StringComparer.Ordinal)
+                    .ToArray();
+            return new CultPersistedStoreSnapshot
+            {
+                FormatVersion = manifest.FormatVersion,
+                SchemaCatalog = manifest.SchemaCatalog.ToArray(),
+                Records = records
+            };
+        }
+    }
+
     /// <inheritdoc />
     public override void PullAll()
     {
@@ -496,20 +527,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             {
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
-                var path = _manifestUsesImmutablePages
-                    ? ContentAddressedRecordPath(metadata)
-                    : _manifestUsesMetadataPages
-                        ? MetadataRecordPath(metadata)
-                        : LegacyRecordPath(metadata.Key);
-                if (!File.Exists(path))
-                    throw new InvalidDataException($"Committed record page '{path}' is missing from the selected manifest generation.");
-                var pagePayload = ReadAllBytesShared(path);
-                if (_manifestUsesImmutablePages &&
-                    !HashPayload(pagePayload).SequenceEqual(metadata.Payload))
-                    throw new InvalidDataException($"Record page '{path}' does not match its committed content hash.");
-                var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
-                if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
-                    throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
+                var record = ReadPersistedRecordPage(
+                    metadata,
+                    _manifestUsesImmutablePages,
+                    _manifestUsesMetadataPages,
+                    out var pagePayload);
                 var catalog = ResolveLegacyUncataloguedRecordCatalog(record, catalogEntries);
                 recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog);
                 storedRecords[index] = ToStoredDocument(
@@ -795,6 +817,39 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 // Cleanup is best effort and never changes the committed generation.
             }
         }
+    }
+
+    private CultPersistedRecord ReadPersistedRecordPage(
+        CultPersistedRecord metadata,
+        string formatVersion,
+        out byte[] pagePayload) =>
+        ReadPersistedRecordPage(
+            metadata,
+            string.Equals(formatVersion, IndexedFormatVersion, StringComparison.Ordinal),
+            string.Equals(formatVersion, LegacyMetadataPageFormatVersion, StringComparison.Ordinal),
+            out pagePayload);
+
+    private CultPersistedRecord ReadPersistedRecordPage(
+        CultPersistedRecord metadata,
+        bool usesContentAddressedPages,
+        bool usesMetadataPages,
+        out byte[] pagePayload)
+    {
+        var path = usesContentAddressedPages
+            ? ContentAddressedRecordPath(metadata)
+            : usesMetadataPages
+                ? MetadataRecordPath(metadata)
+                : LegacyRecordPath(metadata.Key);
+        if (!File.Exists(path))
+            throw new InvalidDataException($"Committed record page '{path}' is missing from the selected manifest generation.");
+        pagePayload = ReadAllBytesShared(path);
+        if (usesContentAddressedPages &&
+            !HashPayload(pagePayload).SequenceEqual(metadata.Payload))
+            throw new InvalidDataException($"Record page '{path}' does not match its committed content hash.");
+        var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
+        if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
+            throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
+        return record;
     }
 
     private static string HashKey(string key)

@@ -1577,10 +1577,12 @@ namespace GameCult.Caching
             try
             {
                 await stageAsync().ConfigureAwait(false);
+                transaction.Seal();
                 changes = CommitTransaction(transaction, soft);
             }
             finally
             {
+                transaction.Seal();
                 _ambientTransaction.Value = null;
                 _transactionGate.Release();
             }
@@ -1904,7 +1906,7 @@ namespace GameCult.Caching
             CultCacheTransaction transaction,
             bool soft)
         {
-            var mutations = transaction.Mutations
+            var mutations = transaction.SnapshotForCommit()
                 .OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 .ToArray();
             if (mutations.Length == 0)
@@ -1978,16 +1980,71 @@ namespace GameCult.Caching
 
         private sealed class CultCacheTransaction
         {
+            private readonly object _gate = new();
             private readonly Dictionary<string, CultStoredDocument?> _mutations = new(StringComparer.Ordinal);
+            private bool _sealed;
 
-            public IReadOnlyDictionary<string, CultStoredDocument?> Mutations => _mutations;
+            public IReadOnlyDictionary<string, CultStoredDocument?> Mutations
+            {
+                get
+                {
+                    lock (_gate)
+                    {
+                        ThrowIfSealedForAmbientAccess();
+                        return new Dictionary<string, CultStoredDocument?>(_mutations, StringComparer.Ordinal);
+                    }
+                }
+            }
 
-            public void Stage(CultStoredDocument stored) => _mutations[stored.Key.Value] = stored;
+            public void Stage(CultStoredDocument stored)
+            {
+                lock (_gate)
+                {
+                    ThrowIfSealedForAmbientAccess();
+                    _mutations[stored.Key.Value] = stored;
+                }
+            }
 
-            public void Delete(CultRecordKey key) => _mutations[key.Value] = null;
+            public void Delete(CultRecordKey key)
+            {
+                lock (_gate)
+                {
+                    ThrowIfSealedForAmbientAccess();
+                    _mutations[key.Value] = null;
+                }
+            }
 
-            public bool TryGet(CultRecordKey key, out CultStoredDocument? stored) =>
-                _mutations.TryGetValue(key.Value, out stored);
+            public bool TryGet(CultRecordKey key, out CultStoredDocument? stored)
+            {
+                lock (_gate)
+                {
+                    ThrowIfSealedForAmbientAccess();
+                    return _mutations.TryGetValue(key.Value, out stored);
+                }
+            }
+
+            public void Seal()
+            {
+                lock (_gate)
+                    _sealed = true;
+            }
+
+            public IReadOnlyDictionary<string, CultStoredDocument?> SnapshotForCommit()
+            {
+                lock (_gate)
+                {
+                    if (!_sealed)
+                        throw new InvalidOperationException("A CultCache transaction must be sealed before commit.");
+                    return new Dictionary<string, CultStoredDocument?>(_mutations, StringComparer.Ordinal);
+                }
+            }
+
+            private void ThrowIfSealedForAmbientAccess()
+            {
+                if (_sealed)
+                    throw new InvalidOperationException(
+                        "This CultCache transaction has already completed; escaped async work cannot read or mutate it.");
+            }
         }
 
         internal CultStoredDocument CreateStoredDocument(Type documentType, object document, CultRecordKey? key = null, string? storedAt = null)

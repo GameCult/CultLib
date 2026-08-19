@@ -1055,6 +1055,9 @@ namespace GameCult.Caching.Tests
                 var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog, Is.Empty);
                 Assert.That(compacted.Records, Is.Empty);
+                var selectedGeneration = store.ReadPersistedGeneration();
+                Assert.That(selectedGeneration.Records, Is.Empty,
+                    "a raw generation reader must not resurrect an orphaned page left by another process");
             }
             finally
             {
@@ -1425,6 +1428,55 @@ namespace GameCult.Caching.Tests
                 await reopened.PullAllBackingStoresAsync();
                 Assert.That(reopened.Get<NamedTestEntry>(abortedKey), Is.Null);
                 Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("survives"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Rejects_Escaped_Async_Writes_After_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-escaped-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var committedKey = new CultRecordKey("transaction:committed-parent");
+                var escapedKey = new CultRecordKey("transaction:escaped-child");
+                var releaseChild = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Task? escapedWrite = null;
+
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "parent", Value = "committed" },
+                        new CultRecordHandle<NamedTestEntry>(committedKey));
+                    escapedWrite = Task.Run(async () =>
+                    {
+                        await releaseChild.Task;
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "child", Value = "must-fail" },
+                            new CultRecordHandle<NamedTestEntry>(escapedKey));
+                    });
+                });
+
+                releaseChild.SetResult(true);
+                Assert.That(escapedWrite, Is.Not.Null);
+                Assert.That(
+                    async () => await escapedWrite!,
+                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains("already completed"));
+                Assert.That(cache.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("committed"));
+                Assert.That(cache.Get<NamedTestEntry>(escapedKey), Is.Null);
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("committed"));
+                Assert.That(reopened.Get<NamedTestEntry>(escapedKey), Is.Null);
             }
             finally
             {
