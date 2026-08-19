@@ -1446,13 +1446,22 @@ namespace GameCult.Caching
         /// </summary>
         public async Task PullAllBackingStoresAsync()
         {
-            foreach (var store in _backingStores)
-            {
-                store.PullAll();
-            }
+            if (_ambientTransaction.Value != null)
+                throw new InvalidOperationException(
+                    "CultCache hydration cannot run inside a mutation transaction; hydrate before opening the commit scope.");
 
-            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
-            await Task.CompletedTask;
+            await _transactionGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                foreach (var store in _backingStores)
+                    store.PullAll();
+
+                _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+            }
+            finally
+            {
+                _transactionGate.Release();
+            }
         }
 
         /// <summary>
@@ -1462,13 +1471,22 @@ namespace GameCult.Caching
         public async Task PullBackingStoreRecordsAsync(Func<CultPersistedRecordMetadata, bool> selector)
         {
             if (selector == null) throw new ArgumentNullException(nameof(selector));
-            foreach (var store in _backingStores)
-            {
-                store.PullSelected(selector);
-            }
+            if (_ambientTransaction.Value != null)
+                throw new InvalidOperationException(
+                    "CultCache hydration cannot run inside a mutation transaction; hydrate before opening the commit scope.");
 
-            _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
-            await Task.CompletedTask;
+            await _transactionGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                foreach (var store in _backingStores)
+                    store.PullSelected(selector);
+
+                _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+            }
+            finally
+            {
+                _transactionGate.Release();
+            }
         }
 
         /// <summary>

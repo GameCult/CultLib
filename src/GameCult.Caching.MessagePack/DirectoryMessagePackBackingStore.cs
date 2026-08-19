@@ -89,9 +89,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     .OrderBy(record => record.Key, StringComparer.Ordinal)
                     .Select(record => ReadPersistedRecordPage(record, manifest.FormatVersion, out _))
                     .ToArray()
-                : manifest.Records
-                    .OrderBy(record => record.Key, StringComparer.Ordinal)
-                    .ToArray();
+                : ReadLegacyPersistedGenerationRecords(manifest);
             return new CultPersistedStoreSnapshot
             {
                 FormatVersion = manifest.FormatVersion,
@@ -99,6 +97,28 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 Records = records
             };
         }
+    }
+
+    private CultPersistedRecord[] ReadLegacyPersistedGenerationRecords(CultPersistedStoreSnapshot manifest)
+    {
+        var records = manifest.Records
+            .Where(record => !string.IsNullOrWhiteSpace(record.Key))
+            .ToList();
+        _recordDirectory.Refresh();
+        if (_recordDirectory.Exists)
+        {
+            records.AddRange(_recordDirectory.EnumerateFiles("*.msgpack")
+                .OrderBy(file => file.Name, StringComparer.Ordinal)
+                .Select(file => CultDocumentMessagePackSerialization.DeserializePersistedRecord(
+                    ReadAllBytesShared(file.FullName))));
+        }
+
+        return records
+            .Where(record => !string.IsNullOrWhiteSpace(record.Key))
+            .GroupBy(record => record.Key, StringComparer.Ordinal)
+            .Select(group => group.Last())
+            .OrderBy(record => record.Key, StringComparer.Ordinal)
+            .ToArray();
     }
 
     /// <inheritdoc />

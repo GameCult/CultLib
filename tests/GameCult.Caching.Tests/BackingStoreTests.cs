@@ -574,6 +574,10 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(recordPath, CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
 
                 var readStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var rawGeneration = readStore.ReadPersistedGeneration();
+                Assert.That(rawGeneration.Records.Select(value => value.Key),
+                    Is.EqualTo(new[] { "record:stale" }),
+                    "v1 split record pages remain part of the selected legacy generation");
                 var readCache = new CultCache();
                 readCache.AddBackingStore(readStore);
                 await readCache.PullAllBackingStoresAsync();
@@ -1477,6 +1481,85 @@ namespace GameCult.Caching.Tests
                 await reopened.PullAllBackingStoresAsync();
                 Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("committed"));
                 Assert.That(reopened.Get<NamedTestEntry>(escapedKey), Is.Null);
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Rejects_Hydration_Inside_Its_Mutation_Scope()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-transaction-hydration-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using (var writer = new CultCache())
+                {
+                    writer.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                    await writer.UpsertAsync(
+                        new NamedTestEntry { Name = "external", Value = "durable" },
+                        new CultRecordHandle<NamedTestEntry>(new CultRecordKey("transaction:external")));
+                    writer.FlushAllBackingStores();
+                }
+
+                using var reader = new CultCache();
+                reader.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var observed = 0;
+                using var subscription = reader.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                Assert.That(
+                    async () => await reader.ExecuteTransactionAsync(
+                        () => reader.PullAllBackingStoresAsync()),
+                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains("hydrate before"));
+                Assert.That(reader.Get<NamedTestEntry>(new CultRecordKey("transaction:external")), Is.Null);
+                Assert.That(observed, Is.Zero);
+
+                await reader.PullAllBackingStoresAsync();
+                Assert.That(reader.Get<NamedTestEntry>(new CultRecordKey("transaction:external"))?.Value,
+                    Is.EqualTo("durable"));
+                Assert.That(observed, Is.EqualTo(1));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Hydration_Waits_For_The_Active_Mutation_Transaction()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-hydration-gate-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var transaction = cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "staged", Value = "committed" },
+                        new CultRecordHandle<NamedTestEntry>(new CultRecordKey("transaction:hydration-gate")));
+                    staged.SetResult(true);
+                    await release.Task;
+                });
+
+                await staged.Task;
+                var hydration = cache.PullAllBackingStoresAsync();
+                Assert.That(hydration.IsCompleted, Is.False,
+                    "hydration must wait until the active mutation transaction has committed");
+
+                release.SetResult(true);
+                await transaction;
+                await hydration;
+                Assert.That(cache.Get<NamedTestEntry>(new CultRecordKey("transaction:hydration-gate"))?.Value,
+                    Is.EqualTo("committed"));
             }
             finally
             {
