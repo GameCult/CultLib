@@ -1117,9 +1117,18 @@ namespace GameCult.Mesh
             string pointerId,
             string? sourceId = null,
             string? schemaId = null,
-            CultMeshRouteHint? routeHint = null)
+            CultMeshRouteHint? routeHint = null,
+            string? bindingName = null,
+            string? documentId = null,
+            string? fieldPath = null,
+            string? valueKind = null,
+            string? accessMode = null,
+            string? authority = null,
+            string? writeCommand = null)
         {
-            return new CultMeshStateBindingDescriptor(targetProp, pointerId, sourceId, schemaId, routeHint);
+            return new CultMeshStateBindingDescriptor(
+                targetProp, pointerId, sourceId, schemaId, routeHint,
+                bindingName, documentId, fieldPath, valueKind, accessMode, authority, writeCommand);
         }
 
         /// <summary>
@@ -1139,7 +1148,14 @@ namespace GameCult.Mesh
             string? sourceId = null,
             string? schemaId = null,
             string? routeKind = null,
-            string? routeDescription = null)
+            string? routeDescription = null,
+            string? bindingName = null,
+            string? documentId = null,
+            string? fieldPath = null,
+            string? valueKind = null,
+            string? accessMode = null,
+            string? authority = null,
+            string? writeCommand = null)
         {
             return new CultMeshStateBindingRecord(
                 targetProp,
@@ -1147,7 +1163,14 @@ namespace GameCult.Mesh
                 sourceId,
                 schemaId,
                 routeKind,
-                routeDescription);
+                routeDescription,
+                bindingName,
+                documentId,
+                fieldPath,
+                valueKind,
+                accessMode,
+                authority,
+                writeCommand);
         }
 
         /// <summary>

@@ -299,6 +299,37 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
+    public void StateBindingRecord_PreservesEditableFieldIdentityAndAuthority()
+    {
+        var binding = CultMesh.StateBinding(
+            "value",
+            "ghostlight.session-zero.composer",
+            sourceId: "session-zero:draft-7",
+            schemaId: "session_zero.v1",
+            routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, "Ghostlight provider"),
+            bindingName: "composer.message",
+            documentId: "session-zero:draft-7",
+            fieldPath: "channels.private.messages.pending",
+            valueKind: "string",
+            accessMode: "local-draft",
+            authority: "SessionZeroKernel",
+            writeCommand: "edit.value");
+
+        var record = CultMesh.StateBindingRecord(binding);
+        record.BindingName.Should().Be("composer.message");
+        record.FieldPath.Should().Be("channels.private.messages.pending");
+        record.AccessMode.Should().Be("local-draft");
+        var restored = record.ToBinding();
+        restored.BindingName.Should().Be(binding.BindingName);
+        restored.DocumentId.Should().Be(binding.DocumentId);
+        restored.FieldPath.Should().Be(binding.FieldPath);
+        restored.ValueKind.Should().Be(binding.ValueKind);
+        restored.AccessMode.Should().Be(binding.AccessMode);
+        restored.Authority.Should().Be(binding.Authority);
+        restored.WriteCommand.Should().Be(binding.WriteCommand);
+    }
+
+    [Test]
     public void OperationBindingDescriptor_BindsUiCommandsToTypedOperations()
     {
         var operation = new CultMeshOperationHandle<MeshMoveRequest, CultMeshOperationReceipt>(

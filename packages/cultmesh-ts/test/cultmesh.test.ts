@@ -2147,6 +2147,13 @@ test("CultMesh TS flattens and rehydrates UI state binding records", () => {
     schemaId: "gamecult.aetheria.daemon_frame.v1",
     routeKind: "shared-memory",
     routeDescription: "co-located frame slab",
+    bindingName: "",
+    documentId: "",
+    fieldPath: "",
+    valueKind: "",
+    accessMode: "",
+    authority: "",
+    writeCommand: "",
   });
 
   assert.deepEqual(CultMesh.stateBindingFromRecord({
@@ -2166,6 +2173,26 @@ test("CultMesh TS flattens and rehydrates UI state binding records", () => {
       description: "embedded tool host",
     },
   });
+});
+
+test("CultMesh TS preserves editable binding identity and authority through transport records", () => {
+  const binding = CultMesh.stateBinding("value", "ghostlight.session-zero.composer", {
+    sourceId: "session-zero:draft-7",
+    schemaId: "session_zero.v1",
+    routeHint: CultMesh.routeHint("network", "Ghostlight provider"),
+    bindingName: "composer.message",
+    documentId: "session-zero:draft-7",
+    fieldPath: "channels.private.messages.pending",
+    valueKind: "string",
+    accessMode: "local-draft",
+    authority: "SessionZeroKernel",
+    writeCommand: "edit.value",
+  });
+  const record = CultMesh.stateBindingRecord(binding);
+  assert.equal(record.bindingName, "composer.message");
+  assert.equal(record.fieldPath, "channels.private.messages.pending");
+  assert.equal(record.accessMode, "local-draft");
+  assert.deepEqual(CultMesh.stateBindingFromRecord(record), binding);
 });
 
 test("CultMesh TS describes UI command bindings from typed operations", async () => {

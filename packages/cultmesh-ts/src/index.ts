@@ -300,6 +300,13 @@ export interface CultMeshStateBindingDescriptor {
   readonly sourceId?: string;
   readonly schemaId?: string;
   readonly routeHint: CultMeshRouteHint;
+  readonly bindingName?: string;
+  readonly documentId?: string;
+  readonly fieldPath?: string;
+  readonly valueKind?: "string" | "number" | "boolean" | "choice" | "string-list";
+  readonly accessMode?: "read" | "write" | "read-write" | "local-draft";
+  readonly authority?: string;
+  readonly writeCommand?: string;
 }
 
 export interface CultMeshStateBindingRecord {
@@ -309,6 +316,13 @@ export interface CultMeshStateBindingRecord {
   readonly schemaId: string;
   readonly routeKind: string;
   readonly routeDescription: string;
+  readonly bindingName: string;
+  readonly documentId: string;
+  readonly fieldPath: string;
+  readonly valueKind: string;
+  readonly accessMode: string;
+  readonly authority: string;
+  readonly writeCommand: string;
 }
 
 export interface CultMeshOperationBindingDescriptor {
@@ -3351,6 +3365,15 @@ export function cultMeshDescribeStateRefResolver(
   };
 }
 
+function stateBindingMetadata(
+  options: Pick<CultMeshStateBindingDescriptor,
+    "bindingName" | "documentId" | "fieldPath" | "valueKind" | "accessMode" | "authority" | "writeCommand">,
+): Partial<CultMeshStateBindingDescriptor> {
+  return Object.fromEntries(
+    Object.entries(options).filter(([, value]) => value !== undefined),
+  ) as Partial<CultMeshStateBindingDescriptor>;
+}
+
 export function cultMeshStateBinding(
   targetProp: string,
   pointer:
@@ -3364,6 +3387,13 @@ export function cultMeshStateBinding(
     sourceId?: string;
     schemaId?: string;
     routeHint?: CultMeshRouteHint;
+    bindingName?: string;
+    documentId?: string;
+    fieldPath?: string;
+    valueKind?: CultMeshStateBindingDescriptor["valueKind"];
+    accessMode?: CultMeshStateBindingDescriptor["accessMode"];
+    authority?: string;
+    writeCommand?: string;
   } = {},
 ): CultMeshStateBindingDescriptor {
   requireNonEmpty(targetProp, "targetProp");
@@ -3375,6 +3405,7 @@ export function cultMeshStateBinding(
       sourceId: options.sourceId,
       schemaId: options.schemaId,
       routeHint: options.routeHint ?? cultMeshRouteHint(),
+      ...stateBindingMetadata(options),
     };
   }
 
@@ -3386,6 +3417,7 @@ export function cultMeshStateBinding(
     sourceId: options.sourceId ?? source?.sourceId,
     schemaId: options.schemaId ?? source?.schemaId,
     routeHint: options.routeHint ?? pointer.routeHint ?? cultMeshRouteHint(),
+    ...stateBindingMetadata(options),
   };
 }
 
@@ -3399,6 +3431,13 @@ export function cultMeshStateBindingRecord(
   schemaId?: string,
   routeKind?: string,
   routeDescription?: string,
+  bindingName?: string,
+  documentId?: string,
+  fieldPath?: string,
+  valueKind?: string,
+  accessMode?: string,
+  authority?: string,
+  writeCommand?: string,
 ): CultMeshStateBindingRecord;
 export function cultMeshStateBindingRecord(
   bindingOrTargetProp?: Partial<CultMeshStateBindingDescriptor> | string,
@@ -3407,6 +3446,13 @@ export function cultMeshStateBindingRecord(
   schemaId?: string,
   routeKind?: string,
   routeDescription?: string,
+  bindingName?: string,
+  documentId?: string,
+  fieldPath?: string,
+  valueKind?: string,
+  accessMode?: string,
+  authority?: string,
+  writeCommand?: string,
 ): CultMeshStateBindingRecord {
   if (typeof bindingOrTargetProp === "object" || bindingOrTargetProp === undefined) {
     const binding = bindingOrTargetProp;
@@ -3418,6 +3464,13 @@ export function cultMeshStateBindingRecord(
       schemaId: binding?.schemaId ?? "",
       routeKind: route.kind,
       routeDescription: route.description,
+      bindingName: binding?.bindingName ?? "",
+      documentId: binding?.documentId ?? "",
+      fieldPath: binding?.fieldPath ?? "",
+      valueKind: binding?.valueKind ?? "",
+      accessMode: binding?.accessMode ?? "",
+      authority: binding?.authority ?? "",
+      writeCommand: binding?.writeCommand ?? "",
     };
   }
 
@@ -3428,6 +3481,13 @@ export function cultMeshStateBindingRecord(
     schemaId: schemaId ?? "",
     routeKind: routeKind ?? "",
     routeDescription: routeDescription ?? "",
+    bindingName: bindingName ?? "",
+    documentId: documentId ?? "",
+    fieldPath: fieldPath ?? "",
+    valueKind: valueKind ?? "",
+    accessMode: accessMode ?? "",
+    authority: authority ?? "",
+    writeCommand: writeCommand ?? "",
   };
 }
 
@@ -3451,6 +3511,15 @@ export function cultMeshStateBindingFromRecord(
       },
       options.fallbackRouteHint,
     ),
+    ...stateBindingMetadata({
+      bindingName: record.bindingName || undefined,
+      documentId: record.documentId || undefined,
+      fieldPath: record.fieldPath || undefined,
+      valueKind: (record.valueKind || undefined) as CultMeshStateBindingDescriptor["valueKind"],
+      accessMode: (record.accessMode || undefined) as CultMeshStateBindingDescriptor["accessMode"],
+      authority: record.authority || undefined,
+      writeCommand: record.writeCommand || undefined,
+    }),
   };
 }
 
@@ -5278,6 +5347,13 @@ export class CultMesh {
       sourceId?: string;
       schemaId?: string;
       routeHint?: CultMeshRouteHint;
+      bindingName?: string;
+      documentId?: string;
+      fieldPath?: string;
+      valueKind?: CultMeshStateBindingDescriptor["valueKind"];
+      accessMode?: CultMeshStateBindingDescriptor["accessMode"];
+      authority?: string;
+      writeCommand?: string;
     } = {},
   ): CultMeshStateBindingDescriptor {
     return cultMeshStateBinding(targetProp, pointer, options);
@@ -5293,6 +5369,13 @@ export class CultMesh {
     schemaId?: string,
     routeKind?: string,
     routeDescription?: string,
+    bindingName?: string,
+    documentId?: string,
+    fieldPath?: string,
+    valueKind?: string,
+    accessMode?: string,
+    authority?: string,
+    writeCommand?: string,
   ): CultMeshStateBindingRecord;
   public static stateBindingRecord(
     bindingOrTargetProp?: Partial<CultMeshStateBindingDescriptor> | string,
@@ -5301,6 +5384,13 @@ export class CultMesh {
     schemaId?: string,
     routeKind?: string,
     routeDescription?: string,
+    bindingName?: string,
+    documentId?: string,
+    fieldPath?: string,
+    valueKind?: string,
+    accessMode?: string,
+    authority?: string,
+    writeCommand?: string,
   ): CultMeshStateBindingRecord {
     return typeof bindingOrTargetProp === "object" || bindingOrTargetProp === undefined
       ? cultMeshStateBindingRecord(bindingOrTargetProp)
@@ -5311,6 +5401,13 @@ export class CultMesh {
           schemaId,
           routeKind,
           routeDescription,
+          bindingName,
+          documentId,
+          fieldPath,
+          valueKind,
+          accessMode,
+          authority,
+          writeCommand,
         );
   }
 

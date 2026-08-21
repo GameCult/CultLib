@@ -3329,13 +3329,27 @@ namespace GameCult.Mesh
             string pointerId,
             string? sourceId = null,
             string? schemaId = null,
-            CultMeshRouteHint? routeHint = null)
+            CultMeshRouteHint? routeHint = null,
+            string? bindingName = null,
+            string? documentId = null,
+            string? fieldPath = null,
+            string? valueKind = null,
+            string? accessMode = null,
+            string? authority = null,
+            string? writeCommand = null)
         {
             TargetProp = RequireNonEmpty(targetProp, nameof(targetProp));
             PointerId = RequireNonEmpty(pointerId, nameof(pointerId));
             SourceId = sourceId;
             SchemaId = schemaId;
             RouteHint = routeHint ?? CultMeshRouteHint.Automatic;
+            BindingName = bindingName ?? "";
+            DocumentId = documentId ?? "";
+            FieldPath = fieldPath ?? "";
+            ValueKind = valueKind ?? "";
+            AccessMode = accessMode ?? "";
+            Authority = authority ?? "";
+            WriteCommand = writeCommand ?? "";
         }
 
         /// <summary>Gets the component property receiving the resolved state value.</summary>
@@ -3352,6 +3366,27 @@ namespace GameCult.Mesh
 
         /// <summary>Gets the preferred route for resolving and watching the binding.</summary>
         public CultMeshRouteHint RouteHint { get; }
+
+        /// <summary>Gets the stable renderer-facing name used to capture this binding in an operation.</summary>
+        public string BindingName { get; }
+
+        /// <summary>Gets the optional identity of the provider-owned backing document.</summary>
+        public string DocumentId { get; }
+
+        /// <summary>Gets the optional typed field path inside the backing document.</summary>
+        public string FieldPath { get; }
+
+        /// <summary>Gets the optional portable value kind.</summary>
+        public string ValueKind { get; }
+
+        /// <summary>Gets the optional read, write, read-write, or local-draft access mode.</summary>
+        public string AccessMode { get; }
+
+        /// <summary>Gets the authority responsible for accepting writes to this binding.</summary>
+        public string Authority { get; }
+
+        /// <summary>Gets the optional typed operation id used for direct writes.</summary>
+        public string WriteCommand { get; }
 
         /// <summary>Creates a binding from an existing state pointer.</summary>
         public static CultMeshStateBindingDescriptor FromPointer<TValue>(
@@ -3390,7 +3425,14 @@ namespace GameCult.Mesh
             string? sourceId = null,
             string? schemaId = null,
             string? routeKind = null,
-            string? routeDescription = null)
+            string? routeDescription = null,
+            string? bindingName = null,
+            string? documentId = null,
+            string? fieldPath = null,
+            string? valueKind = null,
+            string? accessMode = null,
+            string? authority = null,
+            string? writeCommand = null)
         {
             TargetProp = string.IsNullOrWhiteSpace(targetProp) ? "value" : targetProp!;
             PointerId = pointerId ?? "";
@@ -3398,6 +3440,13 @@ namespace GameCult.Mesh
             SchemaId = schemaId ?? "";
             RouteKind = routeKind ?? "";
             RouteDescription = routeDescription ?? "";
+            BindingName = bindingName ?? "";
+            DocumentId = documentId ?? "";
+            FieldPath = fieldPath ?? "";
+            ValueKind = valueKind ?? "";
+            AccessMode = accessMode ?? "";
+            Authority = authority ?? "";
+            WriteCommand = writeCommand ?? "";
         }
 
         /// <summary>Gets the component property receiving the resolved state value.</summary>
@@ -3418,6 +3467,14 @@ namespace GameCult.Mesh
         /// <summary>Gets the flattened route description.</summary>
         [Key(5)] public string RouteDescription { get; }
 
+        [Key(6)] public string BindingName { get; }
+        [Key(7)] public string DocumentId { get; }
+        [Key(8)] public string FieldPath { get; }
+        [Key(9)] public string ValueKind { get; }
+        [Key(10)] public string AccessMode { get; }
+        [Key(11)] public string Authority { get; }
+        [Key(12)] public string WriteCommand { get; }
+
         /// <summary>Creates transport-friendly fields from a state binding descriptor.</summary>
         public static CultMeshStateBindingRecord FromBinding(CultMeshStateBindingDescriptor? binding)
         {
@@ -3428,7 +3485,14 @@ namespace GameCult.Mesh
                 binding?.SourceId,
                 binding?.SchemaId,
                 route.Kind,
-                route.Description);
+                route.Description,
+                binding?.BindingName,
+                binding?.DocumentId,
+                binding?.FieldPath,
+                binding?.ValueKind,
+                binding?.AccessMode,
+                binding?.Authority,
+                binding?.WriteCommand);
         }
 
         /// <summary>Rehydrates this record as a state binding descriptor.</summary>
@@ -3450,7 +3514,14 @@ namespace GameCult.Mesh
                 pointerId,
                 SourceId,
                 SchemaId,
-                route);
+                route,
+                BindingName,
+                DocumentId,
+                FieldPath,
+                ValueKind,
+                AccessMode,
+                Authority,
+                WriteCommand);
         }
     }
 
