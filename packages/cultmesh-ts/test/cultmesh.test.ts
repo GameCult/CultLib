@@ -2862,6 +2862,19 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
   }
 });
 
+test("CultMesh TS resolves a CultMesh URI through its authority bootstrap", () => {
+  assert.deepEqual(
+    CultMesh.resolveRudpEndpoint("cultmesh://odin/rendezvous/provider-catalog", {
+      CULTMESH_URI_ODIN_RUDP: "127.0.0.1:17871",
+    }),
+    { host: "127.0.0.1", port: 17871, uri: "rudp://127.0.0.1:17871" },
+  );
+  assert.throws(
+    () => CultMesh.resolveRudpEndpoint("cultmesh://missing/rendezvous/provider-catalog", {}),
+    /did not resolve/,
+  );
+});
+
 test("CultMesh TS returns a correlated provider receipt after a RUDP document mutation", async () => {
   const connectionId = 0x10203050;
   const commandBinding = defineCultNetDocumentBinding({ definition: noteDocument });

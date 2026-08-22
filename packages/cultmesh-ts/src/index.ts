@@ -6002,6 +6002,37 @@ export class CultMesh {
     };
   }
 
+  public static resolveRudpEndpoint(
+    endpoint: string,
+    environment: Record<string, string | undefined> = process.env,
+  ): CultMeshRudpEndpoint {
+    requireNonEmpty(endpoint, "endpoint");
+    const text = endpoint.trim();
+    if (text.toLowerCase().startsWith("rudp://")) {
+      return CultMesh.parseRudpEndpoint(text);
+    }
+    if (!text.toLowerCase().startsWith("cultmesh://")) {
+      return CultMesh.parseRudpEndpoint(`rudp://${text}`);
+    }
+
+    const uri = new URL(text);
+    const authority = uri.hostname.trim();
+    if (!authority) throw new Error("CultMesh URI must include an authority.");
+    const slug = authority
+      .replace(/[^a-z0-9]+/gi, "_")
+      .replace(/^_+|_+$/g, "")
+      .toUpperCase();
+    for (const key of [`CULTMESH_URI_${slug}_RUDP`, `${slug}_CULTMESH_RUDP_ENDPOINT`]) {
+      const resolved = environment[key]?.trim();
+      if (resolved) {
+        return CultMesh.parseRudpEndpoint(
+          resolved.toLowerCase().startsWith("rudp://") ? resolved : `rudp://${resolved}`,
+        );
+      }
+    }
+    throw new Error(`CultMesh URI ${text} did not resolve to a RUDP endpoint.`);
+  }
+
   public static parseRudpEndpoint(endpoint: string): CultMeshRudpEndpoint {
     requireNonEmpty(endpoint, "endpoint");
     const parsed = new URL(endpoint);
