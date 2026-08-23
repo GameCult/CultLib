@@ -68,6 +68,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration as StdDuration;
+use std::time::Instant as StdInstant;
 
 const TS_HELLO_FRAME: &[u8] = include_bytes!("fixtures/cultnet-ts-hello.frame");
 const TS_LEGACY_LOGIN_FRAME: &[u8] = include_bytes!("fixtures/cultnet-ts-legacy-login.frame");
@@ -1370,7 +1371,15 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
         CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17
     );
 
-    let server_worker = thread::spawn(move || receive_rudp_frame(&mut server));
+    let server_worker = thread::spawn(move || -> Result<CultNetTransportFrame> {
+        let delivered = receive_rudp_frame(&mut server)?;
+        let linger_deadline = StdInstant::now() + StdDuration::from_millis(250);
+        while StdInstant::now() < linger_deadline {
+            let _ = server.receive_once()?;
+            server.poll_resends()?;
+        }
+        Ok(delivered)
+    });
     client.flush_reliable(StdDuration::from_secs(5))?;
     let delivered = server_worker
         .join()

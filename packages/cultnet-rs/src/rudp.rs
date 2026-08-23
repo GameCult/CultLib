@@ -29,7 +29,7 @@ const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 64;
+pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

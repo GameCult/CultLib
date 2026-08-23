@@ -396,7 +396,7 @@ def create_rudp_transport_profile(
 
 
 class CultNetRudpSession:
-    RELIABLE_SEND_WINDOW_PACKETS = 64
+    RELIABLE_SEND_WINDOW_PACKETS = 32
     RECEIVED_SEQUENCE_WINDOW = 4_096
 
     def __init__(self, options: CultNetRudpSessionOptions) -> None:

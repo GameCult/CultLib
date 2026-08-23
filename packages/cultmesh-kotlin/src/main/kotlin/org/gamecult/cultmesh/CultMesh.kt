@@ -2621,7 +2621,7 @@ private data class FragmentBuffer(
 
 class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     companion object {
-        const val ReliableSendWindowPackets = 64
+        const val ReliableSendWindowPackets = 32
         private const val ReceivedSequenceWindow = 4_096
     }
 

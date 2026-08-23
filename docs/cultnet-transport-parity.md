@@ -258,7 +258,7 @@ Current progress:
   echo against C#/Kotlin/Python/Rust UDP peers; local runtime tests prove timeout
   state transitions.
 - TypeScript, C#, Rust, Python, and Kotlin now share bounded reliable-send
-  backpressure for RUDP sessions. At most 64 reliable packets are admitted to
+  backpressure for RUDP sessions. At most 32 reliable packets are admitted to
   the wire at once; later fragments remain in a session-owned FIFO and exact
   acknowledgements promote the next packets. This keeps the send frontier well
   inside the 4,096-sequence receive history instead of blasting an entire large

@@ -870,7 +870,7 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSession
     {
         /// <summary>Maximum reliable packets admitted to the wire before acknowledgements advance the window.</summary>
-        public const int ReliableSendWindowPackets = 64;
+        public const int ReliableSendWindowPackets = 32;
         private const int ReceivedSequenceWindow = 4096;
         private sealed class PendingReliablePacket
         {
