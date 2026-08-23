@@ -1288,7 +1288,7 @@ impl CultNetRudpServerHub {
                 let reply = peer
                     .session
                     .pending_accept_for_resend(now_ms())
-                    .unwrap_or_else(|| peer.session.create_ack_for(packet.sequence));
+                    .unwrap_or_else(|| peer.session.create_ack());
                 self.send_packet(remote_addr, &reply)?;
                 return Ok(None);
             }
@@ -1340,7 +1340,7 @@ impl CultNetRudpServerHub {
         let result = peer.session.receive(&packet, now_ms())?;
         let context = peer.context.clone();
         let ack = if packet.reliable {
-            Some(peer.session.create_ack_for(packet.sequence))
+            Some(peer.session.create_ack())
         } else {
             None
         };
@@ -1657,7 +1657,7 @@ impl CultNetRudpSocketTransportConnection {
         let frame = self.delivered_frames.pop_front();
         if packet.reliable || packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some()
         {
-            let ack = self.session.create_ack_for(packet.sequence);
+            let ack = self.session.create_ack();
             self.send_packet(&ack)?;
         }
         Ok(frame)

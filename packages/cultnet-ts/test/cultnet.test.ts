@@ -1322,9 +1322,12 @@ test("rudp session advances large fragment sets through a bounded reliable windo
 
   const delivered = [];
   while (wire.length > 0) {
-    const packet = wire.shift()!;
-    delivered.push(...receiver.receive(packet, 2).delivered);
-    const acknowledged = sender.receive(receiver.createAckFor(packet.sequence), 3);
+    const admitted = wire.length;
+    for (let index = 0; index < admitted; index += 1) {
+      const packet = wire.shift()!;
+      delivered.push(...receiver.receive(packet, 2).delivered);
+    }
+    const acknowledged = sender.receive(receiver.createAck(), 3);
     wire.push(...(acknowledged.readyToSend ?? []));
   }
 

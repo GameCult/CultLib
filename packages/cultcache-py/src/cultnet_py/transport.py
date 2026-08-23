@@ -599,7 +599,16 @@ class CultNetRudpSession:
         )
 
     def create_ack(self) -> CultNetRudpPacket:
-        return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
+        ack, ack_mask = self._ack_state()
+        return CultNetRudpPacket(
+            packet_type=CultNetRudpPacketType.ACK,
+            connection_id=self.connection_id,
+            sequence=0,
+            ack=ack,
+            ack_mask=ack_mask,
+            channel_id="control",
+            payload=b"",
+        )
 
     def create_ack_for(self, sequence: int) -> CultNetRudpPacket:
         return CultNetRudpPacket(
@@ -955,7 +964,7 @@ class CultNetRudpSocketTransportConnection:
 
         frame = self._delivered_frames.popleft() if self._delivered_frames else None
         if packet.reliable or packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
-            self._send_packet(self.session.create_ack_for(packet.sequence))
+            self._send_packet(self.session.create_ack())
         return frame
 
     def receive(self, timeout_seconds: float | None = None) -> CultNetTransportFrame:

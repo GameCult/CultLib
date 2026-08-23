@@ -2764,7 +2764,17 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         )
     }
 
-    fun createAck(): CultNetRudpPacket = createPacket(CultNetRudpPacketType.Ack, "control", ByteArray(0))
+    fun createAck(): CultNetRudpPacket {
+        val (ack, ackMask) = ackState()
+        return CultNetRudpPacket(
+            packetType = CultNetRudpPacketType.Ack,
+            connectionId = connectionId,
+            sequence = 0,
+            ack = ack,
+            ackMask = ackMask,
+            channelId = "control",
+        )
+    }
 
     fun createAckFor(sequence: Long): CultNetRudpPacket = CultNetRudpPacket(
         packetType = CultNetRudpPacketType.Ack,
@@ -3205,7 +3215,7 @@ class CultNetRudpSocketTransportConnection(
             framesReceived += 1
         }
         val frame = if (delivered.isEmpty()) null else delivered.removeFirst()
-        if (packet.reliable || packet.packetType == CultNetRudpPacketType.Accept || frame != null) sendPacket(session.createAckFor(packet.sequence))
+        if (packet.reliable || packet.packetType == CultNetRudpPacketType.Accept || frame != null) sendPacket(session.createAck())
         return frame
     }
 
@@ -3972,7 +3982,7 @@ private fun startInteropRudpServer(
                 val result = session.receive(packet, nowMs())
                 result.reply?.let { sendInteropRudpPacket(socket, remote, it) }
                 result.readyToSend.forEach { sendInteropRudpPacket(socket, remote, it) }
-                if (packet.reliable || packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAckFor(packet.sequence))
+                if (packet.reliable || packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAck())
                 for (frame in result.delivered) {
                     if (frame.channelId != "schema") continue
                     val sender = InteropRudpSessionSender(socket, remote, session)
@@ -5323,9 +5333,11 @@ private fun rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow() {
 
     val delivered = mutableListOf<CultNetRudpDeliveredFrame>()
     while (!wire.isEmpty()) {
-        val packet = wire.removeFirst()
-        delivered.addAll(receiver.receive(packet, 2).delivered)
-        val acknowledged = sender.receive(receiver.createAckFor(packet.sequence), 3)
+        val admitted = wire.size
+        repeat(admitted) {
+            delivered.addAll(receiver.receive(wire.removeFirst(), 2).delivered)
+        }
+        val acknowledged = sender.receive(receiver.createAck(), 3)
         acknowledged.readyToSend.forEach { wire.addLast(it) }
     }
     check(sender.outstandingReliablePacketCount == 0)

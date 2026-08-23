@@ -1178,9 +1178,11 @@ class CultCacheTests(unittest.TestCase):
 
         delivered = []
         while wire:
-            packet = wire.pop(0)
-            delivered.extend(receiver.receive(packet, 2).delivered)
-            acknowledged = sender.receive(receiver.create_ack_for(packet.sequence), 3)
+            admitted = len(wire)
+            for _ in range(admitted):
+                packet = wire.pop(0)
+                delivered.extend(receiver.receive(packet, 2).delivered)
+            acknowledged = sender.receive(receiver.create_ack(), 3)
             wire.extend(acknowledged.ready_to_send)
 
         self.assertEqual(sender.outstanding_reliable_packet_count, 0)

@@ -1308,10 +1308,14 @@ fn rudp_session_advances_large_fragment_sets_through_a_bounded_reliable_window()
 
     let mut wire = VecDeque::from(initial);
     let mut delivered = Vec::new();
-    while let Some(packet) = wire.pop_front() {
-        let received = receiver.receive(&packet, 2)?;
-        delivered.extend(received.delivered);
-        let acknowledged = sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
+    while !wire.is_empty() {
+        let admitted = wire.len();
+        for _ in 0..admitted {
+            let packet = wire.pop_front().expect("admitted packet remains queued");
+            let received = receiver.receive(&packet, 2)?;
+            delivered.extend(received.delivered);
+        }
+        let acknowledged = sender.receive(&receiver.create_ack(), 3)?;
         wire.extend(acknowledged.ready_to_send);
     }
 

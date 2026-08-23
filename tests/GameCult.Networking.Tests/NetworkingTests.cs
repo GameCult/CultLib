@@ -1096,9 +1096,10 @@ namespace GameCult.Networking.Tests
             var delivered = new List<CultNetRudpDeliveredFrame>();
             while (wire.Count > 0)
             {
-                var packet = wire.Dequeue();
-                delivered.AddRange(receiver.Receive(packet, 2).Delivered);
-                var acknowledged = sender.Receive(receiver.CreateAck(packet.Sequence), 3);
+                var admitted = wire.Count;
+                for (var index = 0; index < admitted; index++)
+                    delivered.AddRange(receiver.Receive(wire.Dequeue(), 2).Delivered);
+                var acknowledged = sender.Receive(receiver.CreateAck(), 3);
                 foreach (var ready in acknowledged.ReadyToSend)
                     wire.Enqueue(ready);
             }

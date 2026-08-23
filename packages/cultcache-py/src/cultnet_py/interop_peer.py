@@ -320,7 +320,7 @@ def rudp_loop(
                 for response in handle_server_message(state, message, peer.subscriptions):
                     send_rudp_schema_frame(sock, remote, peer.session, response)
             if packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
-                send_rudp_packet(sock, remote, peer.session.create_ack_for(packet.sequence))
+                send_rudp_packet(sock, remote, peer.session.create_ack())
         except Exception as error:
             sys.stderr.write(json.dumps({
                 "event": "rudpMessageError",

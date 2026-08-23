@@ -2077,7 +2077,7 @@ namespace GameCult.Networking
                 SendPackets(result.ReadyToSend);
                 if (packet.PacketType == CultNetRudpPacketType.Accept ||
                     packet.PacketType == CultNetRudpPacketType.Data)
-                    acknowledgement = _session.CreateAck(packet.Sequence);
+                    acknowledgement = _session.CreateAck();
             }
             if (result.Pong)
             {
@@ -2486,7 +2486,7 @@ namespace GameCult.Networking
                     SendPacket(existingPeer.RemoteEndPoint, result.Reply);
                 SendPackets(existingPeer, result.ReadyToSend);
                 if (packet.PacketType == CultNetRudpPacketType.Data)
-                    acknowledgement = existingPeer.Session.CreateAck(packet.Sequence);
+                    acknowledgement = existingPeer.Session.CreateAck();
             }
             if (result.Disconnected)
             {
