@@ -83,6 +83,18 @@ jobs:
           npm run build --workspace packages/cultnet-ts
           npx tsc -p packages/cultnet-ts/tsconfig.test.json --pretty false
 
+      - name: Verify TypeScript RUDP reliability
+        run: npm test --workspace packages/cultnet-ts
+
+      - name: Verify Python RUDP reliability
+        run: python -m unittest packages/cultcache-py/tests/test_cultcache.py
+
+      - name: Verify Rust RUDP reliability
+        run: cargo test --manifest-path packages/cultnet-rs/Cargo.toml rudp
+
+      - name: Verify C# RUDP reliability
+        run: dotnet test tests/GameCult.Networking.Tests/GameCult.Networking.Tests.csproj --filter "FullyQualifiedName~Rudp"
+
       - name: Interop RUDP Python lane
         timeout-minutes: 8
         run: node --test --test-name-pattern "TypeScript and Python|Python and TypeScript" packages/cultnet-ts/dist-test/test/interop/cultnet-interop.test.js
