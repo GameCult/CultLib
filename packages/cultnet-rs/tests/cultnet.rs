@@ -1376,7 +1376,15 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
     );
 
     let server_worker = thread::spawn(move || -> Result<CultNetTransportFrame> {
-        let delivered = receive_rudp_frame(&mut server)?;
+        let delivery_deadline = StdInstant::now() + StdDuration::from_secs(5);
+        let delivered = loop {
+            if let Some(frame) = server.receive_once()? {
+                break frame;
+            }
+            if StdInstant::now() >= delivery_deadline {
+                anyhow::bail!("RUDP large socket frame was not delivered");
+            }
+        };
         let linger_deadline = StdInstant::now() + StdDuration::from_millis(250);
         while StdInstant::now() < linger_deadline {
             let _ = server.receive_once()?;
