@@ -145,6 +145,7 @@ async function handleServerDatagram(
   if (!peer) return;
   const result = peer.session.receive(packet, Date.now());
   if (result.reply) sendPacket(remote, result.reply);
+  for (const ready of result.readyToSend ?? []) sendPacket(remote, ready);
   if (result.disconnected) {
     sessions.delete(key);
     return;

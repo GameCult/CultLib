@@ -5816,6 +5816,9 @@ export class CultMesh {
         if (result.reply) {
           socket.send(encodeRudpPacket(result.reply), record.remote.port, record.remote.address);
         }
+        for (const ready of result.readyToSend ?? []) {
+          socket.send(encodeRudpPacket(ready), record.remote.port, record.remote.address);
+        }
         for (const frame of result.delivered) {
           if (frame.channelId !== "schema") {
             continue;
@@ -6078,7 +6081,7 @@ export class CultMesh {
           tags: options.tags,
         },
       ));
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, options.flushTimeoutMs ?? 150)));
+      await peer.flush(options.flushTimeoutMs ?? 30_000);
     } finally {
       peer.close();
     }

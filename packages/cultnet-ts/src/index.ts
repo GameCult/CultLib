@@ -83,6 +83,7 @@ export {
   createRudpTransportProfile,
   decodeRudpPacket,
   encodeRudpPacket,
+  CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS,
   CultNetRudpReconnectLoop,
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,

@@ -1064,6 +1064,51 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_AdvancesLargeFragmentSetsThroughBoundedReliableWindow()
+        {
+            const uint connectionId = 457;
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = connectionId,
+                InitialSequence = 1,
+                ResendDelayMs = 25
+            });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = connectionId,
+                InitialSequence = 100,
+                ResendDelayMs = 25
+            });
+            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = connectionId, Sequence = 0, ChannelId = "control" });
+            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = connectionId, Sequence = 0, ChannelId = "control" });
+
+            var fragmentCount = CultNetRudpSession.ReliableSendWindowPackets + 17;
+            var payload = Enumerable.Range(0, fragmentCount * 8).Select(index => (byte)(index % 251)).ToArray();
+            var wire = new Queue<CultNetRudpPacket>(sender.SendMany(
+                "schema",
+                payload,
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 1 },
+                maxFragmentBytes: 8));
+            Assert.That(wire, Has.Count.EqualTo(CultNetRudpSession.ReliableSendWindowPackets));
+            Assert.That(sender.PendingReliableSequences, Has.Count.EqualTo(wire.Count));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(17));
+
+            var delivered = new List<CultNetRudpDeliveredFrame>();
+            while (wire.Count > 0)
+            {
+                var packet = wire.Dequeue();
+                delivered.AddRange(receiver.Receive(packet, 2).Delivered);
+                var acknowledged = sender.Receive(receiver.CreateAck(packet.Sequence), 3);
+                foreach (var ready in acknowledged.ReadyToSend)
+                    wire.Enqueue(ready);
+            }
+
+            Assert.That(sender.OutstandingReliablePacketCount, Is.Zero);
+            Assert.That(delivered, Has.Count.EqualTo(1));
+            Assert.That(delivered[0].Payload, Is.EqualTo(payload));
+        }
+
+        [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {
             using var serverSocket = BindUdpSocket();

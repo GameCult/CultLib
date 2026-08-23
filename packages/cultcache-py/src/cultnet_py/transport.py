@@ -280,6 +280,7 @@ class CultNetRudpDeliveredFrame:
 @dataclass(frozen=True)
 class CultNetRudpReceiveResult:
     delivered: tuple[CultNetRudpDeliveredFrame, ...] = field(default_factory=tuple)
+    ready_to_send: tuple[CultNetRudpPacket, ...] = field(default_factory=tuple)
     reply: CultNetRudpPacket | None = None
     pong: bool = False
     pong_payload: bytes = b""
@@ -395,6 +396,9 @@ def create_rudp_transport_profile(
 
 
 class CultNetRudpSession:
+    RELIABLE_SEND_WINDOW_PACKETS = 64
+    RECEIVED_SEQUENCE_WINDOW = 4_096
+
     def __init__(self, options: CultNetRudpSessionOptions) -> None:
         self.connection_id = _uint32(options.connection_id, "connection_id")
         self.resend_delay_ms = options.resend_delay_ms
@@ -408,6 +412,7 @@ class CultNetRudpSession:
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
+        self._queued_reliable: deque[CultNetRudpPacket] = deque()
         self._ordered_next_sequence_by_channel: dict[str, int] = {}
         self._ordered_buffers: dict[str, dict[int, tuple[CultNetRudpDeliveredFrame, int]]] = {}
         self._fragment_buffers: dict[tuple[str, int], dict[str, Any]] = {}
@@ -423,6 +428,14 @@ class CultNetRudpSession:
     @property
     def pending_reliable_sequences(self) -> tuple[int, ...]:
         return tuple(sorted(self._pending_reliable))
+
+    @property
+    def queued_reliable_packet_count(self) -> int:
+        return len(self._queued_reliable)
+
+    @property
+    def outstanding_reliable_packet_count(self) -> int:
+        return len(self._pending_reliable) + len(self._queued_reliable)
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
         self._ensure_reliable_capacity(1)
@@ -465,7 +478,10 @@ class CultNetRudpSession:
         payload: bytes,
         options: CultNetRudpSendOptions | None = None,
     ) -> CultNetRudpPacket:
-        return self.send_many(channel_id, payload, options)[0]
+        resolved = options or CultNetRudpSendOptions()
+        if resolved.reliable and len(self._pending_reliable) >= self.RELIABLE_SEND_WINDOW_PACKETS:
+            raise ValueError("RUDP reliable send window is full; receive acknowledgements before sending")
+        return self.send_many(channel_id, payload, resolved)[0]
 
     def send_many(
         self,
@@ -492,9 +508,7 @@ class CultNetRudpSession:
                 ordered=options.ordered,
                 sequenced=options.sequenced,
             )
-            if packet.reliable:
-                self._track_reliable(packet, options.now_ms)
-            return (packet,)
+            return self._admit_reliable_packets((packet,), options.now_ms) if packet.reliable else (packet,)
 
         fragment_count = (len(payload) + max_fragment_bytes - 1) // max_fragment_bytes
         if fragment_count > 0xFFFF:
@@ -516,14 +530,13 @@ class CultNetRudpSession:
                 fragment_index=index,
                 fragment_count=fragment_count,
             )
-            if packet.reliable:
-                self._track_reliable(packet, options.now_ms)
             packets.append(packet)
-        return tuple(packets)
+        return self._admit_reliable_packets(tuple(packets), options.now_ms) if options.reliable else tuple(packets)
 
     def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
         self._require_connection(packet)
         self._apply_acknowledgements(packet)
+        ready_to_send = self._promote_queued_reliable(now_ms)
         self._last_received_at_ms = now_ms
         expected_sequence_if_uninitialized = (
             packet.sequence
@@ -534,17 +547,19 @@ class CultNetRudpSession:
         if packet.packet_type == CultNetRudpPacketType.ACCEPT:
             self._remember_received(packet.sequence)
             self._connected = True
-            return CultNetRudpReceiveResult()
+            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
         if packet.packet_type == CultNetRudpPacketType.PING:
             self._remember_received(packet.sequence)
             return CultNetRudpReceiveResult(
+                ready_to_send=ready_to_send,
                 reply=self._create_packet(CultNetRudpPacketType.PONG, "control", packet.payload)
             )
 
         if packet.packet_type in (CultNetRudpPacketType.ACK, CultNetRudpPacketType.PONG):
             self._remember_received(packet.sequence)
             return CultNetRudpReceiveResult(
+                ready_to_send=ready_to_send,
                 pong=packet.packet_type == CultNetRudpPacketType.PONG,
                 pong_payload=bytes(packet.payload) if packet.packet_type == CultNetRudpPacketType.PONG else b"",
             )
@@ -553,32 +568,49 @@ class CultNetRudpSession:
             self._remember_received(packet.sequence)
             self._connected = False
             return CultNetRudpReceiveResult(
+                ready_to_send=ready_to_send,
                 disconnected=True,
                 disconnect_reason=bytes(packet.payload),
             )
 
         if packet.packet_type != CultNetRudpPacketType.DATA:
-            return CultNetRudpReceiveResult()
+            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
-        duplicate = packet.sequence in self._received_sequences
+        duplicate = packet.sequence in self._received_sequences or (
+            self._highest_received_sequence is not None
+            and packet.sequence < self._highest_received_sequence
+            and self._highest_received_sequence - packet.sequence >= self.RECEIVED_SEQUENCE_WINDOW
+        )
         self._remember_received(packet.sequence)
         if duplicate:
-            return CultNetRudpReceiveResult()
+            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
         reassembled = self._reassemble(packet)
         if reassembled is None:
-            return CultNetRudpReceiveResult()
+            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
         frame, ordered, next_sequence = reassembled
         if not ordered:
-            return CultNetRudpReceiveResult(delivered=(frame,))
+            return CultNetRudpReceiveResult(delivered=(frame,), ready_to_send=ready_to_send)
         return CultNetRudpReceiveResult(
             delivered=tuple(
                 self._deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
-            )
+            ),
+            ready_to_send=ready_to_send,
         )
 
     def create_ack(self) -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.ACK, "control", b"")
+
+    def create_ack_for(self, sequence: int) -> CultNetRudpPacket:
+        return CultNetRudpPacket(
+            packet_type=CultNetRudpPacketType.ACK,
+            connection_id=self.connection_id,
+            sequence=0,
+            ack=_uint32(sequence, "ack sequence"),
+            ack_mask=0,
+            channel_id="control",
+            payload=b"",
+        )
 
     def create_ping(self, payload: bytes = b"") -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.PING, "control", payload)
@@ -655,10 +687,31 @@ class CultNetRudpSession:
             last_sent_at_ms=now_ms,
         )
 
+    def _admit_reliable_packets(
+        self,
+        packets: tuple[CultNetRudpPacket, ...],
+        now_ms: int,
+    ) -> tuple[CultNetRudpPacket, ...]:
+        available = max(0, self.RELIABLE_SEND_WINDOW_PACKETS - len(self._pending_reliable))
+        ready = packets[:available]
+        for packet in ready:
+            self._track_reliable(packet, now_ms)
+        self._queued_reliable.extend(packets[available:])
+        return ready
+
+    def _promote_queued_reliable(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
+        available = max(0, self.RELIABLE_SEND_WINDOW_PACKETS - len(self._pending_reliable))
+        ready: list[CultNetRudpPacket] = []
+        while len(ready) < available and self._queued_reliable:
+            packet = self._queued_reliable.popleft()
+            self._track_reliable(packet, now_ms)
+            ready.append(packet)
+        return tuple(ready)
+
     def _ensure_reliable_capacity(self, packet_count: int) -> None:
         if packet_count == 0 or self.max_pending_reliable_packets is None:
             return
-        if len(self._pending_reliable) + packet_count > self.max_pending_reliable_packets:
+        if self.outstanding_reliable_packet_count + packet_count > self.max_pending_reliable_packets:
             raise ValueError("RUDP reliable send queue is full")
 
     def _apply_acknowledgements(self, packet: CultNetRudpPacket) -> None:
@@ -671,6 +724,9 @@ class CultNetRudpSession:
         self._received_sequences.add(sequence)
         if self._highest_received_sequence is None or sequence > self._highest_received_sequence:
             self._highest_received_sequence = sequence
+        if len(self._received_sequences) > self.RECEIVED_SEQUENCE_WINDOW:
+            keep_from = max(0, (self._highest_received_sequence or sequence) - self.RECEIVED_SEQUENCE_WINDOW + 1)
+            self._received_sequences = {received for received in self._received_sequences if received >= keep_from}
 
     def _ack_state(self) -> tuple[int, int]:
         ack = self._highest_received_sequence or 0
@@ -838,6 +894,10 @@ class CultNetRudpSocketTransportConnection:
             frames_sent=self._frames_sent,
         )
 
+    @property
+    def outstanding_reliable_packet_count(self) -> int:
+        return self.session.outstanding_reliable_packet_count
+
     def connect(self, payload: bytes = b"") -> None:
         if self.mode != CultNetRudpSocketMode.CLIENT:
             raise ValueError("Only a client RUDP socket transport can initiate connect")
@@ -879,6 +939,8 @@ class CultNetRudpSocketTransportConnection:
         result = self.session.receive(packet, _now_ms())
         if result.reply is not None:
             self._send_packet(result.reply)
+        for ready in result.ready_to_send:
+            self._send_packet(ready)
         if result.pong:
             self.pong_payloads.append(result.pong_payload)
         if result.disconnected:
@@ -892,8 +954,8 @@ class CultNetRudpSocketTransportConnection:
             self._frames_received += 1
 
         frame = self._delivered_frames.popleft() if self._delivered_frames else None
-        if packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
-            self._send_packet(self.session.create_ack())
+        if packet.reliable or packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
+            self._send_packet(self.session.create_ack_for(packet.sequence))
         return frame
 
     def receive(self, timeout_seconds: float | None = None) -> CultNetTransportFrame:
@@ -905,6 +967,29 @@ class CultNetRudpSocketTransportConnection:
             self.poll_resends()
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Timed out waiting for RUDP schema frame")
+
+    def flush_reliable(self, timeout_seconds: float = 30.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        original_timeout = self.socket.gettimeout()
+        poll_timeout = min(original_timeout, 0.01) if original_timeout is not None else 0.01
+        preserved = deque(self._delivered_frames)
+        self._delivered_frames.clear()
+        self.socket.settimeout(poll_timeout)
+        try:
+            while self.session.outstanding_reliable_packet_count > 0:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "RUDP reliable flush timed out with "
+                        f"{self.session.outstanding_reliable_packet_count} packets outstanding"
+                    )
+                frame = self.receive_once()
+                if frame is not None:
+                    preserved.append(frame)
+                self.poll_resends()
+        finally:
+            preserved.extend(self._delivered_frames)
+            self._delivered_frames = preserved
+            self.socket.settimeout(original_timeout)
 
     def disconnect(self, reason: bytes = b"") -> None:
         self._send_packet(self.session.create_disconnect(reason))

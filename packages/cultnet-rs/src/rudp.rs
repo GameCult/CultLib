@@ -6,8 +6,7 @@ use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::net::UdpSocket;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::CultNetMessage;
 use crate::CultNetReconnectController;
@@ -30,6 +29,7 @@ const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 64;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +70,7 @@ pub struct CultNetRudpDeliveredFrame {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpReceiveResult {
     pub delivered: Vec<CultNetRudpDeliveredFrame>,
+    pub ready_to_send: Vec<CultNetRudpPacket>,
     pub reply: Option<CultNetRudpPacket>,
     pub pong: bool,
     pub pong_payload: Vec<u8>,
@@ -139,6 +140,7 @@ pub struct CultNetRudpSession {
     highest_received_sequence: Option<u32>,
     received_sequences: BTreeSet<u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
+    queued_reliable: VecDeque<CultNetRudpPacket>,
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
@@ -160,6 +162,7 @@ impl CultNetRudpSession {
             highest_received_sequence: None,
             received_sequences: BTreeSet::new(),
             pending_reliable: BTreeMap::new(),
+            queued_reliable: VecDeque::new(),
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
             fragment_buffers: BTreeMap::new(),
@@ -180,6 +183,14 @@ impl CultNetRudpSession {
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
         self.pending_reliable.keys().copied().collect()
+    }
+
+    pub fn queued_reliable_packet_count(&self) -> usize {
+        self.queued_reliable.len()
+    }
+
+    pub fn outstanding_reliable_packet_count(&self) -> usize {
+        self.pending_reliable.len() + self.queued_reliable.len()
     }
 
     fn pending_accept_for_resend(&mut self, now_ms: u64) -> Option<CultNetRudpPacket> {
@@ -220,6 +231,7 @@ impl CultNetRudpSession {
         self.highest_received_sequence = None;
         self.received_sequences.clear();
         self.pending_reliable.clear();
+        self.queued_reliable.clear();
         self.ordered_next_sequence_by_channel.clear();
         self.ordered_buffers.clear();
         self.fragment_buffers.clear();
@@ -275,6 +287,13 @@ impl CultNetRudpSession {
         payload: Vec<u8>,
         options: CultNetRudpSendOptions,
     ) -> Result<CultNetRudpPacket> {
+        if options.reliable
+            && self.pending_reliable.len() >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS
+        {
+            return Err(anyhow!(
+                "RUDP reliable send window is full; receive acknowledgements before sending"
+            ));
+        }
         self.send_many(channel_id, payload, options, None)?
             .into_iter()
             .next()
@@ -321,12 +340,13 @@ impl CultNetRudpSession {
                         index as u16,
                         fragment_count as u16,
                     );
-                    if packet.reliable {
-                        self.track_reliable(packet.clone(), options.now_ms);
-                    }
                     packets.push(packet);
                 }
-                return Ok(packets);
+                return Ok(if options.reliable {
+                    self.admit_reliable_packets(packets, options.now_ms)
+                } else {
+                    packets
+                });
             }
         }
 
@@ -340,7 +360,7 @@ impl CultNetRudpSession {
             options.sequenced,
         );
         if packet.reliable {
-            self.track_reliable(packet.clone(), options.now_ms);
+            return Ok(self.admit_reliable_packets(vec![packet], options.now_ms));
         }
         Ok(vec![packet])
     }
@@ -352,6 +372,7 @@ impl CultNetRudpSession {
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
         self.apply_acknowledgements(packet);
+        let ready_to_send = self.promote_queued_reliable(now_ms);
         self.last_received_at_ms = Some(now_ms);
         let expected_sequence_if_uninitialized = self
             .highest_received_sequence
@@ -363,6 +384,7 @@ impl CultNetRudpSession {
             self.connected = true;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: false,
                 pong_payload: Vec::new(),
@@ -375,6 +397,7 @@ impl CultNetRudpSession {
             self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: Some(self.create_packet(
                     CultNetRudpPacketType::Pong,
                     "control",
@@ -398,6 +421,7 @@ impl CultNetRudpSession {
             }
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: packet.packet_type == CultNetRudpPacketType::Pong,
                 pong_payload: if packet.packet_type == CultNetRudpPacketType::Pong {
@@ -415,6 +439,7 @@ impl CultNetRudpSession {
             self.connected = false;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: false,
                 pong_payload: Vec::new(),
@@ -426,6 +451,7 @@ impl CultNetRudpSession {
         if packet.packet_type != CultNetRudpPacketType::Data {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: false,
                 pong_payload: Vec::new(),
@@ -443,6 +469,7 @@ impl CultNetRudpSession {
         if duplicate {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: false,
                 pong_payload: Vec::new(),
@@ -454,6 +481,7 @@ impl CultNetRudpSession {
         let Some((frame, ordered, next_sequence)) = self.reassemble(packet)? else {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
+                ready_to_send,
                 reply: None,
                 pong: false,
                 pong_payload: Vec::new(),
@@ -468,6 +496,7 @@ impl CultNetRudpSession {
         };
         Ok(CultNetRudpReceiveResult {
             delivered,
+            ready_to_send,
             reply: None,
             pong: false,
             pong_payload: Vec::new(),
@@ -630,12 +659,45 @@ impl CultNetRudpSession {
         );
     }
 
+    fn admit_reliable_packets(
+        &mut self,
+        packets: Vec<CultNetRudpPacket>,
+        now_ms: u64,
+    ) -> Vec<CultNetRudpPacket> {
+        let available =
+            CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
+        let mut ready = Vec::with_capacity(available.min(packets.len()));
+        for packet in packets {
+            if ready.len() < available {
+                self.track_reliable(packet.clone(), now_ms);
+                ready.push(packet);
+            } else {
+                self.queued_reliable.push_back(packet);
+            }
+        }
+        ready
+    }
+
+    fn promote_queued_reliable(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
+        let available =
+            CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
+        let mut ready = Vec::with_capacity(available.min(self.queued_reliable.len()));
+        for _ in 0..available {
+            let Some(packet) = self.queued_reliable.pop_front() else {
+                break;
+            };
+            self.track_reliable(packet.clone(), now_ms);
+            ready.push(packet);
+        }
+        ready
+    }
+
     fn ensure_reliable_capacity(&self, packet_count: usize) -> Result<()> {
         if packet_count == 0 {
             return Ok(());
         }
         if let Some(limit) = self.max_pending_reliable_packets {
-            if self.pending_reliable.len() + packet_count > limit {
+            if self.outstanding_reliable_packet_count() + packet_count > limit {
                 return Err(anyhow!("RUDP reliable send queue is full"));
             }
         }
@@ -1283,6 +1345,9 @@ impl CultNetRudpServerHub {
         if let Some(reply) = result.reply {
             self.send_packet(remote_addr, &reply)?;
         }
+        for ready in result.ready_to_send {
+            self.send_packet(remote_addr, &ready)?;
+        }
         if let Some(ack) = ack {
             self.send_packet(remote_addr, &ack)?;
         }
@@ -1474,6 +1539,49 @@ impl CultNetRudpSocketTransportConnection {
         self.session.check_timeout(now_ms(), timeout_ms)
     }
 
+    pub fn pending_reliable_packet_count(&self) -> usize {
+        self.session.pending_reliable_sequences().len()
+    }
+
+    pub fn outstanding_reliable_packet_count(&self) -> usize {
+        self.session.outstanding_reliable_packet_count()
+    }
+
+    pub fn flush_reliable(&mut self, timeout: Duration) -> Result<()> {
+        let original_timeout = self.socket.read_timeout()?;
+        let poll_timeout = original_timeout
+            .map(|configured| configured.min(Duration::from_millis(10)))
+            .unwrap_or(Duration::from_millis(10));
+        self.socket.set_read_timeout(Some(poll_timeout))?;
+
+        let deadline = Instant::now() + timeout;
+        let mut preserved_frames = VecDeque::new();
+        let result = (|| {
+            while self.outstanding_reliable_packet_count() > 0 {
+                if Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "RUDP reliable flush timed out with {} packets outstanding",
+                        self.outstanding_reliable_packet_count()
+                    ));
+                }
+                if let Some(frame) = self.receive_once()? {
+                    preserved_frames.push_back(frame);
+                }
+                self.poll_resends()?;
+            }
+            Ok(())
+        })();
+
+        preserved_frames.append(&mut self.delivered_frames);
+        self.delivered_frames = preserved_frames;
+        let restore = self.socket.set_read_timeout(original_timeout);
+        match (result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error.into()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
         if let Some(frame) = self.delivered_frames.pop_front() {
             return Ok(Some(frame));
@@ -1523,6 +1631,9 @@ impl CultNetRudpSocketTransportConnection {
         let result = self.session.receive(&packet, now_ms())?;
         if let Some(reply) = result.reply {
             self.send_packet(&reply)?;
+        }
+        for ready in result.ready_to_send {
+            self.send_packet(&ready)?;
         }
         if result.pong {
             self.pong_payloads.push_back(result.pong_payload);

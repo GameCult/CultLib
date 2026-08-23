@@ -258,11 +258,16 @@ Current progress:
   echo against C#/Kotlin/Python/Rust UDP peers; local runtime tests prove timeout
   state transitions.
 - TypeScript, C#, Rust, Python, and Kotlin now share bounded reliable-send
-  backpressure for RUDP sessions. `maxPendingReliablePackets` is advertised on
-  RUDP transport-profile channels and enforced by the session before reliable
-  connect, accept, single-packet sends, or fragmented sends enqueue anything;
-  TCP-framed profiles do not publish the field because they do not own the RUDP
-  pending-reliable queue.
+  backpressure for RUDP sessions. At most 64 reliable packets are admitted to
+  the wire at once; later fragments remain in a session-owned FIFO and exact
+  acknowledgements promote the next packets. This keeps the send frontier well
+  inside the 4,096-sequence receive history instead of blasting an entire large
+  document and hoping the UDP buffers impersonate flow control.
+  `maxPendingReliablePackets` bounds both queued and in-flight packets before a
+  reliable frame is accepted. Socket transports expose an explicit reliable
+  flush where the runtime supports one, so callers that require confirmed
+  transport delivery do not substitute a fixed sleep. TCP-framed profiles do
+  not publish the field because they do not own the RUDP pending-reliable queue.
 - TypeScript, C#, Rust, Python, and Kotlin now share a portable
   `cultnet.reconnect_policy.v0` document and deterministic exponential delay
   helper, and RUDP transport profiles advertise that policy under

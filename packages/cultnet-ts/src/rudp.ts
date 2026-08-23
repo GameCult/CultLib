@@ -16,6 +16,8 @@ const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
 const RUDP_FIXED_HEADER_BYTES = 36;
 const MAX_CHANNEL_ID_BYTES = 255;
+export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 64;
+const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
 
 export type CultNetRudpPacketType =
   | "connect"
@@ -57,6 +59,7 @@ export interface CultNetRudpSessionOptions {
 
 export interface CultNetRudpReceiveResult {
   delivered: CultNetRudpDeliveredFrame[];
+  readyToSend?: CultNetRudpPacket[];
   reply?: CultNetRudpPacket;
   pong?: boolean;
   pongPayload?: Uint8Array;
@@ -151,6 +154,7 @@ export class CultNetRudpSession {
   #highestReceivedSequence: number | undefined;
   readonly #receivedSequences = new Set<number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
+  readonly #queuedReliable: CultNetRudpPacket[] = [];
   readonly #orderedNextSequenceByChannel = new Map<string, number>();
   readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
   readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
@@ -173,6 +177,14 @@ export class CultNetRudpSession {
     return [...this.#pendingReliable.keys()].sort((left, right) => left - right);
   }
 
+  get queuedReliablePacketCount(): number {
+    return this.#queuedReliable.length;
+  }
+
+  get outstandingReliablePacketCount(): number {
+    return this.#pendingReliable.size + this.#queuedReliable.length;
+  }
+
   get lastReceivedAtMs(): number | undefined {
     return this.#lastReceivedAtMs;
   }
@@ -183,6 +195,7 @@ export class CultNetRudpSession {
     this.#highestReceivedSequence = undefined;
     this.#receivedSequences.clear();
     this.#pendingReliable.clear();
+    this.#queuedReliable.splice(0);
     this.#orderedNextSequenceByChannel.clear();
     this.#orderedBuffers.clear();
     this.#fragmentBuffers.clear();
@@ -238,6 +251,9 @@ export class CultNetRudpSession {
     payload: Uint8Array,
     options: { reliable?: boolean; ordered?: boolean; sequenced?: boolean; nowMs?: number } = {},
   ): CultNetRudpPacket {
+    if (options.reliable && this.#pendingReliable.size >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS) {
+      throw new Error("RUDP reliable send window is full; receive acknowledgements before sending.");
+    }
     return this.sendMany(channelId, payload, options)[0]!;
   }
 
@@ -271,10 +287,9 @@ export class CultNetRudpSession {
         ordered: options.ordered,
         sequenced: options.sequenced,
       });
-      if (packet.reliable) {
-        this.#trackReliable(packet, options.nowMs ?? 0);
-      }
-      return [packet];
+      return packet.reliable
+        ? this.#admitReliablePackets([packet], options.nowMs ?? 0)
+        : [packet];
     }
 
     const fragmentCount = Math.ceil(payload.byteLength / maxFragmentBytes);
@@ -298,17 +313,17 @@ export class CultNetRudpSession {
         fragmentIndex: index,
         fragmentCount,
       });
-      if (packet.reliable) {
-        this.#trackReliable(packet, options.nowMs ?? 0);
-      }
       packets.push(packet);
     }
-    return packets;
+    return options.reliable
+      ? this.#admitReliablePackets(packets, options.nowMs ?? 0)
+      : packets;
   }
 
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
     this.#requireConnection(packet);
     this.#applyAcknowledgements(packet);
+    const readyToSend = this.#promoteQueuedReliable(nowMs);
     this.#lastReceivedAtMs = nowMs;
     const expectedSequenceIfUninitialized = this.#highestReceivedSequence === undefined
       ? packet.sequence
@@ -317,13 +332,14 @@ export class CultNetRudpSession {
     if (packet.packetType === "accept") {
       this.#rememberReceived(packet.sequence);
       this.#connected = true;
-      return { delivered: [] };
+      return { delivered: [], readyToSend };
     }
 
     if (packet.packetType === "ping") {
       this.#rememberReceived(packet.sequence);
       return {
         delivered: [],
+        readyToSend,
         reply: this.#createPacket({
           packetType: "pong",
           channelId: "control",
@@ -336,6 +352,7 @@ export class CultNetRudpSession {
       if (packet.packetType === "pong") this.#rememberReceived(packet.sequence);
       return {
         delivered: this.#drainUnblockedOrdered(),
+        readyToSend,
         pong: packet.packetType === "pong",
         pongPayload: packet.packetType === "pong" ? packet.payload ?? new Uint8Array() : undefined,
       };
@@ -346,31 +363,38 @@ export class CultNetRudpSession {
       this.#connected = false;
       return {
         delivered: [],
+        readyToSend,
         disconnected: true,
         disconnectReason: packet.payload ?? new Uint8Array(),
       };
     }
 
     if (packet.packetType !== "data") {
-      return { delivered: [] };
+      return { delivered: [], readyToSend };
     }
 
-    const isDuplicate = this.#receivedSequences.has(packet.sequence);
+    const isDuplicate = this.#receivedSequences.has(packet.sequence)
+      || (this.#highestReceivedSequence !== undefined
+        && packet.sequence < this.#highestReceivedSequence
+        && this.#highestReceivedSequence - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW);
     this.#rememberReceived(packet.sequence);
     if (isDuplicate) {
-      return { delivered: [] };
+      return { delivered: [], readyToSend };
     }
 
     const reassembled = this.#reassemble(packet);
     if (!reassembled) {
-      return { delivered: [] };
+      return { delivered: [], readyToSend };
     }
 
     if (!reassembled.ordered) {
-      return { delivered: [reassembled.frame] };
+      return { delivered: [reassembled.frame], readyToSend };
     }
 
-    return { delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) };
+    return {
+      delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized),
+      readyToSend,
+    };
   }
 
   createAck(): CultNetRudpPacket {
@@ -487,11 +511,26 @@ export class CultNetRudpSession {
     });
   }
 
+  #admitReliablePackets(packets: CultNetRudpPacket[], nowMs: number): CultNetRudpPacket[] {
+    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
+    const ready = packets.slice(0, available);
+    for (const packet of ready) this.#trackReliable(packet, nowMs);
+    this.#queuedReliable.push(...packets.slice(available));
+    return ready;
+  }
+
+  #promoteQueuedReliable(nowMs: number): CultNetRudpPacket[] {
+    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
+    const ready = this.#queuedReliable.splice(0, available);
+    for (const packet of ready) this.#trackReliable(packet, nowMs);
+    return ready;
+  }
+
   #ensureReliableCapacity(packetCount: number): void {
     if (packetCount === 0 || this.#maxPendingReliablePackets === undefined) {
       return;
     }
-    if (this.#pendingReliable.size + packetCount > this.#maxPendingReliablePackets) {
+    if (this.outstandingReliablePacketCount + packetCount > this.#maxPendingReliablePackets) {
       throw new Error("RUDP reliable send queue is full.");
     }
   }
@@ -509,6 +548,12 @@ export class CultNetRudpSession {
     this.#receivedSequences.add(sequence);
     if (this.#highestReceivedSequence === undefined || sequence > this.#highestReceivedSequence) {
       this.#highestReceivedSequence = sequence;
+    }
+    if (this.#receivedSequences.size > RUDP_RECEIVED_SEQUENCE_WINDOW) {
+      const keepFrom = Math.max(0, (this.#highestReceivedSequence ?? sequence) - RUDP_RECEIVED_SEQUENCE_WINDOW + 1);
+      for (const received of this.#receivedSequences) {
+        if (received < keepFrom) this.#receivedSequences.delete(received);
+      }
     }
   }
 
@@ -754,6 +799,10 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     return { ...this.#stats };
   }
 
+  get outstandingReliablePacketCount(): number {
+    return this.#session.outstandingReliablePacketCount;
+  }
+
   connect(payload = new Uint8Array()): void {
     if (this.#mode !== "client") {
       throw new Error("Only a client RUDP socket transport can initiate connect.");
@@ -771,6 +820,21 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       this.#sendPacket(packet);
     }
     this.#stats.framesSent += 1;
+  }
+
+  async flush(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (this.#session.outstandingReliablePacketCount > 0) {
+      if (this.#closed) {
+        throw new Error("RUDP transport closed before reliable packets were acknowledged.");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `RUDP reliable flush timed out with ${this.#session.outstandingReliablePacketCount} packets outstanding.`,
+        );
+      }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
   }
 
   ping(payload = new Uint8Array()): void {
@@ -833,6 +897,9 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       const result = this.#session.receive(packet, Date.now());
       if (result.reply) {
         this.#sendPacket(result.reply);
+      }
+      for (const ready of result.readyToSend ?? []) {
+        this.#sendPacket(ready);
       }
       if (result.pong) {
         this.emit("pong", { payload: result.pongPayload ?? new Uint8Array() });

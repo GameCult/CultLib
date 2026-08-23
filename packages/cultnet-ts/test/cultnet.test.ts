@@ -21,6 +21,7 @@ import {
   CultNetRudpReconnectLoop,
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,
+  CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS,
   CultNetSchemaCatalog,
   CultNetSchemaRegistry,
   CultNetSecret,
@@ -1295,6 +1296,41 @@ test("operation envelopes preserve typed service routing and payload correlation
   });
   assert.equal(response.schemaVersion, "cultnet.operation_response.v0");
   assert.equal(response.messageId, request.messageId);
+});
+
+test("rudp session advances large fragment sets through a bounded reliable window", () => {
+  const connectionId = 457;
+  const sender = new CultNetRudpSession({ connectionId, initialSequence: 1, resendDelayMs: 25 });
+  const receiver = new CultNetRudpSession({ connectionId, initialSequence: 100, resendDelayMs: 25 });
+  sender.receive({ packetType: "accept", connectionId, sequence: 0, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.receive({ packetType: "accept", connectionId, sequence: 0, ack: 0, ackMask: 0, channelId: "control" });
+
+  const fragmentCount = CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17;
+  const payload = Uint8Array.from(
+    { length: fragmentCount * 8 },
+    (_, index) => index % 251,
+  );
+  const wire = sender.sendMany("schema", payload, {
+    reliable: true,
+    ordered: true,
+    nowMs: 1,
+    maxFragmentBytes: 8,
+  });
+  assert.equal(wire.length, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS);
+  assert.equal(sender.pendingReliableSequences.length, wire.length);
+  assert.equal(sender.queuedReliablePacketCount, 17);
+
+  const delivered = [];
+  while (wire.length > 0) {
+    const packet = wire.shift()!;
+    delivered.push(...receiver.receive(packet, 2).delivered);
+    const acknowledged = sender.receive(receiver.createAckFor(packet.sequence), 3);
+    wire.push(...(acknowledged.readyToSend ?? []));
+  }
+
+  assert.equal(sender.outstandingReliablePacketCount, 0);
+  assert.equal(delivered.length, 1);
+  assert.deepEqual(delivered[0]?.payload, payload);
 });
 
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {

@@ -131,6 +131,7 @@ export interface CultNetTransportConnection {
   readonly profile: CultNetTransportProfile;
   readonly stats: CultNetTransportStats;
   send(channelId: string, payload: Uint8Array): void;
+  flush?(timeoutMs?: number): Promise<void>;
   close(): void;
   on<EventName extends keyof CultNetTransportConnectionEvents>(
     eventName: EventName,

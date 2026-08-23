@@ -1157,6 +1157,36 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(delivered[0].payload, b"fragment-me-please")
         self.assertEqual(delivered[0].sequence, packets[0].sequence)
 
+    def test_cultnet_rudp_session_advances_large_fragment_sets_through_bounded_window(self) -> None:
+        connection_id = 457
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=100))
+        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, connection_id, 0, 0, 0, "control"))
+        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, connection_id, 0, 0, 0, "control"))
+
+        fragment_count = CultNetRudpSession.RELIABLE_SEND_WINDOW_PACKETS + 17
+        payload = bytes(index % 251 for index in range(fragment_count * 8))
+        wire = list(sender.send_many(
+            "schema",
+            payload,
+            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=1),
+            max_fragment_bytes=8,
+        ))
+        self.assertEqual(len(wire), CultNetRudpSession.RELIABLE_SEND_WINDOW_PACKETS)
+        self.assertEqual(len(sender.pending_reliable_sequences), len(wire))
+        self.assertEqual(sender.queued_reliable_packet_count, 17)
+
+        delivered = []
+        while wire:
+            packet = wire.pop(0)
+            delivered.extend(receiver.receive(packet, 2).delivered)
+            acknowledged = sender.receive(receiver.create_ack_for(packet.sequence), 3)
+            wire.extend(acknowledged.ready_to_send)
+
+        self.assertEqual(sender.outstanding_reliable_packet_count, 0)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0].payload, payload)
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()

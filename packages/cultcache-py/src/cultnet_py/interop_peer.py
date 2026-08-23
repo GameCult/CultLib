@@ -306,6 +306,8 @@ def rudp_loop(
             result = peer.session.receive(packet, now_ms())
             if result.reply is not None:
                 send_rudp_packet(sock, remote, result.reply)
+            for ready in result.ready_to_send:
+                send_rudp_packet(sock, remote, ready)
             if result.disconnected:
                 peers.pop(remote, None)
                 continue
@@ -317,8 +319,8 @@ def rudp_loop(
                     continue
                 for response in handle_server_message(state, message, peer.subscriptions):
                     send_rudp_schema_frame(sock, remote, peer.session, response)
-            if packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
-                send_rudp_packet(sock, remote, peer.session.create_ack())
+            if packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
+                send_rudp_packet(sock, remote, peer.session.create_ack_for(packet.sequence))
         except Exception as error:
             sys.stderr.write(json.dumps({
                 "event": "rudpMessageError",

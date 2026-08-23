@@ -4,6 +4,7 @@ use chrono::Utc;
 use cultcache_rs::CultCache;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
+use cultnet_rs::CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS;
 use cultnet_rs::CultMesh;
 use cultnet_rs::CultMeshAuthorityLease;
 use cultnet_rs::CultMeshPeerCard;
@@ -60,6 +61,7 @@ use cultnet_rs::encode_frame;
 use cultnet_rs::encode_rudp_packet;
 use pretty_assertions::assert_eq;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1245,6 +1247,136 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
     assert_eq!(server_frame.payload, payload);
     assert_eq!(client.stats().frames_sent, 1);
     assert_eq!(server.stats().frames_received, 1);
+    Ok(())
+}
+
+#[test]
+fn rudp_session_advances_large_fragment_sets_through_a_bounded_reliable_window() -> Result<()> {
+    let connection_id = 0x1020_3042;
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id,
+        initial_sequence: 1,
+        resend_delay_ms: 25,
+        max_pending_reliable_packets: None,
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id,
+        initial_sequence: 100,
+        resend_delay_ms: 25,
+        max_pending_reliable_packets: None,
+    });
+    for session in [&mut sender, &mut receiver] {
+        session.receive(
+            &CultNetRudpPacket {
+                packet_type: CultNetRudpPacketType::Accept,
+                connection_id,
+                sequence: 0,
+                ack: 0,
+                ack_mask: 0,
+                channel_id: "control".into(),
+                reliable: false,
+                ordered: false,
+                sequenced: false,
+                fragment_id: 0,
+                fragment_index: 0,
+                fragment_count: 0,
+                payload: Vec::new(),
+            },
+            0,
+        )?;
+    }
+
+    let fragment_count = CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17;
+    let payload = (0..fragment_count * 8)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let initial = sender.send_many(
+        "schema",
+        payload.clone(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            now_ms: 1,
+            ..CultNetRudpSendOptions::default()
+        },
+        Some(8),
+    )?;
+    assert_eq!(initial.len(), CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS);
+    assert_eq!(sender.pending_reliable_sequences().len(), initial.len());
+    assert_eq!(sender.queued_reliable_packet_count(), 17);
+
+    let mut wire = VecDeque::from(initial);
+    let mut delivered = Vec::new();
+    while let Some(packet) = wire.pop_front() {
+        let received = receiver.receive(&packet, 2)?;
+        delivered.extend(received.delivered);
+        let acknowledged = sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
+        wire.extend(acknowledged.ready_to_send);
+    }
+
+    assert_eq!(sender.outstanding_reliable_packet_count(), 0);
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload, payload);
+    Ok(())
+}
+
+#[test]
+fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
+    let server_socket = bind_udp_socket()?;
+    let client_socket = bind_udp_socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let connection_id = 0x1020_3043;
+    let mut server =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-window-server".into(),
+            socket: server_socket,
+            mode: CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id,
+            initial_sequence: 100,
+            resend_delay_ms: 25,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: Some(8),
+            max_pending_reliable_packets: None,
+            reconnect_policy: None,
+        })?;
+    let mut client =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-window-client".into(),
+            socket: client_socket,
+            mode: CultNetRudpSocketMode::Client,
+            remote_addr: Some(server_addr),
+            connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: 25,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: Some(8),
+            max_pending_reliable_packets: None,
+            reconnect_policy: None,
+        })?;
+    client.connect(b"join".to_vec())?;
+    pump_rudp_handshake(&mut client, &mut server)?;
+
+    let payload = vec![0x5a; (CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17) * 8];
+    client.send("schema", payload.clone())?;
+    assert_eq!(
+        client.pending_reliable_packet_count(),
+        CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS
+    );
+    assert_eq!(
+        client.outstanding_reliable_packet_count(),
+        CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17
+    );
+
+    let server_worker = thread::spawn(move || receive_rudp_frame(&mut server));
+    client.flush_reliable(StdDuration::from_secs(5))?;
+    let delivered = server_worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("RUDP server worker panicked"))??;
+    assert_eq!(delivered.payload, payload);
+    assert_eq!(client.outstanding_reliable_packet_count(), 0);
     Ok(())
 }
 

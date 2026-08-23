@@ -245,6 +245,8 @@ class CultMeshLocalServer:
             result = peer.session.receive(packet, now_ms)
             if result.reply is not None:
                 self._send_rudp_packet(rudp_socket, remote_addr, result.reply)
+            for ready in result.ready_to_send:
+                self._send_rudp_packet(rudp_socket, remote_addr, ready)
             if result.disconnected:
                 peers.pop(remote_addr, None)
                 continue
@@ -265,8 +267,8 @@ class CultMeshLocalServer:
                         peer.session,
                         msgpack.packb(response, use_bin_type=True),
                     )
-            if packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
-                self._send_rudp_packet(rudp_socket, remote_addr, peer.session.create_ack())
+            if packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
+                self._send_rudp_packet(rudp_socket, remote_addr, peer.session.create_ack_for(packet.sequence))
 
     def _poll_rudp_resends(
         self,

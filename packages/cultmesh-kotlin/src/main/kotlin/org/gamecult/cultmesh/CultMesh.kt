@@ -2587,6 +2587,7 @@ data class CultNetRudpPacket(
 data class CultNetRudpDeliveredFrame(val channelId: String, val payload: ByteArray, val sequence: Long)
 data class CultNetRudpReceiveResult(
     val delivered: List<CultNetRudpDeliveredFrame> = emptyList(),
+    val readyToSend: List<CultNetRudpPacket> = emptyList(),
     val reply: CultNetRudpPacket? = null,
     val pong: Boolean = false,
     val pongPayload: ByteArray = ByteArray(0),
@@ -2619,6 +2620,11 @@ private data class FragmentBuffer(
 )
 
 class CultNetRudpSession(options: CultNetRudpSessionOptions) {
+    companion object {
+        const val ReliableSendWindowPackets = 64
+        private const val ReceivedSequenceWindow = 4_096
+    }
+
     val connectionId: Long = uint32(options.connectionId, "connectionId")
     val resendDelayMs: Long = options.resendDelayMs
     private val maxPendingReliablePackets: Int? = options.maxPendingReliablePackets
@@ -2631,12 +2637,17 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     private var highestReceivedSequence: Long? = null
     private val receivedSequences = linkedSetOf<Long>()
     private val pendingReliable = linkedMapOf<Long, PendingReliablePacket>()
+    private val queuedReliable = ArrayDeque<CultNetRudpPacket>()
     private val orderedNextSequenceByChannel = linkedMapOf<String, Long>()
     private val orderedBuffers = linkedMapOf<String, TreeMap<Long, PendingOrderedFrame>>()
     private val fragmentBuffers = linkedMapOf<Pair<String, Int>, FragmentBuffer>()
 
     val pendingReliableSequences: List<Long>
         get() = pendingReliable.keys.sorted()
+    val queuedReliablePacketCount: Int
+        get() = queuedReliable.size
+    val outstandingReliablePacketCount: Int
+        get() = pendingReliable.size + queuedReliable.size
 
     init {
         if (maxPendingReliablePackets != null && maxPendingReliablePackets <= 0) {
@@ -2663,6 +2674,9 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     }
 
     fun send(channelId: String, payload: ByteArray, options: CultNetRudpSendOptions = CultNetRudpSendOptions()): CultNetRudpPacket {
+        if (options.reliable && pendingReliable.size >= ReliableSendWindowPackets) {
+            throw IOException("RUDP reliable send window is full; receive acknowledgements before sending")
+        }
         return sendMany(channelId, payload, options).first()
     }
 
@@ -2679,7 +2693,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
             if (fragmentCount > 0xffff) throw IOException("RUDP payload requires more than 65535 fragments")
             ensureReliableCapacity(if (options.reliable) fragmentCount else 0)
             val fragmentId = allocateFragmentId()
-            return (0 until fragmentCount).map { index ->
+            val packets = (0 until fragmentCount).map { index ->
                 val start = index * maxFragmentBytes
                 val packet = createPacket(
                     channelId = channelId,
@@ -2692,14 +2706,13 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
                     fragmentIndex = index,
                     fragmentCount = fragmentCount,
                 )
-                if (packet.reliable) trackReliable(packet, options.nowMs)
                 packet
             }
+            return if (options.reliable) admitReliablePackets(packets, options.nowMs) else packets
         }
         ensureReliableCapacity(if (options.reliable) 1 else 0)
         val packet = createPacket(channelId = channelId, packetType = CultNetRudpPacketType.Data, payload = payload, reliable = options.reliable, ordered = options.ordered, sequenced = options.sequenced)
-        if (packet.reliable) trackReliable(packet, options.nowMs)
-        return listOf(packet)
+        return if (packet.reliable) admitReliablePackets(listOf(packet), options.nowMs) else listOf(packet)
     }
 
     fun receive(packet: CultNetRudpPacket, nowMs: Long = 0): CultNetRudpReceiveResult {
@@ -2707,21 +2720,23 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         val ignoredNow = nowMs
         requireConnection(packet)
         applyAcknowledgements(packet)
+        val readyToSend = promoteQueuedReliable(nowMs)
         lastReceivedAtMs = nowMs
         val expectedSequenceIfUninitialized = (highestReceivedSequence ?: (packet.sequence - 1)) + 1
         when (packet.packetType) {
             CultNetRudpPacketType.Accept -> {
                 rememberReceived(packet.sequence)
                 connected = true
-                return CultNetRudpReceiveResult()
+                return CultNetRudpReceiveResult(readyToSend = readyToSend)
             }
             CultNetRudpPacketType.Ping -> {
                 rememberReceived(packet.sequence)
-                return CultNetRudpReceiveResult(reply = createPacket(CultNetRudpPacketType.Pong, "control", packet.payload))
+                return CultNetRudpReceiveResult(readyToSend = readyToSend, reply = createPacket(CultNetRudpPacketType.Pong, "control", packet.payload))
             }
             CultNetRudpPacketType.Ack, CultNetRudpPacketType.Pong -> {
                 rememberReceived(packet.sequence)
                 return CultNetRudpReceiveResult(
+                    readyToSend = readyToSend,
                     pong = packet.packetType == CultNetRudpPacketType.Pong,
                     pongPayload = if (packet.packetType == CultNetRudpPacketType.Pong) packet.payload.copyOf() else ByteArray(0),
                 )
@@ -2729,20 +2744,36 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
             CultNetRudpPacketType.Disconnect -> {
                 rememberReceived(packet.sequence)
                 connected = false
-                return CultNetRudpReceiveResult(disconnected = true, disconnectReason = packet.payload.copyOf())
+                return CultNetRudpReceiveResult(readyToSend = readyToSend, disconnected = true, disconnectReason = packet.payload.copyOf())
             }
             CultNetRudpPacketType.Data -> Unit
-            else -> return CultNetRudpReceiveResult()
+            else -> return CultNetRudpReceiveResult(readyToSend = readyToSend)
         }
 
-        val duplicate = receivedSequences.contains(packet.sequence)
+        val duplicate = receivedSequences.contains(packet.sequence) || (
+            highestReceivedSequence != null &&
+                packet.sequence < highestReceivedSequence!! &&
+                highestReceivedSequence!! - packet.sequence >= ReceivedSequenceWindow.toLong()
+            )
         rememberReceived(packet.sequence)
-        if (duplicate) return CultNetRudpReceiveResult()
-        val reassembled = reassemble(packet) ?: return CultNetRudpReceiveResult()
-        return CultNetRudpReceiveResult(delivered = if (reassembled.ordered) deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) else listOf(reassembled.frame))
+        if (duplicate) return CultNetRudpReceiveResult(readyToSend = readyToSend)
+        val reassembled = reassemble(packet) ?: return CultNetRudpReceiveResult(readyToSend = readyToSend)
+        return CultNetRudpReceiveResult(
+            delivered = if (reassembled.ordered) deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) else listOf(reassembled.frame),
+            readyToSend = readyToSend,
+        )
     }
 
     fun createAck(): CultNetRudpPacket = createPacket(CultNetRudpPacketType.Ack, "control", ByteArray(0))
+
+    fun createAckFor(sequence: Long): CultNetRudpPacket = CultNetRudpPacket(
+        packetType = CultNetRudpPacketType.Ack,
+        connectionId = connectionId,
+        sequence = 0,
+        ack = uint32(sequence, "ack sequence"),
+        ackMask = 0,
+        channelId = "control",
+    )
 
     fun createPing(payload: ByteArray = ByteArray(0)): CultNetRudpPacket =
         createPacket(CultNetRudpPacketType.Ping, "control", payload)
@@ -2787,9 +2818,28 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         pendingReliable[packet.sequence] = PendingReliablePacket(packet.copy(payload = packet.payload.copyOf()), nowMs)
     }
 
+    private fun admitReliablePackets(packets: List<CultNetRudpPacket>, nowMs: Long): List<CultNetRudpPacket> {
+        val available = maxOf(0, ReliableSendWindowPackets - pendingReliable.size)
+        val ready = packets.take(available)
+        ready.forEach { trackReliable(it, nowMs) }
+        packets.drop(available).forEach { queuedReliable.addLast(it.copy(payload = it.payload.copyOf())) }
+        return ready
+    }
+
+    private fun promoteQueuedReliable(nowMs: Long): List<CultNetRudpPacket> {
+        val available = maxOf(0, ReliableSendWindowPackets - pendingReliable.size)
+        val ready = mutableListOf<CultNetRudpPacket>()
+        while (ready.size < available && !queuedReliable.isEmpty()) {
+            val packet = queuedReliable.removeFirst()
+            trackReliable(packet, nowMs)
+            ready.add(packet)
+        }
+        return ready
+    }
+
     private fun ensureReliableCapacity(packetCount: Int) {
         if (packetCount == 0 || maxPendingReliablePackets == null) return
-        if (pendingReliable.size + packetCount > maxPendingReliablePackets) {
+        if (outstandingReliablePacketCount + packetCount > maxPendingReliablePackets) {
             throw IOException("RUDP reliable send queue is full")
         }
     }
@@ -2806,6 +2856,10 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     private fun rememberReceived(sequence: Long) {
         receivedSequences.add(sequence)
         if (highestReceivedSequence == null || sequence > highestReceivedSequence!!) highestReceivedSequence = sequence
+        if (receivedSequences.size > ReceivedSequenceWindow) {
+            val keepFrom = maxOf(0L, (highestReceivedSequence ?: sequence) - ReceivedSequenceWindow.toLong() + 1)
+            receivedSequences.removeIf { it < keepFrom }
+        }
     }
 
     private fun ackState(): Pair<Long, Long> {
@@ -3010,6 +3064,7 @@ class CultNetRudpSocketTransportConnection(
         maxPendingReliablePackets = maxPendingReliablePackets,
     )
     val connected: Boolean get() = session.connected
+    val outstandingReliablePacketCount: Int get() = session.outstandingReliablePacketCount
     val localPort: Int get() = socket.localPort
     override val stats: CultNetTransportStats get() = CultNetTransportStats(bytesReceived, bytesSent, framesReceived, framesSent)
 
@@ -3093,6 +3148,27 @@ class CultNetRudpSocketTransportConnection(
     override fun receiveSchemaMessage(timeoutMs: Long, pollIntervalMs: Long): CultNetMessage? =
         receiveSchema(timeoutMs, pollIntervalMs)?.let { parseCultNetMessage(it) }
 
+    fun flushReliable(timeoutMs: Long = 30_000, pollIntervalMs: Long = 5) {
+        val deadline = System.nanoTime() + timeoutMs.coerceAtLeast(0) * 1_000_000L
+        val preserved = ArrayDeque<CultNetTransportFrame>()
+        while (!delivered.isEmpty()) preserved.addLast(delivered.removeFirst())
+        try {
+            while (session.outstandingReliablePacketCount > 0) {
+                if (System.nanoTime() >= deadline) {
+                    throw SocketTimeoutException(
+                        "RUDP reliable flush timed out with ${session.outstandingReliablePacketCount} packets outstanding"
+                    )
+                }
+                receiveOnce()?.let { preserved.addLast(it) }
+                pollResends()
+                Thread.sleep(pollIntervalMs)
+            }
+        } finally {
+            while (!delivered.isEmpty()) preserved.addLast(delivered.removeFirst())
+            while (!preserved.isEmpty()) delivered.addLast(preserved.removeFirst())
+        }
+    }
+
     fun receiveOnce(): CultNetTransportFrame? {
         if (!delivered.isEmpty()) return delivered.removeFirst()
         val buffer = ByteArray(65535)
@@ -3116,6 +3192,7 @@ class CultNetRudpSocketTransportConnection(
         }
         val result = session.receive(packet, nowMs())
         result.reply?.let { sendPacket(it) }
+        result.readyToSend.forEach { sendPacket(it) }
         if (result.pong) {
             pongPayloads.add(result.pongPayload.copyOf())
         }
@@ -3128,7 +3205,7 @@ class CultNetRudpSocketTransportConnection(
             framesReceived += 1
         }
         val frame = if (delivered.isEmpty()) null else delivered.removeFirst()
-        if (packet.packetType == CultNetRudpPacketType.Accept || frame != null) sendPacket(session.createAck())
+        if (packet.reliable || packet.packetType == CultNetRudpPacketType.Accept || frame != null) sendPacket(session.createAckFor(packet.sequence))
         return frame
     }
 
@@ -3252,6 +3329,7 @@ fun main(args: Array<String>) {
         rudpSessionPingsAndDetectsReceiveTimeout()
         rudpSessionBoundsPendingReliablePacketsBeforeEnqueue()
         rudpSessionFragmentsAndReassemblesReliableOrderedPayloads()
+        rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow()
         rudpSocketTransportErgonomicFactoriesCarrySchemaFrames()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
@@ -3893,7 +3971,8 @@ private fun startInteropRudpServer(
                 }
                 val result = session.receive(packet, nowMs())
                 result.reply?.let { sendInteropRudpPacket(socket, remote, it) }
-                if (packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAck())
+                result.readyToSend.forEach { sendInteropRudpPacket(socket, remote, it) }
+                if (packet.reliable || packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAckFor(packet.sequence))
                 for (frame in result.delivered) {
                     if (frame.channelId != "schema") continue
                     val sender = InteropRudpSessionSender(socket, remote, session)
@@ -5221,6 +5300,37 @@ private fun rudpSessionFragmentsAndReassemblesReliableOrderedPayloads() {
     check(delivered.size == 1)
     check(String(delivered.first().payload, StandardCharsets.UTF_8) == "fragment-me-please")
     check(delivered.first().sequence == packets.first().sequence)
+}
+
+private fun rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow() {
+    val connectionId = 457L
+    val sender = CultNetRudpSession(CultNetRudpSessionOptions(connectionId = connectionId, initialSequence = 1))
+    val receiver = CultNetRudpSession(CultNetRudpSessionOptions(connectionId = connectionId, initialSequence = 100))
+    sender.receive(CultNetRudpPacket(CultNetRudpPacketType.Accept, connectionId, 0, 0, 0, "control"))
+    receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.Accept, connectionId, 0, 0, 0, "control"))
+
+    val fragmentCount = CultNetRudpSession.ReliableSendWindowPackets + 17
+    val payload = ByteArray(fragmentCount * 8) { index -> (index % 251).toByte() }
+    val wire = ArrayDeque(sender.sendMany(
+        "schema",
+        payload,
+        CultNetRudpSendOptions(reliable = true, ordered = true, nowMs = 1),
+        maxFragmentBytes = 8,
+    ))
+    check(wire.size == CultNetRudpSession.ReliableSendWindowPackets)
+    check(sender.pendingReliableSequences.size == wire.size)
+    check(sender.queuedReliablePacketCount == 17)
+
+    val delivered = mutableListOf<CultNetRudpDeliveredFrame>()
+    while (!wire.isEmpty()) {
+        val packet = wire.removeFirst()
+        delivered.addAll(receiver.receive(packet, 2).delivered)
+        val acknowledged = sender.receive(receiver.createAckFor(packet.sequence), 3)
+        acknowledged.readyToSend.forEach { wire.addLast(it) }
+    }
+    check(sender.outstandingReliablePacketCount == 0)
+    check(delivered.size == 1)
+    check(delivered.first().payload.contentEquals(payload))
 }
 
 private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {

@@ -986,6 +986,9 @@ fn run_rudp_server(
                 if let Some(reply) = result.reply {
                     send_rudp_packet(&socket, remote_addr, &reply)?;
                 }
+                for ready in result.ready_to_send {
+                    send_rudp_packet(&socket, remote_addr, &ready)?;
+                }
                 if packet.packet_type == CultNetRudpPacketType::Data {
                     let ack = peer.session.create_ack();
                     send_rudp_packet(&socket, remote_addr, &ack)?;

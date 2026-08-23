@@ -106,6 +106,10 @@ export class CultNetPeer extends EventEmitter {
     this.#stream?.write(encodeFrame(payload));
   }
 
+  async flush(timeoutMs?: number): Promise<void> {
+    await this.#transport?.flush?.(timeoutMs);
+  }
+
   sendHello(message: CultNetHelloMessage): void {
     this.send(message);
   }
