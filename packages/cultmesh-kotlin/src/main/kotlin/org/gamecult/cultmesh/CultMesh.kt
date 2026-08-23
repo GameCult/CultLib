@@ -2785,6 +2785,16 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         channelId = "control",
     )
 
+    fun createAckForReceived(sequence: Long): CultNetRudpPacket {
+        val receivedSequence = uint32(sequence, "received sequence")
+        val (ack, _) = ackState()
+        return if (ack >= receivedSequence && ack - receivedSequence <= 32L) {
+            createAck()
+        } else {
+            createAckFor(receivedSequence)
+        }
+    }
+
     fun createPing(payload: ByteArray = ByteArray(0)): CultNetRudpPacket =
         createPacket(CultNetRudpPacketType.Ping, "control", payload)
 
@@ -3215,7 +3225,9 @@ class CultNetRudpSocketTransportConnection(
             framesReceived += 1
         }
         val frame = if (delivered.isEmpty()) null else delivered.removeFirst()
-        if (packet.reliable || packet.packetType == CultNetRudpPacketType.Accept || frame != null) sendPacket(session.createAck())
+        if (packet.reliable || packet.packetType == CultNetRudpPacketType.Accept || frame != null) {
+            sendPacket(session.createAckForReceived(packet.sequence))
+        }
         return frame
     }
 
@@ -3982,7 +3994,9 @@ private fun startInteropRudpServer(
                 val result = session.receive(packet, nowMs())
                 result.reply?.let { sendInteropRudpPacket(socket, remote, it) }
                 result.readyToSend.forEach { sendInteropRudpPacket(socket, remote, it) }
-                if (packet.reliable || packet.packetType == CultNetRudpPacketType.Data) sendInteropRudpPacket(socket, remote, session.createAck())
+                if (packet.reliable || packet.packetType == CultNetRudpPacketType.Data) {
+                    sendInteropRudpPacket(socket, remote, session.createAckForReceived(packet.sequence))
+                }
                 for (frame in result.delivered) {
                     if (frame.channelId != "schema") continue
                     val sender = InteropRudpSessionSender(socket, remote, session)
@@ -5328,6 +5342,7 @@ private fun rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow() {
         maxFragmentBytes = 8,
     ))
     check(wire.size == CultNetRudpSession.ReliableSendWindowPackets)
+    val oldestSequence = wire.first().sequence
     check(sender.pendingReliableSequences.size == wire.size)
     check(sender.queuedReliablePacketCount == 17)
 
@@ -5343,6 +5358,9 @@ private fun rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow() {
     check(sender.outstandingReliablePacketCount == 0)
     check(delivered.size == 1)
     check(delivered.first().payload.contentEquals(payload))
+    val oldAck = receiver.createAckForReceived(oldestSequence)
+    check(oldAck.ack == oldestSequence)
+    check(oldAck.ackMask == 0L)
 }
 
 private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {

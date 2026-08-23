@@ -790,12 +790,15 @@ namespace GameCult.Networking.Tests
             receiver.Receive(new CultNetRudpPacket
                 { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 991, Sequence = 0, ChannelId = "control" });
 
-            var packets = sender.SendMany(
+            var oldPacket = sender.Send(
                 "snapshot",
-                Enumerable.Range(0, 80).Select(index => (byte)index).ToArray(),
-                new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 },
-                maxFragmentBytes: 1);
-            foreach (var packet in packets)
+                new byte[] { 1 },
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 });
+            receiver.Receive(oldPacket);
+            foreach (var packet in Enumerable.Range(0, 40).Select(index => sender.Send(
+                "activity",
+                new byte[] { (byte)index },
+                new CultNetRudpSendOptions { Reliable = false, Ordered = false, NowMs = 0 })))
                 receiver.Receive(packet);
 
             sender.Receive(receiver.CreateAck());
@@ -803,7 +806,10 @@ namespace GameCult.Networking.Tests
 
             var oldRetransmit = sender.DueResends(10).Single(packet => packet.Sequence == 1);
             receiver.Receive(oldRetransmit);
-            sender.Receive(receiver.CreateAck(oldRetransmit.Sequence));
+            var exactAck = receiver.CreateAckForReceived(oldRetransmit.Sequence);
+            Assert.That(exactAck.Ack, Is.EqualTo(oldRetransmit.Sequence));
+            Assert.That(exactAck.AckMask, Is.Zero);
+            sender.Receive(exactAck);
 
             Assert.That(sender.PendingReliableSequences, Does.Not.Contain(1u));
         }
@@ -824,7 +830,7 @@ namespace GameCult.Networking.Tests
                 Sequence = 5000,
                 ChannelId = "control"
             });
-            var packets = Enumerable.Range(0, 1000)
+            var packets = Enumerable.Range(0, CultNetRudpSession.ReliableSendWindowPackets)
                 .Select(index => session.Send("schema", Encoding.UTF8.GetBytes(index.ToString()),
                     new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 }))
                 .ToArray();

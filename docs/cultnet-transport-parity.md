@@ -259,8 +259,11 @@ Current progress:
   state transitions.
 - TypeScript, C#, Rust, Python, and Kotlin now share bounded reliable-send
   backpressure for RUDP sessions. At most 32 reliable packets are admitted to
-  the wire at once; later fragments remain in a session-owned FIFO and exact
-  acknowledgements promote the next packets. This keeps the send frontier well
+  the wire at once; later fragments remain in a session-owned FIFO and
+  acknowledgements promote the next packets. Receivers emit a cumulative ACK
+  for packets inside the 32-sequence ACK horizon and an exact ACK for an older
+  retransmit, so unrelated unreliable traffic cannot strand reliable work.
+  This keeps the send frontier well
   inside the 4,096-sequence receive history instead of blasting an entire large
   document and hoping the UDP buffers impersonate flow control.
   `maxPendingReliablePackets` bounds both queued and in-flight packets before a

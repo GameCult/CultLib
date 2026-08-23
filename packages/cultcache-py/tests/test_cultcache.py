@@ -1173,6 +1173,7 @@ class CultCacheTests(unittest.TestCase):
             max_fragment_bytes=8,
         ))
         self.assertEqual(len(wire), CultNetRudpSession.RELIABLE_SEND_WINDOW_PACKETS)
+        oldest_sequence = wire[0].sequence
         self.assertEqual(len(sender.pending_reliable_sequences), len(wire))
         self.assertEqual(sender.queued_reliable_packet_count, 17)
 
@@ -1188,6 +1189,9 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(sender.outstanding_reliable_packet_count, 0)
         self.assertEqual(len(delivered), 1)
         self.assertEqual(delivered[0].payload, payload)
+        old_ack = receiver.create_ack_for_received(oldest_sequence)
+        self.assertEqual(old_ack.ack, oldest_sequence)
+        self.assertEqual(old_ack.ack_mask, 0)
 
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()

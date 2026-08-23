@@ -268,7 +268,11 @@ class CultMeshLocalServer:
                         msgpack.packb(response, use_bin_type=True),
                     )
             if packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
-                self._send_rudp_packet(rudp_socket, remote_addr, peer.session.create_ack())
+                self._send_rudp_packet(
+                    rudp_socket,
+                    remote_addr,
+                    peer.session.create_ack_for_received(packet.sequence),
+                )
 
     def _poll_rudp_resends(
         self,

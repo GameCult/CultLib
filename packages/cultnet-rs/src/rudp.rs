@@ -542,6 +542,15 @@ impl CultNetRudpSession {
         }
     }
 
+    pub fn create_ack_for_received(&mut self, sequence: u32) -> CultNetRudpPacket {
+        let (ack, _) = self.ack_state();
+        if ack >= sequence && ack - sequence <= 32 {
+            self.create_ack()
+        } else {
+            self.create_ack_for(sequence)
+        }
+    }
+
     pub fn create_ping(&mut self, payload: Vec<u8>) -> CultNetRudpPacket {
         self.create_packet(
             CultNetRudpPacketType::Ping,
@@ -1340,7 +1349,7 @@ impl CultNetRudpServerHub {
         let result = peer.session.receive(&packet, now_ms())?;
         let context = peer.context.clone();
         let ack = if packet.reliable {
-            Some(peer.session.create_ack())
+            Some(peer.session.create_ack_for_received(packet.sequence))
         } else {
             None
         };
@@ -1657,7 +1666,7 @@ impl CultNetRudpSocketTransportConnection {
         let frame = self.delivered_frames.pop_front();
         if packet.reliable || packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some()
         {
-            let ack = self.session.create_ack();
+            let ack = self.session.create_ack_for_received(packet.sequence);
             self.send_packet(&ack)?;
         }
         Ok(frame)

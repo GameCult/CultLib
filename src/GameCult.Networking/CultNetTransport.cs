@@ -1194,6 +1194,18 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Creates a cumulative acknowledgement when the received packet is inside the
+        /// acknowledgement horizon, or an exact acknowledgement for an older retransmit.
+        /// </summary>
+        public CultNetRudpPacket CreateAckForReceived(uint receivedSequence)
+        {
+            var (ack, _) = AckState();
+            return ack >= receivedSequence && ack - receivedSequence <= 32
+                ? CreateAck()
+                : CreateAck(receivedSequence);
+        }
+
+        /// <summary>
         /// Creates a packet carrying a keepalive ping payload.
         /// </summary>
         public CultNetRudpPacket CreatePing(byte[]? payload = null)
@@ -2077,7 +2089,7 @@ namespace GameCult.Networking
                 SendPackets(result.ReadyToSend);
                 if (packet.PacketType == CultNetRudpPacketType.Accept ||
                     packet.PacketType == CultNetRudpPacketType.Data)
-                    acknowledgement = _session.CreateAck();
+                    acknowledgement = _session.CreateAckForReceived(packet.Sequence);
             }
             if (result.Pong)
             {
@@ -2486,7 +2498,7 @@ namespace GameCult.Networking
                     SendPacket(existingPeer.RemoteEndPoint, result.Reply);
                 SendPackets(existingPeer, result.ReadyToSend);
                 if (packet.PacketType == CultNetRudpPacketType.Data)
-                    acknowledgement = existingPeer.Session.CreateAck();
+                    acknowledgement = existingPeer.Session.CreateAckForReceived(packet.Sequence);
             }
             if (result.Disconnected)
             {

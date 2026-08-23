@@ -1317,6 +1317,7 @@ test("rudp session advances large fragment sets through a bounded reliable windo
     maxFragmentBytes: 8,
   });
   assert.equal(wire.length, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS);
+  const oldestSequence = wire[0]!.sequence;
   assert.equal(sender.pendingReliableSequences.length, wire.length);
   assert.equal(sender.queuedReliablePacketCount, 17);
 
@@ -1334,6 +1335,9 @@ test("rudp session advances large fragment sets through a bounded reliable windo
   assert.equal(sender.outstandingReliablePacketCount, 0);
   assert.equal(delivered.length, 1);
   assert.deepEqual(delivered[0]?.payload, payload);
+  const oldAck = receiver.createAckForReceived(oldestSequence);
+  assert.equal(oldAck.ack, oldestSequence);
+  assert.equal(oldAck.ackMask, 0);
 });
 
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {

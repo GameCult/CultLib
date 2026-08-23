@@ -621,6 +621,13 @@ class CultNetRudpSession:
             payload=b"",
         )
 
+    def create_ack_for_received(self, sequence: int) -> CultNetRudpPacket:
+        received_sequence = _uint32(sequence, "received sequence")
+        ack, _ = self._ack_state()
+        if ack >= received_sequence and ack - received_sequence <= 32:
+            return self.create_ack()
+        return self.create_ack_for(received_sequence)
+
     def create_ping(self, payload: bytes = b"") -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.PING, "control", payload)
 
@@ -964,7 +971,7 @@ class CultNetRudpSocketTransportConnection:
 
         frame = self._delivered_frames.popleft() if self._delivered_frames else None
         if packet.reliable or packet.packet_type == CultNetRudpPacketType.ACCEPT or frame is not None:
-            self._send_packet(self.session.create_ack())
+            self._send_packet(self.session.create_ack_for_received(packet.sequence))
         return frame
 
     def receive(self, timeout_seconds: float | None = None) -> CultNetTransportFrame:

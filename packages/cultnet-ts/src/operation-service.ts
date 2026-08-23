@@ -163,7 +163,9 @@ async function handleServerDatagram(
       maxFragmentBytes: options.maxFragmentBytes ?? 2048,
     })) sendPacket(remote, responsePacket);
   }
-  if (packet.packetType === "data" || result.delivered.length > 0) sendPacket(remote, peer.session.createAck());
+  if (packet.packetType === "data" || result.delivered.length > 0) {
+    sendPacket(remote, peer.session.createAckForReceived(packet.sequence));
+  }
 }
 
 function parseRudpEndpoint(endpoint: string): { host: string; port: number } {

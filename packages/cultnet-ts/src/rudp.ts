@@ -434,6 +434,14 @@ export class CultNetRudpSession {
     };
   }
 
+  createAckForReceived(sequence: number): CultNetRudpPacket {
+    const receivedSequence = toUint32(sequence, "received sequence");
+    const { ack } = this.#ackState();
+    return ack >= receivedSequence && ack - receivedSequence <= 32
+      ? this.createAck()
+      : this.createAckFor(receivedSequence);
+  }
+
   createPing(payload = new Uint8Array()): CultNetRudpPacket {
     return this.#createPacket({
       packetType: "ping",
@@ -917,7 +925,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         return;
       }
       if (packet.packetType === "accept" || packet.packetType === "data" || result.delivered.length > 0) {
-        this.#sendPacket(this.#session.createAck());
+        this.#sendPacket(this.#session.createAckForReceived(packet.sequence));
       }
     } catch (error) {
       this.emit("error", error instanceof Error ? error : new Error(String(error)));

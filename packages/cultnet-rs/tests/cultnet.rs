@@ -1303,6 +1303,7 @@ fn rudp_session_advances_large_fragment_sets_through_a_bounded_reliable_window()
         Some(8),
     )?;
     assert_eq!(initial.len(), CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS);
+    let oldest_sequence = initial[0].sequence;
     assert_eq!(sender.pending_reliable_sequences().len(), initial.len());
     assert_eq!(sender.queued_reliable_packet_count(), 17);
 
@@ -1322,6 +1323,9 @@ fn rudp_session_advances_large_fragment_sets_through_a_bounded_reliable_window()
     assert_eq!(sender.outstanding_reliable_packet_count(), 0);
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].payload, payload);
+    let old_ack = receiver.create_ack_for_received(oldest_sequence);
+    assert_eq!(old_ack.ack, oldest_sequence);
+    assert_eq!(old_ack.ack_mask, 0);
     Ok(())
 }
 
