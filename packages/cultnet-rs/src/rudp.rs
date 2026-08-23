@@ -1265,7 +1265,9 @@ impl CultNetRudpServerHub {
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
             Err(error)
-                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
+                if error.kind() == ErrorKind::WouldBlock
+                    || error.kind() == ErrorKind::TimedOut
+                    || error.kind() == ErrorKind::ConnectionReset =>
             {
                 return Ok(None);
             }
@@ -1591,7 +1593,9 @@ impl CultNetRudpSocketTransportConnection {
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
             Err(error)
-                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
+                if error.kind() == ErrorKind::WouldBlock
+                    || error.kind() == ErrorKind::TimedOut
+                    || error.kind() == ErrorKind::ConnectionReset =>
             {
                 return Ok(None);
             }
