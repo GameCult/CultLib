@@ -192,7 +192,7 @@ namespace GameCult.Geometry.Tests
                 chunk,
                 new CultNetDocumentMessageOptions
                 {
-                    SourceRuntimeId = "vg-csg",
+                    SourceRuntimeId = "gamecult.geometry.csg",
                     SourceRole = "geometry-worker",
                     Tags = ["ragnarok", "chunk"]
                 });
@@ -282,7 +282,7 @@ namespace GameCult.Geometry.Tests
                     StartServer = false,
                     DatabaseOptions = new CultNetDatabaseOptions
                     {
-                        RuntimeId = "unity-runtime",
+                        RuntimeId = "godot-runtime",
                         DocumentRegistry = registry
                     }
                 }))
@@ -314,7 +314,7 @@ namespace GameCult.Geometry.Tests
             {
                 DomainId = "ragnarok-column",
                 RootKey = "ragnarok-column",
-                SourceRuntime = "vg-csg",
+                SourceRuntime = "gamecult.geometry.csg",
                 CreatedAt = "2026-05-29T00:00:00.0000000Z",
                 Root = new CultGeometryDomainNode
                 {
@@ -359,6 +359,7 @@ namespace GameCult.Geometry.Tests
             return Path.Combine(
                 TestContext.CurrentContext.TestDirectory,
                 "Fixtures",
+                // Immutable interoperability fixtures emitted before the CSG package rename.
                 "vg-csg-ragnarok",
                 fileName);
         }

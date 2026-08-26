@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Description>Typed CultCache geometry domain and chunk artifact documents for VibeGeometry and Fensalir</Description>
+    <Description>CultGeometry algorithms and typed CultCache geometry artifacts</Description>
     <PackageId>GameCult.Geometry</PackageId>
     <PackageTags>game;geometry;csg;lod;cultcache;cultmesh;vibegeometry;fensalir</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\packages\cultmath\src\CultMath\CultMath.csproj" />
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="System.Text.Json" Version="9.0.10" />
@@ -15,5 +16,6 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="ISOSURFACE-PROVENANCE.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

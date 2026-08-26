@@ -1,8 +1,17 @@
 # GameCult.Geometry
 
-`GameCult.Geometry` defines shared geometry values plus CultCache-native
-documents for procedural geometry domains, LOD build requests, selected-cut
-manifests, and mesh chunk artifacts.
+The project is known as **CultGeometry**. `GameCult.Geometry` is its clean .NET
+package and namespace identity.
+
+`GameCult.Geometry` owns reusable procedural geometry algorithms together with
+the CultCache-native documents that carry their domains, build requests,
+selected cuts, and mesh chunk artifacts.
+
+Its first engine-neutral algorithm is `CultGeometryIsoSurface.Extract`, a
+marching-tetrahedra extractor over regular scalar grids. It uses CultMath for
+numeric primitives and emits `CultGeometryTriangleMesh`; Godot, Unity, native
+workers, and other consumers adapt that neutral result into their own runtime
+objects. See `ISOSURFACE-PROVENANCE.md` for the clean-port boundary.
 
 The package is deliberately substrate-shaped:
 
@@ -33,10 +42,10 @@ runtime equivalents instead of bespoke `{ minX, minY, maxX, maxY }` payloads.
 
 ## Runtime Path
 
-`vg-csg` emits domain documents, selected-cut manifests, and chunk artifacts as
-MessagePack CultCache documents. A Unity runtime, local worker, or remote
-geometry process should receive the same records through CultMesh/CultNet and
-read them back as `CultGeometry*` types.
+CultGeometry CSG (`GameCult.Geometry.Csg`) emits domain documents, selected-cut
+manifests, and chunk artifacts as MessagePack CultCache documents. A Godot
+runtime, local worker, or remote geometry process receives the same records
+through CultMesh/CultNet and reads them back as `CultGeometry*` types.
 
 ```csharp
 using GameCult.Caching;
