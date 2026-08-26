@@ -531,6 +531,53 @@ test("rudp session pings and detects receive timeout", () => {
   assert.equal(client.connected, false);
 });
 
+test("rudp lossy packets cannot create reliable ordered gaps", () => {
+  const client = new CultNetRudpSession({ connectionId: 198, initialSequence: 1 });
+  const server = new CultNetRudpSession({ connectionId: 198, initialSequence: 100 });
+  const connect = client.createConnect(0);
+  const accept = server.acceptConnect(connect, 1);
+  client.receive(accept, 2);
+
+  const ping = client.createPing(Buffer.from("pulse"));
+  const pong = server.receive(ping, 3).reply!;
+  const realtime = server.send("realtime", Buffer.from("discarded realtime"));
+  const latest = server.send("latest", Buffer.from("discarded latest state"), { sequenced: true });
+  const schema = server.send("schema", Buffer.from("committed response"), { reliable: true, ordered: true });
+
+  assert.equal(ping.sequence, 0);
+  assert.equal(pong.sequence, 0);
+  assert.equal(realtime.sequence, 0);
+  assert.equal(latest.sequence, 1);
+  assert.equal(schema.sequence, accept.sequence + 1);
+  assert.deepEqual(client.receive(schema, 4).delivered.map(frame => Buffer.from(frame.payload).toString("utf8")), [
+    "committed response",
+  ]);
+});
+
+test("rudp unreliable sequenced delivery is scoped to its channel", () => {
+  const sender = new CultNetRudpSession({ connectionId: 197, initialSequence: 50 });
+  const receiver = new CultNetRudpSession({ connectionId: 197, initialSequence: 100 });
+  const connect = sender.createConnect(0);
+  const accept = receiver.acceptConnect(connect, 1);
+  sender.receive(accept, 2);
+  const older = sender.send("latest", Buffer.from("older"), { sequenced: true });
+  const newer = sender.send("latest", Buffer.from("newer"), { sequenced: true });
+
+  assert.equal(older.sequence, 1);
+  assert.equal(newer.sequence, 2);
+  assert.deepEqual(receiver.receive(newer, 3).delivered.map(frame => Buffer.from(frame.payload).toString("utf8")), ["newer"]);
+  assert.deepEqual(receiver.receive(older, 4).delivered, []);
+});
+
+test("rudp rejects unreliable ordered delivery", () => {
+  const session = new CultNetRudpSession({ connectionId: 196 });
+  session.receive({ packetType: "accept", connectionId: 196, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  assert.throws(
+    () => session.send("schema", Buffer.from("cannot order what will not retransmit"), { ordered: true }),
+    /ordered delivery requires reliability/,
+  );
+});
+
 test("rudp session bounds pending reliable packets before enqueue", () => {
   const session = new CultNetRudpSession({ connectionId: 102, initialSequence: 1, maxPendingReliablePackets: 2 });
   session.receive({ packetType: "accept", connectionId: 102, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });

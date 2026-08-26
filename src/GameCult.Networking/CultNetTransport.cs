@@ -894,12 +894,14 @@ namespace GameCult.Networking
         }
 
         private uint _nextSequence;
+        private readonly Dictionary<string, uint> _nextSequencedByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
         private ushort _nextFragmentId = 1;
         private readonly int? _maxPendingReliablePackets;
         private volatile bool _connected;
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
+        private readonly Dictionary<string, uint> _latestSequencedByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
         private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Queue<CultNetRudpPacket> _queuedReliable = new Queue<CultNetRudpPacket>();
@@ -1022,6 +1024,10 @@ namespace GameCult.Networking
             }
 
             options ??= new CultNetRudpSendOptions();
+            if (options.Ordered && !options.Reliable)
+            {
+                throw new InvalidOperationException("RUDP ordered delivery requires reliability.");
+            }
             payload ??= Array.Empty<byte>();
             if (maxFragmentBytes.HasValue && maxFragmentBytes.Value <= 0)
             {
@@ -1099,7 +1105,6 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Ping)
             {
-                RememberReceived(packet.Sequence);
                 return new CultNetRudpReceiveResult
                 {
                     ReadyToSend = readyToSend,
@@ -1115,11 +1120,9 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Ack || packet.PacketType == CultNetRudpPacketType.Pong)
             {
-                if (packet.PacketType == CultNetRudpPacketType.Pong)
-                    RememberReceived(packet.Sequence);
                 return new CultNetRudpReceiveResult
                 {
-                    Delivered = DrainUnblockedOrdered(),
+                    Delivered = Array.Empty<CultNetRudpDeliveredFrame>(),
                     ReadyToSend = readyToSend,
                     Pong = packet.PacketType == CultNetRudpPacketType.Pong,
                     PongPayload = packet.PacketType == CultNetRudpPacketType.Pong
@@ -1130,7 +1133,6 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Disconnect)
             {
-                RememberReceived(packet.Sequence);
                 _connected = false;
                 return new CultNetRudpReceiveResult
                 {
@@ -1145,11 +1147,15 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
             }
 
-            var duplicate = _receivedSequences.Contains(packet.Sequence)
-                || (_highestReceivedSequence.HasValue
-                    && packet.Sequence < _highestReceivedSequence.Value
-                    && _highestReceivedSequence.Value - packet.Sequence >= ReceivedSequenceWindow);
-            RememberReceived(packet.Sequence);
+            var duplicate = packet.Reliable
+                && (_receivedSequences.Contains(packet.Sequence)
+                    || (_highestReceivedSequence.HasValue
+                        && packet.Sequence < _highestReceivedSequence.Value
+                        && _highestReceivedSequence.Value - packet.Sequence >= ReceivedSequenceWindow));
+            if (packet.Reliable)
+            {
+                RememberReceived(packet.Sequence);
+            }
             if (duplicate)
             {
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
@@ -1159,6 +1165,17 @@ namespace GameCult.Networking
             if (reassembled == null)
             {
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
+            }
+
+            if (!reassembled.Ordered && packet.Sequenced)
+            {
+                var newestSequence = reassembled.NextSequence - 1;
+                if (_latestSequencedByChannel.TryGetValue(reassembled.Frame.ChannelId, out var latestSequence)
+                    && newestSequence <= latestSequence)
+                {
+                    return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
+                }
+                _latestSequencedByChannel[reassembled.Frame.ChannelId] = newestSequence;
             }
 
             return new CultNetRudpReceiveResult
@@ -1282,8 +1299,24 @@ namespace GameCult.Networking
             ushort fragmentIndex,
             ushort fragmentCount)
         {
-            var sequence = _nextSequence;
-            _nextSequence = checked(_nextSequence + 1);
+            uint sequence;
+            if (reliable)
+            {
+                sequence = _nextSequence;
+                _nextSequence = checked(_nextSequence + 1);
+            }
+            else if (sequenced)
+            {
+                if (!_nextSequencedByChannel.TryGetValue(channelId, out sequence))
+                {
+                    sequence = 1;
+                }
+                _nextSequencedByChannel[channelId] = checked(sequence + 1);
+            }
+            else
+            {
+                sequence = 0;
+            }
             var (ack, ackMask) = AckState();
             return new CultNetRudpPacket
             {
@@ -1560,17 +1593,6 @@ namespace GameCult.Networking
                 SkipReceivedNonChannelSequences(channelId);
             }
 
-            return delivered;
-        }
-
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainUnblockedOrdered()
-        {
-            var delivered = new List<CultNetRudpDeliveredFrame>();
-            foreach (var channelId in _orderedBuffers.Keys.ToArray())
-            {
-                SkipReceivedNonChannelSequences(channelId);
-                delivered.AddRange(DrainOrdered(channelId));
-            }
             return delivered;
         }
 
