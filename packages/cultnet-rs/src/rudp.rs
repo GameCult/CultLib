@@ -159,11 +159,13 @@ pub struct CultNetRudpSession {
     max_pending_fragment_sets: usize,
     initial_sequence: u32,
     next_sequence: u32,
+    next_sequenced_by_channel: BTreeMap<String, u32>,
     next_fragment_id: u16,
     connected: bool,
     last_received_at_ms: Option<u64>,
     highest_received_sequence: Option<u32>,
     received_sequences: BTreeSet<u32>,
+    latest_sequenced_by_channel: BTreeMap<String, u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
     queued_reliable: VecDeque<CultNetRudpPacket>,
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
@@ -182,11 +184,13 @@ impl CultNetRudpSession {
             max_pending_fragment_sets: 64,
             initial_sequence: options.initial_sequence,
             next_sequence: options.initial_sequence,
+            next_sequenced_by_channel: BTreeMap::new(),
             next_fragment_id: 1,
             connected: false,
             last_received_at_ms: None,
             highest_received_sequence: None,
             received_sequences: BTreeSet::new(),
+            latest_sequenced_by_channel: BTreeMap::new(),
             pending_reliable: BTreeMap::new(),
             queued_reliable: VecDeque::new(),
             ordered_next_sequence_by_channel: BTreeMap::new(),
@@ -290,11 +294,13 @@ impl CultNetRudpSession {
     pub fn reset_peer_state(&mut self) {
         self.session_scope = Uuid::new_v4();
         self.next_sequence = self.initial_sequence;
+        self.next_sequenced_by_channel.clear();
         self.next_fragment_id = 1;
         self.connected = false;
         self.last_received_at_ms = None;
         self.highest_received_sequence = None;
         self.received_sequences.clear();
+        self.latest_sequenced_by_channel.clear();
         self.pending_reliable.clear();
         self.queued_reliable.clear();
         self.ordered_next_sequence_by_channel.clear();
@@ -376,6 +382,9 @@ impl CultNetRudpSession {
             return Err(anyhow!(
                 "Cannot send RUDP data before the session is connected"
             ));
+        }
+        if options.ordered && !options.reliable {
+            return Err(anyhow!("RUDP ordered delivery requires reliability"));
         }
         self.require_payload_size(payload.len())?;
 
@@ -459,7 +468,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Ping {
-            self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 ready_to_send,
@@ -481,9 +489,6 @@ impl CultNetRudpSession {
         if packet.packet_type == CultNetRudpPacketType::Ack
             || packet.packet_type == CultNetRudpPacketType::Pong
         {
-            if packet.packet_type == CultNetRudpPacketType::Pong {
-                self.remember_received(packet.sequence);
-            }
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 ready_to_send,
@@ -500,7 +505,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Disconnect {
-            self.remember_received(packet.sequence);
             self.connected = false;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -525,12 +529,15 @@ impl CultNetRudpSession {
             });
         }
 
-        let duplicate = self.received_sequences.contains(&packet.sequence)
-            || self.highest_received_sequence.is_some_and(|highest| {
-                packet.sequence < highest
-                    && highest - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW as u32
-            });
-        self.remember_received(packet.sequence);
+        let duplicate = packet.reliable
+            && (self.received_sequences.contains(&packet.sequence)
+                || self.highest_received_sequence.is_some_and(|highest| {
+                    packet.sequence < highest
+                        && highest - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW as u32
+                }));
+        if packet.reliable {
+            self.remember_received(packet.sequence);
+        }
         if duplicate {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -556,6 +563,19 @@ impl CultNetRudpSession {
         };
         let delivered = if ordered {
             self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
+        } else if packet.sequenced {
+            let latest = self
+                .latest_sequenced_by_channel
+                .get(&frame.channel_id)
+                .copied();
+            let newest_sequence = next_sequence.saturating_sub(1);
+            if latest.is_some_and(|latest| newest_sequence <= latest) {
+                Vec::new()
+            } else {
+                self.latest_sequenced_by_channel
+                    .insert(frame.channel_id.clone(), newest_sequence);
+                vec![frame]
+            }
         } else {
             vec![frame]
         };
@@ -700,11 +720,24 @@ impl CultNetRudpSession {
         fragment_index: u16,
         fragment_count: u16,
     ) -> CultNetRudpPacket {
-        let sequence = self.next_sequence;
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .expect("sequence overflow");
+        let sequence = if reliable {
+            let sequence = self.next_sequence;
+            self.next_sequence = self
+                .next_sequence
+                .checked_add(1)
+                .expect("reliable sequence overflow");
+            sequence
+        } else if sequenced {
+            let next = self
+                .next_sequenced_by_channel
+                .entry(channel_id.to_string())
+                .or_insert(1);
+            let sequence = *next;
+            *next = next.checked_add(1).expect("sequenced channel overflow");
+            sequence
+        } else {
+            0
+        };
         let (ack, ack_mask) = self.ack_state();
         CultNetRudpPacket {
             packet_type,

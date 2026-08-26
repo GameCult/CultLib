@@ -890,6 +890,75 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_LossyPacketsCannotCreateReliableOrderedGaps()
+        {
+            var client = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 198, InitialSequence = 1 });
+            var server = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 198, InitialSequence = 100 });
+            var connect = client.CreateConnect(0);
+            var accept = server.AcceptConnect(connect, 1);
+            client.Receive(accept, 2);
+
+            var ping = client.CreatePing(Encoding.UTF8.GetBytes("pulse"));
+            var pong = server.Receive(ping, 3).Reply!;
+            var realtime = server.Send("realtime", Encoding.UTF8.GetBytes("discarded realtime"));
+            var latest = server.Send(
+                "latest",
+                Encoding.UTF8.GetBytes("discarded latest state"),
+                new CultNetRudpSendOptions { Sequenced = true });
+            var schema = server.Send(
+                "schema",
+                Encoding.UTF8.GetBytes("committed response"),
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+
+            Assert.That(ping.Sequence, Is.Zero);
+            Assert.That(pong.Sequence, Is.Zero);
+            Assert.That(realtime.Sequence, Is.Zero);
+            Assert.That(latest.Sequence, Is.EqualTo(1));
+            Assert.That(schema.Sequence, Is.EqualTo(accept.Sequence + 1));
+            Assert.That(
+                client.Receive(schema, 4).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "committed response" }));
+        }
+
+        [Test]
+        public void RudpSession_UnreliableSequencedDeliveryIsScopedToItsChannel()
+        {
+            var sender = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 197, InitialSequence = 50 });
+            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 197, InitialSequence = 100 });
+            var connect = sender.CreateConnect(0);
+            var accept = receiver.AcceptConnect(connect, 1);
+            sender.Receive(accept, 2);
+            var older = sender.Send("latest", Encoding.UTF8.GetBytes("older"), new CultNetRudpSendOptions { Sequenced = true });
+            var newer = sender.Send("latest", Encoding.UTF8.GetBytes("newer"), new CultNetRudpSendOptions { Sequenced = true });
+
+            Assert.That(older.Sequence, Is.EqualTo(1));
+            Assert.That(newer.Sequence, Is.EqualTo(2));
+            Assert.That(
+                receiver.Receive(newer, 3).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "newer" }));
+            Assert.That(receiver.Receive(older, 4).Delivered, Is.Empty);
+        }
+
+        [Test]
+        public void RudpSession_RejectsUnreliableOrderedDelivery()
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 196 });
+            session.Receive(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Accept,
+                ConnectionId = 196,
+                Sequence = 50,
+                ChannelId = "control"
+            });
+            var error = Assert.Throws<InvalidOperationException>(() =>
+                session.Send(
+                    "schema",
+                    Encoding.UTF8.GetBytes("cannot order what will not retransmit"),
+                    new CultNetRudpSendOptions { Ordered = true }));
+            Assert.That(error!.Message, Does.Contain("ordered delivery requires reliability"));
+        }
+
+        [Test]
         public void RudpSession_BoundsPendingReliablePacketsBeforeEnqueue()
         {
             var session = new CultNetRudpSession(new CultNetRudpSessionOptions
@@ -953,55 +1022,6 @@ namespace GameCult.Networking.Tests
             Assert.That(
                 receiver.Receive(second).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
                 Is.EqualTo(new[] { "second", "third" }));
-        }
-
-        [Test]
-        public void RudpSession_SequencedControlPacketReleasesBufferedOrderedFrame()
-        {
-            var receiver = new CultNetRudpSession(new CultNetRudpSessionOptions
-            {
-                ConnectionId = 199,
-                InitialSequence = 1
-            });
-            receiver.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Accept,
-                ConnectionId = 199,
-                Sequence = 100,
-                ChannelId = "control"
-            });
-            var first = receiver.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Data,
-                ConnectionId = 199,
-                Sequence = 101,
-                ChannelId = "schema",
-                Reliable = true,
-                Ordered = true,
-                Payload = Encoding.UTF8.GetBytes("first")
-            });
-            var buffered = receiver.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Data,
-                ConnectionId = 199,
-                Sequence = 103,
-                ChannelId = "schema",
-                Reliable = true,
-                Ordered = true,
-                Payload = Encoding.UTF8.GetBytes("second")
-            });
-            var released = receiver.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Pong,
-                ConnectionId = 199,
-                Sequence = 102,
-                ChannelId = "control"
-            });
-
-            Assert.That(first.Delivered, Has.Count.EqualTo(1));
-            Assert.That(buffered.Delivered, Is.Empty);
-            Assert.That(released.Delivered, Has.Count.EqualTo(1));
-            Assert.That(Encoding.UTF8.GetString(released.Delivered[0].Payload), Is.EqualTo("second"));
         }
 
         [Test]
