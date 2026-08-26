@@ -1,0 +1,9 @@
+bin/
+obj/
+**/bin/
+**/obj/
+target/
+**/target/
+/native/cultmath-core/target.meta
+.tools/
+/artifacts/

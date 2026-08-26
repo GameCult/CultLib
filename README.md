@@ -38,7 +38,8 @@ and pretending the label makes it furniture.
 | Job | Start With | Owns | Use When | Do Not Use It For |
 | --- | --- | --- | --- | --- |
 | Local typed state | `GameCult.Caching` / CultCache | Document identity, schema compatibility, record keys, indexes, globals, and local persistence | You need a typed cache, file-compatible save data, local reactive reads, or a stable domain document model | Peer discovery, transport security, shard routing, or mesh consensus |
-| Procedural geometry state | `GameCult.Geometry` | CultCache-native domain trees, LOD build requests, selected-cut diagnostics, and chunk artifact payloads | Rust, Unity, or remote workers need to share CSG/LOD geometry and graph metadata as typed state | Transport policy, peer discovery, or gameplay authority |
+| Portable math | `GameCult.Math` / CultMath | Shader-shaped numeric primitives, deterministic random, noise, and CPU/GPU parity helpers | Shared simulation and geometry code must not depend on an engine's math or RNG types | Domain-specific geometry, rendering, or world authority |
+| Procedural geometry | `GameCult.Geometry` / CultGeometry | Isosurface extraction plus CultCache-native domains, LOD requests, selected cuts, and mesh artifacts | C#, Rust, Godot, or remote workers need shared geometry algorithms and typed results | Transport policy, peer discovery, or gameplay authority |
 | Network transport and database plumbing | `GameCult.Networking` / CultNet | Native RUDP sessions, LiteNetLib/TCP adapters, an authenticated WebSocket host adapter, schema-v0 wire contracts, shard authority, raw document replication, snapshots, and subscriptions | You need a client/server pipe, login/session flow, schema discovery, reliable UDP, or a low-level distributed CultCache lane | Gameplay-facing mesh ergonomics, Verse policy, mod branches, or simulation consensus composition |
 | Distributed realtime gameplay state | `GameCult.Mesh` / CultMesh | Public mesh entrypoints, Verse discovery, peer exchange, shard replication defaults, authority leases, client prediction, and witness consensus | You want the game to treat clients and servers as one reactive database for persistent state, input state, and simulation facts | A tiny local-only tool, a bare transport client, or a storage format contract |
 | Realtime media/frame streams | `GameCult.Mesh` / CultMesh streaming mode | Stream identity, authority, clock metadata, body transport negotiation, frame cursors, and backpressure state | Audio/video/tensor frames need to move between runtimes through shared memory, GPU handles, platform buffers, or CultCache page refs | Durable document mutation, mesh consensus facts, or pretending inline bytes are zero-copy |
@@ -47,8 +48,10 @@ and pretending the label makes it furniture.
 Quick rule:
 
 - Choose CultCache when the problem is "how do I model and persist typed state?"
-- Choose GameCult.Geometry when the problem is "how do geometry workers share
-  domain trees, LOD build requests, and mesh chunks as typed state?"
+- Choose GameCult.Math when the problem is "which portable numeric and random
+  semantics do these runtimes share?"
+- Choose GameCult.Geometry when the problem is "how do geometry workers build
+  and share engine-neutral geometry?"
 - Choose CultNet when the problem is "how do peers exchange authenticated,
   schema-aware database messages?"
 - Choose CultMesh when the problem is "how does a game join a Verse and share
@@ -97,7 +100,8 @@ The solution includes:
 - `GameCult.Caching.NewtonsoftJson`: Newtonsoft.Json-backed persistence for the cache
 - `GameCult.Caching.MessagePack.Generator`: source generator for MessagePack formatters for cache models
 - `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
-- `GameCult.Geometry`: CultCache-native geometry domain, selected-cut, and chunk artifact documents for VibeGeometry/Fensalir-style pipelines
+- `GameCult.Math` / CultMath: portable numeric primitives, deterministic random, noise, and shader-parity helpers
+- `GameCult.Geometry` / CultGeometry: engine-neutral geometry algorithms plus CultCache-native domain, selected-cut, and mesh artifact documents
 - `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
 - `GameCult.Networking.WebSockets`: bounded ASP.NET Core binary WebSocket host adapter for browser CultMesh clients
 - `GameCult.Mesh`: CultMesh package home for distributed realtime database, shard replication, client prediction, Verse discovery, and mesh witness consensus
@@ -134,6 +138,7 @@ tests/
   GameCult.Geometry.Tests/
   GameCult.Networking.Tests/
 packages/
+  cultmath/
   cultcache-ts/
   cultnet-ts/
   cultmesh-ts/

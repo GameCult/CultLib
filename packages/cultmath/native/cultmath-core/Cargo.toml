@@ -1,0 +1,13 @@
+[package]
+name = "cultmath-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cultmath_core"
+crate-type = ["cdylib", "staticlib"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
