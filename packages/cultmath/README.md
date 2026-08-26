@@ -83,7 +83,7 @@ cargo build --release --manifest-path packages/cultmath/native/cultmath-core/Car
 ## Unity package
 
 CultMath's Unity 2021.3 surface is the tracked precompiled package at
-`unity/org.gamecult.cultmath`. Unity consumes `CultMath.dll` and the numeric
+`packages/cultmath/unity/org.gamecult.cultmath`. Unity consumes `CultMath.dll` and the numeric
 `CultMath.hlsl`; it does not compile the repository's current-language C# source
 tree and does not require a consumer `csc.rsp` workaround.
 
@@ -92,22 +92,22 @@ tree and does not require a consumer `csc.rsp` workaround.
 ```
 
 The repository root is not a Unity package. Build the tracked package with
-`scripts/build-unity-package.ps1`; the script fresh-builds the netstandard2.1
+`packages/cultmath/scripts/build-unity-package.ps1`; the script fresh-builds the netstandard2.1
 assembly and rejects stale binaries, missing metadata, unexpected assemblies,
 or leaked C# source.
 
 ## Shader Tooling
 
-CultMath keeps portable DXC outside git under `.tools/`:
+CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
 
 ```powershell
-.\tools\get-dxc.ps1
-.\tools\get-spirv-cross.ps1
-.\tools\compile-hlsl-spirv.ps1 `
+.\packages\cultmath\tools\get-dxc.ps1
+.\packages\cultmath\tools\get-spirv-cross.ps1
+.\packages\cultmath\tools\compile-hlsl-spirv.ps1 `
   -ShaderPath E:\Projects\Odin\crates\muninn-move-tracker\shaders\MoveSphereCandidate.comp.hlsl `
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
-  -IncludePath E:\Projects\CultMath\shaders
-.\tools\compile-spirv-metal.ps1 `
+  -IncludePath E:\Projects\CultLib\packages\cultmath\shaders
+.\packages\cultmath\tools\compile-spirv-metal.ps1 `
   -SpirvPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.metal
 ```

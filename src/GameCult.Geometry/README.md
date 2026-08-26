@@ -7,6 +7,10 @@ package and namespace identity.
 the CultCache-native documents that carry their domains, build requests,
 selected cuts, and mesh chunk artifacts.
 
+It is the schema authority for the shared `CultGeometry*` records.
+`GameCult.Geometry.Csg` owns CSG production behavior and proves wire parity
+against those records; it does not independently evolve their identities.
+
 Its first engine-neutral algorithm is `CultGeometryIsoSurface.Extract`, a
 marching-tetrahedra extractor over regular scalar grids. It uses CultMath for
 numeric primitives and emits `CultGeometryTriangleMesh`; Godot, Unity, native
@@ -63,7 +67,7 @@ using var node = await CultMesh.CreateNodeAsync("ragnarok-geometry.ccmp", new Cu
 {
     DatabaseOptions = new CultNetDatabaseOptions
     {
-        RuntimeId = "unity-runtime",
+        RuntimeId = "godot-runtime",
         DocumentRegistry = geometryDocuments
     }
 });
