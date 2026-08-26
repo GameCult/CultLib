@@ -37,13 +37,30 @@ static async Task RunOdinAsync(Args arguments)
     if (string.IsNullOrWhiteSpace(arguments.ProviderEndpoint))
         throw new ArgumentException("The Odin fixture requires --provider-endpoint.");
     using var catalog = new CultMeshVerseCatalog();
+    var routes = new List<CultMeshAuthorityRoute>
+    {
+        new(
+            arguments.AuthorityRuntimeId,
+            arguments.ProviderEndpoint,
+            [CultMeshProtocols.Documents.Value],
+            priority: 10,
+            generation: arguments.RouteGeneration)
+    };
+    if (!string.IsNullOrWhiteSpace(arguments.DecoyEndpoint))
+    {
+        routes.Add(new CultMeshAuthorityRoute(
+            arguments.DecoyAuthorityRuntimeId,
+            arguments.DecoyEndpoint,
+            [CultMeshProtocols.Documents.Value],
+            priority: 0,
+            generation: arguments.DecoyRouteGeneration));
+    }
     catalog.Upsert(new CultMeshVerseDescriptor(
         arguments.VerseId,
         arguments.VerseName,
         CultMeshVerseAuthorityModel.OperatorCluster,
         new CultMeshVerseCompatibility(arguments.TransportVersion, arguments.RulesHash),
-        discoveryEndpoints: [arguments.ProviderEndpoint],
-        authorityRuntimeIds: [arguments.AuthorityRuntimeId],
+        authorityRoutes: routes,
         description: "Local executable Odin fixture for the browser/network onboarding witness."));
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
@@ -97,6 +114,12 @@ static async Task RunProviderAsync(Args arguments)
     await node.FlushAsync();
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
+    using var identity = new CultMeshSessionIdentityServer(
+        schemaServer,
+        arguments.AuthorityRuntimeId,
+        [arguments.VerseId],
+        [CultMeshProtocols.Documents.Value],
+        [arguments.RouteGeneration]);
     using var subscriptions = new CultNetDatabaseSubscriptionServer(schemaServer, node.Database);
     using var operationGate = new SemaphoreSlim(1, 1);
     using var operations = new CultNetOperationServer(schemaServer, arguments.AuthorityRuntimeId)
@@ -174,6 +197,10 @@ static async Task RunHeadlessAsync(Args arguments)
         {
             CreateClient = CreateClient,
             TransportVersion = arguments.TransportVersion
+        },
+        Sessions = new CultMeshSessionManagerOptions
+        {
+            Trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.LocalDevelopment)
         },
         Connectors =
         [
@@ -347,12 +374,16 @@ sealed class Args
     public string StatePath { get; private init; } = "sample-counter.cc";
     public string OdinEndpoint { get; private init; } = "";
     public string ProviderEndpoint { get; private init; } = "";
+    public string DecoyEndpoint { get; private init; } = "";
     public string Token { get; private init; } = "sample-session";
     public string VerseId { get; private init; } = "sample.counter";
     public string VerseName { get; private init; } = "CultMesh browser counter";
     public string AuthorityRuntimeId { get; private init; } = "sample.counter-daemon";
+    public string DecoyAuthorityRuntimeId { get; private init; } = "sample.decoy-daemon";
     public string TransportVersion { get; private init; } = "cultmesh.v0";
     public string RulesHash { get; private init; } = "sample-counter-v1";
+    public string RouteGeneration { get; private init; } = "sample-counter-route-1";
+    public string DecoyRouteGeneration { get; private init; } = "sample-decoy-route-1";
     public int ExpectedCount { get; private init; } = 2;
     public int BenchmarkOperations { get; private init; } = 10_000;
 
@@ -369,12 +400,16 @@ sealed class Args
             StatePath = named.GetValueOrDefault("--state", "sample-counter.cc"),
             OdinEndpoint = named.GetValueOrDefault("--odin", ""),
             ProviderEndpoint = named.GetValueOrDefault("--provider-endpoint", ""),
+            DecoyEndpoint = named.GetValueOrDefault("--decoy-endpoint", ""),
             Token = named.GetValueOrDefault("--token", "sample-session"),
             VerseId = named.GetValueOrDefault("--verse-id", "sample.counter"),
             VerseName = named.GetValueOrDefault("--verse-name", "CultMesh browser counter"),
             AuthorityRuntimeId = named.GetValueOrDefault("--authority-runtime-id", "sample.counter-daemon"),
+            DecoyAuthorityRuntimeId = named.GetValueOrDefault("--decoy-authority-runtime-id", "sample.decoy-daemon"),
             TransportVersion = named.GetValueOrDefault("--transport-version", "cultmesh.v0"),
             RulesHash = named.GetValueOrDefault("--rules-hash", "sample-counter-v1"),
+            RouteGeneration = named.GetValueOrDefault("--route-generation", "sample-counter-route-1"),
+            DecoyRouteGeneration = named.GetValueOrDefault("--decoy-route-generation", "sample-decoy-route-1"),
             ExpectedCount = named.TryGetValue("--expected-count", out var expectedCount)
                 ? int.Parse(expectedCount)
                 : 2,

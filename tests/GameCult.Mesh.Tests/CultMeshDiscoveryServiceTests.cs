@@ -295,7 +295,7 @@ public sealed class CultMeshDiscoveryServiceTests
             CultMeshVerseAuthorityModel.OperatorCluster,
             new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
             new[] { endpoint },
-            new[] { "odin:aetheria", "odin:games", "aetheria" }),
+            new[] { "aetheria" }),
         sourceId,
         clock.UtcNow,
         clock.UtcNow + ttl,

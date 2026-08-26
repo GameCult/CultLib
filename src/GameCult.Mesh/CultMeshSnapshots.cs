@@ -102,7 +102,7 @@ namespace GameCult.Mesh
             CultNetDocumentRegistry? registry)
         {
             _sharedSession = session ?? throw new ArgumentNullException(nameof(session));
-            _endpoint = session.State.Path?.Endpoint ?? session.Target.ProviderRuntimeId;
+            _endpoint = session.State.Path?.Endpoint ?? session.Target.AuthorityRuntimeId;
             _defaults = CultMesh.CloneSnapshotRequestOptions(options);
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = session.Channel;

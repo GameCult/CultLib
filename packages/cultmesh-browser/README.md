@@ -43,10 +43,19 @@ selection, reconnect, or resubscription. This is deliberately distinct from an
 Eve surface's `providerId`, which identifies the UI provider inside the Verse.
 The physical socket is a replaceable route, not either stable identity.
 
+Odin returns exact authority-route bindings. The browser selects only routes
+bound to the requested authority and `cultmesh.documents.v1`, then performs a
+session-open handshake. It does not report `connected` until the peer proves
+the exact Verse, authority runtime, protocol, and route generation. Operation
+responses must also name that authority. Legacy catalogs are accepted only
+when one authority runtime makes the endpoint binding unambiguous.
+
 The browser handshake carries authentication through the host application's
 ordinary secure cookie or equivalent upgrade credential. The C# host adapter
 rejects endpoints without an authorization predicate unless anonymous local
 development is explicitly enabled.
 
 Run `scripts/verify-eve-browser-network.mjs --eve-root <path-to-Eve>` for the
-real Chromium + C# headless chronology.
+real Chromium + C# headless chronology. The witness publishes a lower-priority
+decoy endpoint owned by another runtime and proves that neither client connects
+to it before and after route rotation.

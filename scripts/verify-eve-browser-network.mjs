@@ -14,12 +14,22 @@ import { chromium } from "playwright-core";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const eveFlag = process.argv.indexOf("--eve-root");
 const eveRoot = resolve(eveFlag >= 0 ? process.argv[eveFlag + 1] : join(repoRoot, "..", "Eve"));
+const packageFeedFlag = process.argv.indexOf("--package-feed");
+const packageFeed = packageFeedFlag >= 0 ? resolve(process.argv[packageFeedFlag + 1]) : undefined;
+const cultLibVersionFlag = process.argv.indexOf("--cultlib-package-version");
+const cultLibPackageVersion = cultLibVersionFlag >= 0 ? process.argv[cultLibVersionFlag + 1] : undefined;
+const eveSurfaceVersionFlag = process.argv.indexOf("--eve-surface-package-version");
+const eveSurfacePackageVersion = eveSurfaceVersionFlag >= 0 ? process.argv[eveSurfaceVersionFlag + 1] : undefined;
+const nugetConfigFlag = process.argv.indexOf("--nuget-config");
+const nugetConfig = nugetConfigFlag >= 0 ? resolve(process.argv[nugetConfigFlag + 1]) : undefined;
 const sampleRoot = join(repoRoot, "samples", "eve-browser-network");
 const workRoot = await mkdtemp(join(tmpdir(), "cultmesh-browser-network-"));
 const statePath = join(workRoot, "counter.cc");
+const decoyStatePath = join(workRoot, "decoy-counter.cc");
 const bundlePath = join(workRoot, "bundle.js");
 const token = "sample-session";
 let provider;
+let decoyProvider;
 let replacementProvider;
 let odin;
 let headless;
@@ -41,27 +51,52 @@ try {
     alias: {
       "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
       "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
+      "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
+      "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
     },
     logLevel: "warning",
   });
   const bundle = await readFile(bundlePath, "utf8");
   assert.doesNotMatch(bundle, /(?:from\s*["']node:|require\(["']node:)/u, "browser bundle contains a Node builtin import");
 
-  await run("dotnet", [
+  const dotnetBuildArguments = [
     "build",
     join(sampleRoot, "EveBrowserNetworkSample.csproj"),
     "-m:1",
     "--verbosity", "quiet",
     "-p:NoWarn=1591%3BCS8632",
-    `-p:EveRoot=${eveRoot}`,
-  ]);
+    "-p:NuGetAudit=false",
+    "-p:RestoreIgnoreFailedSources=true",
+  ];
+  if (nugetConfig) dotnetBuildArguments.push(`-p:RestoreConfigFile=${nugetConfig}`);
+  if (packageFeed) {
+    if (!cultLibPackageVersion || !eveSurfacePackageVersion) {
+      throw new Error("Package artifact builds require both CultLib and Eve surface package versions.");
+    }
+    dotnetBuildArguments.push(
+      "-p:UsePackageArtifacts=true",
+      `-p:PackageFeed=${packageFeed}`,
+      `-p:CultLibPackageVersion=${cultLibPackageVersion}`,
+      `-p:EveSurfacePackageVersion=${eveSurfacePackageVersion}`,
+    );
+  } else {
+    dotnetBuildArguments.push(`-p:EveRoot=${eveRoot}`, `-p:CultLibRoot=${repoRoot}`);
+  }
+  await run("dotnet", dotnetBuildArguments);
   const providerPort = await freePort();
+  const decoyProviderPort = await freePort();
   const replacementProviderPort = await freePort();
   const odinPort = await freePort();
   const httpPort = await freePort();
   provider = await startProvider(providerPort);
   const endpoint = await provider.waitFor("PROVIDER_READY ");
-  odin = await startOdin(odinPort, endpoint);
+  decoyProvider = await startProvider(decoyProviderPort, {
+    authorityRuntimeId: "sample.decoy-daemon",
+    routeGeneration: "sample-decoy-route-1",
+    statePath: decoyStatePath,
+  });
+  const decoyEndpoint = await decoyProvider.waitFor("PROVIDER_READY ");
+  odin = await startOdin(odinPort, endpoint, decoyEndpoint);
   const odinEndpoint = await odin.waitFor("ODIN_READY ");
   headless = startDotnet([
     "headless", "--odin", odinEndpoint, "--verse-id", "sample.counter",
@@ -91,7 +126,7 @@ try {
   const restartedEndpoint = await replacementProvider.waitFor("PROVIDER_READY ");
   assert.notEqual(restartedEndpoint, endpoint);
   await stop(odin.process);
-  odin = await startOdin(odinPort, restartedEndpoint);
+  odin = await startOdin(odinPort, restartedEndpoint, decoyEndpoint);
   assert.equal(await odin.waitFor("ODIN_READY "), odinEndpoint);
   await stop(provider.process);
   provider = replacementProvider;
@@ -122,6 +157,7 @@ try {
   console.log(JSON.stringify({
     providerEndpoint: endpoint,
     replacementProviderEndpoint: restartedEndpoint,
+    rejectedWrongAuthorityEndpoint: decoyEndpoint,
     odinEndpoint,
     browserRuntime: "chromium",
     headlessRuntime: "csharp",
@@ -136,21 +172,31 @@ try {
   if (browser) await browser.close().catch(() => undefined);
   if (headless) await stop(headless.process);
   if (provider) await stop(provider.process);
+  if (decoyProvider) await stop(decoyProvider.process);
   if (replacementProvider) await stop(replacementProvider.process);
   if (odin) await stop(odin.process);
   if (httpServer) await new Promise(resolve => httpServer.close(resolve));
   await rm(workRoot, { recursive: true, force: true });
 }
 
-async function startProvider(port) {
-  return startDotnet(["provider", "--port", String(port), "--state", statePath, "--token", token]);
+async function startProvider(port, options = {}) {
+  return startDotnet([
+    "provider", "--port", String(port),
+    "--state", options.statePath ?? statePath,
+    "--authority-runtime-id", options.authorityRuntimeId ?? "sample.counter-daemon",
+    "--route-generation", options.routeGeneration ?? "sample-counter-route-1",
+    "--token", token,
+  ]);
 }
 
-async function startOdin(port, providerEndpoint) {
+async function startOdin(port, providerEndpoint, decoyEndpoint) {
   return startDotnet([
     "odin",
     "--port", String(port),
     "--provider-endpoint", providerEndpoint,
+    "--decoy-endpoint", decoyEndpoint,
+    "--decoy-authority-runtime-id", "sample.decoy-daemon",
+    "--decoy-route-generation", "sample-decoy-route-1",
     "--token", token,
   ]);
 }

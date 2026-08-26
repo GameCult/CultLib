@@ -1,6 +1,7 @@
 param(
   [string] $Configuration = "Release",
   [string] $OutputDirectory = "artifacts\nuget",
+  [string] $PackageVersion = "",
   [switch] $SkipConsumerSmoke
 )
 
@@ -18,6 +19,7 @@ $projects = @(
   "src\GameCult.Caching.MessagePack.Analyzers\GameCult.Caching.MessagePack.Analyzers.csproj",
   "src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj",
   "src\GameCult.Networking\GameCult.Networking.csproj",
+  "src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj",
   "src\GameCult.Mesh\GameCult.Mesh.csproj"
 )
 
@@ -27,8 +29,14 @@ if (Test-Path -LiteralPath $outputRoot) {
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
 foreach ($project in $projects) {
-  dotnet pack (Join-Path $repoRoot $project) -c $Configuration -o $outputRoot `
-    --nologo --verbosity quiet -p:NoWarn=1591%3BCS8632
+  $packArguments = @(
+    "pack", (Join-Path $repoRoot $project), "-c", $Configuration, "-o", $outputRoot,
+    "--nologo", "--verbosity", "quiet", "-p:NoWarn=1591%3BCS8632"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
+    $packArguments += "-p:CultLibPackageVersion=$PackageVersion"
+  }
+  & dotnet @packArguments
   if ($LASTEXITCODE -ne 0) {
     throw "NuGet pack failed for $project with exit code $LASTEXITCODE"
   }
@@ -48,6 +56,7 @@ $expectedPackages = @(
   "GameCult.Caching.MessagePack.Analyzers.$version.nupkg",
   "GameCult.Caching.MessagePack.$version.nupkg",
   "GameCult.Networking.$version.nupkg",
+  "GameCult.Networking.WebSockets.$version.nupkg",
   "GameCult.Mesh.$version.nupkg"
 )
 foreach ($package in $expectedPackages) {
@@ -62,6 +71,7 @@ if (-not $SkipConsumerSmoke) {
     Remove-Item -LiteralPath $smokeRoot -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+  $consumerPackages = Join-Path $smokeRoot "packages"
   $projectDocument = @"
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -69,6 +79,8 @@ if (-not $SkipConsumerSmoke) {
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <RestoreSources>$outputRoot;https://api.nuget.org/v3/index.json</RestoreSources>
+    <RestorePackagesPath>$consumerPackages</RestorePackagesPath>
+    <RestoreNoCache>true</RestoreNoCache>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="GameCult.Mesh" Version="$version" />

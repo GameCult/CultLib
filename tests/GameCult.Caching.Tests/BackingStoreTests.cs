@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -434,9 +435,10 @@ namespace GameCult.Caching.Tests
                 }
 
                 var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
-                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v2.directory-indexed"));
+                Assert.That(manifest.FormatVersion, Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
                 Assert.That(manifest.Records, Has.Length.EqualTo(2));
-                Assert.That(manifest.Records.All(record => record.Payload.Length == 0), Is.True);
+                Assert.That(manifest.Records.All(record => record.Payload.Length == 32), Is.True,
+                    "the hot index carries only the SHA-256 page identity, never the document body");
 
                 var coldPath = Directory.GetFiles(recordsPath, "*.msgpack")
                     .Single(path => string.Equals(
@@ -469,7 +471,7 @@ namespace GameCult.Caching.Tests
                 var finalManifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(finalManifest.Records, Has.Length.EqualTo(3));
                 Assert.That(finalManifest.Records.Any(record => record.Key == cold.Key.Value), Is.True);
-                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 0), Is.True);
+                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 32), Is.True);
             }
             finally
             {
@@ -572,6 +574,10 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(recordPath, CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
 
                 var readStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var rawGeneration = readStore.ReadPersistedGeneration();
+                Assert.That(rawGeneration.Records.Select(value => value.Key),
+                    Is.EqualTo(new[] { "record:stale" }),
+                    "v1 split record pages remain part of the selected legacy generation");
                 var readCache = new CultCache();
                 readCache.AddBackingStore(readStore);
                 await readCache.PullAllBackingStoresAsync();
@@ -599,7 +605,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task DirectoryMessagePackBackingStore_Precommits_Catalog_And_Remains_Dirty_When_Record_Write_Fails()
+        public async Task DirectoryMessagePackBackingStore_Does_Not_Expose_New_Pages_Before_Manifest_Commit()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
             var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
@@ -624,23 +630,308 @@ namespace GameCult.Caching.Tests
                     alternateDescriptor,
                     new AlternateNamedTestEntry { Name = "new" }));
 
-                using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                store.FlushStageProbe = (stage, _) =>
                 {
-                    Assert.That(() => store.PushAll(), Throws.Exception);
-                }
+                    if (string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        throw new IOException("injected crash before manifest commit");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
 
                 var precommit = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 var alternateSchema = alternateDescriptor.SchemaId;
                 Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(durableSchema));
-                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Contain(alternateSchema));
+                Assert.That(precommit.SchemaCatalog.Select(entry => entry.SchemaId), Does.Not.Contain(alternateSchema));
                 Assert.That(store.IsDirty, Is.True);
                 Assert.That(CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(recordPath)).SchemaId, Is.EqualTo(durableSchema));
 
+                store.FlushStageProbe = null;
                 store.PushAll();
 
                 var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog.Select(entry => entry.SchemaId), Is.EqualTo(new[] { alternateSchema }));
                 Assert.That(store.IsDirty, Is.False);
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        public async Task DirectoryMessagePackBackingStore_Fault_Before_Manifest_Leaves_Entire_Previous_Generation(int writtenPageCount)
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var handles = new[]
+                {
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:a")),
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:b")),
+                    new CultRecordHandle<NamedTestEntry>(new CultRecordKey("record:atomic:c"))
+                };
+                foreach (var handle in handles)
+                    await cache.UpsertAsync(new NamedTestEntry { Name = handle.Key.Value, Value = "old" }, handle);
+                store.PushAll();
+
+                foreach (var handle in handles)
+                    await cache.UpsertAsync(new NamedTestEntry { Name = handle.Key.Value, Value = "new" }, handle);
+                store.FlushStageProbe = (stage, index) =>
+                {
+                    if ((writtenPageCount < handles.Length &&
+                         string.Equals(stage, DirectoryMessagePackBackingStore.BeforeRecordPageWriteStage, StringComparison.Ordinal) &&
+                         index == writtenPageCount) ||
+                        (writtenPageCount == handles.Length &&
+                         string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal)))
+                        throw new IOException($"injected crash after {writtenPageCount} pages");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
+
+                using (var reopened = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    foreach (var handle in handles)
+                        Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("old"));
+                }
+
+                store.FlushStageProbe = null;
+                store.PushAll();
+                using (var reopened = await CultCacheMessagePack.OpenAsync(
+                           filePath,
+                           new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    foreach (var handle in handles)
+                        Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("new"));
+                }
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_SameTimestampPayload_CannotOverwriteCommittedPageBeforeManifest()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                const string storedAt = "2026-08-19T00:00:00.0000000+00:00";
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var key = new CultRecordKey("record:atomic:same-timestamp");
+                var descriptor = CultDocumentRegistry.Shared.GetRequired<NamedTestEntry>();
+                store.Push(new CultStoredDocument(
+                    key,
+                    storedAt,
+                    descriptor,
+                    new NamedTestEntry { Name = "same", Value = "old" }));
+                store.PushAll();
+
+                store.Push(new CultStoredDocument(
+                    key,
+                    storedAt,
+                    descriptor,
+                    new NamedTestEntry { Name = "same", Value = "new" }));
+                store.FlushStageProbe = (stage, _) =>
+                {
+                    if (string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        throw new IOException("injected crash before same-timestamp manifest commit");
+                };
+                Assert.That(() => store.PushAll(), Throws.TypeOf<IOException>());
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("old"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_MutationDuringFlush_RemainsDirtyAndCommitsNextGeneration()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var store = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                var first = await cache.UpsertAsync(new NamedTestEntry { Name = "first", Value = "one" });
+                using var flushEntered = new ManualResetEventSlim();
+                using var writerAttempting = new ManualResetEventSlim();
+                store.FlushStageProbe = (stage, _) =>
+                {
+                    if (!string.Equals(stage, DirectoryMessagePackBackingStore.BeforeManifestCommitStage, StringComparison.Ordinal))
+                        return;
+                    flushEntered.Set();
+                    Assert.That(writerAttempting.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                };
+
+                var flush = Task.Run(() => store.PushAll());
+                var writer = Task.Run(async () =>
+                {
+                    Assert.That(flushEntered.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                    writerAttempting.Set();
+                    return await cache.UpsertAsync(new NamedTestEntry { Name = "second", Value = "two" });
+                });
+                await flush;
+                var second = await writer;
+
+                Assert.That(store.IsDirty, Is.True, "the mutation blocked behind flush must remain pending");
+                store.FlushStageProbe = null;
+                store.PushAll();
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(first.Key)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(second.Key)?.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_ConcurrentInstances_MergeUnderOneCommitLease()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var firstStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var firstCache = new CultCache();
+                firstCache.AddBackingStore(firstStore);
+                var secondStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var secondCache = new CultCache();
+                secondCache.AddBackingStore(secondStore);
+                var first = await firstCache.UpsertAsync(new NamedTestEntry { Name = "first-process", Value = "one" });
+                var second = await secondCache.UpsertAsync(new NamedTestEntry { Name = "second-process", Value = "two" });
+
+                await Task.WhenAll(
+                    Task.Run(() => firstStore.PushAll()),
+                    Task.Run(() => secondStore.PushAll()));
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(first.Key)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(second.Key)?.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_ReaderLeasesManifestUntilEveryReferencedPageIsHydrated()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var key = new CultRecordKey("record:reader-generation");
+                var writerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var writerCache = new CultCache();
+                writerCache.AddBackingStore(writerStore);
+                await writerCache.UpsertAsync(
+                    new NamedTestEntry { Name = "generation", Value = "old" },
+                    new CultRecordHandle<NamedTestEntry>(key));
+                writerStore.PushAll();
+
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var readerCache = new CultCache();
+                readerCache.AddBackingStore(readerStore);
+                using var manifestRead = new ManualResetEventSlim();
+                using var releaseReader = new ManualResetEventSlim();
+                readerStore.ReadStageProbe = stage =>
+                {
+                    if (!string.Equals(stage, DirectoryMessagePackBackingStore.AfterManifestReadStage, StringComparison.Ordinal))
+                        return;
+                    manifestRead.Set();
+                    Assert.That(releaseReader.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                };
+
+                var read = Task.Run(() => readerStore.PullAll());
+                Assert.That(manifestRead.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                await writerCache.UpsertAsync(
+                    new NamedTestEntry { Name = "generation", Value = "new" },
+                    new CultRecordHandle<NamedTestEntry>(key));
+                var write = Task.Run(() => writerStore.PushAll());
+                Assert.That(write.Wait(TimeSpan.FromMilliseconds(100)), Is.False,
+                    "writer must wait while a reader hydrates its selected manifest generation");
+
+                releaseReader.Set();
+                await Task.WhenAll(read, write);
+                Assert.That(readerCache.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("old"));
+
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(key)?.Value, Is.EqualTo("new"));
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_ReleasesGenerationLeaseBeforePublishingObservers()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+            try
+            {
+                var writerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var writerCache = new CultCache();
+                writerCache.AddBackingStore(writerStore);
+                await writerCache.UpsertAsync(new NamedTestEntry { Name = "source", Value = "one" });
+                writerStore.PushAll();
+
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var readerCache = new CultCache();
+                readerCache.AddBackingStore(readerStore);
+                var observerRan = false;
+                using var subscription = readerStore.EntryAdded.Subscribe(_ =>
+                {
+                    if (observerRan)
+                        return;
+                    observerRan = true;
+                    readerCache.UpsertAsync(new NamedTestEntry { Name = "observer", Value = "two" })
+                        .GetAwaiter()
+                        .GetResult();
+                    readerStore.PushAll();
+                });
+
+                Assert.That(() => readerStore.PullAll(), Throws.Nothing);
+                Assert.That(observerRan, Is.True);
+                using var reopened = await CultCacheMessagePack.OpenAsync(
+                    filePath,
+                    new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.GetAll<NamedTestEntry>().Select(value => value.Name),
+                    Is.EquivalentTo(new[] { "source", "observer" }));
             }
             finally
             {
@@ -743,7 +1034,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task DirectoryMessagePackBackingStore_Remains_Dirty_When_Deletion_Fails()
+        public async Task DirectoryMessagePackBackingStore_Deletion_Commits_While_Locked_Old_Page_Remains_An_Orphan()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
             var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
@@ -760,18 +1051,17 @@ namespace GameCult.Caching.Tests
 
                 using (new FileStream(recordPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    Assert.That(() => store.PushAll(), Throws.Exception);
+                    Assert.That(() => store.PushAll(), Throws.Nothing);
+                    Assert.That(File.Exists(recordPath), Is.True);
                 }
 
-                Assert.That(File.Exists(recordPath), Is.True);
-                Assert.That(store.IsDirty, Is.True);
-
-                store.PushAll();
-
-                Assert.That(File.Exists(recordPath), Is.False);
                 Assert.That(store.IsDirty, Is.False);
                 var compacted = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
                 Assert.That(compacted.SchemaCatalog, Is.Empty);
+                Assert.That(compacted.Records, Is.Empty);
+                var selectedGeneration = store.ReadPersistedGeneration();
+                Assert.That(selectedGeneration.Records, Is.Empty,
+                    "a raw generation reader must not resurrect an orphaned page left by another process");
             }
             finally
             {
@@ -1050,6 +1340,274 @@ namespace GameCult.Caching.Tests
             Assert.That(
                 () => registry.ResolvePersistedSchemaReport(retargetedCatalog.SchemaId, new[] { retargetedCatalog }),
                 Throws.TypeOf<InvalidOperationException>().With.Message.Contains("changed target schema"));
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Hides_Staged_Records_Until_Whole_Batch_Is_Durable()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var firstKey = new CultRecordKey("transaction:first");
+                var secondKey = new CultRecordKey("transaction:second");
+                var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var observed = 0;
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                var transaction = cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "first", Value = "one" },
+                        new CultRecordHandle<NamedTestEntry>(firstKey));
+                    staged.SetResult(true);
+                    await release.Task;
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "second", Value = "two" },
+                        new CultRecordHandle<NamedTestEntry>(secondKey));
+                });
+
+                await staged.Task;
+                Assert.That(cache.Get<NamedTestEntry>(firstKey), Is.Null);
+                Assert.That(observed, Is.Zero);
+
+                release.SetResult(true);
+                await transaction;
+                Assert.That(cache.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("one"));
+                Assert.That(cache.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("two"));
+                Assert.That(observed, Is.EqualTo(2));
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("one"));
+                Assert.That(reopened.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("two"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Abort_Cannot_Leak_Into_Later_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-abort-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var abortedKey = new CultRecordKey("transaction:aborted");
+                var committedKey = new CultRecordKey("transaction:committed");
+                var observed = 0;
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await cache.ExecuteTransactionAsync(async () =>
+                    {
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "aborted", Value = "must-not-leak" },
+                            new CultRecordHandle<NamedTestEntry>(abortedKey));
+                        throw new InvalidOperationException("abort probe");
+                    }));
+
+                Assert.That(cache.Get<NamedTestEntry>(abortedKey), Is.Null);
+                Assert.That(observed, Is.Zero);
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "committed", Value = "survives" },
+                        new CultRecordHandle<NamedTestEntry>(committedKey));
+                });
+                Assert.That(observed, Is.EqualTo(1));
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(abortedKey), Is.Null);
+                Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("survives"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Rejects_Escaped_Async_Writes_After_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-escaped-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var committedKey = new CultRecordKey("transaction:committed-parent");
+                var escapedKey = new CultRecordKey("transaction:escaped-child");
+                var releaseChild = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Task? escapedWrite = null;
+
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "parent", Value = "committed" },
+                        new CultRecordHandle<NamedTestEntry>(committedKey));
+                    escapedWrite = Task.Run(async () =>
+                    {
+                        await releaseChild.Task;
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "child", Value = "must-fail" },
+                            new CultRecordHandle<NamedTestEntry>(escapedKey));
+                    });
+                });
+
+                releaseChild.SetResult(true);
+                Assert.That(escapedWrite, Is.Not.Null);
+                Assert.That(
+                    async () => await escapedWrite!,
+                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains("already completed"));
+                Assert.That(cache.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("committed"));
+                Assert.That(cache.Get<NamedTestEntry>(escapedKey), Is.Null);
+
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(committedKey)?.Value, Is.EqualTo("committed"));
+                Assert.That(reopened.Get<NamedTestEntry>(escapedKey), Is.Null);
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Rejects_Hydration_Inside_Its_Mutation_Scope()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-transaction-hydration-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using (var writer = new CultCache())
+                {
+                    writer.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                    await writer.UpsertAsync(
+                        new NamedTestEntry { Name = "external", Value = "durable" },
+                        new CultRecordHandle<NamedTestEntry>(new CultRecordKey("transaction:external")));
+                    writer.FlushAllBackingStores();
+                }
+
+                using var reader = new CultCache();
+                reader.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var observed = 0;
+                using var subscription = reader.Watch<NamedTestEntry>().Subscribe(_ => observed++);
+
+                Assert.That(
+                    async () => await reader.ExecuteTransactionAsync(
+                        () => reader.PullAllBackingStoresAsync()),
+                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains("hydrate before"));
+                Assert.That(reader.Get<NamedTestEntry>(new CultRecordKey("transaction:external")), Is.Null);
+                Assert.That(observed, Is.Zero);
+
+                await reader.PullAllBackingStoresAsync();
+                Assert.That(reader.Get<NamedTestEntry>(new CultRecordKey("transaction:external"))?.Value,
+                    Is.EqualTo("durable"));
+                Assert.That(observed, Is.EqualTo(1));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Hydration_Waits_For_The_Active_Mutation_Transaction()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-hydration-gate-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var transaction = cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "staged", Value = "committed" },
+                        new CultRecordHandle<NamedTestEntry>(new CultRecordKey("transaction:hydration-gate")));
+                    staged.SetResult(true);
+                    await release.Task;
+                });
+
+                await staged.Task;
+                var hydration = cache.PullAllBackingStoresAsync();
+                Assert.That(hydration.IsCompleted, Is.False,
+                    "hydration must wait until the active mutation transaction has committed");
+
+                release.SetResult(true);
+                await transaction;
+                await hydration;
+                Assert.That(cache.Get<NamedTestEntry>(new CultRecordKey("transaction:hydration-gate"))?.Value,
+                    Is.EqualTo("committed"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task CultCache_Transaction_Observer_Writes_In_A_New_Commit()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultcache-observer-transaction-{Guid.NewGuid():N}");
+            var manifest = Path.Combine(root, "state.cc");
+            Directory.CreateDirectory(root);
+            try
+            {
+                using var cache = new CultCache();
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                var firstKey = new CultRecordKey("transaction:observer-source");
+                var secondKey = new CultRecordKey("transaction:observer-write");
+                using var subscription = cache.Watch<NamedTestEntry>().Subscribe(change =>
+                {
+                    if (!change.Key.Equals(firstKey)) return;
+                    cache.ExecuteTransactionAsync(async () =>
+                    {
+                        await cache.UpsertAsync(
+                            new NamedTestEntry { Name = "observer", Value = "separate-commit" },
+                            new CultRecordHandle<NamedTestEntry>(secondKey));
+                    }).GetAwaiter().GetResult();
+                });
+
+                await cache.ExecuteTransactionAsync(async () =>
+                {
+                    await cache.UpsertAsync(
+                        new NamedTestEntry { Name = "source", Value = "committed-first" },
+                        new CultRecordHandle<NamedTestEntry>(firstKey));
+                });
+
+                Assert.That(cache.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("separate-commit"));
+                using var reopened = new CultCache();
+                reopened.AddBackingStore(new DirectoryMessagePackBackingStore(manifest));
+                await reopened.PullAllBackingStoresAsync();
+                Assert.That(reopened.Get<NamedTestEntry>(firstKey)?.Value, Is.EqualTo("committed-first"));
+                Assert.That(reopened.Get<NamedTestEntry>(secondKey)?.Value, Is.EqualTo("separate-commit"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
         }
 
         private const string NamedFixtureCanonicalSchemaJson =

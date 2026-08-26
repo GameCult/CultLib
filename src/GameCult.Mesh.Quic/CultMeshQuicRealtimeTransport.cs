@@ -22,7 +22,7 @@ public sealed class CultMeshQuicRealtimeConnectorOptions
     /// <summary>
     /// Optional provider-aware certificate validator. Standard TLS validation is used when omitted.
     /// </summary>
-    public Func<CultMeshEndpointId, X509Certificate2?, X509Chain?, SslPolicyErrors, bool>?
+    public Func<CultMeshRuntimeId, X509Certificate2?, X509Chain?, SslPolicyErrors, bool>?
         ValidateProviderCertificate { get; set; }
 }
 
@@ -55,11 +55,11 @@ public sealed class CultMeshQuicRealtimeTransportConnector : ICultMeshRealtimeTr
     /// <inheritdoc />
     public async Task<ICultMeshRealtimeTransport> ConnectAsync(
         CultMeshTransportCandidate candidate,
-        CultMeshEndpointId endpointId,
+        CultMeshSessionTarget target,
         CancellationToken cancellationToken = default)
     {
         if (candidate == null) throw new ArgumentNullException(nameof(candidate));
-        if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+        if (target == null) throw new ArgumentNullException(nameof(target));
         if (!QuicConnection.IsSupported)
             throw new PlatformNotSupportedException("QUIC is unavailable. Install a supported MsQuic runtime.");
         if (!TryParseEndpoint(candidate.Endpoint, out var host, out var port))
@@ -84,14 +84,15 @@ public sealed class CultMeshQuicRealtimeTransportConnector : ICultMeshRealtimeTr
                 {
                     var providerCertificate = certificate as X509Certificate2 ??
                         (certificate == null ? null : new X509Certificate2(certificate));
-                    return validator?.Invoke(endpointId, providerCertificate, chain, errors) ??
+                    return validator?.Invoke(CultMeshRuntimeId.Parse(target.AuthorityRuntimeId), providerCertificate, chain, errors) ??
                         errors == SslPolicyErrors.None ||
                         MatchesAdvertisedCertificatePin(candidate.Endpoint, providerCertificate);
                 }
             }
         }, cancellationToken).ConfigureAwait(false);
 
-        return new CultMeshQuicRealtimeTransport(candidate.Endpoint, connection);
+        return new CultMeshQuicRealtimeTransport(
+            candidate.Endpoint, connection, target: target, routeGeneration: candidate.Generation);
     }
 
     private static bool TryParseEndpoint(string? endpoint, out string host, out int port)
@@ -308,7 +309,7 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
     }
 }
 
-internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
+internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport, ICultMeshVerifiedTransport
 {
     private readonly QuicConnection _connection;
     private readonly CancellationTokenSource _shutdown = new();
@@ -318,6 +319,8 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
     private readonly SemaphoreSlim _reliableSendGate = new(1, 1);
     private readonly CultMeshRealtimeInbox _outbound = new();
     private readonly Action<CultMeshRealtimeFrame>? _observer;
+    private readonly CultMeshSessionTarget? _target;
+    private readonly string _routeGeneration;
     private readonly Task _acceptLoop;
     private readonly Task _outboundLoop;
     private readonly Task _completion;
@@ -328,11 +331,15 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
     public CultMeshQuicRealtimeTransport(
         string endpoint,
         QuicConnection connection,
-        Action<CultMeshRealtimeFrame>? observer = null)
+        Action<CultMeshRealtimeFrame>? observer = null,
+        CultMeshSessionTarget? target = null,
+        string routeGeneration = "")
     {
         Endpoint = endpoint;
         _connection = connection;
         _observer = observer;
+        _target = target;
+        _routeGeneration = routeGeneration ?? string.Empty;
         _acceptLoop = AcceptStreamsAsync(_shutdown.Token);
         _outboundLoop = SendPublishedFramesAsync(_shutdown.Token);
         _completion = Task.WhenAll(_acceptLoop, _outboundLoop);
@@ -341,6 +348,17 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
     public string TransportId => "msquic-realtime";
     public string Endpoint { get; }
     public Task Completion => _completion;
+
+    public bool IsVerifiedFor(
+        string verseId,
+        string authorityRuntimeId,
+        string protocolId,
+        string routeGeneration) =>
+        _target != null &&
+        string.Equals(_target.VerseId, verseId, StringComparison.Ordinal) &&
+        string.Equals(_target.AuthorityRuntimeId, authorityRuntimeId, StringComparison.Ordinal) &&
+        string.Equals(CultMeshProtocols.RealtimeState.Value, protocolId, StringComparison.Ordinal) &&
+        string.Equals(_routeGeneration, routeGeneration, StringComparison.Ordinal);
 
     internal bool TryPublishLatest(CultMeshRealtimeFrame frame)
     {

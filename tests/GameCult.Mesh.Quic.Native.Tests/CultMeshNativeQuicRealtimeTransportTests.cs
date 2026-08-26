@@ -22,7 +22,7 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
         var connector = new CultMeshNativeQuicRealtimeTransportConnector();
         using var client = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint!),
-            CultMeshEndpointId.Parse("aetheria.local"));
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var frame = await client.ReceiveAsync(timeout.Token);
 
@@ -49,7 +49,7 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
 
         using var client = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
-            CultMeshEndpointId.Parse("aetheria.local"));
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
         var expected = new CultMeshRealtimeFrame
         {
             ChannelId = "aetheria.entities",
@@ -92,7 +92,7 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
 
         var connect = () => connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
-            CultMeshEndpointId.Parse("aetheria.local"));
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
 
         await connect.Should().ThrowAsync<IOException>()
             .WithMessage("*certificate*pin*");
@@ -114,10 +114,10 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
         var connector = new CultMeshNativeQuicRealtimeTransportConnector();
         var departedClient = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
-            CultMeshEndpointId.Parse("aetheria.local"));
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
         using var healthyClient = await connector.ConnectAsync(
             new CultMeshTransportCandidate(endpoint),
-            CultMeshEndpointId.Parse("aetheria.local"));
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
         await WaitUntilAsync(() => server.ConnectionCount == 2);
         await server.BroadcastAsync(Frame(sequence: 1));
         using var receiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));

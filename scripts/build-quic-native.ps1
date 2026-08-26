@@ -30,7 +30,14 @@ if (-not (Test-Path -LiteralPath $packagePath)) {
     "https://www.nuget.org/api/v2/package/Microsoft.Native.Quic.MsQuic.Schannel/$version"
   if ($LASTEXITCODE -ne 0) { throw "MsQuic package download failed with exit code $LASTEXITCODE" }
 }
-if ((Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash -ne $expectedPackageSha256) {
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+  $packageBytes = [IO.File]::ReadAllBytes($packagePath)
+  $packageSha256 = [BitConverter]::ToString($sha256.ComputeHash($packageBytes)).Replace("-", "")
+} finally {
+  $sha256.Dispose()
+}
+if ($packageSha256 -ne $expectedPackageSha256) {
   throw "MsQuic package digest does not match the pinned release."
 }
 if (-not (Test-Path -LiteralPath (Join-Path $nativeRoot "include\msquic.h"))) {

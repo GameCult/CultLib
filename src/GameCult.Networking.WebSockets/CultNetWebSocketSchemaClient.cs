@@ -37,7 +37,7 @@ public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICul
     /// <inheritdoc />
     public void Connect(string host, int port)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+        if (string.IsNullOrWhiteSpace(host)) throw new ArgumentException("Host is required.", nameof(host));
         if (port <= 0 || port > 65535) throw new ArgumentOutOfRangeException(nameof(port));
         ConnectAsync(new Uri($"ws://{host}:{port}/cultmesh"), CancellationToken.None)
             .GetAwaiter().GetResult();
@@ -46,7 +46,7 @@ public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICul
     /// <summary>Connects to an exact WebSocket route.</summary>
     public async Task ConnectAsync(Uri endpoint, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(endpoint);
+        if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
         if (endpoint.Scheme is not ("ws" or "wss"))
             throw new ArgumentException("CultNet WebSocket endpoint must use ws:// or wss://.", nameof(endpoint));
         ThrowIfDisposed();
@@ -69,7 +69,7 @@ public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICul
     /// <inheritdoc />
     public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
     {
-        ArgumentNullException.ThrowIfNull(message);
+        if (message == null) throw new ArgumentNullException(nameof(message));
         ThrowIfDisposed();
         var socket = _socket;
         if (socket?.State != WebSocketState.Open)
@@ -92,7 +92,7 @@ public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICul
     /// <inheritdoc />
     public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
     {
-        ArgumentNullException.ThrowIfNull(callback);
+        if (callback == null) throw new ArgumentNullException(nameof(callback));
         ThrowIfDisposed();
         lock (_handlerGate)
         {
@@ -161,6 +161,6 @@ public sealed class CultNetWebSocketSchemaClient : ICultNetUriSchemaClient, ICul
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_disposed) throw new ObjectDisposedException(nameof(CultNetWebSocketSchemaClient));
     }
 }

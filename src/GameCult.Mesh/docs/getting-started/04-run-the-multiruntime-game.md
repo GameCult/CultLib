@@ -10,6 +10,8 @@ The counter is now one small multiplayer game:
   typed operation boundary;
 - both clients remain attached when Odin moves the Verse to a replacement
   physical provider route.
+- a better-priority route bound to another runtime remains unreachable to both
+  clients throughout the chronology.
 
 Run the whole chronology from the CultLib checkout:
 
@@ -34,8 +36,10 @@ packages, installs those artifacts into an empty temporary consumer, and proves
 DOM/headless convergence plus `.cc` reopen. This rejects a sample that only
 works through repository-relative source imports.
 
-The third checkpoint boots separate Odin, provider, Chromium, and C# headless
-processes. Chromium performs the first increment. The provider then restarts on
+The third checkpoint boots separate Odin, intended provider, wrong-authority
+decoy provider, Chromium, and C# headless processes. Its C# application is built
+from the temporary NuGet feed produced by the first checkpoint, not sibling
+project references. Chromium performs the first increment. The provider then restarts on
 a different route, Odin advertises the replacement, and the retained clients
 resubscribe without application reconnect code. C# performs the second
 increment. Both clients must observe count 2 and both canonical receipt ids.

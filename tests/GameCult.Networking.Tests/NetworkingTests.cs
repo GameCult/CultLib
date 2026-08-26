@@ -1515,6 +1515,179 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task DatabaseSubscriptionServer_AuthorizesRequestAndFiltersSnapshotAndLiveRecords()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-authorized-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (request, _) => request.ConsumerRuntimeId == "allowed-runtime",
+                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal),
+                projectRecord: (request, _, record) =>
+                {
+                    record.SourceRuntimeId = "projection:" + request.ConsumerRuntimeId;
+                    return record;
+                });
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            await database.PutAsync(new CultRecordKey("tests:public:initial"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "public-initial"
+            });
+            await database.PutAsync(new CultRecordKey("tests:private:initial"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "private-initial"
+            });
+
+            using var client = CultNetSchemaClients.CreateRudp("database-authorized-subscription-client");
+            var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var changed = new TaskCompletionSource<CultNetDatabaseChangeRawMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+            client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changed.TrySetResult(message));
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-authorized",
+                SubscriptionId = "authorized",
+                ConsumerRuntimeId = "allowed-runtime",
+                IncludeSnapshot = true
+            });
+
+            var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+            Assert.That(snapshot.Documents.Select(document => document.RecordKey),
+                Is.EqualTo(new[] { "tests:public:initial" }));
+            Assert.That(snapshot.Documents.Single().SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
+
+            await database.PutAsync(new CultRecordKey("tests:private:live"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "private-live"
+            });
+            await database.PutAsync(new CultRecordKey("tests:public:live"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "public-live"
+            });
+            var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+
+            cancellation.Cancel();
+            Assert.That(update.Document, Is.Not.Null);
+            Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
+            Assert.That(update.Document.SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
+        }
+
+        [Test]
+        public async Task DatabaseSubscriptionServer_ReconcilesDeliveredProjectionAndBodyDemandWhenAuthorityChanges()
+        {
+            const string sourceRecordKey = "tests:authority:source";
+            const string bodyId = "tests:authority:body";
+            var authorized = true;
+            var projectionName = "one";
+            var sourceCache = new CultCache();
+            var sourceDatabase = new CultNetDatabase(sourceCache);
+            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "initial"
+            });
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-reconciled-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                sourceDatabase,
+                authorizeRequest: (_, _) => authorized,
+                authorizeRecord: (_, _, _, _) => authorized,
+                projectRecord: (_, _, record) =>
+                {
+                    record.RecordKey = $"tests:authority:projected:{projectionName}";
+                    return record;
+                });
+            using var bodyDemand = new CultMeshBodyDemandTracker(subscriptions);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            var targetCache = new CultCache();
+            var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(targetCache.Registry));
+            var transport = CultNetSchemaClients.CreateRudp("database-reconciled-subscription-client");
+            using var client = new CultNetDatabaseSubscriptionClient(transport, targetCache, targetDocuments);
+            var changes = new ConcurrentQueue<CultNetReplicatedDocumentChange>();
+            client.Changed += changes.Enqueue;
+            transport.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => transport.Connected, TimeSpan.FromSeconds(2));
+            await AwaitWithTimeout(
+                client.SubscribeAsync(
+                    "authority",
+                    recordKeys: [sourceRecordKey],
+                    consumerRuntimeId: "authority-client",
+                    bodyIds: [bodyId],
+                    supportedBodyTransports: [CultMeshBodyTransportKind.SharedMemory.ToString()]),
+                TimeSpan.FromSeconds(2));
+            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:one")), Is.Not.Null);
+            Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.True);
+
+            projectionName = "two";
+            subscriptions.Reconcile();
+            await WaitUntilAsync(
+                () => targetCache.Get(new CultRecordKey("tests:authority:projected:one")) == null &&
+                      targetCache.Get(new CultRecordKey("tests:authority:projected:two")) != null,
+                TimeSpan.FromSeconds(2));
+            Assert.That(changes.Any(change => change.ChangeKind == "removed" &&
+                change.RecordKey == "tests:authority:projected:one"), Is.True);
+            Assert.That(changes.Any(change => change.ChangeKind == "added" &&
+                change.RecordKey == "tests:authority:projected:two"), Is.True);
+
+            authorized = false;
+            subscriptions.Reconcile();
+            await WaitUntilAsync(
+                () => targetCache.Get(new CultRecordKey("tests:authority:projected:two")) == null,
+                TimeSpan.FromSeconds(2));
+            Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.False);
+            var changeCountAfterRevocation = changes.Count;
+            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "must-not-escape"
+            });
+            await Task.Delay(100);
+            cancellation.Cancel();
+
+            Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
+            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:two")), Is.Null);
+        }
+
+        [Test]
         public async Task DatabaseSubscriptionServer_ProjectsBodyDemandAndWithdrawalFromExactSubscription()
         {
             var database = new CultNetDatabase(new CultCache());
@@ -2754,6 +2927,60 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public async Task CultNetDatabase_RequiredTransaction_DefersRawPutPublicationUntilCommit()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                RequireTransactionsForAuthoritativeWrites = true
+            });
+            var key = new CultRecordKey("player:transactional-raw");
+            var message = registry.CreateRawDocumentPutMessage(
+                "put-transactional-raw",
+                new CultRecordHandle<PlayerData>(key),
+                new PlayerData
+                {
+                    PlayerId = Guid.NewGuid(),
+                    Email = "transactional@example.test",
+                    PasswordHash = "hash",
+                    Username = "Transactional"
+                });
+            var changes = new List<CultNetDatabaseChange<PlayerData>>();
+            using var subscription = database.WatchRecord<PlayerData>(key)
+                .Subscribe(change => changes.Add(change));
+
+            Assert.That(
+                async () => await database.ApplyPutAsync(message),
+                Throws.TypeOf<InvalidOperationException>());
+
+            var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var transaction = database.ExecuteTransactionAsync(async () =>
+            {
+                await database.ApplyPutAsync(message);
+                staged.SetResult(true);
+                await release.Task;
+            });
+            await staged.Task;
+
+            Assert.That(cache.Get<PlayerData>(key), Is.Null);
+            Assert.That(changes, Is.Empty);
+
+            release.SetResult(true);
+            await transaction;
+
+            Assert.That(cache.Get<PlayerData>(key)?.Username, Is.EqualTo("Transactional"));
+            Assert.That(changes, Has.Count.EqualTo(1));
+            Assert.That(changes[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
+        }
+
+        [Test]
         public async Task CultNetDatabase_ApplyRawPut_ResolvesForeignSchemaIdFromPayload()
         {
             var cache = new CultCache();
@@ -3679,8 +3906,19 @@ namespace GameCult.Networking.Tests
                 "Aetheria",
                 CultMeshVerseAuthorityModel.OperatorCluster,
                 new CultMeshVerseCompatibility("cultmesh.v0", vanillaRules),
-                discoveryEndpoints: ["cultmesh://aetheria.example.test:3075"],
-                authorityRuntimeIds: ["gc-us-east", "gc-eu-west"]);
+                authorityRoutes:
+                [
+                    new CultMeshAuthorityRoute(
+                        "gc-us-east",
+                        "cultmesh://us-east.aetheria.example.test:3075",
+                        [CultMeshProtocols.Documents.Value],
+                        generation: "east-1"),
+                    new CultMeshAuthorityRoute(
+                        "gc-eu-west",
+                        "cultmesh://eu-west.aetheria.example.test:3075",
+                        [CultMeshProtocols.Documents.Value],
+                        generation: "west-1")
+                ]);
             var modded = new CultMeshVerseDescriptor(
                 "aetheria-skylands",
                 "Aetheria: Skylands",

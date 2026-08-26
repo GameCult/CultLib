@@ -12,6 +12,9 @@ This is the real-process continuation of `samples/eve-two-runtime`:
   without application transport or reconnect code;
 - one separate local Odin fixture answers the canonical CultMesh Verse catalog
   over binary CultNet WebSocket messages;
+- one wrong-authority provider is deliberately advertised on a better-priority
+  route, and both clients must ignore it because the route is bound to another
+  runtime;
 - the browser and C# clients speak the same binary CultNet schema-v0 WebSocket
   messages through the authenticated host adapter.
 

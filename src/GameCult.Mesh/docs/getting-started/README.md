@@ -4,14 +4,22 @@ This series builds one typed application state and presents it through multiple
 Eve runtimes. It is maintained as an API acceptance test: examples use public
 APIs, name the owner of each decision, and include a verification checkpoint.
 
-Run the complete getting-started checkpoint:
+Application consumers install released packages and do not need the source
+repositories. This checkout also contains a maintainer checkpoint that creates
+the same clean consumers from local package artifacts:
 
 ```powershell
 pwsh -File ./scripts/verify-eve-getting-started.ps1
 ```
 
-With clean sibling CultLib and Eve checkouts, the command installs missing build
-dependencies and runs three explicit evidence layers. First it packs the
+The maintainer command takes an explicit `-EveRoot` when Eve is not a sibling:
+
+```powershell
+pwsh -File ./scripts/verify-eve-getting-started.ps1 -EveRoot D:\src\Eve
+```
+
+It installs missing build dependencies and runs three explicit evidence layers.
+First it packs the
 CultLib managed dependency closure plus `GameCult.Eve.Surface`, then restores
 and runs an empty .NET consumer using only `PackageReference`. Next it packs the five
 TypeScript packages into another empty temporary consumer, validates the Eve surface
@@ -20,7 +28,8 @@ headless observer converge, and reopens the durable `.cc` store. Then it boots a
 durable C# provider, local Odin fixture, real Chromium lowerer, and independent
 C# client. Chromium invokes before provider replacement; C# invokes afterward.
 Both retained clients prove discovery by identity, canonical receipts, provider
-restart on another route, resubscription, and durable convergence. The retained
+restart on another route, rejection of a better-priority wrong-authority route,
+resubscription, and durable convergence. The retained
 C# session also completes 10,000 non-persistent typed operations under p99 and
 post-GC managed-memory gates.
 Set `CHROME_PATH` only when no installed Chrome, Chromium, Edge, or Playwright
@@ -58,3 +67,6 @@ native projection. CultMesh owns discovery and connection continuity.
   pull request.
 - A setup step that depends on repository internals is an API defect, not
   acceptable tutorial folklore.
+- The maintainer command may read owner checkouts to create packages. Every
+  sample process it launches must consume those package artifacts rather than
+  compiling through sibling project references.

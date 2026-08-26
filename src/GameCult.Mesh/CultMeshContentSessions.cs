@@ -122,37 +122,74 @@ namespace GameCult.Mesh
 
         public async Task<ICultMeshContentTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             if (!CanConnect(candidate))
                 throw new NotSupportedException($"Legacy RUDP content connector does not support '{candidate.Endpoint}'.");
             var client = await _schemaConnector.ConnectAsync(candidate, CultMeshProtocols.Content, cancellationToken)
                 .ConfigureAwait(false);
-            return new LegacyRudpContentTransport(candidate.Endpoint, client, _options);
+            try
+            {
+                await CultMeshSessionIdentityClient.VerifyAsync(
+                    client,
+                    "cultmesh-content-client",
+                    target,
+                    CultMeshProtocols.Content,
+                    candidate,
+                    null,
+                    _options.Clock.UtcNow,
+                    _options.ResponseTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                return new LegacyRudpContentTransport(
+                    candidate.Endpoint, client, _options, target, candidate.Generation);
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
         }
 
-        private sealed class LegacyRudpContentTransport : ICultMeshContentTransport
+        private sealed class LegacyRudpContentTransport : ICultMeshContentTransport, ICultMeshVerifiedTransport
         {
             private readonly ICultNetSchemaClient _client;
             private readonly CultMeshLegacyRudpContentTransportOptions _options;
+            private readonly string _verseId;
+            private readonly string _authorityRuntimeId;
+            private readonly string _routeGeneration;
             private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<CultMeshContentChunkResponseMessage>> _pending = new(StringComparer.Ordinal);
             private bool _disposed;
 
             public LegacyRudpContentTransport(
                 string endpoint,
                 ICultNetSchemaClient client,
-                CultMeshLegacyRudpContentTransportOptions options)
+                CultMeshLegacyRudpContentTransportOptions options,
+                CultMeshSessionTarget target,
+                string routeGeneration)
             {
                 Endpoint = endpoint;
                 _client = client;
                 _options = options;
+                _verseId = target.VerseId;
+                _authorityRuntimeId = target.AuthorityRuntimeId;
+                _routeGeneration = routeGeneration ?? string.Empty;
                 _client.OnCultNet<CultMeshContentChunkResponseMessage>(OnResponse);
                 _client.OnCultNet<CultNetErrorMessage>(OnError);
             }
 
             public string TransportId => "legacy-rudp-content";
             public string Endpoint { get; }
+
+            public bool IsVerifiedFor(
+                string verseId,
+                string authorityRuntimeId,
+                string protocolId,
+                string routeGeneration) =>
+                string.Equals(_verseId, verseId, StringComparison.Ordinal) &&
+                string.Equals(_authorityRuntimeId, authorityRuntimeId, StringComparison.Ordinal) &&
+                string.Equals(CultMeshProtocols.Content.Value, protocolId, StringComparison.Ordinal) &&
+                string.Equals(_routeGeneration, routeGeneration, StringComparison.Ordinal);
 
             public async Task CopyChunkToAsync(
                 CultMeshCdnChunkRef chunk,

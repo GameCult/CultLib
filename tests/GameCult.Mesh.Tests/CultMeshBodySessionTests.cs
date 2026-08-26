@@ -26,7 +26,7 @@ public sealed class CultMeshBodySessionTests
         var client = new LoopbackClient(server);
         var connector = new LoopbackConnector(client);
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource() });
-        using var sessions = new CultMeshSessionManager(discovery, new[] { connector });
+        using var sessions = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionBodyProvider(
             "aetheria.daemon", sessions, new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
 
@@ -53,6 +53,13 @@ public sealed class CultMeshBodySessionTests
             RuntimeId = "cultmesh-body-rudp-test", Socket = socket, MaxFragmentBytes = 1024,
             MaxPendingReliablePackets = 8192
         });
+        var endpoint = $"rudp://127.0.0.1:{server.LocalEndPoint.Port}";
+        using var identityServer = new CultMeshSessionIdentityServer(
+            server,
+            "aetheria.daemon",
+            new[] { "aetheria" },
+            new[] { CultMeshProtocols.Bodies.Value },
+            new[] { "aetheria.daemon@" + endpoint });
         using var bodyServer = new CultMeshBodyServer(server, store);
         using var pumpCancellation = new CancellationTokenSource();
         var pump = Task.Run(async () =>
@@ -64,10 +71,9 @@ public sealed class CultMeshBodySessionTests
                 if (progress.TransportItemsConsumed == 0) await Task.Delay(1, pumpCancellation.Token);
             }
         });
-        var endpoint = $"rudp://127.0.0.1:{server.LocalEndPoint.Port}";
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
         using var sessions = new CultMeshSessionManager(discovery,
-            new ICultMeshTransportConnector[] { new CultMeshSchemaTransportConnector() });
+            new ICultMeshTransportConnector[] { new CultMeshSchemaTransportConnector() }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionBodyProvider("aetheria.daemon", sessions,
             new CultMeshSessionTarget("aetheria", "aetheria.daemon"),
             new CultMeshSessionBodyProviderOptions { ResponseTimeout = TimeSpan.FromSeconds(10) });
@@ -136,7 +142,7 @@ public sealed class CultMeshBodySessionTests
     private sealed class RouteSource : ICultMeshLookupSource
     {
         private readonly string _endpoint;
-        public RouteSource(string endpoint = "rudp://body.test:3076") => _endpoint = endpoint;
+        public RouteSource(string endpoint = "rudp://127.0.0.13:3076") => _endpoint = endpoint;
         public string SourceId => "test";
         public Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(CultMeshDiscoveryQuery query,
             CancellationToken cancellationToken = default)
@@ -179,7 +185,7 @@ public sealed class CultMeshBodySessionTests
             ((Func<T, ICultNetSchemaServerPeer, Task>)_handlers[typeof(T)])(message, peer);
     }
 
-    private sealed class LoopbackClient : ICultNetSchemaClient
+    private sealed class LoopbackClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly LoopbackServer _server;
         private readonly Dictionary<Type, List<Delegate>> _handlers = new();
@@ -208,6 +214,8 @@ public sealed class CultMeshBodySessionTests
                 foreach (var value in values.ToArray()) ((Action<T>)value)(message);
         }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria.daemon";
     }
 
     private sealed class LoopbackPeer : ICultNetSchemaServerPeer

@@ -8,7 +8,8 @@ This is the implementation map for the browser Verse boundary.
 `samples/eve-two-runtime` remains the clean package-consumer/jsdom checkpoint.
 `samples/eve-browser-network` runs a durable C# provider, a real Chromium Eve
 lowerer, an independent C# headless observer, and a separate local Odin fixture
-over authenticated binary CultNet WebSocket routes. It proves one canonical
+over binary loopback CultNet WebSocket routes under an explicit
+`local-development` trust policy. It proves one canonical
 command effect, idempotent retry, shared observation, provider restart on a new
 physical route, browser rediscovery, retained lease resubscription, and a second
 canonical command after reconnection.
@@ -29,6 +30,10 @@ not a complete public Verse proof:
   `cultmesh.verse_catalog_request.v0` and
   `cultmesh.verse_catalog_response.v0`; application callbacks no longer need to
   smuggle provider URLs into the browser client;
+- `CultMeshBrowserClient` owns the final authority gate: remote use requires a
+  consumer-pinned Odin P-256 root, an Odin-signed route certificate, `wss://`,
+  and provider possession proof over a fresh nonce. A catalog source cannot
+  bypass that gate by returning a route-shaped object;
 - Kotlin has a channel-aware WebSocket transport adapter, TypeScript has the
   browser client, and `GameCult.Networking.WebSockets` provides the bounded C#
   schema server host adapter;
@@ -58,9 +63,9 @@ Owner:
 
 Inputs:
 
-- an Odin-discovered WebSocket transport candidate;
+- an Odin-discovered route certificate and consumer-configured Odin root;
 - stable Verse and provider identities;
-- authenticated session evidence;
+- provider key possession over a fresh client nonce;
 - requested schema ids and record keys;
 - typed operation invocations and idempotency keys;
 - canonical CultNet schema-v0 MessagePack messages.

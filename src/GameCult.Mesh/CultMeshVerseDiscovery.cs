@@ -33,6 +33,24 @@ namespace GameCult.Mesh
                 },
                 DiscoveryEndpoints = verse.DiscoveryEndpoints.ToArray(),
                 AuthorityRuntimeIds = verse.AuthorityRuntimeIds.ToArray(),
+                AuthorityRoutes = verse.AuthorityRoutes.Select(route => new CultMeshAuthorityRouteMessage
+                {
+                    AuthorityRuntimeId = route.AuthorityRuntimeId,
+                    Endpoint = route.Endpoint,
+                    ProtocolIds = route.ProtocolIds.ToArray(),
+                    Priority = route.Priority,
+                    Generation = route.Generation,
+                    Certificate = route.Certificate == null ? null : new CultMeshRouteCertificateMessage
+                    {
+                        ProviderKeyId = route.Certificate.ProviderKey.KeyId,
+                        ProviderPublicKeyX = route.Certificate.ProviderKey.X,
+                        ProviderPublicKeyY = route.Certificate.ProviderKey.Y,
+                        OdinKeyId = route.Certificate.OdinKeyId,
+                        IssuedAtUnixMilliseconds = route.Certificate.IssuedAtUnixMilliseconds,
+                        ExpiresAtUnixMilliseconds = route.Certificate.ExpiresAtUnixMilliseconds,
+                        Signature = route.Certificate.Signature
+                    }
+                }).ToArray(),
                 ParentVerseId = verse.ParentVerseId,
                 Description = verse.Description
             };
@@ -50,6 +68,21 @@ namespace GameCult.Mesh
                 out var parsed)
                 ? parsed
                 : CultMeshVerseAuthorityModel.SubscribedOverlay;
+            var routes = message.AuthorityRoutes?.Select(route => new CultMeshAuthorityRoute(
+                route.AuthorityRuntimeId,
+                route.Endpoint,
+                route.ProtocolIds,
+                route.Priority,
+                route.Generation,
+                route.Certificate == null ? null : new CultMeshRouteCertificate(
+                    new CultMeshEcdsaP256PublicKey(
+                        route.Certificate.ProviderKeyId,
+                        route.Certificate.ProviderPublicKeyX,
+                        route.Certificate.ProviderPublicKeyY),
+                    route.Certificate.OdinKeyId,
+                    route.Certificate.IssuedAtUnixMilliseconds,
+                    route.Certificate.ExpiresAtUnixMilliseconds,
+                    route.Certificate.Signature))).ToArray();
             return new CultMeshVerseDescriptor(
                 message.VerseId,
                 message.DisplayName,
@@ -60,10 +93,11 @@ namespace GameCult.Mesh
                     message.Compatibility.CompatibleVerseIds,
                     message.Compatibility.RequiredPluginIds,
                     message.Compatibility.OptionalPluginIds),
-                message.DiscoveryEndpoints,
-                message.AuthorityRuntimeIds,
+                routes is { Length: > 0 } ? null : message.DiscoveryEndpoints,
+                routes is { Length: > 0 } ? null : message.AuthorityRuntimeIds,
                 message.ParentVerseId,
-                message.Description);
+                message.Description,
+                routes is { Length: > 0 } ? routes : null);
         }
 
         /// <summary>Creates the canonical filtered Verse catalog response for any CultNet transport adapter.</summary>
@@ -172,6 +206,12 @@ namespace GameCult.Mesh
         /// Defaults to endpoint selection: rudp:// uses RUDP and cultnet:// uses LiteNetLib.
         /// </summary>
         public Func<ICultNetSchemaClient>? CreateClient { get; set; }
+
+        /// <summary>
+        /// Gets or sets an endpoint-aware client factory for external transport packages.
+        /// When present, this owns discovery transport selection for each exact Odin route.
+        /// </summary>
+        public Func<string, ICultNetSchemaClient>? CreateClientForEndpoint { get; set; }
 
         /// <summary>Gets or sets the clock that owns discovery deadlines.</summary>
         public ICultMeshClock Clock { get; set; } = CultMeshSystemClock.Instance;
@@ -307,7 +347,8 @@ namespace GameCult.Mesh
 
         private ICultNetSchemaClient CreateClient(string endpoint)
         {
-            return _options.CreateClient?.Invoke()
+            return _options.CreateClientForEndpoint?.Invoke(endpoint)
+                   ?? _options.CreateClient?.Invoke()
                    ?? CultNetSchemaClients.CreateForEndpoint(endpoint, _options.Security, _options.ConfigureClient);
         }
 

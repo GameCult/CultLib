@@ -14,7 +14,8 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Copyright>© Meta Vens and contributors</Copyright>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-	<Version>1.0.33</Version>
+	<Version>1.0.35</Version>
+	<Version Condition="'$(CultLibPackageVersion)' != ''">$(CultLibPackageVersion)</Version>
 
     <!-- Symbols/debugging -->
     <EmbedUntrackedSources>true</EmbedUntrackedSources>

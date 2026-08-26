@@ -4,11 +4,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EveRoot Condition="'$(EveRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\Eve</EveRoot>
+    <UsePackageArtifacts Condition="'$(UsePackageArtifacts)' == ''">false</UsePackageArtifacts>
+    <CultLibPackageVersion Condition="'$(CultLibPackageVersion)' == ''">1.0.35</CultLibPackageVersion>
+    <EveSurfacePackageVersion Condition="'$(EveSurfacePackageVersion)' == ''">0.3.3</EveSurfacePackageVersion>
+    <RestoreAdditionalProjectSources Condition="'$(PackageFeed)' != ''">$(PackageFeed)</RestoreAdditionalProjectSources>
   </PropertyGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(UsePackageArtifacts)' != 'true'">
     <ProjectReference Include="..\..\src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Mesh\GameCult.Mesh.csproj" />
     <ProjectReference Include="$(EveRoot)\packages\org.gamecult.eve.surface\GameCult.Eve.Surface.csproj"
                       AdditionalProperties="CultLibRoot=$(MSBuildThisFileDirectory)..\.." />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UsePackageArtifacts)' == 'true'">
+    <PackageReference Include="GameCult.Mesh" Version="$(CultLibPackageVersion)" />
+    <PackageReference Include="GameCult.Networking.WebSockets" Version="$(CultLibPackageVersion)" />
+    <PackageReference Include="GameCult.Eve.Surface" Version="$(EveSurfacePackageVersion)" />
   </ItemGroup>
 </Project>

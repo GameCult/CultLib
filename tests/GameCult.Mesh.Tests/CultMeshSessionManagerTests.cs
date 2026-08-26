@@ -28,22 +28,22 @@ public sealed class CultMeshSessionManagerTests
             connected = candidate;
             return Task.FromResult<ICultNetSchemaClient>(new FakeSchemaClient());
         });
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
 
         await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
 
         connected.Should().NotBeNull();
-        connected!.Endpoint.Should().Be("rudp://aetheria:3076");
+        connected!.Endpoint.Should().Be("rudp://127.0.0.1:3076");
     }
 
     [Test]
     public async Task Connect_ReusesInflightAndEstablishedSession()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.2:3076" });
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var connector = new FakeConnector(async (_, _) => { await release.Task; return new FakeSchemaClient(); });
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         var target = Target;
 
         var first = manager.ConnectAsync(target, CultMeshProtocols.Documents);
@@ -61,29 +61,104 @@ public sealed class CultMeshSessionManagerTests
     public async Task Connect_RacesPathsAndDisposesSuccessfulLoser()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://slow:3076", "rudp://fast:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.3:3076", "rudp://127.0.0.4:3076" });
         var slowRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var slowClient = new FakeSchemaClient();
         var fastClient = new FakeSchemaClient();
         var connector = new FakeConnector(async (candidate, _) =>
         {
-            if (candidate.Endpoint.Contains("slow")) { await slowRelease.Task; return slowClient; }
+            if (candidate.Endpoint.Contains("127.0.0.3")) { await slowRelease.Task; return slowClient; }
             return fastClient;
         });
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
 
         var session = await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
-        session.State.Path!.Endpoint.Should().Be("rudp://fast:3076");
+        session.State.Path!.Endpoint.Should().Be("rudp://127.0.0.4:3076");
         slowRelease.TrySetResult();
         await WaitUntilAsync(() => slowClient.DisposeCount == 1);
         fastClient.DisposeCount.Should().Be(0);
     }
 
     [Test]
+    public async Task Connect_NeverAttemptsRouteBoundToAnotherAuthority()
+    {
+        var clock = new ManualSessionClock();
+        var descriptor = new CultMeshVerseDescriptor(
+            "aetheria",
+            "Aetheria",
+            CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            authorityRoutes: new[]
+            {
+                new CultMeshAuthorityRoute("decoy-daemon", "rudp://127.0.0.5:3076"),
+                new CultMeshAuthorityRoute("aetheria-daemon", "rudp://127.0.0.6:3076")
+            });
+        using var discovery = new CultMeshDiscoveryService(
+            new[] { new StaticRouteSource(clock, descriptor) },
+            new CultMeshDiscoveryServiceOptions { Clock = clock });
+        var attempts = new List<string>();
+        var connector = new FakeConnector((candidate, _) =>
+        {
+            attempts.Add(candidate.Endpoint);
+            return Task.FromResult<ICultNetSchemaClient>(new FakeSchemaClient());
+        });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessions);
+
+        var session = await manager.ConnectAsync(Target, CultMeshProtocols.Documents);
+
+        session.State.Path!.Endpoint.Should().Be("rudp://127.0.0.6:3076");
+        attempts.Should().Equal("rudp://127.0.0.6:3076");
+    }
+
+    [Test]
+    public void Connect_RejectsRouteWhoseNativeIdentityDoesNotMatchTarget()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.5:3076" });
+        var connector = new FakeConnector((_, _) =>
+            Task.FromResult<ICultNetSchemaClient>(new NativeMismatchClient()));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessions);
+
+        var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
+            manager.ConnectAsync(Target, CultMeshProtocols.Documents));
+
+        error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
+    public void Connect_RejectsPortableHandshakeFromWrongRuntime()
+    {
+        var clock = new ManualSessionClock();
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.5:3076" });
+        var connector = new FakeConnector((_, _) =>
+            Task.FromResult<ICultNetSchemaClient>(new HandshakeSchemaClient("decoy-daemon")));
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessions);
+
+        var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
+            manager.ConnectAsync(Target, CultMeshProtocols.Documents));
+
+        error!.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
+    public void Descriptor_RejectsAmbiguousLegacyMultiAuthorityRoutes()
+    {
+        var action = () => new CultMeshVerseDescriptor(
+            "aetheria",
+            "Aetheria",
+            CultMeshVerseAuthorityModel.OperatorCluster,
+            new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            discoveryEndpoints: new[] { "rudp://127.0.0.7:3076" },
+            authorityRuntimeIds: new[] { "authority-a", "authority-b" });
+
+        action.Should().Throw<InvalidOperationException>().WithMessage("*ambiguous*");
+    }
+
+    [Test]
     public async Task Connect_CallerCancellationDoesNotCancelSharedAttempt()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.2:3076" });
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var connector = new FakeConnector(async (_, token) =>
         {
@@ -91,7 +166,7 @@ public sealed class CultMeshSessionManagerTests
             await release.Task;
             return new FakeSchemaClient();
         });
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         using var cancellation = new CancellationTokenSource();
         var target = Target;
 
@@ -110,7 +185,7 @@ public sealed class CultMeshSessionManagerTests
     public async Task BackgroundFailureMigratesSameSessionAcrossEndpointRotation()
     {
         var clock = new ManualSessionClock();
-        var route = "rudp://first:3076";
+        var route = "rudp://127.0.0.8:3076";
         using var discovery = Discovery(clock, () => new[] { route }, TimeSpan.FromSeconds(5));
         var clients = new List<FakeSchemaClient>();
         var connector = new FakeConnector((_, _) =>
@@ -119,7 +194,7 @@ public sealed class CultMeshSessionManagerTests
             clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         });
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         var target = Target;
         var first = await manager.ConnectAsync(target, CultMeshProtocols.Documents);
         var states = new List<CultMeshSessionStatus>();
@@ -129,14 +204,14 @@ public sealed class CultMeshSessionManagerTests
         schemaLease.OnCultNet<CultNetErrorMessage>(_ => deliveries++);
         clients[0].Emit(new CultNetErrorMessage { Error = "before rotation" });
 
-        route = "rudp://second:3076";
+        route = "rudp://127.0.0.9:3076";
         clients[0].Fail(new IOException("partition"));
         await WaitUntilAsync(() => first.State.Status == CultMeshSessionStatus.Online && connector.ConnectCount == 2);
         var second = await manager.ConnectAsync(target, CultMeshProtocols.Documents);
         clients[1].Emit(new CultNetErrorMessage { Error = "after rotation" });
 
         second.Should().BeSameAs(first);
-        second.State.Path!.Endpoint.Should().Be("rudp://second:3076");
+        second.State.Path!.Endpoint.Should().Be("rudp://127.0.0.9:3076");
         states.Should().ContainInOrder(CultMeshSessionStatus.Reconnecting, CultMeshSessionStatus.Online);
         connector.ConnectCount.Should().Be(2);
         clients[0].DisposeCount.Should().Be(1);
@@ -163,8 +238,8 @@ public sealed class CultMeshSessionManagerTests
     public void Connect_ReportsUnsupportedPathPrecisely()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "quic://unimplemented:443" });
-        using var manager = new CultMeshSessionManager(discovery, Array.Empty<ICultMeshTransportConnector>(), new CultMeshSessionManagerOptions { Clock = clock });
+        using var discovery = Discovery(clock, () => new[] { "quic://127.0.0.10:443" });
+        using var manager = new CultMeshSessionManager(discovery, Array.Empty<ICultMeshTransportConnector>(), CultMeshTestTrust.LocalSessionsWithClock(clock));
 
         var error = Assert.ThrowsAsync<CultMeshSessionException>(() =>
             manager.ConnectAsync(Target, CultMeshProtocols.Documents));
@@ -178,10 +253,10 @@ public sealed class CultMeshSessionManagerTests
     public async Task SnapshotSessionsBorrowOneManagedChannelAndDisposeRegistrationsIndependently()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.2:3076" });
         var client = new RespondingSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         var target = Target;
         using var first = await CultMeshSnapshotSession.ConnectAsync(manager, target, new CultMeshSnapshotRequestOptions());
         using var second = await CultMeshSnapshotSession.ConnectAsync(manager, target, new CultMeshSnapshotRequestOptions());
@@ -199,10 +274,10 @@ public sealed class CultMeshSessionManagerTests
     public async Task PeerExchangeBorrowsManagedProtocolSessionAcrossRequests()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.2:3076" });
         var client = new PeerExchangeSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         var exchange = new CultMeshPeerExchangeClient(new CultMeshPeerExchangeClientOptions { Sessions = manager, Clock = clock });
         var target = Target;
 
@@ -219,10 +294,10 @@ public sealed class CultMeshSessionManagerTests
     public async Task SchemaClientLeasesDisposeHandlersWithoutClosingSession()
     {
         var clock = new ManualSessionClock();
-        using var discovery = Discovery(clock, () => new[] { "rudp://direct:3076" });
+        using var discovery = Discovery(clock, () => new[] { "rudp://127.0.0.2:3076" });
         var client = new LeaseSchemaClient();
         var connector = new FakeConnector((_, _) => Task.FromResult<ICultNetSchemaClient>(client));
-        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, new CultMeshSessionManagerOptions { Clock = clock });
+        using var manager = new CultMeshSessionManager(discovery, new[] { connector }, CultMeshTestTrust.LocalSessionsWithClock(clock));
         var session = await manager.ConnectAsync(Target, CultMeshProtocols.Subscriptions);
         using var first = session.OpenSchemaClient();
         using var second = session.OpenSchemaClient();
@@ -288,8 +363,8 @@ public sealed class CultMeshSessionManagerTests
             var expires = _clock.UtcNow.AddMinutes(1);
             return Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(new[]
             {
-                Observation("norn", "rudp://norn:3076", expires),
-                Observation("aetheria", "rudp://aetheria:3076", expires)
+                Observation("norn", "rudp://127.0.0.11:3076", expires),
+                Observation("aetheria", "rudp://127.0.0.1:3076", expires)
             });
         }
 
@@ -308,6 +383,30 @@ public sealed class CultMeshSessionManagerTests
                 CultMeshDiscoveryTrust.Signed);
     }
 
+    private sealed class StaticRouteSource : ICultMeshLookupSource
+    {
+        private readonly ManualSessionClock _clock;
+        private readonly CultMeshVerseDescriptor _descriptor;
+        public StaticRouteSource(ManualSessionClock clock, CultMeshVerseDescriptor descriptor)
+        {
+            _clock = clock;
+            _descriptor = descriptor;
+        }
+        public string SourceId => "odin";
+        public Task<IReadOnlyList<CultMeshDiscoveryObservation>> LookupAsync(
+            CultMeshDiscoveryQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CultMeshDiscoveryObservation>>(new[]
+            {
+                new CultMeshDiscoveryObservation(
+                    _descriptor,
+                    SourceId,
+                    _clock.UtcNow,
+                    _clock.UtcNow.AddMinutes(1),
+                    CultMeshDiscoveryTrust.Signed)
+            });
+    }
+
     private sealed class FakeConnector : ICultMeshTransportConnector
     {
         private readonly Func<CultMeshTransportCandidate, CancellationToken, Task<ICultNetSchemaClient>> _connect;
@@ -324,7 +423,7 @@ public sealed class CultMeshSessionManagerTests
         }
     }
 
-    private sealed class FakeSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+    private sealed class FakeSchemaClient : ICultNetSchemaClient, ICultNetSchemaClientHealth, ICultMeshVerifiedSchemaClient
     {
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly List<Action<CultNetErrorMessage>> _handlers = new();
@@ -340,6 +439,8 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
         public void Fail(Exception error) => _failure.TrySetResult(error);
         public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
     }
@@ -360,7 +461,46 @@ public sealed class CultMeshSessionManagerTests
         public void Dispose() { }
     }
 
-    private sealed class RespondingSchemaClient : ICultNetSchemaClient
+    private sealed class NativeMismatchClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
+    {
+        public bool Connected => true;
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) => false;
+        public void Dispose() { }
+    }
+
+    private sealed class HandshakeSchemaClient : ICultNetSchemaClient
+    {
+        private readonly string _actualRuntimeId;
+        private readonly List<Action<CultMeshSessionAcceptedMessage>> _handlers = new();
+        public HandshakeSchemaClient(string actualRuntimeId) => _actualRuntimeId = actualRuntimeId;
+        public bool Connected => true;
+        public void Connect(string host, int port) { }
+        public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage
+        {
+            if (message is not CultMeshSessionOpenMessage request) return;
+            var response = new CultMeshSessionAcceptedMessage
+            {
+                MessageId = request.MessageId,
+                Accepted = true,
+                VerseId = request.VerseId,
+                AuthorityRuntimeId = _actualRuntimeId,
+                ProtocolId = request.ProtocolId,
+                RouteGeneration = request.RouteGeneration
+            };
+            foreach (var handler in _handlers.ToArray()) handler(response);
+        }
+        public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage
+        {
+            if (typeof(T) == typeof(CultMeshSessionAcceptedMessage))
+                _handlers.Add(message => callback((T)(object)message));
+        }
+        public void Dispose() { }
+    }
+
+    private sealed class RespondingSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _handlers = new();
         private int _disposeCount;
@@ -385,9 +525,11 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
-    private sealed class PeerExchangeSchemaClient : ICultNetSchemaClient
+    private sealed class PeerExchangeSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultMeshPeerExchangeResponseMessage>> _handlers = new();
         public bool Connected => true;
@@ -402,7 +544,7 @@ public sealed class CultMeshSessionManagerTests
                 MessageId = request.MessageId,
                 Peers = new[]
                 {
-                    new CultMeshPeerCard("peer-a", request.VerseId, new[] { "rudp://peer-a:3076" }).ToMessage()
+                    new CultMeshPeerCard("peer-a", request.VerseId, new[] { "rudp://127.0.0.12:3076" }).ToMessage()
                 }
             };
             foreach (var handler in _handlers.ToArray()) handler(response);
@@ -413,9 +555,11 @@ public sealed class CultMeshSessionManagerTests
                 _handlers.Add(message => callback((T)(object)message));
         }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
-    private sealed class LeaseSchemaClient : ICultNetSchemaClient
+    private sealed class LeaseSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetErrorMessage>> _handlers = new();
         private int _disposeCount;
@@ -430,6 +574,8 @@ public sealed class CultMeshSessionManagerTests
         }
         public void Emit(CultNetErrorMessage message) { foreach (var handler in _handlers.ToArray()) handler(message); }
         public void Dispose() => Interlocked.Increment(ref _disposeCount);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private sealed class ManualSessionClock : ICultMeshClock

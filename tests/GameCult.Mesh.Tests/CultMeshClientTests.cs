@@ -40,6 +40,7 @@ public sealed class CultMeshClientTests
                     return new RendezvousClient();
                 }
             },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -48,7 +49,7 @@ public sealed class CultMeshClientTests
 
         first.Should().BeSameAs(second);
         first.Target.Should().Be(Target);
-        first.State.Path!.Endpoint.Should().Be("rudp://aetheria:3081");
+        first.State.Path!.Endpoint.Should().Be("rudp://127.0.0.1:3081");
         discoveryClients.Should().Be(1);
         connector.ConnectCount.Should().Be(1);
     }
@@ -61,6 +62,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -82,6 +84,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -103,6 +106,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         using var lease = await mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
@@ -125,6 +129,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -148,6 +153,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             SubscriptionResponseTimeout = TimeSpan.FromMilliseconds(20)
         });
@@ -168,6 +174,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -187,6 +194,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -211,6 +219,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -237,6 +246,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -262,6 +272,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         var request = new ClientTestDocument { Id = "command:1", Text = "move" };
@@ -288,6 +299,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
 
@@ -303,7 +315,7 @@ public sealed class CultMeshClientTests
 
         result.MessageId.Should().Be("pilot-command-1");
         result.Status.Should().Be("accepted");
-        result.SourceRuntimeId.Should().Be("provider-daemon");
+        result.SourceRuntimeId.Should().Be("aetheria-daemon");
         result.Value.ReceiptId.Should().Be("receipt:pilot-command-1");
         result.Value.Count.Should().Be(2);
         connector.Clients.Should().ContainSingle();
@@ -319,6 +331,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             OperationResponseTimeout = TimeSpan.FromSeconds(2)
         });
@@ -348,6 +361,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector },
             OperationResponseTimeout = TimeSpan.FromSeconds(5)
         });
@@ -371,6 +385,32 @@ public sealed class CultMeshClientTests
     }
 
     [Test]
+    public async Task InvokeOperation_RejectsReceiptFromAnotherRuntime()
+    {
+        var connector = new DocumentConnector { ResponseSourceRuntimeId = "intruder-daemon" };
+        using var mesh = new CultMeshClient(new CultMeshClientOptions
+        {
+            RendezvousEndpoints = new[] { "rudp://odin:3076" },
+            Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
+            Connectors = new[] { connector }
+        });
+
+        Func<Task> invoke = async () => await mesh.InvokeAsync<ClientOperationRequest, ClientOperationReceipt>(
+            Target,
+            "tests.counter",
+            "tests.counter.increment",
+            "tests.counter.increment_request.v1",
+            "tests.counter.increment_receipt.v1",
+            new ClientOperationRequest { Amount = 2 },
+            sourceRuntimeId: "pilot-one",
+            idempotencyKey: "pilot-command-wrong-source");
+
+        var failure = await invoke.Should().ThrowAsync<CultMeshSessionException>();
+        failure.Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
     public async Task Dispose_TerminatesDocumentWaitingForInitialSnapshot()
     {
         var connector = new DocumentConnector { SuppressFirstSnapshot = true };
@@ -378,6 +418,7 @@ public sealed class CultMeshClientTests
         {
             RendezvousEndpoints = new[] { "rudp://odin:3076" },
             Discovery = new CultMeshVerseDiscoveryClientOptions { CreateClient = () => new RendezvousClient() },
+            Sessions = CultMeshTestTrust.LocalSessions,
             Connectors = new[] { connector }
         });
         var opening = mesh.LeaseDocumentAsync<ClientTestDocument>(Target, "surface:pilot");
@@ -407,7 +448,7 @@ public sealed class CultMeshClientTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v0", "rules"),
-                        new[] { "rudp://aetheria:3081" },
+                        new[] { "rudp://127.0.0.1:3081" },
                         new[] { "aetheria-daemon" }).ToMessage()
                 }
             };
@@ -438,13 +479,15 @@ public sealed class CultMeshClientTests
         }
     }
 
-    private sealed class ConnectedClient : ICultNetSchemaClient
+    private sealed class ConnectedClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         public bool Connected => true;
         public void Connect(string host, int port) { }
         public void SendCultNet<T>(T message) where T : ICultNetSchemaMessage { }
         public void OnCultNet<T>(Action<T> callback) where T : ICultNetSchemaMessage { }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private sealed class DocumentConnector : ICultMeshTransportConnector
@@ -454,6 +497,7 @@ public sealed class CultMeshClientTests
         public bool SuppressFirstSubscriptionSnapshot { get; set; }
         public bool RejectOperations { get; set; }
         public bool FailFirstOperationBeforeResponse { get; set; }
+        public string ResponseSourceRuntimeId { get; set; } = "aetheria-daemon";
         public string ConnectorId => "document-test";
         public int Priority => 0;
         public int SubscribeCount => Clients.Sum(client => client.SubscribeCount);
@@ -469,13 +513,14 @@ public sealed class CultMeshClientTests
                     ? int.MaxValue
                     : SuppressFirstSubscriptionSnapshot && Clients.Count == 0 ? 1 : 0,
                 rejectOperations: RejectOperations,
-                failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0);
+                failOperationBeforeResponse: FailFirstOperationBeforeResponse && Clients.Count == 0,
+                responseSourceRuntimeId: ResponseSourceRuntimeId);
             Clients.Add(client);
             return Task.FromResult<ICultNetSchemaClient>(client);
         }
     }
 
-    private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth
+    private sealed class DocumentClient : ICultNetSchemaClient, ICultNetSchemaClientHealth, ICultMeshVerifiedSchemaClient
     {
         private readonly List<Action<CultNetSnapshotResponseRawMessage>> _snapshots = new();
         private readonly List<Action<CultNetOperationResponseMessage>> _operationResponses = new();
@@ -484,17 +529,20 @@ public sealed class CultMeshClientTests
         private readonly TaskCompletionSource<Exception> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly bool _rejectOperations;
         private bool _failOperationBeforeResponse;
+        private readonly string _responseSourceRuntimeId;
         private int _snapshotsToSuppress;
         public DocumentClient(
             string text,
             int snapshotsToSuppress = 0,
             bool rejectOperations = false,
-            bool failOperationBeforeResponse = false)
+            bool failOperationBeforeResponse = false,
+            string responseSourceRuntimeId = "aetheria-daemon")
         {
             _text = text;
             _snapshotsToSuppress = snapshotsToSuppress;
             _rejectOperations = rejectOperations;
             _failOperationBeforeResponse = failOperationBeforeResponse;
+            _responseSourceRuntimeId = responseSourceRuntimeId;
             var cache = CultMesh.CreateCultCacheDocumentRegistry(typeof(ClientTestDocument));
             _documents = CultMesh.CreateCultNetDocumentRegistry(new[] { typeof(ClientTestDocument) }, cache);
         }
@@ -514,6 +562,7 @@ public sealed class CultMeshClientTests
             }
             if (message is CultNetOperationRequestMessage operation)
             {
+                operation.TargetRuntimeId.Should().Be("aetheria-daemon");
                 Operations.Add(operation);
                 if (_failOperationBeforeResponse)
                 {
@@ -539,7 +588,7 @@ public sealed class CultMeshClientTests
                             failure,
                             CultNetSchemaMessageSerialization.Options)),
                         Diagnostics = new[] { failure.Message },
-                        SourceRuntimeId = "provider-daemon"
+                        SourceRuntimeId = _responseSourceRuntimeId
                     };
                     foreach (var handler in _operationResponses.ToArray()) handler(rejected);
                     return;
@@ -562,7 +611,7 @@ public sealed class CultMeshClientTests
                     Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(
                         receipt,
                         CultNetSchemaMessageSerialization.Options)),
-                    SourceRuntimeId = "provider-daemon"
+                    SourceRuntimeId = _responseSourceRuntimeId
                 };
                 foreach (var handler in _operationResponses.ToArray()) handler(operationResponse);
                 return;
@@ -596,6 +645,8 @@ public sealed class CultMeshClientTests
         }
         public void Dispose() { }
         public void Fail(Exception error) => _failure.TrySetResult(error);
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria-daemon";
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

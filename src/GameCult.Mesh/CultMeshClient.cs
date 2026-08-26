@@ -27,8 +27,8 @@ namespace GameCult.Mesh
         public IReadOnlyList<ICultMeshTransportConnector>? Connectors { get; set; }
 
         /// <summary>
-        /// Gets or sets streaming content connectors. TCP content delivery is used by default;
-        /// applications may replace it or explicitly add legacy RUDP.
+        /// Gets or sets streaming content connectors. HTTPS and loopback TCP content
+        /// delivery are used by default; applications may replace them or explicitly add legacy RUDP.
         /// </summary>
         public IReadOnlyList<ICultMeshContentTransportConnector>? ContentConnectors { get; set; }
 
@@ -184,6 +184,7 @@ namespace GameCult.Mesh
                 },
                 options.ContentConnectors ?? new ICultMeshContentTransportConnector[]
                 {
+                    new CultMeshHttpsContentTransportConnector(),
                     new CultMeshTcpContentTransportConnector()
                 },
                 options.RealtimeConnectors,
@@ -391,7 +392,8 @@ namespace GameCult.Mesh
                 PayloadSchema = requestSchema.Trim(),
                 PayloadEncoding = "messagepack-base64",
                 Payload = Convert.ToBase64String(MessagePackSerializer.Serialize(request, CultNetSchemaMessageSerialization.Options)),
-                SourceRuntimeId = sourceRuntimeId.Trim()
+                SourceRuntimeId = sourceRuntimeId.Trim(),
+                TargetRuntimeId = target.AuthorityRuntimeId
             };
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_operationResponseTimeout);
@@ -441,6 +443,11 @@ namespace GameCult.Mesh
             if (!string.Equals(envelope.ServiceId, expectedService, StringComparison.Ordinal) ||
                 !string.Equals(envelope.Operation, expectedOperation, StringComparison.Ordinal))
                 throw new InvalidOperationException("CultMesh operation response did not match the requested service and operation.");
+            if (!string.Equals(envelope.SourceRuntimeId, target.AuthorityRuntimeId, StringComparison.Ordinal))
+                throw new CultMeshSessionException(new CultMeshSessionFailure(
+                    CultMeshSessionFailureReason.Authority,
+                    $"CultMesh operation response came from runtime '{envelope.SourceRuntimeId ?? "(missing)"}', " +
+                    $"not selected authority '{target.AuthorityRuntimeId}'."));
             if (string.Equals(envelope.PayloadSchema, CultNetOperationServer.FailureSchemaId, StringComparison.Ordinal))
             {
                 if (!string.Equals(envelope.PayloadEncoding, "messagepack-base64", StringComparison.Ordinal))
@@ -580,7 +587,7 @@ namespace GameCult.Mesh
             using var snapshot = await CultMeshSnapshotSession.ConnectAsync(
                     _sessions,
                     target,
-                    CultMeshProtocols.Content,
+                    CultMeshProtocols.Documents,
                     new CultMeshSnapshotRequestOptions
                     {
                         ConnectTimeout = TimeSpan.FromSeconds(5),
@@ -795,7 +802,7 @@ namespace GameCult.Mesh
                     _cache,
                     new CultRecordKey(recordKey),
                     CultMesh.Verse(target.VerseId, "cultmesh-client").Context,
-                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.ProviderRuntimeId));
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.AuthorityRuntimeId));
             }
 
             public CultMeshDocumentHandle<TDocument> Handle { get; }
@@ -897,7 +904,7 @@ namespace GameCult.Mesh
                 _subscription = new CultNetDatabaseSubscriptionClient(session.OpenSchemaClient(), _cache, networkRegistry);
                 Handle = CultMesh.Collection<TDocument>(
                     _cache,
-                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.ProviderRuntimeId));
+                    routeHint: new CultMeshRouteHint(CultMeshLocalityKind.Network, target.AuthorityRuntimeId));
             }
 
             public CultMeshCollectionHandle<TDocument> Handle { get; }

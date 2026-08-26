@@ -32,6 +32,7 @@ try {
     verseId: "sample.counter",
     authorityRuntimeId: "sample.counter-daemon",
     runtimeId: "sample.chromium",
+    trust: { mode: "local-development" },
     rendezvous: new CultMeshBrowserOdinRendezvous({
       endpoints: [odinEndpoint],
       runtimeId: "sample.chromium.discovery",
@@ -86,7 +87,11 @@ try {
   window.__sampleCount = decodeCultNetPayload<{ count: number }>(counter.current!).count;
   window.__sampleReady = true;
 } catch (error) {
-  window.__sampleError = error instanceof Error ? error.stack || error.message : String(error);
+  const details = error instanceof AggregateError
+    ? error.errors.map(inner => inner instanceof Error ? inner.stack || inner.message : String(inner)).join("\n---\n")
+    : "";
+  window.__sampleError = (error instanceof Error ? error.stack || error.message : String(error))
+    + (details ? `\n${details}` : "");
   host.textContent = window.__sampleError;
   throw error;
 }

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.session-open.schema.json",
+  "title": "CultMesh Session Open",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "sourceRuntimeId", "verseId", "authorityRuntimeId", "protocolId", "routeGeneration", "clientNonce"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultmesh.session_open.v2" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "sourceRuntimeId": { "type": "string", "minLength": 1 },
+    "verseId": { "type": "string", "minLength": 1 },
+    "authorityRuntimeId": { "type": "string", "minLength": 1 },
+    "protocolId": { "type": "string", "minLength": 1 },
+    "routeGeneration": { "type": "string" },
+    "clientNonce": { "type": "string", "minLength": 1 }
+  }
+}

@@ -201,7 +201,8 @@ static async Task<StateResult> MeasureCultMeshQuicStateAsync(int payloadBytes, i
         [new CultMeshQuicRealtimeTransportConnector(new CultMeshQuicRealtimeConnectorOptions
         {
             ValidateProviderCertificate = (_, _, _, _) => true
-        })]);
+        })],
+        LocalDevelopmentSessions());
     var session = await sessions.ConnectRealtimeAsync(
         new CultMeshSessionTarget("parity", "service:parity.provider"));
     var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -339,6 +340,12 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
         MaxPendingReliablePackets = 8192
     });
     using var contentServer = new CultMeshLegacyRudpContentServer(wireServer, providerCache);
+    using var identityServer = new CultMeshSessionIdentityServer(
+        wireServer,
+        "service:parity.provider",
+        ["parity"],
+        [CultMeshProtocols.Content.Value],
+        ["parity-route-1"]);
     using var pumpCancellation = new CancellationTokenSource();
     var pump = Task.Run(async () =>
     {
@@ -357,9 +364,10 @@ static async Task<Result> MeasureCultMeshRudpAsync(byte[] payload)
         discovery,
         Array.Empty<ICultMeshTransportConnector>(),
         [new CultMeshLegacyRudpContentTransportConnector(
-            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromMinutes(2) })]);
+            new CultMeshLegacyRudpContentTransportOptions { ResponseTimeout = TimeSpan.FromMinutes(2) })],
+        LocalDevelopmentSessions());
     var provider = new CultMeshSessionContentProvider(
-        "parity.provider", sessions, CultMeshEndpointId.Parse("service:parity.provider"));
+        "parity.provider", sessions, new CultMeshSessionTarget("parity", "service:parity.provider"));
     var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
     using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
         typeof(CultMeshContentTransferStateDocument)));
@@ -392,15 +400,23 @@ static async Task<Result> MeasureCultMeshTcpAsync(byte[] payload)
     await CultMeshCdn.PublishAsync(providerCache, artifact);
 
     using var contentServer = new CultMeshTcpContentServer(
-        new TcpListener(IPAddress.Loopback, 0), providerCache);
+        new TcpListener(IPAddress.Loopback, 0),
+        providerCache,
+        new CultMeshTcpContentServerOptions
+        {
+            VerseId = "parity",
+            AuthorityRuntimeId = "service:parity.provider",
+            RouteGeneration = "parity-route-1"
+        });
     var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
     using var discovery = new CultMeshDiscoveryService([new RouteSource(endpoint)]);
     using var sessions = new CultMeshSessionManager(
         discovery,
         Array.Empty<ICultMeshTransportConnector>(),
-        [new CultMeshTcpContentTransportConnector()]);
+        [new CultMeshTcpContentTransportConnector()],
+        LocalDevelopmentSessions());
     var provider = new CultMeshSessionContentProvider(
-        "parity.provider", sessions, CultMeshEndpointId.Parse("service:parity.provider"));
+        "parity.provider", sessions, new CultMeshSessionTarget("parity", "service:parity.provider"));
     var directory = Path.Combine(Path.GetTempPath(), "cultmesh-transport-parity", Guid.NewGuid().ToString("N"));
     using var transferState = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
         typeof(CultMeshContentTransferStateDocument)));
@@ -443,6 +459,11 @@ static X509Certificate2 CreateCertificate()
 static string TempPath(string plane) =>
     Path.Combine(Path.GetTempPath(), $"cultmesh-parity-{plane}-{Guid.NewGuid():N}.body");
 
+static CultMeshSessionManagerOptions LocalDevelopmentSessions() => new()
+{
+    Trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.LocalDevelopment)
+};
+
 static Socket BindUdpSocket()
 {
     var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -479,8 +500,14 @@ internal sealed class RouteSource(string endpoint) : ICultMeshLookupSource
             new(
                 new CultMeshVerseDescriptor(
                     "parity", "Transport parity", CultMeshVerseAuthorityModel.OperatorCluster,
-                    new CultMeshVerseCompatibility("cultmesh.v1", "parity"), [endpoint],
-                    ["service:parity.provider"]),
+                    new CultMeshVerseCompatibility("cultmesh.v1", "parity"),
+                    authorityRoutes:
+                    [
+                        new CultMeshAuthorityRoute(
+                            "service:parity.provider",
+                            endpoint,
+                            generation: "parity-route-1")
+                    ]),
                 SourceId, now, now.AddMinutes(1), CultMeshDiscoveryTrust.Signed)
         ];
         return Task.FromResult(observations);

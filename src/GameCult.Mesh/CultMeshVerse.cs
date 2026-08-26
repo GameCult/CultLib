@@ -92,6 +92,57 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
+    /// Binds one authoritative runtime to one physical route. This relationship is
+    /// the routing authority; the legacy endpoint/runtime lists are projections only.
+    /// </summary>
+    public sealed class CultMeshAuthorityRoute
+    {
+        public CultMeshAuthorityRoute(
+            string authorityRuntimeId,
+            string endpoint,
+            IEnumerable<string>? protocolIds = null,
+            int priority = 0,
+            string? generation = null,
+            CultMeshRouteCertificate? certificate = null)
+        {
+            AuthorityRuntimeId = RequireNonEmpty(authorityRuntimeId, nameof(authorityRuntimeId));
+            Endpoint = RequireNonEmpty(endpoint, nameof(endpoint));
+            ProtocolIds = Clean(protocolIds);
+            if (priority < 0) throw new ArgumentOutOfRangeException(nameof(priority));
+            Priority = priority;
+            Generation = string.IsNullOrWhiteSpace(generation)
+                ? AuthorityRuntimeId + "@" + Endpoint
+                : generation!.Trim();
+            Certificate = certificate;
+        }
+
+        public string AuthorityRuntimeId { get; }
+        public string Endpoint { get; }
+        public IReadOnlyList<string> ProtocolIds { get; }
+        public int Priority { get; }
+        public string Generation { get; }
+        /// <summary>Gets the optional Odin-signed binding from this route to its provider key.</summary>
+        public CultMeshRouteCertificate? Certificate { get; }
+
+        public bool Supports(CultMeshProtocolId protocol) =>
+            protocol != null &&
+            (ProtocolIds.Count == 0 || ProtocolIds.Contains(protocol.Value, StringComparer.Ordinal));
+
+        private static string[] Clean(IEnumerable<string>? values) =>
+            values?.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .ToArray()
+            ?? Array.Empty<string>();
+
+        private static string RequireNonEmpty(string value, string paramName) =>
+            string.IsNullOrWhiteSpace(value)
+                ? throw new ArgumentException("Value must be non-empty.", paramName)
+                : value.Trim();
+    }
+
+    /// <summary>
     /// Describes one CultMesh Verse: a rule-bearing consensus graph.
     /// </summary>
     public sealed class CultMeshVerseDescriptor
@@ -107,14 +158,36 @@ namespace GameCult.Mesh
             IEnumerable<string>? discoveryEndpoints = null,
             IEnumerable<string>? authorityRuntimeIds = null,
             string? parentVerseId = null,
-            string? description = null)
+            string? description = null,
+            IEnumerable<CultMeshAuthorityRoute>? authorityRoutes = null)
         {
             VerseId = RequireNonEmpty(verseId, nameof(verseId));
             DisplayName = RequireNonEmpty(displayName, nameof(displayName));
             AuthorityModel = authorityModel;
             Compatibility = compatibility ?? throw new ArgumentNullException(nameof(compatibility));
-            DiscoveryEndpoints = Clean(discoveryEndpoints);
-            AuthorityRuntimeIds = Clean(authorityRuntimeIds);
+            var legacyEndpoints = Clean(discoveryEndpoints);
+            var legacyRuntimeIds = Clean(authorityRuntimeIds);
+            var suppliedRoutes = authorityRoutes?.ToArray();
+            if (suppliedRoutes?.Any(route => route == null) == true)
+                throw new ArgumentException("Authority routes cannot contain null.", nameof(authorityRoutes));
+            if (suppliedRoutes != null && (legacyEndpoints.Length > 0 || legacyRuntimeIds.Length > 0))
+                throw new ArgumentException(
+                    "Supply bound authority routes or legacy endpoint/runtime lists, never both.",
+                    nameof(authorityRoutes));
+            if (suppliedRoutes == null && legacyEndpoints.Length > 0 && legacyRuntimeIds.Length > 1)
+                throw new InvalidOperationException(
+                    "Legacy Verse routing with multiple authority runtimes is ambiguous. " +
+                    "Publish explicit CultMeshAuthorityRoute bindings.");
+
+            AuthorityRoutes = NormalizeRoutes(suppliedRoutes ??
+                (legacyRuntimeIds.Length == 1
+                    ? legacyEndpoints.Select(endpoint => new CultMeshAuthorityRoute(legacyRuntimeIds[0], endpoint))
+                    : Array.Empty<CultMeshAuthorityRoute>()));
+            DiscoveryEndpoints = AuthorityRoutes.Count > 0
+                ? AuthorityRoutes.Select(route => route.Endpoint).Distinct(StringComparer.Ordinal).ToArray()
+                : legacyEndpoints;
+            AuthorityRuntimeIds = AuthorityRoutes.Select(route => route.AuthorityRuntimeId)
+                .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray();
             ParentVerseId = parentVerseId;
             Description = description;
         }
@@ -143,6 +216,8 @@ namespace GameCult.Mesh
         /// Gets known authoritative runtime ids, when authority is cluster-shaped.
         /// </summary>
         public IReadOnlyList<string> AuthorityRuntimeIds { get; }
+        /// <summary>Gets exact authority-to-route bindings used for identity-sensitive resolution.</summary>
+        public IReadOnlyList<CultMeshAuthorityRoute> AuthorityRoutes { get; }
         /// <summary>
         /// Gets the parent Verse id for subscribed overlays or branches.
         /// </summary>
@@ -177,8 +252,27 @@ namespace GameCult.Mesh
 
         private static string[] Clean(IEnumerable<string>? values)
         {
-            return values?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray()
+            return values?.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()
                 ?? Array.Empty<string>();
+        }
+
+        private static CultMeshAuthorityRoute[] NormalizeRoutes(IEnumerable<CultMeshAuthorityRoute> routes)
+        {
+            return routes
+                .GroupBy(route => new
+                {
+                    route.AuthorityRuntimeId,
+                    route.Endpoint,
+                    Protocols = string.Join("\u001f", route.ProtocolIds)
+                })
+                .Select(group => group.OrderBy(route => route.Priority).First())
+                .OrderBy(route => route.Priority)
+                .ThenBy(route => route.AuthorityRuntimeId, StringComparer.Ordinal)
+                .ThenBy(route => route.Endpoint, StringComparer.Ordinal)
+                .ToArray();
         }
 
         private static string RequireNonEmpty(string value, string paramName)

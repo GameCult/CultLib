@@ -42,11 +42,11 @@ namespace GameCult.Mesh.Quic.Native
 
         public async Task<ICultMeshRealtimeTransport> ConnectAsync(
             CultMeshTransportCandidate candidate,
-            CultMeshEndpointId endpointId,
+            CultMeshSessionTarget target,
             CancellationToken cancellationToken = default)
         {
             if (candidate == null) throw new ArgumentNullException(nameof(candidate));
-            if (endpointId == null) throw new ArgumentNullException(nameof(endpointId));
+            if (target == null) throw new ArgumentNullException(nameof(target));
             if (!TryParseEndpoint(candidate.Endpoint, out var host, out var port, out var pin))
                 throw new NotSupportedException($"Native QUIC connector does not support '{candidate.Endpoint}'.");
 
@@ -72,7 +72,9 @@ namespace GameCult.Mesh.Quic.Native
             var transport = new CultMeshNativeQuicRealtimeTransport(
                 candidate.Endpoint,
                 handle,
-                _options.PollInterval);
+                _options.PollInterval,
+                target,
+                candidate.Generation);
             try
             {
                 await transport.WaitUntilConnectedAsync(_options.HandshakeTimeout, cancellationToken).ConfigureAwait(false);
@@ -122,22 +124,41 @@ namespace GameCult.Mesh.Quic.Native
         }
     }
 
-    internal sealed class CultMeshNativeQuicRealtimeTransport : ICultMeshRealtimeTransport
+    internal sealed class CultMeshNativeQuicRealtimeTransport : ICultMeshRealtimeTransport, ICultMeshVerifiedTransport
     {
         private readonly object _gate = new object();
         private readonly TimeSpan _pollInterval;
         private IntPtr _handle;
+        private readonly CultMeshSessionTarget _target;
+        private readonly string _routeGeneration;
         private bool _disposed;
 
-        public CultMeshNativeQuicRealtimeTransport(string endpoint, IntPtr handle, TimeSpan pollInterval)
+        public CultMeshNativeQuicRealtimeTransport(
+            string endpoint,
+            IntPtr handle,
+            TimeSpan pollInterval,
+            CultMeshSessionTarget target,
+            string routeGeneration)
         {
             Endpoint = endpoint;
             _handle = handle;
             _pollInterval = pollInterval;
+            _target = target;
+            _routeGeneration = routeGeneration ?? string.Empty;
         }
 
         public string TransportId => "msquic-native-realtime";
         public string Endpoint { get; }
+
+        public bool IsVerifiedFor(
+            string verseId,
+            string authorityRuntimeId,
+            string protocolId,
+            string routeGeneration) =>
+            string.Equals(_target.VerseId, verseId, StringComparison.Ordinal) &&
+            string.Equals(_target.AuthorityRuntimeId, authorityRuntimeId, StringComparison.Ordinal) &&
+            string.Equals(CultMeshProtocols.RealtimeState.Value, protocolId, StringComparison.Ordinal) &&
+            string.Equals(_routeGeneration, routeGeneration, StringComparison.Ordinal);
 
         public Task SendAsync(CultMeshRealtimeFrame frame, CancellationToken cancellationToken = default) =>
             Task.FromException(new NotSupportedException(

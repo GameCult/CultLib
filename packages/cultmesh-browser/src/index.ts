@@ -12,6 +12,8 @@ import {
   type CultNetSnapshotResponseRawMessage,
   type CultMeshVerseCatalogRequestMessage,
   type CultMeshVerseCatalogResponseMessage,
+  type CultMeshSessionAcceptedMessage,
+  type CultMeshSessionOpenMessage,
 } from "cultnet-ts/contracts";
 
 export interface CultMeshBrowserIdentity {
@@ -21,11 +23,40 @@ export interface CultMeshBrowserIdentity {
 
 export interface CultMeshBrowserRoute extends CultMeshBrowserIdentity {
   endpoint: string;
-  generation?: string;
+  protocolId?: string;
+  protocolIds?: readonly string[];
+  priority?: number;
+  generation: string;
+  certificate?: CultMeshBrowserRouteCertificate;
+}
+
+export interface CultMeshBrowserP256PublicKey {
+  keyId: string;
+  x: string;
+  y: string;
+}
+
+export interface CultMeshBrowserRouteCertificate {
+  providerKey: CultMeshBrowserP256PublicKey;
+  odinKeyId: string;
+  issuedAtUnixMilliseconds: number;
+  expiresAtUnixMilliseconds: number;
+  signature: string;
+}
+
+export type CultMeshBrowserAuthorityTrustMode = "authenticated-remote" | "local-development";
+
+export interface CultMeshBrowserAuthorityTrustPolicy {
+  mode: CultMeshBrowserAuthorityTrustMode;
+  odinRoots?: readonly CultMeshBrowserP256PublicKey[];
+  now?: () => number;
 }
 
 export interface CultMeshBrowserRendezvous {
-  resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute>;
+  resolve(
+    identity: CultMeshBrowserIdentity,
+    trust?: CultMeshBrowserAuthorityTrustPolicy,
+  ): Promise<CultMeshBrowserRoute>;
 }
 
 export interface CultMeshBrowserOdinRendezvousOptions {
@@ -73,13 +104,16 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
     if (this.#options.maxFrameBytes <= 0) throw new Error("Odin rendezvous maxFrameBytes must be positive.");
   }
 
-  async resolve(identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+  async resolve(
+    identity: CultMeshBrowserIdentity,
+    trust: CultMeshBrowserAuthorityTrustPolicy = { mode: "authenticated-remote", odinRoots: [] },
+  ): Promise<CultMeshBrowserRoute> {
     requireText(identity.verseId, "verseId");
     requireText(identity.authorityRuntimeId, "authorityRuntimeId");
     const failures: Error[] = [];
     for (const endpoint of this.#options.endpoints) {
       try {
-        return await this.resolveFrom(endpoint, identity);
+        return await this.resolveFrom(endpoint, identity, trust);
       } catch (error) {
         failures.push(error instanceof Error ? error : new Error(String(error)));
       }
@@ -90,7 +124,11 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
     );
   }
 
-  private resolveFrom(endpoint: string, identity: CultMeshBrowserIdentity): Promise<CultMeshBrowserRoute> {
+  private resolveFrom(
+    endpoint: string,
+    identity: CultMeshBrowserIdentity,
+    trust: CultMeshBrowserAuthorityTrustPolicy,
+  ): Promise<CultMeshBrowserRoute> {
     const socket = this.#options.socketFactory(endpoint);
     socket.binaryType = "arraybuffer";
     const messageId = this.#options.createId();
@@ -141,7 +179,9 @@ export class CultMeshBrowserOdinRendezvous implements CultMeshBrowserRendezvous 
             return;
           }
           if (message.schemaVersion !== "cultmesh.verse_catalog_response.v0" || message.messageId !== messageId) return;
-          finish(undefined, selectOdinRoute(message, identity));
+          void selectOdinRoute(message, identity, trust)
+            .then(route => finish(undefined, route))
+            .catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
       };
       socket.onerror = () => finish(new Error(`Odin WebSocket could not open '${endpoint}'.`));
@@ -159,6 +199,8 @@ export interface CultMeshBrowserClientOptions extends CultMeshBrowserIdentity {
   requestTimeoutMs?: number;
   maxFrameBytes?: number;
   createId?: () => string;
+  /** Consumer-owned authority roots. Remote sessions fail closed when omitted. */
+  trust?: CultMeshBrowserAuthorityTrustPolicy;
 }
 
 export interface CultMeshRawDocumentLeaseOptions {
@@ -173,6 +215,7 @@ export interface CultMeshOperationOptions {
   payloadSchema: string;
   payload: unknown;
   idempotencyKey?: string;
+  /** @deprecated The connected authority is the operation target. A different value is rejected. */
   targetRuntimeId?: string;
 }
 
@@ -211,6 +254,7 @@ interface PendingSnapshot {
 }
 
 interface PendingOperation {
+  request: CultNetOperationRequestMessage;
   resolve: (response: CultNetOperationResponseMessage) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -293,6 +337,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       maxFrameBytes: options.maxFrameBytes ?? 4 * 1024 * 1024,
       createId: options.createId ?? (() => crypto.randomUUID()),
       socketFactory: options.socketFactory ?? (endpoint => new WebSocket(endpoint)),
+      trust: options.trust ?? { mode: "authenticated-remote", odinRoots: [] },
     };
   }
 
@@ -338,6 +383,11 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     requireText(options.serviceId, "serviceId");
     requireText(options.operation, "operation");
     requireText(options.payloadSchema, "payloadSchema");
+    if (options.targetRuntimeId && options.targetRuntimeId !== this.identity.authorityRuntimeId) {
+      throw new Error(
+        `CultMesh operation target '${options.targetRuntimeId}' does not match connected authority '${this.identity.authorityRuntimeId}'.`,
+      );
+    }
     await this.ensureConnected();
     const messageId = options.idempotencyKey ?? this.#options.createId();
     requireText(messageId, "operation idempotencyKey");
@@ -353,22 +403,19 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       payloadEncoding: "messagepack-base64",
       payload: bytesToBase64(encode(options.payload)),
       sourceRuntimeId: this.runtimeId,
-      ...(options.targetRuntimeId ? { targetRuntimeId: options.targetRuntimeId } : {}),
+      targetRuntimeId: this.identity.authorityRuntimeId,
     };
     const response = new Promise<CultNetOperationResponseMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.#pendingOperations.delete(messageId)) return;
         reject(new Error(`CultMesh operation '${messageId}' timed out.`));
       }, this.#options.requestTimeoutMs);
-      this.#pendingOperations.set(messageId, { resolve, reject, timer });
+      this.#pendingOperations.set(messageId, { request, resolve, reject, timer });
     });
     try {
       this.send(request);
     } catch (error) {
-      const pending = this.#pendingOperations.get(messageId);
-      if (pending) clearTimeout(pending.timer);
-      this.#pendingOperations.delete(messageId);
-      throw error;
+      this.scheduleReconnect();
     }
     return response;
   }
@@ -466,6 +513,11 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 
   private connectSocket(): Promise<void> {
     this.throwIfDisposed();
+    if (this.#state === "connected" && this.#socket?.readyState === 1) return Promise.resolve();
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+    }
     if (this.#connectPromise) return this.#connectPromise;
     const generation = ++this.#socketGeneration;
     this.setState(this.#socket ? "reconnecting" : "connecting");
@@ -476,11 +528,12 @@ export class CultMeshBrowserClient implements AsyncDisposable {
   }
 
   private async openSocket(generation: number): Promise<void> {
-    const route = await this.#options.rendezvous.resolve(this.identity);
+    const route = await this.#options.rendezvous.resolve(this.identity, this.#options.trust);
     if (route.verseId !== this.identity.verseId ||
         route.authorityRuntimeId !== this.identity.authorityRuntimeId) {
       throw new Error("CultMesh rendezvous returned a route for the wrong stable identity.");
     }
+    await verifyAuthorityRoute(route, this.#options.trust);
     const endpoint = new URL(route.endpoint);
     if (endpoint.protocol !== "ws:" && endpoint.protocol !== "wss:") {
       throw new Error(`CultMesh browser route must use ws:// or wss://, got '${route.endpoint}'.`);
@@ -489,13 +542,74 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     socket.binaryType = "arraybuffer";
     try {
       await new Promise<void>((resolve, reject) => {
+        let opened = false;
+        let settled = false;
+        const handshakeId = this.#options.createId();
+        const clientNonce = randomNonce();
+        const sessionRequest: CultMeshSessionOpenMessage = {
+          schemaVersion: "cultmesh.session_open.v2",
+          messageId: handshakeId,
+          sourceRuntimeId: this.runtimeId,
+          verseId: this.identity.verseId,
+          authorityRuntimeId: this.identity.authorityRuntimeId,
+          protocolId: route.protocolId ?? "cultmesh.documents.v1",
+          routeGeneration: route.generation,
+          clientNonce,
+        };
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
         const timer = setTimeout(
-          () => reject(new Error(`CultMesh WebSocket open timed out for '${route.endpoint}'.`)),
+          () => finish(new Error(
+            opened
+              ? `CultMesh authority handshake timed out for '${route.endpoint}'.`
+              : `CultMesh WebSocket open timed out for '${route.endpoint}'.`,
+          )),
           this.#options.connectTimeoutMs,
         );
-        socket.onopen = () => { clearTimeout(timer); resolve(); };
-        socket.onerror = () => { clearTimeout(timer); reject(new Error(`CultMesh WebSocket could not open '${route.endpoint}'.`)); };
-        socket.onclose = () => { clearTimeout(timer); reject(new Error(`CultMesh WebSocket closed while opening '${route.endpoint}'.`)); };
+        socket.onopen = () => {
+          opened = true;
+          try {
+            sendSocketMessage(socket, {
+              schemaVersion: "cultnet.hello.v0",
+              runtimeId: this.runtimeId,
+              runtimeKind: "browser",
+              supportedMessageVersions: [
+                "cultmesh.session_open.v2",
+                "cultmesh.session_accepted.v2",
+                "cultnet.database_subscribe.v0",
+                "cultnet.database_unsubscribe.v0",
+                "cultnet.database_change_raw.v0",
+                "cultnet.operation_request.v0",
+                "cultnet.operation_response.v0",
+              ],
+            }, this.#options.maxFrameBytes);
+            sendSocketMessage(socket, sessionRequest, this.#options.maxFrameBytes);
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        socket.onmessage = event => {
+          void decodeSocketMessage(event, this.#options.maxFrameBytes).then(message => {
+            if (message.schemaVersion === "cultnet.error.v0") {
+              finish(new Error(message.error));
+              return;
+            }
+            if (message.schemaVersion !== "cultmesh.session_accepted.v2" || message.messageId !== handshakeId) return;
+            void validateSessionAcceptance(
+              message,
+              sessionRequest,
+              route,
+              this.#options.trust,
+            ).then(finish).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+          }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+        };
+        socket.onerror = () => finish(new Error(`CultMesh WebSocket could not open '${route.endpoint}'.`));
+        socket.onclose = () => finish(new Error(`CultMesh WebSocket closed before proving authority at '${route.endpoint}'.`));
       });
     } catch (error) {
       socket.close(1000, "CultMesh route open failed");
@@ -511,19 +625,8 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     socket.onclose = () => this.handleClosed(generation);
     this.setState("connected");
     try {
-      this.send({
-        schemaVersion: "cultnet.hello.v0",
-        runtimeId: this.runtimeId,
-        runtimeKind: "browser",
-        supportedMessageVersions: [
-          "cultnet.database_subscribe.v0",
-          "cultnet.database_unsubscribe.v0",
-          "cultnet.database_change_raw.v0",
-          "cultnet.operation_request.v0",
-          "cultnet.operation_response.v0",
-        ],
-      });
       await Promise.all([...this.#leases.values()].map(lease => this.subscribe(lease)));
+      for (const pending of this.#pendingOperations.values()) this.send(pending.request);
     } catch (error) {
       if (this.#socket === socket) this.#socket = undefined;
       socket.onclose = null;
@@ -540,12 +643,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
-    for (const pending of this.#pendingOperations.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
     this.#pendingSnapshots.clear();
-    this.#pendingOperations.clear();
     this.setState("reconnecting");
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined;
@@ -576,6 +674,15 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       case "cultnet.operation_response.v0": {
         const pending = this.#pendingOperations.get(message.messageId);
         if (!pending) return;
+        if (message.sourceRuntimeId !== this.identity.authorityRuntimeId) {
+          this.#pendingOperations.delete(message.messageId);
+          clearTimeout(pending.timer);
+          pending.reject(new Error(
+            `CultMesh operation response came from '${message.sourceRuntimeId ?? "unknown"}', expected '${this.identity.authorityRuntimeId}'.`,
+          ));
+          this.#socket?.close(1008, "CultMesh authority identity changed");
+          return;
+        }
         this.#pendingOperations.delete(message.messageId);
         clearTimeout(pending.timer);
         if (message.payloadSchema === cultNetOperationFailureSchema) {
@@ -651,6 +758,15 @@ export class CultMeshBrowserClient implements AsyncDisposable {
     if (this.#state === state) return;
     this.#state = state;
     for (const watcher of this.#stateWatchers) watcher(state);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.#disposed || this.#reconnectTimer) return;
+    this.setState("reconnecting");
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      void this.connectSocket().catch(() => this.scheduleReconnect());
+    }, this.#options.reconnectDelayMs);
   }
 
   private throwIfDisposed(): void {
@@ -729,35 +845,230 @@ async function decodeSocketMessage(event: MessageEvent, maxFrameBytes: number): 
   return parseCultNetMessage(decode(payload));
 }
 
-function selectOdinRoute(
+async function selectOdinRoute(
   response: CultMeshVerseCatalogResponseMessage,
   identity: CultMeshBrowserIdentity,
-): CultMeshBrowserRoute {
-  const matchingVerses = response.verses.filter(verse =>
-    verse.verseId === identity.verseId &&
-      verse.authorityRuntimeIds.includes(identity.authorityRuntimeId));
+  trust: CultMeshBrowserAuthorityTrustPolicy,
+): Promise<CultMeshBrowserRoute> {
+  const matchingVerses = response.verses.filter(verse => verse.verseId === identity.verseId);
   if (matchingVerses.length !== 1) {
     throw new Error(
       `Odin returned ${matchingVerses.length} routes for Verse '${identity.verseId}' authority runtime '${identity.authorityRuntimeId}'.`,
     );
   }
   const verse = matchingVerses[0];
-  const endpoints = verse.discoveryEndpoints.filter(endpoint => {
+  if (verse.authorityRoutes == null && verse.authorityRuntimeIds.length !== 1) {
+    throw new Error(
+      `Odin returned ambiguous legacy routes for Verse '${identity.verseId}'. Explicit authority route bindings are required.`,
+    );
+  }
+  if (verse.authorityRoutes == null && verse.authorityRuntimeIds[0] !== identity.authorityRuntimeId) {
+    throw new Error(
+      `Odin advertised no route for authority runtime '${identity.authorityRuntimeId}'.`,
+    );
+  }
+  const boundRoutes = verse.authorityRoutes ?? verse.discoveryEndpoints.map(endpoint => ({
+    authorityRuntimeId: verse.authorityRuntimeIds[0],
+    endpoint,
+    protocolIds: ["cultmesh.documents.v1"],
+    priority: 0,
+    generation: [verse.compatibility.transportVersion, verse.compatibility.rulesHash, endpoint].join(":"),
+    certificate: undefined,
+  }));
+  const routes = boundRoutes.filter(route =>
+    route.authorityRuntimeId === identity.authorityRuntimeId &&
+    route.protocolIds.includes("cultmesh.documents.v1") &&
+    (() => {
     try {
-      requireWebSocketEndpoint(endpoint, "Odin provider route");
+      requireWebSocketEndpoint(route.endpoint, "Odin provider route");
       return true;
     } catch {
       return false;
     }
-  });
-  if (endpoints.length === 0) {
+  })()).sort((left, right) => left.priority - right.priority || left.endpoint.localeCompare(right.endpoint));
+  if (routes.length === 0) {
     throw new Error(`Odin advertised no browser-compatible route for authority runtime '${identity.authorityRuntimeId}'.`);
   }
-  return {
-    ...identity,
-    endpoint: endpoints[0],
-    generation: [verse.compatibility.transportVersion, verse.compatibility.rulesHash, endpoints[0]].join(":"),
-  };
+  const failures: Error[] = [];
+  for (const route of routes) {
+    const candidate: CultMeshBrowserRoute = {
+      ...identity,
+      endpoint: route.endpoint,
+      protocolId: "cultmesh.documents.v1",
+      protocolIds: route.protocolIds,
+      priority: route.priority,
+      generation: route.generation,
+      ...(route.certificate ? { certificate: {
+        providerKey: {
+          keyId: route.certificate.providerKeyId,
+          x: route.certificate.providerPublicKeyX,
+          y: route.certificate.providerPublicKeyY,
+        },
+        odinKeyId: route.certificate.odinKeyId,
+        issuedAtUnixMilliseconds: route.certificate.issuedAtUnixMilliseconds,
+        expiresAtUnixMilliseconds: route.certificate.expiresAtUnixMilliseconds,
+        signature: route.certificate.signature,
+      } } : {}),
+    };
+    try {
+      await verifyAuthorityRoute(candidate, trust);
+      return candidate;
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  throw new AggregateError(
+    failures,
+    `Odin advertised no trusted browser route for authority runtime '${identity.authorityRuntimeId}'.`,
+  );
+}
+
+async function validateSessionAcceptance(
+  message: CultMeshSessionAcceptedMessage,
+  request: CultMeshSessionOpenMessage,
+  route: CultMeshBrowserRoute,
+  trust: CultMeshBrowserAuthorityTrustPolicy,
+): Promise<Error | undefined> {
+  if (!message.accepted) return new Error(message.error ?? "CultMesh authority rejected the session.");
+  const protocolId = route.protocolId ?? "cultmesh.documents.v1";
+  if (message.verseId !== request.verseId ||
+      message.authorityRuntimeId !== request.authorityRuntimeId ||
+      message.protocolId !== protocolId ||
+      message.routeGeneration !== route.generation ||
+      message.clientNonce !== request.clientNonce) {
+    return new Error(
+      `CultMesh route proved '${message.verseId}/${message.authorityRuntimeId}/${message.protocolId}/${message.routeGeneration}', ` +
+      `expected '${request.verseId}/${request.authorityRuntimeId}/${protocolId}/${route.generation}'.`,
+    );
+  }
+  if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint) && !route.certificate) return undefined;
+  const providerKey = route.certificate?.providerKey;
+  if (!providerKey || message.providerKeyId !== providerKey.keyId || !message.providerSignature) {
+    return new Error("CultMesh authority did not prove possession of the Odin-certified provider key.");
+  }
+  if (!await verifyP256(providerKey, canonicalSession(request, route.endpoint), message.providerSignature)) {
+    return new Error("CultMesh provider session proof is invalid.");
+  }
+  return undefined;
+}
+
+async function verifyAuthorityRoute(
+  route: CultMeshBrowserRoute,
+  trust: CultMeshBrowserAuthorityTrustPolicy,
+): Promise<void> {
+  const certificate = route.certificate;
+  if (!certificate) {
+    if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint)) return;
+    throw new Error("Remote CultMesh routes require an Odin-signed authority certificate.");
+  }
+  const endpoint = new URL(route.endpoint);
+  if (endpoint.protocol !== "wss:" && !(trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint))) {
+    throw new Error("Authenticated remote CultMesh browser routes require wss:// channel protection.");
+  }
+  const now = trust.now?.() ?? Date.now();
+  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {
+    throw new Error("The Odin route certificate is not currently valid.");
+  }
+  const root = trust.odinRoots?.find(candidate => candidate.keyId === certificate.odinKeyId);
+  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);
+  if (!await verifyP256(root, canonicalRoute(route), certificate.signature)) {
+    throw new Error("The Odin route certificate signature is invalid.");
+  }
+}
+
+function canonicalRoute(route: CultMeshBrowserRoute): Uint8Array {
+  const certificate = route.certificate!;
+  return canonicalFields(
+    "gamecult.cultmesh.route-certificate.v1",
+    route.verseId,
+    route.authorityRuntimeId,
+    route.endpoint,
+    [...(route.protocolIds ?? [route.protocolId ?? "cultmesh.documents.v1"])].sort().join("\u001f"),
+    String(route.priority ?? 0),
+    route.generation,
+    certificate.providerKey.keyId,
+    certificate.providerKey.x,
+    certificate.providerKey.y,
+    certificate.odinKeyId,
+    String(certificate.issuedAtUnixMilliseconds),
+    String(certificate.expiresAtUnixMilliseconds),
+  );
+}
+
+function canonicalSession(request: CultMeshSessionOpenMessage, endpoint: string): Uint8Array {
+  return canonicalFields(
+    "gamecult.cultmesh.session-proof.v1",
+    request.clientNonce,
+    request.messageId,
+    request.sourceRuntimeId,
+    request.verseId,
+    request.authorityRuntimeId,
+    request.protocolId,
+    endpoint,
+    request.routeGeneration,
+  );
+}
+
+function canonicalFields(...values: string[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const encoded = values.map(value => encoder.encode(value));
+  const total = encoded.reduce((sum, value) => sum + 4 + value.byteLength, 0);
+  const result = new Uint8Array(total);
+  const view = new DataView(result.buffer);
+  let offset = 0;
+  for (const value of encoded) {
+    view.setUint32(offset, value.byteLength, false);
+    offset += 4;
+    result.set(value, offset);
+    offset += value.byteLength;
+  }
+  return result;
+}
+
+async function verifyP256(
+  key: CultMeshBrowserP256PublicKey,
+  payload: Uint8Array,
+  signatureBase64: string,
+): Promise<boolean> {
+  try {
+    const x = base64ToBytes(key.x);
+    const y = base64ToBytes(key.y);
+    const signature = base64ToBytes(signatureBase64);
+    if (x.byteLength !== 32 || y.byteLength !== 32 || signature.byteLength !== 64) return false;
+    const raw = new Uint8Array(65);
+    raw[0] = 4;
+    raw.set(x, 1);
+    raw.set(y, 33);
+    const publicKey = await crypto.subtle.importKey(
+      "raw",
+      raw.slice().buffer as ArrayBuffer,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    return await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      publicKey,
+      signature.slice().buffer as ArrayBuffer,
+      payload.slice().buffer as ArrayBuffer,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function randomNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return bytesToBase64(bytes);
+}
+
+function isLoopbackEndpoint(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 function requireText(value: string, field: string): void {

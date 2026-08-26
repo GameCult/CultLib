@@ -17,6 +17,7 @@ namespace GameCult.Mesh.Tests;
 [TestFixture]
 public sealed class CultMeshContentSessionTests
 {
+    private const string RouteGeneration = "content-test-route-1";
     private string _directory = null!;
 
     [SetUp]
@@ -41,14 +42,20 @@ public sealed class CultMeshContentSessionTests
             StringComparer.Ordinal);
         using var contentServer = new CultMeshTcpContentServer(
             new TcpListener(IPAddress.Loopback, 0),
-            hash => providerChunks.TryGetValue(hash, out var chunk) ? chunk : null);
+            hash => providerChunks.TryGetValue(hash, out var chunk) ? chunk : null,
+            new CultMeshTcpContentServerOptions
+            {
+                VerseId = "aetheria",
+                AuthorityRuntimeId = "aetheria.daemon",
+                RouteGeneration = RouteGeneration
+            });
         var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
         var connector = new CultMeshTcpContentTransportConnector();
         using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
         using var sessions = new CultMeshSessionManager(
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
-            new ICultMeshContentTransportConnector[] { connector });
+            new ICultMeshContentTransportConnector[] { connector }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
@@ -74,6 +81,34 @@ public sealed class CultMeshContentSessionTests
     }
 
     [Test]
+    public async Task TcpContentSessionRejectsEndpointServingAnotherAuthority()
+    {
+        using var content = new CultCache(CultMesh.CreateCultCacheDocumentRegistry(
+            typeof(CultMeshCdnArtifactManifest), typeof(CultMeshCdnArtifactChunk)));
+        using var contentServer = new CultMeshTcpContentServer(
+            new TcpListener(IPAddress.Loopback, 0),
+            content,
+            new CultMeshTcpContentServerOptions
+            {
+                VerseId = "aetheria",
+                AuthorityRuntimeId = "intruder.daemon",
+                RouteGeneration = RouteGeneration
+            });
+        var endpoint = $"{CultMeshTcpContentTransportConnector.Scheme}://127.0.0.1:{contentServer.LocalEndPoint.Port}";
+        using var discovery = new CultMeshDiscoveryService(new[] { new RouteSource(endpoint) });
+        using var sessions = new CultMeshSessionManager(
+            discovery,
+            Array.Empty<ICultMeshTransportConnector>(),
+            new ICultMeshContentTransportConnector[] { new CultMeshTcpContentTransportConnector() }, CultMeshTestTrust.LocalSessions);
+
+        Func<Task> connect = async () => await sessions.ConnectContentAsync(
+            new CultMeshSessionTarget("aetheria", "aetheria.daemon"));
+
+        var error = await connect.Should().ThrowAsync<CultMeshSessionException>();
+        error.Which.Failure.Reason.Should().Be(CultMeshSessionFailureReason.Authority);
+    }
+
+    [Test]
     public async Task RudpContentSessionCarriesConcurrentChunkWindowWithoutPerFragmentSchedulerDelay()
     {
         var payload = Enumerable.Range(0, 1024 * 1024).Select(value => (byte)(value % 251)).ToArray();
@@ -91,6 +126,12 @@ public sealed class CultMeshContentSessionTests
             MaxPendingReliablePackets = 8192
         });
         using var contentServer = new CultMeshLegacyRudpContentServer(wireServer, providerCache);
+        using var identityServer = new CultMeshSessionIdentityServer(
+            wireServer,
+            "aetheria.daemon",
+            new[] { "aetheria" },
+            new[] { CultMeshProtocols.Content.Value },
+            new[] { RouteGeneration });
         using var pumpCancellation = new CancellationTokenSource();
         var pump = Task.Run(async () =>
         {
@@ -110,7 +151,7 @@ public sealed class CultMeshContentSessionTests
         using var sessions = new CultMeshSessionManager(
             discovery,
             Array.Empty<ICultMeshTransportConnector>(),
-            new ICultMeshContentTransportConnector[] { connector });
+            new ICultMeshContentTransportConnector[] { connector }, CultMeshTestTrust.LocalSessions);
         var provider = new CultMeshSessionContentProvider(
             "aetheria.daemon",
             sessions,
@@ -179,7 +220,7 @@ public sealed class CultMeshContentSessionTests
     {
         private readonly string _endpoint;
 
-        public RouteSource(string endpoint = "rudp://content.test:3076") => _endpoint = endpoint;
+        public RouteSource(string endpoint = "rudp://127.0.0.14:3076") => _endpoint = endpoint;
 
         public string SourceId => "test-rendezvous";
 
@@ -196,8 +237,14 @@ public sealed class CultMeshContentSessionTests
                         "Aetheria",
                         CultMeshVerseAuthorityModel.OperatorCluster,
                         new CultMeshVerseCompatibility("cultmesh.v1", "rules"),
-                        new[] { _endpoint },
-                        new[] { "aetheria.daemon" }),
+                        authorityRoutes: new[]
+                        {
+                            new CultMeshAuthorityRoute(
+                                "aetheria.daemon",
+                                _endpoint,
+                                new[] { CultMeshProtocols.Content.Value },
+                                generation: RouteGeneration)
+                        }),
                     SourceId,
                     now,
                     now.AddMinutes(1),
@@ -241,7 +288,7 @@ public sealed class CultMeshContentSessionTests
             ((Func<TMessage, ICultNetSchemaServerPeer, Task>)_handlers[typeof(TMessage)])(message, peer);
     }
 
-    private sealed class LoopbackSchemaClient : ICultNetSchemaClient
+    private sealed class LoopbackSchemaClient : ICultNetSchemaClient, ICultMeshVerifiedSchemaClient
     {
         private readonly LoopbackSchemaServer _server;
         private readonly Dictionary<Type, List<Delegate>> _handlers = new();
@@ -270,6 +317,8 @@ public sealed class CultMeshContentSessionTests
             handlers.Add(callback);
         }
         public void Dispose() { }
+        public bool IsVerifiedFor(string verseId, string authorityRuntimeId, string protocolId, string routeGeneration) =>
+            verseId == "aetheria" && authorityRuntimeId == "aetheria.daemon";
         public void Emit<T>(T message) where T : ICultNetSchemaMessage
         {
             if (!_handlers.TryGetValue(typeof(T), out var handlers)) return;
