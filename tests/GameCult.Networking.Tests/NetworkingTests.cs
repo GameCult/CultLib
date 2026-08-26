@@ -708,7 +708,10 @@ namespace GameCult.Networking.Tests
             Assert.That(ack.Ack, Is.EqualTo(100));
             server.Receive(ack, 30);
             Assert.That(server.PendingReliableSequences, Is.Empty);
-            var firstData = client.Send("schema", Encoding.UTF8.GetBytes("after-ack"));
+            var firstData = client.Send(
+                "schema",
+                Encoding.UTF8.GetBytes("after-ack"),
+                new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             Assert.That(firstData.Sequence, Is.EqualTo(2));
         }
 
@@ -795,11 +798,19 @@ namespace GameCult.Networking.Tests
                 new byte[] { 1 },
                 new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 });
             receiver.Receive(oldPacket);
-            foreach (var packet in Enumerable.Range(0, 40).Select(index => sender.Send(
-                "activity",
-                new byte[] { (byte)index },
-                new CultNetRudpSendOptions { Reliable = false, Ordered = false, NowMs = 0 })))
-                receiver.Receive(packet);
+            foreach (var sequence in Enumerable.Range(2, 40).Select(value => (uint)value))
+            {
+                receiver.Receive(new CultNetRudpPacket
+                {
+                    PacketType = CultNetRudpPacketType.Data,
+                    ConnectionId = 991,
+                    Sequence = sequence,
+                    ChannelId = "activity",
+                    Reliable = true,
+                    Ordered = false,
+                    Payload = new[] { (byte)sequence }
+                });
+            }
 
             sender.Receive(receiver.CreateAck());
             Assert.That(sender.PendingReliableSequences.First(), Is.EqualTo(1u));
