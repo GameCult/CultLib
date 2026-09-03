@@ -2636,3 +2636,39 @@ fn rudp_reliable_sequence_exhaustion_is_reported_not_fatal() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn tcp_framed_receive_refuses_a_length_beyond_the_advertised_maximum() -> Result<()> {
+    let profile = create_tcp_framed_transport_profile(
+        "rust-transport",
+        TcpFramedTransportProfileOptions {
+            transport_id: Some("bounded-tcp".to_string()),
+            max_payload_bytes: Some(64),
+            ..TcpFramedTransportProfileOptions::default()
+        },
+    );
+    let advertised = profile
+        .transports
+        .iter()
+        .find(|transport| transport.protocol == CultNetTransportProtocol::TcpFramed)
+        .and_then(|transport| {
+            transport
+                .channels
+                .iter()
+                .find(|channel| channel.channel_id == "schema")
+        })
+        .and_then(|channel| channel.max_payload_bytes)
+        .expect("tcp_framed schema channel advertises a maximum payload");
+
+    // Only a header, declaring more than the profile allows. Honouring it would
+    // reserve the peer's number before a single payload byte arrives.
+    let mut header = ((advertised as u64 + 1) as u32).to_be_bytes().to_vec();
+    header.extend_from_slice(b"short");
+    let mut receiver = TcpFramedTransportConnection::new(std::io::Cursor::new(header), profile);
+    let error = receiver.receive().unwrap_err();
+    assert!(
+        error.to_string().contains("exceeds advertised maximum"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
