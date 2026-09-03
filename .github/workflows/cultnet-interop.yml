@@ -92,6 +92,9 @@ jobs:
       - name: Verify Rust RUDP reliability
         run: cargo test --manifest-path packages/cultnet-rs/Cargo.toml rudp
 
+      - name: Verify Rust CultMesh runtime-local surface
+        run: cargo test --manifest-path packages/cultmesh-rs/Cargo.toml
+
       - name: Verify C# RUDP reliability
         run: dotnet test tests/GameCult.Networking.Tests/GameCult.Networking.Tests.csproj --filter "FullyQualifiedName~Rudp"
 

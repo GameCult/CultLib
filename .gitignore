@@ -307,6 +307,8 @@ node_modules/
 !packages/cultcache-rs/**
 !packages/cultnet-rs/
 !packages/cultnet-rs/**
+!packages/cultmesh-rs/
+!packages/cultmesh-rs/**
 packages/**/node_modules/
 packages/**/dist/
 packages/**/dist-test/
