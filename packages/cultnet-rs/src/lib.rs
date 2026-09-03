@@ -1,4 +1,10 @@
 mod contracts;
+mod idunn_deployment_brake;
+mod idunn_lifecycle_brake;
+mod provider_health_contracts;
+mod runtime_authority_contracts;
+mod service_identity;
+mod snapshot_query;
 mod cultmesh;
 mod framing;
 mod operation_service;
@@ -11,6 +17,12 @@ mod shard_catalog;
 mod transport;
 
 pub use contracts::*;
+pub use idunn_deployment_brake::*;
+pub use idunn_lifecycle_brake::*;
+pub use provider_health_contracts::*;
+pub use runtime_authority_contracts::*;
+pub use service_identity::*;
+pub use snapshot_query::*;
 pub use cultmesh::*;
 pub use framing::*;
 pub use operation_service::*;
