@@ -33,6 +33,15 @@ const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
+/// A peer chooses its own channel ids and its own send order, so the per-channel
+/// maps and the out-of-order hold buffer are both attacker-sized unless capped.
+const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
+/// A peer cannot be trusted to pick the next sequence honestly. One packet far
+/// ahead of the current highest would otherwise advance the receive state past
+/// every legitimate sequence still in flight and starve the session.
+const RUDP_RECEIVE_AHEAD_WINDOW: u32 = 1_024;
+const RUDP_MAX_ORDERED_BUFFERED_FRAMES: usize = 1_024;
+const RUDP_MAX_ORDERED_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultNetRudpPacketType {
@@ -529,6 +538,25 @@ impl CultNetRudpSession {
             });
         }
 
+        let far_ahead = packet.reliable
+            && self.highest_received_sequence.is_some_and(|highest| {
+                packet.sequence > highest
+                    && packet.sequence - highest > RUDP_RECEIVE_AHEAD_WINDOW
+            });
+        if far_ahead {
+            // Refuse without remembering. Recording it would move the highest
+            // received sequence out of reach of everything still in flight.
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                ready_to_send,
+                reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
+                disconnected: false,
+                disconnect_reason: Vec::new(),
+            });
+        }
+
         let duplicate = packet.reliable
             && (self.received_sequences.contains(&packet.sequence)
                 || self.highest_received_sequence.is_some_and(|highest| {
@@ -562,8 +590,15 @@ impl CultNetRudpSession {
             });
         };
         let delivered = if ordered {
-            self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
+            self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)?
         } else if packet.sequenced {
+            if !self
+                .latest_sequenced_by_channel
+                .contains_key(&frame.channel_id)
+                && self.latest_sequenced_by_channel.len() >= RUDP_MAX_TRACKED_CHANNELS
+            {
+                return Err(anyhow!("RUDP session has too many sequenced channels"));
+            }
             let latest = self
                 .latest_sequenced_by_channel
                 .get(&frame.channel_id)
@@ -724,8 +759,7 @@ impl CultNetRudpSession {
             let sequence = self.next_sequence;
             self.next_sequence = self
                 .next_sequence
-                .checked_add(1)
-                .expect("reliable sequence overflow");
+                .saturating_add(1);
             sequence
         } else if sequenced {
             let next = self
@@ -733,7 +767,7 @@ impl CultNetRudpSession {
                 .entry(channel_id.to_string())
                 .or_insert(1);
             let sequence = *next;
-            *next = next.checked_add(1).expect("sequenced channel overflow");
+            *next = next.saturating_add(1);
             sequence
         } else {
             0
@@ -807,6 +841,14 @@ impl CultNetRudpSession {
             if self.outstanding_reliable_packet_count() + packet_count > limit {
                 return Err(anyhow!("RUDP reliable send queue is full"));
             }
+        }
+        // Refuse before allocation rather than at it. A session that runs out of
+        // reliable sequence space must report it, not abort the process.
+        let required = u32::try_from(packet_count)
+            .ok()
+            .filter(|required| self.next_sequence.checked_add(*required).is_some());
+        if required.is_none() {
+            return Err(anyhow!("RUDP reliable sequence space is exhausted"));
         }
         Ok(())
     }
@@ -958,13 +1000,30 @@ impl CultNetRudpSession {
         Ok(())
     }
 
+    fn ordered_buffered_frames(&self) -> usize {
+        self.ordered_buffers.values().map(BTreeMap::len).sum()
+    }
+
+    fn ordered_buffered_bytes(&self) -> usize {
+        self.ordered_buffers
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|pending| pending.frame.payload.len())
+            .sum()
+    }
+
     fn deliver_ordered(
         &mut self,
         frame: CultNetRudpDeliveredFrame,
         next_sequence_after_frame: u32,
         expected_sequence_if_uninitialized: u32,
-    ) -> Vec<CultNetRudpDeliveredFrame> {
+    ) -> Result<Vec<CultNetRudpDeliveredFrame>> {
         let channel_id = frame.channel_id.clone();
+        if !self.ordered_next_sequence_by_channel.contains_key(&channel_id)
+            && self.ordered_next_sequence_by_channel.len() >= RUDP_MAX_TRACKED_CHANNELS
+        {
+            return Err(anyhow!("RUDP session has too many ordered channels"));
+        }
         let mut next = if let Some(next) = self
             .ordered_next_sequence_by_channel
             .get(&channel_id)
@@ -992,10 +1051,16 @@ impl CultNetRudpSession {
         }
 
         if frame.sequence < next {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         if frame.sequence > next {
+            if self.ordered_buffered_frames() >= RUDP_MAX_ORDERED_BUFFERED_FRAMES
+                || self.ordered_buffered_bytes() + frame.payload.len()
+                    > RUDP_MAX_ORDERED_BUFFERED_BYTES
+            {
+                return Err(anyhow!("RUDP ordered hold buffer is full"));
+            }
             self.ordered_buffers.entry(channel_id).or_default().insert(
                 frame.sequence,
                 PendingOrderedFrame {
@@ -1003,14 +1068,14 @@ impl CultNetRudpSession {
                     next_sequence: next_sequence_after_frame,
                 },
             );
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         self.ordered_next_sequence_by_channel
             .insert(channel_id.clone(), next_sequence_after_frame);
         let mut delivered = vec![frame];
         delivered.extend(self.drain_ordered(&channel_id));
-        delivered
+        Ok(delivered)
     }
 
     fn drain_ordered(&mut self, channel_id: &str) -> Vec<CultNetRudpDeliveredFrame> {

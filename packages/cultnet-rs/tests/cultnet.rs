@@ -2417,3 +2417,222 @@ fn schema_discovery_round_trips_over_legacy_gamecult_contract_when_inline_schema
     );
     Ok(())
 }
+
+#[test]
+fn rudp_sequenced_channel_tracking_is_bounded() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 401,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 401,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+
+    // A peer picks its own channel ids, so the sequenced map is attacker-sized.
+    let mut error = None;
+    for channel in 0..256u32 {
+        let packet = sender.send(
+            &format!("channel-{channel}"),
+            b"state".to_vec(),
+            CultNetRudpSendOptions {
+                sequenced: true,
+                ..CultNetRudpSendOptions::default()
+            },
+        )?;
+        if let Err(refused) = receiver.receive(&packet, 3) {
+            error = Some(refused);
+            break;
+        }
+    }
+    let error = error.expect("unbounded sequenced channel tracking");
+    assert!(
+        error.to_string().contains("too many sequenced channels"),
+        "unexpected refusal: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 402,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 402,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+
+    let mut error = None;
+    for channel in 0..256u32 {
+        let packet = sender.send(
+            &format!("ordered-{channel}"),
+            b"state".to_vec(),
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                ..CultNetRudpSendOptions::default()
+            },
+        )?;
+        match receiver.receive(&packet, 3) {
+            Ok(_) => {
+                sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
+            }
+            Err(refused) => {
+                error = Some(refused);
+                break;
+            }
+        }
+    }
+    let error = error.expect("unbounded ordered channel tracking");
+    assert!(
+        error.to_string().contains("too many ordered channels"),
+        "unexpected refusal: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_ordered_hold_buffer_is_bounded() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 403,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 403,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+
+    let options = CultNetRudpSendOptions {
+        reliable: true,
+        ordered: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    // Withhold the first frame so every later one has to be held.
+    let withheld = sender.send("schema", b"first".to_vec(), options.clone())?;
+    sender.receive(&receiver.create_ack_for(withheld.sequence), 3)?;
+
+    let mut error = None;
+    for step in 0..4_096u32 {
+        let packet = sender.send("schema", vec![(step % 251) as u8], options.clone())?;
+        match receiver.receive(&packet, 4) {
+            Ok(result) => {
+                assert!(result.delivered.is_empty(), "gap should hold every frame");
+                sender.receive(&receiver.create_ack_for(packet.sequence), 4)?;
+            }
+            Err(refused) => {
+                error = Some(refused);
+                break;
+            }
+        }
+    }
+    let error = error.expect("unbounded ordered hold buffer");
+    assert!(
+        error.to_string().contains("ordered hold buffer is full"),
+        "unexpected refusal: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_far_ahead_sequence_cannot_starve_the_session() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 404,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 404,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+
+    let options = CultNetRudpSendOptions {
+        reliable: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    let first = sender.send("schema", b"before".to_vec(), options.clone())?;
+    assert_eq!(receiver.receive(&first, 3)?.delivered.len(), 1);
+    sender.receive(&receiver.create_ack_for(first.sequence), 3)?;
+
+    // A forged packet far past the current highest. Recording it would push the
+    // receive state beyond every sequence still in flight.
+    let forged = CultNetRudpPacket {
+        packet_type: CultNetRudpPacketType::Data,
+        connection_id: 404,
+        sequence: first.sequence.saturating_add(500_000),
+        ack: 0,
+        ack_mask: 0,
+        channel_id: "schema".to_string(),
+        reliable: true,
+        ordered: false,
+        sequenced: false,
+        fragment_id: 0,
+        fragment_index: 0,
+        fragment_count: 0,
+        payload: b"hostile".to_vec(),
+    };
+    assert!(receiver.receive(&forged, 4)?.delivered.is_empty());
+
+    // The session must still accept the next legitimate packet.
+    let second = sender.send("schema", b"after".to_vec(), options)?;
+    assert_eq!(
+        receiver.receive(&second, 5)?.delivered[0].payload,
+        b"after".to_vec()
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_sequence_exhaustion_is_reported_not_fatal() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 405,
+        // One sequence left: the handshake takes it, so the next send is the
+        // first allocation with nowhere to go.
+        initial_sequence: u32::MAX - 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 405,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+
+    let error = sender
+        .send(
+            "schema",
+            b"one past the end".to_vec(),
+            CultNetRudpSendOptions {
+                reliable: true,
+                ..CultNetRudpSendOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("sequence space is exhausted"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
