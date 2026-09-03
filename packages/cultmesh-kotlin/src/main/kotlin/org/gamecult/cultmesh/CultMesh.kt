@@ -2629,6 +2629,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
     val resendDelayMs: Long = options.resendDelayMs
     private val maxPendingReliablePackets: Int? = options.maxPendingReliablePackets
     private var nextSequence = uint32(options.initialSequence, "initialSequence")
+    private val nextSequencedByChannel = linkedMapOf<String, Long>()
     private var nextFragmentId = 1
     var connected: Boolean = false
         private set
@@ -2636,6 +2637,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         private set
     private var highestReceivedSequence: Long? = null
     private val receivedSequences = linkedSetOf<Long>()
+    private val latestSequencedByChannel = linkedMapOf<String, Long>()
     private val pendingReliable = linkedMapOf<Long, PendingReliablePacket>()
     private val queuedReliable = ArrayDeque<CultNetRudpPacket>()
     private val orderedNextSequenceByChannel = linkedMapOf<String, Long>()
@@ -2687,6 +2689,7 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         maxFragmentBytes: Int? = null,
     ): List<CultNetRudpPacket> {
         if (!connected) throw IOException("Cannot send RUDP data before the session is connected")
+        if (options.ordered && !options.reliable) throw IOException("RUDP ordered delivery requires reliability")
         if (maxFragmentBytes != null && maxFragmentBytes <= 0) throw IOException("RUDP maxFragmentBytes must be greater than zero")
         if (maxFragmentBytes != null && payload.size > maxFragmentBytes) {
             val fragmentCount = (payload.size + maxFragmentBytes - 1) / maxFragmentBytes
@@ -2730,11 +2733,9 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
                 return CultNetRudpReceiveResult(readyToSend = readyToSend)
             }
             CultNetRudpPacketType.Ping -> {
-                rememberReceived(packet.sequence)
                 return CultNetRudpReceiveResult(readyToSend = readyToSend, reply = createPacket(CultNetRudpPacketType.Pong, "control", packet.payload))
             }
             CultNetRudpPacketType.Ack, CultNetRudpPacketType.Pong -> {
-                rememberReceived(packet.sequence)
                 return CultNetRudpReceiveResult(
                     readyToSend = readyToSend,
                     pong = packet.packetType == CultNetRudpPacketType.Pong,
@@ -2742,7 +2743,6 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
                 )
             }
             CultNetRudpPacketType.Disconnect -> {
-                rememberReceived(packet.sequence)
                 connected = false
                 return CultNetRudpReceiveResult(readyToSend = readyToSend, disconnected = true, disconnectReason = packet.payload.copyOf())
             }
@@ -2750,14 +2750,22 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
             else -> return CultNetRudpReceiveResult(readyToSend = readyToSend)
         }
 
-        val duplicate = receivedSequences.contains(packet.sequence) || (
+        val duplicate = packet.reliable && (receivedSequences.contains(packet.sequence) || (
             highestReceivedSequence != null &&
                 packet.sequence < highestReceivedSequence!! &&
                 highestReceivedSequence!! - packet.sequence >= ReceivedSequenceWindow.toLong()
-            )
-        rememberReceived(packet.sequence)
+            ))
+        if (packet.reliable) rememberReceived(packet.sequence)
         if (duplicate) return CultNetRudpReceiveResult(readyToSend = readyToSend)
         val reassembled = reassemble(packet) ?: return CultNetRudpReceiveResult(readyToSend = readyToSend)
+        if (!reassembled.ordered && packet.sequenced) {
+            val newestSequence = reassembled.nextSequence - 1
+            val latestSequence = latestSequencedByChannel[reassembled.frame.channelId]
+            if (latestSequence != null && newestSequence <= latestSequence) {
+                return CultNetRudpReceiveResult(readyToSend = readyToSend)
+            }
+            latestSequencedByChannel[reassembled.frame.channelId] = newestSequence
+        }
         return CultNetRudpReceiveResult(
             delivered = if (reassembled.ordered) deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized) else listOf(reassembled.frame),
             readyToSend = readyToSend,
@@ -2828,8 +2836,15 @@ class CultNetRudpSession(options: CultNetRudpSessionOptions) {
         fragmentIndex: Int = 0,
         fragmentCount: Int = 0,
     ): CultNetRudpPacket {
-        val sequence = nextSequence
-        nextSequence = uint32(nextSequence + 1, "sequence")
+        val sequence = when {
+            reliable -> nextSequence.also {
+                nextSequence = uint32(nextSequence + 1, "reliable sequence")
+            }
+            sequenced -> (nextSequencedByChannel[channelId] ?: 1).also {
+                nextSequencedByChannel[channelId] = uint32(it + 1, "sequenced channel sequence")
+            }
+            else -> 0
+        }
         val (ack, ackMask) = ackState()
         return CultNetRudpPacket(packetType, connectionId, sequence, ack, ackMask, channelId, reliable, ordered, sequenced, fragmentId, fragmentIndex, fragmentCount, payload.copyOf())
     }

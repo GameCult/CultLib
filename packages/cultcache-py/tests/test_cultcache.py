@@ -1110,6 +1110,52 @@ class CultCacheTests(unittest.TestCase):
             ["second", "third"],
         )
 
+    def test_cultnet_rudp_lossy_packets_cannot_create_reliable_ordered_gaps(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=198, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=198, initial_sequence=100))
+        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 198, 90, 0, 0, "control"))
+        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 198, 91, 0, 0, "control"))
+
+        realtime = sender.send("realtime", b"discarded realtime", CultNetRudpSendOptions())
+        latest = sender.send("latest", b"discarded latest state", CultNetRudpSendOptions(sequenced=True))
+        schema = sender.send("schema", b"committed response", CultNetRudpSendOptions(reliable=True, ordered=True))
+
+        self.assertEqual(realtime.sequence, 0)
+        self.assertEqual(latest.sequence, 1)
+        self.assertEqual(
+            [frame.payload.decode("utf-8") for frame in receiver.receive(schema).delivered],
+            ["committed response"],
+        )
+
+    def test_cultnet_rudp_unreliable_sequenced_delivery_is_scoped_to_its_channel(self) -> None:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=197, initial_sequence=50))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=197, initial_sequence=100))
+        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 197, 90, 0, 0, "control"))
+        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 197, 91, 0, 0, "control"))
+
+        older = sender.send("latest", b"older", CultNetRudpSendOptions(sequenced=True))
+        newer = sender.send("latest", b"newer", CultNetRudpSendOptions(sequenced=True))
+
+        self.assertEqual(older.sequence, 1)
+        self.assertEqual(newer.sequence, 2)
+        self.assertEqual(
+            [frame.payload.decode("utf-8") for frame in receiver.receive(newer).delivered],
+            ["newer"],
+        )
+        self.assertEqual(receiver.receive(older).delivered, ())
+
+    def test_cultnet_rudp_rejects_unreliable_ordered_delivery(self) -> None:
+        session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=196, initial_sequence=1))
+        session.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 196, 50, 0, 0, "control"))
+
+        with self.assertRaises(ValueError) as raised:
+            session.send(
+                "schema",
+                b"cannot order what will not retransmit",
+                CultNetRudpSendOptions(ordered=True),
+            )
+        self.assertIn("ordered delivery requires reliability", str(raised.exception))
+
     def test_cultnet_rudp_session_skips_control_packets_while_ordering_schema_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=100))

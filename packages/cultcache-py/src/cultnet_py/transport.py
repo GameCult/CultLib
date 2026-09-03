@@ -406,11 +406,13 @@ class CultNetRudpSession:
             raise ValueError("RUDP max_pending_reliable_packets must be greater than zero")
         self.max_pending_reliable_packets = options.max_pending_reliable_packets
         self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
+        self._next_sequenced_by_channel: dict[str, int] = {}
         self._next_fragment_id = 1
         self._connected = False
         self._last_received_at_ms: int | None = None
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
+        self._latest_sequenced_by_channel: dict[str, int] = {}
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
         self._queued_reliable: deque[CultNetRudpPacket] = deque()
         self._ordered_next_sequence_by_channel: dict[str, int] = {}
@@ -495,6 +497,8 @@ class CultNetRudpSession:
             raise ValueError("Cannot send RUDP data before the session is connected")
 
         options = options or CultNetRudpSendOptions()
+        if options.ordered and not options.reliable:
+            raise ValueError("RUDP ordered delivery requires reliability")
         if max_fragment_bytes is not None and max_fragment_bytes <= 0:
             raise ValueError("RUDP max_fragment_bytes must be greater than zero")
 
@@ -550,14 +554,12 @@ class CultNetRudpSession:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
         if packet.packet_type == CultNetRudpPacketType.PING:
-            self._remember_received(packet.sequence)
             return CultNetRudpReceiveResult(
                 ready_to_send=ready_to_send,
                 reply=self._create_packet(CultNetRudpPacketType.PONG, "control", packet.payload)
             )
 
         if packet.packet_type in (CultNetRudpPacketType.ACK, CultNetRudpPacketType.PONG):
-            self._remember_received(packet.sequence)
             return CultNetRudpReceiveResult(
                 ready_to_send=ready_to_send,
                 pong=packet.packet_type == CultNetRudpPacketType.PONG,
@@ -565,7 +567,6 @@ class CultNetRudpSession:
             )
 
         if packet.packet_type == CultNetRudpPacketType.DISCONNECT:
-            self._remember_received(packet.sequence)
             self._connected = False
             return CultNetRudpReceiveResult(
                 ready_to_send=ready_to_send,
@@ -576,12 +577,15 @@ class CultNetRudpSession:
         if packet.packet_type != CultNetRudpPacketType.DATA:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
-        duplicate = packet.sequence in self._received_sequences or (
-            self._highest_received_sequence is not None
-            and packet.sequence < self._highest_received_sequence
-            and self._highest_received_sequence - packet.sequence >= self.RECEIVED_SEQUENCE_WINDOW
+        duplicate = packet.reliable and (
+            packet.sequence in self._received_sequences or (
+                self._highest_received_sequence is not None
+                and packet.sequence < self._highest_received_sequence
+                and self._highest_received_sequence - packet.sequence >= self.RECEIVED_SEQUENCE_WINDOW
+            )
         )
-        self._remember_received(packet.sequence)
+        if packet.reliable:
+            self._remember_received(packet.sequence)
         if duplicate:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
@@ -589,6 +593,13 @@ class CultNetRudpSession:
         if reassembled is None:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
         frame, ordered, next_sequence = reassembled
+        if not ordered and packet.sequenced:
+            newest_sequence = next_sequence - 1
+            latest_sequence = self._latest_sequenced_by_channel.get(frame.channel_id)
+            if latest_sequence is not None and newest_sequence <= latest_sequence:
+                return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
+            self._latest_sequenced_by_channel[frame.channel_id] = newest_sequence
+            return CultNetRudpReceiveResult(delivered=(frame,), ready_to_send=ready_to_send)
         if not ordered:
             return CultNetRudpReceiveResult(delivered=(frame,), ready_to_send=ready_to_send)
         return CultNetRudpReceiveResult(
@@ -664,8 +675,17 @@ class CultNetRudpSession:
         fragment_index: int = 0,
         fragment_count: int = 0,
     ) -> CultNetRudpPacket:
-        sequence = self._next_sequence
-        self._next_sequence = _uint32(self._next_sequence + 1, "sequence")
+        if reliable:
+            sequence = self._next_sequence
+            self._next_sequence = _uint32(self._next_sequence + 1, "reliable sequence")
+        elif sequenced:
+            sequence = self._next_sequenced_by_channel.get(channel_id, 1)
+            self._next_sequenced_by_channel[channel_id] = _uint32(
+                sequence + 1,
+                "sequenced channel sequence",
+            )
+        else:
+            sequence = 0
         ack, ack_mask = self._ack_state()
         return CultNetRudpPacket(
             packet_type=packet_type,
