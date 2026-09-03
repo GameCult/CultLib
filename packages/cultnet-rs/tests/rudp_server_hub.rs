@@ -453,9 +453,41 @@ fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
         }
         assert_eq!(receiver.receive(&packet, sequence)?.delivered.len(), 1);
     }
-    assert!(
+    // Separating the sequence domains moved duplicate suppression onto the
+    // reliable domain, so a replayed lossy datagram is delivered again rather
+    // than silently dropped. Lossy traffic is remembered nowhere, which is what
+    // bounds its history.
+    assert_eq!(
         receiver
             .receive(&oldest.expect("oldest packet"), 4_101)?
+            .delivered
+            .len(),
+        1
+    );
+
+    // The bounded replay window still guards the reliable domain, and nothing
+    // else asserts it once the lossy path stopped being remembered.
+    let mut oldest_reliable = None;
+    for step in 0..4_100u64 {
+        let packet = sender.send(
+            "schema",
+            vec![(step % 251) as u8],
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: false,
+                sequenced: false,
+                now_ms: step,
+            },
+        )?;
+        if oldest_reliable.is_none() {
+            oldest_reliable = Some(packet.clone());
+        }
+        assert_eq!(receiver.receive(&packet, step)?.delivered.len(), 1);
+        sender.receive(&receiver.create_ack_for(packet.sequence), step)?;
+    }
+    assert!(
+        receiver
+            .receive(&oldest_reliable.expect("oldest reliable packet"), 4_101)?
             .delivered
             .is_empty()
     );
