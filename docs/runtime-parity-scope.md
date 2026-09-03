@@ -89,6 +89,14 @@ server body, is deliberately not made.
   outside any conformance harness, and its stream, negotiation, and shared-memory frame-ring
   surfaces have never been checked against the browser, Kotlin, and TypeScript CultMesh bodies
   they must interoperate with. Runtime-local tests pass; that is not a parity claim.
+- Finish porting RUDP hardening from the retiring GameCult/cultnet-rs lineage. Its exact
+  acknowledgement receipts are in. Two commits are not: bounded session memory (4a54f46) and
+  hostile sequence rollover rejection (91609ff). They rebuild the receive path -- stale-sequence
+  rejection, per-channel tracking caps, reassembly and ordered-buffer byte accounting -- in the
+  same code this lineage reworked with sequence domains and ACK horizons, and they change when
+  packets are dropped and reassembly refused. That is wire-observable, so the interop lanes are
+  the gate, not a local build. Until they land, this runtime accepts sequence and reassembly
+  input the other lineage rejects. Do not delete that repository before this is resolved.
 - Keep performance claims evidence-bound: C# owns SoA; Python has benchmark
   comparison gates; other runtimes should advertise measured native hot paths
   only when those paths exist.
