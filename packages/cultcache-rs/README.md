@@ -53,7 +53,7 @@ struct Settings {
 
 let mut cache = CultCache::new();
 cache.register_entry_type::<Settings>()?;
-cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.msgpack"));
+cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"));
 cache.pull_all_backing_stores()?;
 
 cache.put("app", &Settings {
@@ -136,7 +136,7 @@ pub struct PlayerData {
 
 let mut cache = CultCache::builder()
     .with_generated_entries(game_entries())
-    .with_generic_store(SingleFileMessagePackBackingStore::new("cache.msgpack"))
+    .with_generic_store(SingleFileMessagePackBackingStore::new("cache.cc"))
     .build()?;
 
 cache.pull_all_backing_stores()?;
@@ -173,26 +173,59 @@ without pretending Rust has runtime reflection hiding under the floorboards.
 - `get_envelope::<T>`
 - `get_required_envelope::<T>`
 - `get_all::<T>`
+- `get_all_with_keys::<T>`
+- `soa::<T>`
 - `put::<T>`
 - `put_envelope::<T>`
 - `update::<T>`
 - `delete::<T>`
 - `snapshot`
+- `snapshot_soa`
+- `load_soa`
 - `SingleFileMessagePackBackingStore`
+
+## Structure Of Arrays
+
+The C# CultCache hot path exposes CPU-local SoA scans as:
+
+```csharp
+Span<float> x = cache.Soa<PlayerTransform>()
+    .Column<float>(nameof(PlayerTransform.PositionX))
+    .Span;
+```
+
+Rust cannot discover those columns through runtime reflection, so each domain
+type declares its column extractors explicitly with `SoaDocument` or the
+`cultcache_soa!` helper:
+
+```rust
+cultcache_soa!(PlayerTransform {
+    "position_x" => |row: &PlayerTransform| row.position_x,
+    "health" => |row: &PlayerTransform| row.health,
+});
+
+let table = cache.soa::<PlayerTransform>()?;
+let health = table.column::<i32>("health")?;
+```
+
+This is the same public shape as the C# rite: callers ask the cache for a typed
+table, then pull contiguous typed columns by name. The Rust version is explicit
+about the extractor table because the closed-world schema boundary is a virtue,
+not a missing reflection party trick.
 
 ## Backing Store Routing
 
 Generic store:
 
 ```rust
-cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.msgpack"));
+cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"));
 ```
 
 Type-specific store:
 
 ```rust
 cache.add_backing_store(
-    SingleFileMessagePackBackingStore::new("players.msgpack"),
+    SingleFileMessagePackBackingStore::new("players.cc"),
     ["player"],
 );
 ```
@@ -250,38 +283,8 @@ marked `default` use `Default::default()` when older payloads are read. Deleted
 field slots should stay reserved until an explicit store migration rewrites the
 data.
 
-The single-file MessagePack store rewrites one complete snapshot. Under the
-exclusive sidecar lock it removes abandoned candidates without following them,
-creates a unique same-directory candidate with create-new semantics, writes and
-flushes it, and then replaces the committed pathname without deleting that
-pathname first. A process interruption before replacement leaves the previous
-snapshot authoritative. Once replacement succeeds, readers observe the complete
-new snapshot rather than a partial file.
-
-Unix requests a parent-directory flush after replacement. Windows uses
-`MoveFileExW` with replace-existing and write-through flags. If the final Unix
-directory flush fails, the method returns a downcastable
-`CommittedSnapshotDurabilityUncertain`: the complete new snapshot may already be
-visible, so the caller must fail-stop or reopen and reconcile before issuing
-higher-level work again. Treating that error as "not committed" and blindly
-retrying can duplicate commands or receipts.
-
-Abandoned `.<uuid>.tmp` candidates are never read as committed state and are
-removed by the next exclusive writer. Cleanup recognizes only the exact
-canonical UUID form emitted for that target, including targets whose native
-filename is not UTF-8; similar `.tmp` names remain untouched. Candidate creation
-uses create-new semantics, so an unexpected file or symlink collision fails
-instead of being opened or truncated. The canonical candidate filename namespace
-is reserved to the store.
-
-These guarantees assume a local filesystem that honors the platform rename and
-flush primitives, and writers that honor the sidecar lock. Network filesystems,
-faulty storage hardware, and unrelated writers may provide weaker behavior.
-Fault-injection tests prove the process-visible old-or-new outcomes around the
-replacement boundary; they do not simulate sudden power loss or prove that a
-device honored a successful flush.
-
-This is a sane starting point for small typed state surfaces, settings, Epiphany agent memory,
+The single-file MessagePack store rewrites an atomic snapshot. That is a sane
+starting point for small typed state surfaces, settings, Epiphany agent memory,
 heartbeat state, and other compact control-plane data. Large corpora should use
 a sharded store or a real database instead of asking one file to become a
 warehouse and then acting wounded when physics invoices us.
@@ -290,9 +293,6 @@ The single-file store uses a sidecar lock file for shared reads and exclusive
 writes. That protects ordinary multi-process access to the same file. It is
 still not a multi-master replication protocol, and it is not a substitute for a
 coordinator when higher-level write ordering matters.
-An explicit unlock error cannot replace the write outcome: dropping the lock-file
-handle is the final OS lock-release path, so a committed-durability-uncertain
-result remains inspectable rather than being masked by cleanup noise.
 
 ## Near-Term Ergonomic Improvements
 
