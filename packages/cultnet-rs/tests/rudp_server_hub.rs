@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::time::Duration;
 
@@ -317,16 +318,32 @@ fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<(
         },
         Some(1),
     )?;
-    assert_eq!(packets.len(), 40);
+    // Forty one-byte fragments cannot leave inside one reliable send window. The
+    // window's worth goes out now and the rest queue until acknowledgements free
+    // space, which is the crossing this test exists to prove.
+    assert_eq!(packets.len(), CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS);
+    assert_eq!(
+        sender.queued_reliable_packet_count(),
+        40 - CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS
+    );
+
+    let mut wire = VecDeque::from(packets);
     let mut delivered = Vec::new();
-    for packet in &packets {
-        let result = receiver.receive(packet, 2)?;
-        delivered.extend(result.delivered);
-        sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
+    while !wire.is_empty() {
+        let admitted = wire.len();
+        for _ in 0..admitted {
+            let packet = wire.pop_front().expect("admitted packet remains queued");
+            let received = receiver.receive(&packet, 2)?;
+            delivered.extend(received.delivered);
+        }
+        let acknowledged = sender.receive(&receiver.create_ack(), 3)?;
+        wire.extend(acknowledged.ready_to_send);
     }
+
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].payload, vec![0x5a; 40]);
     assert!(sender.pending_reliable_sequences().is_empty());
+    assert_eq!(sender.outstanding_reliable_packet_count(), 0);
     Ok(())
 }
 

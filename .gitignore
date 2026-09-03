@@ -309,6 +309,12 @@ node_modules/
 !packages/cultnet-rs/**
 !packages/cultmesh-rs/
 !packages/cultmesh-rs/**
+!packages/cultmath/
+!packages/cultmath/**
+!packages/cultmesh-browser/
+!packages/cultmesh-browser/**
+!packages/cultmesh-kotlin/
+!packages/cultmesh-kotlin/**
 packages/**/node_modules/
 packages/**/dist/
 packages/**/dist-test/
