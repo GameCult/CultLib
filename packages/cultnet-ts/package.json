@@ -26,7 +26,7 @@
     "prepack": "node tools/generate-swarm-contracts.mjs && node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "typecheck": "node tools/generate-swarm-contracts.mjs && node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
     "test": "node tools/generate-swarm-contracts.mjs && node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "test:interop": "node tools/generate-swarm-contracts.mjs && node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/interop/*.test.js"
+    "test:interop": "node tools/generate-swarm-contracts.mjs && node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/test/interop/*.test.js"
   },
   "keywords": [
     "messagepack",

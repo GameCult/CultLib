@@ -414,6 +414,12 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   const advertiseHost = findAdvertiseHost();
 
   const servers: RunningServeProcess[] = [];
+  // Registered before anything is spawned. A peer whose readiness rejects
+  // would otherwise skip this and strand every peer already running.
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
   logInteropPhase("schema-v0", "start rust peer");
   servers.push(await spawnServeProcess("rust", {
     command: rustBinaryPath,
@@ -497,10 +503,6 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
     env: { PYTHONPATH: cultcachePySrc },
   }));
   await servers[servers.length - 1].ready;
-
-  t.after(async () => {
-    await Promise.all(servers.map(stopProcess));
-  });
 
   logInteropPhase("schema-v0", "typescript dials rust");
   const tsDial = await runJsonCommand("ts-dial", process.execPath, [
@@ -989,6 +991,12 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
   const discoveryPort = await getFreePort();
   const advertiseHost = findAdvertiseHost();
   const servers: RunningServeProcess[] = [];
+  // Registered before anything is spawned. A peer whose readiness rejects
+  // would otherwise skip this and strand every peer already running.
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
   servers.push(await spawnServeProcess("rust-rudp", {
     command: rustBinaryPath,
     args: [
@@ -1029,10 +1037,6 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
     cwd: cultNetTsRoot,
   }));
   await servers[servers.length - 1].ready;
-
-  t.after(async () => {
-    await Promise.all(servers.map(stopProcess));
-  });
 
   logInteropPhase("ts-rust-full-rudp", "typescript dials rust over rudp");
   const tsRudpDial = await runJsonCommand("ts-rust-rudp-dial", process.execPath, [
@@ -1139,6 +1143,7 @@ test("CultNet Python and TypeScript exchange schema frames when Python dials a T
     assert.equal(exitCode, 0, pythonClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (pythonClient.child.exitCode === null && !pythonClient.child.killed) {
       pythonClient.child.kill("SIGTERM");
       await once(pythonClient.child, "exit").catch(() => undefined);
@@ -1246,6 +1251,7 @@ test("CultNet Python and TypeScript exchange schema-v0 MessagePack messages over
     assert.equal(exitCode, 0, pythonClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (pythonClient.child.exitCode === null && !pythonClient.child.killed) {
       pythonClient.child.kill("SIGTERM");
       await once(pythonClient.child, "exit").catch(() => undefined);
@@ -1322,6 +1328,7 @@ test("CultNet Rust and TypeScript exchange schema frames when Rust dials a TypeS
     assert.equal(exitCode, 0, rustClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (rustClient.child.exitCode === null && !rustClient.child.killed) {
       rustClient.child.kill("SIGTERM");
       await once(rustClient.child, "exit").catch(() => undefined);
@@ -1431,6 +1438,7 @@ test("CultNet Rust and TypeScript exchange schema-v0 MessagePack messages over R
     assert.equal(exitCode, 0, rustClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (rustClient.child.exitCode === null && !rustClient.child.killed) {
       rustClient.child.kill("SIGTERM");
       await once(rustClient.child, "exit").catch(() => undefined);
@@ -1507,6 +1515,7 @@ test("CultNet C# and TypeScript exchange schema frames when C# dials a TypeScrip
     assert.equal(exitCode, 0, csharpClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (csharpClient.child.exitCode === null && !csharpClient.child.killed) {
       csharpClient.child.kill("SIGTERM");
       await once(csharpClient.child, "exit").catch(() => undefined);
@@ -1616,6 +1625,7 @@ test("CultNet C# and TypeScript exchange schema-v0 MessagePack messages over RUD
     assert.equal(exitCode, 0, csharpClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (csharpClient.child.exitCode === null && !csharpClient.child.killed) {
       csharpClient.child.kill("SIGTERM");
       await once(csharpClient.child, "exit").catch(() => undefined);
@@ -1692,6 +1702,7 @@ test("CultNet Kotlin and TypeScript exchange schema frames when Kotlin dials a T
     assert.equal(exitCode, 0, kotlinClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (kotlinClient.child.exitCode === null && !kotlinClient.child.killed) {
       kotlinClient.child.kill("SIGTERM");
       await once(kotlinClient.child, "exit").catch(() => undefined);
@@ -1801,6 +1812,7 @@ test("CultNet Kotlin and TypeScript exchange schema-v0 MessagePack messages over
     assert.equal(exitCode, 0, kotlinClient.stderr.join(""));
   } finally {
     server.close();
+    closeUdpSocket(serverSocket);
     if (kotlinClient.child.exitCode === null && !kotlinClient.child.killed) {
       kotlinClient.child.kill("SIGTERM");
       await once(kotlinClient.child, "exit").catch(() => undefined);
@@ -1823,6 +1835,12 @@ test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP"
   const discoveryPort = await getFreePort();
   const advertiseHost = findAdvertiseHost();
   const servers: RunningServeProcess[] = [];
+  // Registered before anything is spawned. A peer whose readiness rejects
+  // would otherwise skip this and strand every peer already running.
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
   servers.push(await spawnServeProcess("csharp-rudp", {
     command: dotnetCommand,
     args: [
@@ -1864,10 +1882,6 @@ test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP"
     cwd: cultNetTsRoot,
   }));
   await servers[servers.length - 1].ready;
-
-  t.after(async () => {
-    await Promise.all(servers.map(stopProcess));
-  });
 
   logInteropPhase("ts-csharp-full-rudp", "typescript dials csharp over rudp");
   const tsRudpDial = await runJsonCommand("ts-csharp-rudp-dial", process.execPath, [
@@ -1923,6 +1937,12 @@ test("CultNet TypeScript and Kotlin full interop peers exchange schema-v0 over R
   const discoveryPort = await getFreePort();
   const advertiseHost = findAdvertiseHost();
   const servers: RunningServeProcess[] = [];
+  // Registered before anything is spawned. A peer whose readiness rejects
+  // would otherwise skip this and strand every peer already running.
+  t.after(async () => {
+    await Promise.all(servers.map(stopProcess));
+  });
+
   servers.push(await spawnServeProcess("kotlin-rudp", {
     command: kotlinJavaCommand,
     args: [
@@ -1965,10 +1985,6 @@ test("CultNet TypeScript and Kotlin full interop peers exchange schema-v0 over R
     cwd: cultNetTsRoot,
   }));
   await servers[servers.length - 1].ready;
-
-  t.after(async () => {
-    await Promise.all(servers.map(stopProcess));
-  });
 
   logInteropPhase("ts-kotlin-full-rudp", "typescript dials kotlin over rudp");
   const tsRudpDial = await runJsonCommand("ts-kotlin-rudp-dial", process.execPath, [
@@ -3158,6 +3174,20 @@ function spawnRustRudpMessageClient(remotePort: number): Omit<RunningPythonRudpP
   });
 
   return { child, stderr };
+}
+
+/** Closes a socket this file bound, tolerating a transport that adopted and
+ * already closed it. A socket left open holds the event loop forever, which is
+ * invisible while tests pass and fatal to the runner's exit. */
+function closeUdpSocket(socket: Socket | undefined): void {
+  if (!socket) {
+    return;
+  }
+  try {
+    socket.close();
+  } catch {
+    // already closed
+  }
 }
 
 async function bindUdpSocket(): Promise<Socket> {
