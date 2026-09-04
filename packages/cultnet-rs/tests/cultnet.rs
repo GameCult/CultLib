@@ -258,6 +258,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
                     max_payload_bytes: None,
                     max_fragment_bytes: None,
                     max_pending_reliable_packets: None,
+                                    reliable_expire_after_ms: None,
                 }],
             }],
         }]),
@@ -365,6 +366,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             max_fragment_bytes: Some(1000),
             max_pending_reliable_packets: Some(64),
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         },
     );
 
@@ -2815,5 +2817,35 @@ fn accept_rudp_session(session: &mut CultNetRudpSession, connection_id: u32) -> 
         },
         0,
     )?;
+    Ok(())
+}
+
+#[test]
+fn rudp_profile_expires_only_the_media_channel() -> Result<()> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    let peer = socket.local_addr()?;
+    let options = CultNetRudpSocketTransportOptions::client("expiry-profile", socket, peer, 11);
+    let connection = CultNetRudpSocketTransportConnection::new(options)?;
+
+    let channels = connection
+        .profile
+        .transports
+        .iter()
+        .flat_map(|transport| transport.channels.iter())
+        .map(|channel| (channel.channel_id.as_str(), channel.reliable_expire_after_ms))
+        .collect::<Vec<_>>();
+
+    assert!(
+        channels.contains(&("media", Some(75))),
+        "the media channel advertises its expiry so a peer can see it: {channels:?}"
+    );
+    for (channel_id, expiry) in &channels {
+        if *channel_id != "media" {
+            assert_eq!(
+                *expiry, None,
+                "state channel {channel_id} must never expire a reliable send"
+            );
+        }
+    }
     Ok(())
 }

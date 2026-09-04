@@ -142,6 +142,12 @@ pub struct CultNetTransportChannel {
     pub max_fragment_bytes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending_reliable_packets: Option<u32>,
+    /// Drop a reliable packet on this channel instead of retransmitting it once
+    /// this many milliseconds have passed since the send. Omitted when absent,
+    /// so a profile that does not set it is byte-identical to one from a
+    /// runtime that does not know the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliable_expire_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

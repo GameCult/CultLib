@@ -1266,7 +1266,6 @@ pub struct CultNetRudpSocketTransportConnection {
     max_fragment_bytes: Option<usize>,
     disconnect_reason: Option<Vec<u8>>,
     pong_payloads: VecDeque<Vec<u8>>,
-    media_reliable_expire_after_ms: Option<u64>,
 }
 
 pub struct CultNetRudpServerHubOptions {
@@ -1351,7 +1350,6 @@ pub struct CultNetRudpServerHub {
     max_payload_bytes: usize,
     max_fragment_bytes: Option<usize>,
     max_peers: usize,
-    media_reliable_expire_after_ms: Option<u64>,
     next_session_generation: u64,
     peers: BTreeMap<SocketAddr, CultNetRudpServerPeer>,
     pending_events: VecDeque<CultNetRudpServerEvent>,
@@ -1373,6 +1371,7 @@ impl CultNetRudpServerHub {
         let profile = create_rudp_transport_profile(
             options.runtime_id,
             RudpTransportProfileOptions {
+                media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 transport_id: options.transport_id,
                 host: Some(local_addr.ip().to_string()),
                 port: Some(local_addr.port()),
@@ -1383,7 +1382,6 @@ impl CultNetRudpServerHub {
             },
         );
         Ok(Self {
-            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             socket: options.socket,
             connection_id: options.connection_id,
             initial_sequence: options.initial_sequence,
@@ -1449,7 +1447,11 @@ impl CultNetRudpServerHub {
             peer.session.send_many(
                 channel_id,
                 payload,
-                channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms),
+                channel_send_options(
+                channel_id,
+                now_ms(),
+                channel_reliable_expire_after_ms(&self.profile, channel_id),
+            ),
                 self.max_fragment_bytes,
             )?
         };
@@ -1668,6 +1670,7 @@ impl CultNetRudpSocketTransportConnection {
         let profile = create_rudp_transport_profile(
             options.runtime_id,
             RudpTransportProfileOptions {
+                media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 transport_id: options.transport_id,
                 host: Some(local_addr.ip().to_string()),
                 port: Some(local_addr.port()),
@@ -1688,7 +1691,6 @@ impl CultNetRudpSocketTransportConnection {
         });
         session.set_max_payload_bytes(max_payload_bytes.map(|value| value as usize));
         Ok(Self {
-            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             socket: options.socket,
             session,
             mode: options.mode,
@@ -1732,7 +1734,11 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
         let options =
-            channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms);
+            channel_send_options(
+                channel_id,
+                now_ms(),
+                channel_reliable_expire_after_ms(&self.profile, channel_id),
+            );
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
@@ -1749,7 +1755,11 @@ impl CultNetRudpSocketTransportConnection {
         payload: Vec<u8>,
     ) -> Result<CultNetRudpReliableSendReceipt> {
         let options =
-            channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms);
+            channel_send_options(
+                channel_id,
+                now_ms(),
+                channel_reliable_expire_after_ms(&self.profile, channel_id),
+            );
         // This lineage has no reliable-expiry concept, so every reliable channel is
         // already non-expiring. Restore the expiry half of this guard if one is added.
         if !options.reliable {
@@ -2062,6 +2072,7 @@ pub struct RudpTransportProfileOptions {
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
     pub reconnect_policy: Option<CultNetReconnectPolicy>,
+    pub media_reliable_expire_after_ms: Option<u64>,
 }
 
 pub fn create_rudp_transport_profile(
@@ -2092,6 +2103,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "latest".to_string(),
@@ -2100,6 +2112,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "realtime".to_string(),
@@ -2108,6 +2121,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "media".to_string(),
@@ -2116,6 +2130,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 },
             ],
         }],
@@ -2224,10 +2239,25 @@ fn packet_type_to_code(packet_type: CultNetRudpPacketType) -> u8 {
     }
 }
 
+/// The advertised profile owns each channel's expiry. Resolving it here keeps
+/// one answer for what a channel does, rather than a runtime field that can
+/// disagree with the profile the peer was shown.
+fn channel_reliable_expire_after_ms(
+    profile: &CultNetTransportProfile,
+    channel_id: &str,
+) -> Option<u64> {
+    profile
+        .transports
+        .iter()
+        .flat_map(|transport| transport.channels.iter())
+        .find(|channel| channel.channel_id == channel_id)
+        .and_then(|channel| channel.reliable_expire_after_ms)
+}
+
 fn channel_send_options(
     channel_id: &str,
     now_ms: u64,
-    media_reliable_expire_after_ms: Option<u64>,
+    reliable_expire_after_ms: Option<u64>,
 ) -> CultNetRudpSendOptions {
     match channel_id {
         "schema" => CultNetRudpSendOptions {
@@ -2249,7 +2279,7 @@ fn channel_send_options(
             ordered: false,
             sequenced: false,
             now_ms,
-            reliable_expire_after_ms: media_reliable_expire_after_ms,
+            reliable_expire_after_ms,
         },
         _ => CultNetRudpSendOptions {
             reliable: false,
