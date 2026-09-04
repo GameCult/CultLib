@@ -284,6 +284,16 @@ pub struct PushAllOptions {
     pub soft: bool,
 }
 
+/// One per-entry expectation for [`SingleFileMessagePackBackingStore::compare_exchange`].
+/// `current` is the envelope the caller believes is stored, or `None` when it
+/// believes the identity is absent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CultCacheExpectedEnvelope {
+    pub key: String,
+    pub r#type: String,
+    pub current: Option<CultCacheEnvelope>,
+}
+
 /// Result of one nonblocking whole-snapshot compare-and-exchange. Contention is
 /// reported rather than waited on, so the caller keeps retry and scheduling
 /// authority instead of blocking inside the store.
@@ -695,6 +705,52 @@ impl SingleFileMessagePackBackingStore {
         fs2::FileExt::unlock(&lock)
             .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
         result
+    }
+
+    /// Replaces the named entries only if each still matches its expectation.
+    /// Unlike the snapshot form this constrains only the identities named, so
+    /// unrelated concurrent writes do not lose the race.
+    pub fn compare_exchange(
+        &self,
+        expected: &[CultCacheExpectedEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<bool> {
+        self.with_exclusive_lock(|| {
+            let mut entries = self.read_all_unlocked()?;
+            for condition in expected {
+                let current = entries
+                    .iter()
+                    .find(|entry| entry.r#type == condition.r#type && entry.key == condition.key);
+                if current != condition.current.as_ref() {
+                    return Ok(false);
+                }
+                if let Some(envelope) = condition.current.as_ref()
+                    && (envelope.r#type != condition.r#type || envelope.key != condition.key)
+                {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange expectation identity differs from its envelope"
+                    ));
+                }
+            }
+            let mut replacement_ids = BTreeSet::new();
+            for replacement in replacements {
+                if replacement.key.trim().is_empty() || replacement.r#type.trim().is_empty() {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange replacement identity is empty"
+                    ));
+                }
+                if !replacement_ids.insert(entry_id(replacement)) {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange contains a duplicate replacement"
+                    ));
+                }
+            }
+            entries.retain(|entry| !replacement_ids.contains(&entry_id(entry)));
+            entries.extend_from_slice(replacements);
+            entries.sort_by_key(entry_id);
+            self.write_all_unlocked(&entries)?;
+            Ok(true)
+        })
     }
 
     /// Replaces the whole snapshot only if it still equals `expected`, waiting
@@ -4086,6 +4142,99 @@ mod tests {
             "a duplicate identity would make the snapshot ambiguous"
         );
         assert_eq!(store.pull_all_read_only_snapshot()?, Vec::new());
+        Ok(())
+    }
+
+    #[test]
+    fn per_entry_exchange_constrains_only_the_identities_it_names() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SingleFileMessagePackBackingStore::new(temp.path().join("generation.cc"));
+
+        let admitted = snapshot_envelope("admitted", b"one");
+        let unrelated = snapshot_envelope("unrelated", b"other");
+        assert!(store.compare_exchange(
+            &[
+                CultCacheExpectedEnvelope {
+                    key: "admitted".into(),
+                    r#type: "snapshot.record".into(),
+                    current: None,
+                },
+                CultCacheExpectedEnvelope {
+                    key: "unrelated".into(),
+                    r#type: "snapshot.record".into(),
+                    current: None,
+                },
+            ],
+            &[admitted.clone(), unrelated.clone()],
+        )?);
+
+        // The snapshot moved, but an expectation naming only `admitted` still
+        // holds. A whole-snapshot exchange would have lost this race.
+        let next = snapshot_envelope("admitted", b"two");
+        assert!(store.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: "admitted".into(),
+                r#type: "snapshot.record".into(),
+                current: Some(admitted.clone()),
+            }],
+            &[next.clone()],
+        )?);
+        assert_eq!(
+            store.pull_all_read_only_snapshot()?,
+            vec![next.clone(), unrelated.clone()]
+        );
+
+        // A stale expectation for that identity now loses.
+        assert!(!store.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: "admitted".into(),
+                r#type: "snapshot.record".into(),
+                current: Some(admitted),
+            }],
+            &[snapshot_envelope("admitted", b"three")],
+        )?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, vec![next, unrelated]);
+        Ok(())
+    }
+
+    #[test]
+    fn per_entry_exchange_distinguishes_absent_from_stored() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SingleFileMessagePackBackingStore::new(temp.path().join("generation.cc"));
+        let admitted = snapshot_envelope("admitted", b"one");
+
+        // Expecting a stored value where nothing is stored must not commit.
+        assert!(!store.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: "admitted".into(),
+                r#type: "snapshot.record".into(),
+                current: Some(admitted.clone()),
+            }],
+            &[admitted.clone()],
+        )?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, Vec::new());
+
+        // Expecting absence commits the first writer.
+        assert!(store.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: "admitted".into(),
+                r#type: "snapshot.record".into(),
+                current: None,
+            }],
+            &[admitted.clone()],
+        )?);
+
+        // And the second writer expecting absence now loses, which is what
+        // makes this usable as a create-once claim.
+        assert!(!store.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: "admitted".into(),
+                r#type: "snapshot.record".into(),
+                current: None,
+            }],
+            &[snapshot_envelope("admitted", b"two")],
+        )?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, vec![admitted]);
         Ok(())
     }
 }
