@@ -1474,6 +1474,7 @@ impl SchemaMessageSender for RudpSessionSender<'_> {
                 ordered: true,
                 sequenced: false,
                 now_ms: rudp_now_ms(),
+                            reliable_expire_after_ms: None,
             },
             Some(RUDP_INTEROP_MAX_FRAGMENT_BYTES),
         )?;

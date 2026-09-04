@@ -1258,6 +1258,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -1273,6 +1274,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -1348,6 +1350,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -1363,6 +1366,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -1476,6 +1480,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -1491,6 +1496,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
             reconnect_policy: None,
+                    media_reliable_expire_after_ms: None,
         })?;
     client.connect(b"join".to_vec())?;
     pump_rudp_handshake(&mut client, &mut server)?;
@@ -2670,5 +2676,144 @@ fn tcp_framed_receive_refuses_a_length_beyond_the_advertised_maximum() -> Result
         error.to_string().contains("exceeds advertised maximum"),
         "unexpected error: {error}"
     );
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_expiry_drops_late_packets_and_leaves_durable_sends_alone() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 7,
+        initial_sequence: 10,
+        resend_delay_ms: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    accept_rudp_session(&mut sender, 7)?;
+
+    let expiring = sender.send(
+        "media",
+        b"late".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            now_ms: 0,
+            reliable_expire_after_ms: Some(50),
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    let durable = sender.send(
+        "schema",
+        b"state".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            now_ms: 0,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    assert_eq!(sender.pending_reliable_sequences().len(), 2);
+    assert_eq!(sender.reliable_packets_expired(), 0);
+
+    // One millisecond before the deadline nothing is dropped: the boundary is
+    // inclusive, so a packet is never discarded early.
+    sender.send(
+        "schema",
+        b"tick".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: false,
+            now_ms: 50,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    assert_eq!(sender.reliable_packets_expired(), 0);
+
+    sender.send(
+        "schema",
+        b"tick".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: false,
+            now_ms: 51,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    assert_eq!(sender.reliable_packets_expired(), 1);
+    assert_eq!(
+        sender.pending_reliable_sequences(),
+        vec![durable.sequence],
+        "a send without an expiry deadline is never dropped"
+    );
+    assert_ne!(expiring.sequence, durable.sequence);
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_expiry_also_reclaims_the_send_backlog() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 9,
+        initial_sequence: 10,
+        resend_delay_ms: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    accept_rudp_session(&mut sender, 9)?;
+
+    let fragment_count = CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 5;
+    let payload = (0..fragment_count * 8)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    sender.send_many(
+        "media",
+        payload,
+        CultNetRudpSendOptions {
+            reliable: true,
+            now_ms: 0,
+            reliable_expire_after_ms: Some(30),
+            ..CultNetRudpSendOptions::default()
+        },
+        Some(8),
+    )?;
+    assert_eq!(
+        sender.pending_reliable_sequences().len(),
+        CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS
+    );
+    assert_eq!(sender.queued_reliable_packet_count(), 5);
+
+    // The deadline is fixed at admission, so waiting in the backlog spends it
+    // exactly as waiting for an acknowledgement does. A queued packet promoted
+    // after its moment has passed would be as useless as a retransmitted one.
+    sender.send(
+        "schema",
+        b"tick".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: false,
+            now_ms: 31,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    assert_eq!(sender.pending_reliable_sequences().len(), 0);
+    assert_eq!(sender.queued_reliable_packet_count(), 0);
+    assert_eq!(
+        sender.reliable_packets_expired(),
+        fragment_count as u64,
+        "both the in-flight window and the backlog are counted"
+    );
+    Ok(())
+}
+
+fn accept_rudp_session(session: &mut CultNetRudpSession, connection_id: u32) -> Result<()> {
+    session.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id,
+            sequence: 0,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".into(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
     Ok(())
 }

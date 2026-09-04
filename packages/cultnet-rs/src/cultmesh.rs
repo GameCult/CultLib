@@ -318,6 +318,7 @@ impl CultMesh {
     ) -> Result<CultNetRudpSocketTransportConnection> {
         let socket = bind_rudp_socket(&options)?;
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_reliable_expire_after_ms: None,
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Server,
@@ -341,6 +342,7 @@ impl CultMesh {
     ) -> Result<CultNetRudpSocketTransportConnection> {
         let socket = bind_rudp_socket(&options)?;
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_reliable_expire_after_ms: None,
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Client,

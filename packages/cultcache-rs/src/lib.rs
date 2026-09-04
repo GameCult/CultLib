@@ -284,6 +284,16 @@ pub struct PushAllOptions {
     pub soft: bool,
 }
 
+/// Result of one nonblocking whole-snapshot compare-and-exchange. Contention is
+/// reported rather than waited on, so the caller keeps retry and scheduling
+/// authority instead of blocking inside the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TryCompareExchangeSnapshotOutcome {
+    Exchanged,
+    Mismatch,
+    LockContended,
+}
+
 pub trait CacheBackingStore: Send {
     fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>>;
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
@@ -685,6 +695,80 @@ impl SingleFileMessagePackBackingStore {
         fs2::FileExt::unlock(&lock)
             .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
         result
+    }
+
+    /// Replaces the whole snapshot only if it still equals `expected`, waiting
+    /// for the exclusive lock. Returns false when another writer has moved the
+    /// snapshot on, which is a lost race rather than an error.
+    pub fn compare_exchange_snapshot(
+        &self,
+        expected: &[CultCacheEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<bool> {
+        self.with_exclusive_lock(|| self.compare_exchange_snapshot_unlocked(expected, replacements))
+    }
+
+    /// Makes one nonblocking attempt at the same exchange. Once the lock is
+    /// held, comparison, validation, ordering and persistence are identical to
+    /// [`Self::compare_exchange_snapshot`].
+    pub fn try_compare_exchange_snapshot(
+        &self,
+        expected: &[CultCacheEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<TryCompareExchangeSnapshotOutcome> {
+        let Some(exchanged) = self.try_with_exclusive_lock(|| {
+            self.compare_exchange_snapshot_unlocked(expected, replacements)
+        })?
+        else {
+            return Ok(TryCompareExchangeSnapshotOutcome::LockContended);
+        };
+        Ok(if exchanged {
+            TryCompareExchangeSnapshotOutcome::Exchanged
+        } else {
+            TryCompareExchangeSnapshotOutcome::Mismatch
+        })
+    }
+
+    fn compare_exchange_snapshot_unlocked(
+        &self,
+        expected: &[CultCacheEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<bool> {
+        let current = self.read_all_unlocked()?;
+        if current != expected {
+            return Ok(false);
+        }
+        let mut replacement_ids = BTreeSet::new();
+        for replacement in replacements {
+            if replacement.key.trim().is_empty() || replacement.r#type.trim().is_empty() {
+                return Err(anyhow!("CultCache snapshot replacement identity is empty"));
+            }
+            if !replacement_ids.insert(entry_id(replacement)) {
+                return Err(anyhow!(
+                    "CultCache snapshot replacement contains a duplicate identity"
+                ));
+            }
+        }
+        let mut ordered = replacements.to_vec();
+        ordered.sort_by_key(entry_id);
+        self.write_all_unlocked(&ordered)?;
+        Ok(true)
+    }
+
+    fn try_with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+        let lock = self.open_lock_file()?;
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to lock {}", self.lock_path().display()));
+            }
+        }
+        let result = action();
+        fs2::FileExt::unlock(&lock)
+            .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
+        result.map(Some)
     }
 
     fn open_lock_file(&self) -> Result<File> {
@@ -3924,6 +4008,84 @@ mod tests {
         reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
         reloaded.pull_all_backing_stores()?;
         assert_eq!(reloaded.get_required::<Settings>("primary")?.theme, "light");
+        Ok(())
+    }
+
+    fn snapshot_envelope(key: &str, payload: &[u8]) -> CultCacheEnvelope {
+        CultCacheEnvelope {
+            key: key.to_string(),
+            r#type: "snapshot.record".to_string(),
+            payload: payload.to_vec(),
+            stored_at: "2026-01-01T00:00:00Z".to_string(),
+            // The store stamps the schema id from the type on write, so a
+            // fixture that omits it would not survive its own round trip.
+            schema_id: Some("snapshot.record".to_string()),
+        }
+    }
+
+    #[test]
+    fn snapshot_exchange_commits_only_against_the_observed_snapshot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SingleFileMessagePackBackingStore::new(temp.path().join("generation.cc"));
+
+        let first = vec![snapshot_envelope("admitted", b"one")];
+        assert!(store.compare_exchange_snapshot(&[], &first)?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, first);
+
+        // A writer holding a stale view loses the race instead of clobbering it.
+        let stale = vec![snapshot_envelope("admitted", b"stale")];
+        assert!(!store.compare_exchange_snapshot(&[], &stale)?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, first);
+
+        let second = vec![snapshot_envelope("admitted", b"two")];
+        assert!(store.compare_exchange_snapshot(&first, &second)?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, second);
+        Ok(())
+    }
+
+    #[test]
+    fn try_snapshot_exchange_separates_a_lost_race_from_a_commit() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SingleFileMessagePackBackingStore::new(temp.path().join("generation.cc"));
+
+        let first = vec![snapshot_envelope("admitted", b"one")];
+        assert_eq!(
+            store.try_compare_exchange_snapshot(&[], &first)?,
+            TryCompareExchangeSnapshotOutcome::Exchanged
+        );
+        assert_eq!(
+            store.try_compare_exchange_snapshot(&[], &first)?,
+            TryCompareExchangeSnapshotOutcome::Mismatch,
+            "a stale expectation is a lost race, not contention"
+        );
+        assert_eq!(store.pull_all_read_only_snapshot()?, first);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_exchange_refuses_replacements_that_cannot_be_addressed() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SingleFileMessagePackBackingStore::new(temp.path().join("generation.cc"));
+
+        assert!(
+            store
+                .compare_exchange_snapshot(&[], &[snapshot_envelope("   ", b"one")])
+                .is_err(),
+            "an unaddressable record must not reach the store"
+        );
+        assert!(
+            store
+                .compare_exchange_snapshot(
+                    &[],
+                    &[
+                        snapshot_envelope("admitted", b"one"),
+                        snapshot_envelope("admitted", b"two"),
+                    ],
+                )
+                .is_err(),
+            "a duplicate identity would make the snapshot ambiguous"
+        );
+        assert_eq!(store.pull_all_read_only_snapshot()?, Vec::new());
         Ok(())
     }
 }

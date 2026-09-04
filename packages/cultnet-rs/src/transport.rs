@@ -19,6 +19,9 @@ pub struct CultNetTransportStats {
     pub bytes_sent: u64,
     pub frames_received: u64,
     pub frames_sent: u64,
+    /// Reliable packets dropped by a send-side expiry deadline instead of being
+    /// retransmitted. Always zero for transports without reliable expiry.
+    pub reliable_packets_expired: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

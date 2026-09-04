@@ -33,6 +33,10 @@ const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
+/// Live media tolerates loss but not lateness: a frame retransmitted after this
+/// long describes a moment that has already passed. State channels never
+/// expire, so this default applies only to the media channel.
+const DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 /// A peer chooses its own channel ids and its own send order, so the per-channel
 /// maps and the out-of-order hold buffer are both attacker-sized unless capped.
 const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
@@ -114,6 +118,11 @@ pub struct CultNetRudpSendOptions {
     pub ordered: bool,
     pub sequenced: bool,
     pub now_ms: u64,
+    /// Drop a reliable packet instead of retransmitting it once this many
+    /// milliseconds have passed since the send call. `None` retransmits until
+    /// acknowledged, which is correct for state and wrong for live media, where
+    /// a late frame is worse than a missing one.
+    pub reliable_expire_after_ms: Option<u64>,
 }
 
 /// Identifies every transport packet belonging to one non-expiring reliable
@@ -142,6 +151,7 @@ pub enum CultNetRudpReliableSendStatus {
 struct PendingReliablePacket {
     packet: CultNetRudpPacket,
     last_sent_at_ms: u64,
+    expires_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,7 +186,8 @@ pub struct CultNetRudpSession {
     received_sequences: BTreeSet<u32>,
     latest_sequenced_by_channel: BTreeMap<String, u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
-    queued_reliable: VecDeque<CultNetRudpPacket>,
+    queued_reliable: VecDeque<(CultNetRudpPacket, Option<u64>)>,
+    reliable_packets_expired: u64,
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
@@ -202,6 +213,7 @@ impl CultNetRudpSession {
             latest_sequenced_by_channel: BTreeMap::new(),
             pending_reliable: BTreeMap::new(),
             queued_reliable: VecDeque::new(),
+            reliable_packets_expired: 0,
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
             fragment_buffers: BTreeMap::new(),
@@ -227,6 +239,12 @@ impl CultNetRudpSession {
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
         self.pending_reliable.keys().copied().collect()
+    }
+
+    /// Reliable packets dropped by their expiry deadline rather than
+    /// acknowledged. A rising count means the peer is not keeping up.
+    pub fn reliable_packets_expired(&self) -> u64 {
+        self.reliable_packets_expired
     }
 
     pub fn queued_reliable_packet_count(&self) -> usize {
@@ -327,7 +345,7 @@ impl CultNetRudpSession {
             true,
             false,
         );
-        self.track_reliable(packet.clone(), now_ms);
+        self.track_reliable(packet.clone(), now_ms, None);
         Ok(packet)
     }
 
@@ -357,7 +375,7 @@ impl CultNetRudpSession {
             true,
             false,
         );
-        self.track_reliable(response.clone(), now_ms);
+        self.track_reliable(response.clone(), now_ms, None);
         Ok(response)
     }
 
@@ -396,6 +414,12 @@ impl CultNetRudpSession {
             return Err(anyhow!("RUDP ordered delivery requires reliability"));
         }
         self.require_payload_size(payload.len())?;
+        // Reclaim deadline-passed sends before measuring window capacity, so an
+        // expiring stream cannot be refused for a backlog it no longer owns.
+        self.purge_expired_reliable(options.now_ms);
+        let expires_at_ms = options
+            .reliable_expire_after_ms
+            .map(|ttl| options.now_ms.saturating_add(ttl));
 
         if let Some(max_fragment_bytes) = max_fragment_bytes {
             if max_fragment_bytes == 0 {
@@ -426,7 +450,7 @@ impl CultNetRudpSession {
                     packets.push(packet);
                 }
                 return Ok(if options.reliable {
-                    self.admit_reliable_packets(packets, options.now_ms)
+                    self.admit_reliable_packets(packets, options.now_ms, expires_at_ms)
                 } else {
                     packets
                 });
@@ -443,7 +467,7 @@ impl CultNetRudpSession {
             options.sequenced,
         );
         if packet.reliable {
-            return Ok(self.admit_reliable_packets(vec![packet], options.now_ms));
+            return Ok(self.admit_reliable_packets(vec![packet], options.now_ms, expires_at_ms));
         }
         Ok(vec![packet])
     }
@@ -455,6 +479,7 @@ impl CultNetRudpSession {
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
         self.apply_acknowledgements(packet);
+        self.purge_expired_reliable(now_ms);
         let ready_to_send = self.promote_queued_reliable(now_ms);
         self.last_received_at_ms = Some(now_ms);
         let expected_sequence_if_uninitialized = self
@@ -790,30 +815,52 @@ impl CultNetRudpSession {
         }
     }
 
-    fn track_reliable(&mut self, packet: CultNetRudpPacket, now_ms: u64) {
+    fn track_reliable(
+        &mut self,
+        packet: CultNetRudpPacket,
+        now_ms: u64,
+        expires_at_ms: Option<u64>,
+    ) {
         self.pending_reliable.insert(
             packet.sequence,
             PendingReliablePacket {
                 packet,
                 last_sent_at_ms: now_ms,
+                expires_at_ms,
             },
         );
+    }
+
+    /// Drop pending and queued reliable packets past their deadline. The
+    /// deadline is fixed when the send is admitted, so time spent waiting in
+    /// the backlog counts against it exactly as time spent awaiting an ACK does.
+    fn purge_expired_reliable(&mut self, now_ms: u64) {
+        let before = self.pending_reliable.len() + self.queued_reliable.len();
+        self.pending_reliable
+            .retain(|_, pending| pending.expires_at_ms.is_none_or(|at| now_ms <= at));
+        self.queued_reliable
+            .retain(|(_, expires_at_ms)| expires_at_ms.is_none_or(|at| now_ms <= at));
+        let after = self.pending_reliable.len() + self.queued_reliable.len();
+        self.reliable_packets_expired = self
+            .reliable_packets_expired
+            .saturating_add((before - after) as u64);
     }
 
     fn admit_reliable_packets(
         &mut self,
         packets: Vec<CultNetRudpPacket>,
         now_ms: u64,
+        expires_at_ms: Option<u64>,
     ) -> Vec<CultNetRudpPacket> {
         let available =
             CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
         let mut ready = Vec::with_capacity(available.min(packets.len()));
         for packet in packets {
             if ready.len() < available {
-                self.track_reliable(packet.clone(), now_ms);
+                self.track_reliable(packet.clone(), now_ms, expires_at_ms);
                 ready.push(packet);
             } else {
-                self.queued_reliable.push_back(packet);
+                self.queued_reliable.push_back((packet, expires_at_ms));
             }
         }
         ready
@@ -824,10 +871,10 @@ impl CultNetRudpSession {
             CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
         let mut ready = Vec::with_capacity(available.min(self.queued_reliable.len()));
         for _ in 0..available {
-            let Some(packet) = self.queued_reliable.pop_front() else {
+            let Some((packet, expires_at_ms)) = self.queued_reliable.pop_front() else {
                 break;
             };
-            self.track_reliable(packet.clone(), now_ms);
+            self.track_reliable(packet.clone(), now_ms, expires_at_ms);
             ready.push(packet);
         }
         ready
@@ -1162,6 +1209,7 @@ pub struct CultNetRudpSocketTransportOptions {
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
     pub reconnect_policy: Option<CultNetReconnectPolicy>,
+    pub media_reliable_expire_after_ms: Option<u64>,
 }
 
 impl CultNetRudpSocketTransportOptions {
@@ -1172,6 +1220,7 @@ impl CultNetRudpSocketTransportOptions {
         connection_id: u32,
     ) -> Self {
         Self {
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Client,
@@ -1189,6 +1238,7 @@ impl CultNetRudpSocketTransportOptions {
 
     pub fn server(runtime_id: impl Into<String>, socket: UdpSocket, connection_id: u32) -> Self {
         Self {
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Server,
@@ -1216,6 +1266,7 @@ pub struct CultNetRudpSocketTransportConnection {
     max_fragment_bytes: Option<usize>,
     disconnect_reason: Option<Vec<u8>>,
     pong_payloads: VecDeque<Vec<u8>>,
+    media_reliable_expire_after_ms: Option<u64>,
 }
 
 pub struct CultNetRudpServerHubOptions {
@@ -1229,11 +1280,13 @@ pub struct CultNetRudpServerHubOptions {
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
     pub max_peers: usize,
+    pub media_reliable_expire_after_ms: Option<u64>,
 }
 
 impl CultNetRudpServerHubOptions {
     pub fn new(runtime_id: impl Into<String>, socket: UdpSocket, connection_id: u32) -> Self {
         Self {
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
             runtime_id: runtime_id.into(),
             socket,
             connection_id,
@@ -1298,6 +1351,7 @@ pub struct CultNetRudpServerHub {
     max_payload_bytes: usize,
     max_fragment_bytes: Option<usize>,
     max_peers: usize,
+    media_reliable_expire_after_ms: Option<u64>,
     next_session_generation: u64,
     peers: BTreeMap<SocketAddr, CultNetRudpServerPeer>,
     pending_events: VecDeque<CultNetRudpServerEvent>,
@@ -1329,6 +1383,7 @@ impl CultNetRudpServerHub {
             },
         );
         Ok(Self {
+            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             socket: options.socket,
             connection_id: options.connection_id,
             initial_sequence: options.initial_sequence,
@@ -1353,7 +1408,13 @@ impl CultNetRudpServerHub {
     }
 
     pub fn stats(&self) -> CultNetTransportStats {
-        self.stats.clone()
+        let mut stats = self.stats.clone();
+        stats.reliable_packets_expired = self
+            .peers
+            .values()
+            .map(|peer| peer.session.reliable_packets_expired())
+            .fold(0_u64, |total, expired| total.saturating_add(expired));
+        stats
     }
 
     pub fn sessions(&self) -> Vec<CultNetRudpServerSessionContext> {
@@ -1388,7 +1449,7 @@ impl CultNetRudpServerHub {
             peer.session.send_many(
                 channel_id,
                 payload,
-                channel_send_options(channel_id, now_ms()),
+                channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms),
                 self.max_fragment_bytes,
             )?
         };
@@ -1627,6 +1688,7 @@ impl CultNetRudpSocketTransportConnection {
         });
         session.set_max_payload_bytes(max_payload_bytes.map(|value| value as usize));
         Ok(Self {
+            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             socket: options.socket,
             session,
             mode: options.mode,
@@ -1645,7 +1707,9 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn stats(&self) -> CultNetTransportStats {
-        self.stats.clone()
+        let mut stats = self.stats.clone();
+        stats.reliable_packets_expired = self.session.reliable_packets_expired();
+        stats
     }
 
     pub fn disconnect_reason(&self) -> Option<&[u8]> {
@@ -1667,7 +1731,8 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
-        let options = channel_send_options(channel_id, now_ms());
+        let options =
+            channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms);
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
@@ -1683,7 +1748,8 @@ impl CultNetRudpSocketTransportConnection {
         channel_id: &str,
         payload: Vec<u8>,
     ) -> Result<CultNetRudpReliableSendReceipt> {
-        let options = channel_send_options(channel_id, now_ms());
+        let options =
+            channel_send_options(channel_id, now_ms(), self.media_reliable_expire_after_ms);
         // This lineage has no reliable-expiry concept, so every reliable channel is
         // already non-expiring. Restore the expiry half of this guard if one is added.
         if !options.reliable {
@@ -2158,31 +2224,39 @@ fn packet_type_to_code(packet_type: CultNetRudpPacketType) -> u8 {
     }
 }
 
-fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions {
+fn channel_send_options(
+    channel_id: &str,
+    now_ms: u64,
+    media_reliable_expire_after_ms: Option<u64>,
+) -> CultNetRudpSendOptions {
     match channel_id {
         "schema" => CultNetRudpSendOptions {
             reliable: true,
             ordered: true,
             sequenced: false,
             now_ms,
+            reliable_expire_after_ms: None,
         },
         "latest" => CultNetRudpSendOptions {
             reliable: false,
             ordered: false,
             sequenced: true,
             now_ms,
+            reliable_expire_after_ms: None,
         },
         "media" => CultNetRudpSendOptions {
             reliable: true,
             ordered: false,
             sequenced: false,
             now_ms,
+            reliable_expire_after_ms: media_reliable_expire_after_ms,
         },
         _ => CultNetRudpSendOptions {
             reliable: false,
             ordered: false,
             sequenced: false,
             now_ms,
+            reliable_expire_after_ms: None,
         },
     }
 }

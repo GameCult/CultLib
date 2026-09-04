@@ -315,6 +315,7 @@ fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<(
             ordered: true,
             sequenced: false,
             now_ms: 1,
+                    reliable_expire_after_ms: None,
         },
         Some(1),
     )?;
@@ -375,6 +376,7 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
             ordered: true,
             sequenced: false,
             now_ms: 1,
+                    reliable_expire_after_ms: None,
         },
         Some(2),
     )?;
@@ -387,6 +389,7 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
         ordered: true,
         sequenced: false,
         now_ms: 2,
+            reliable_expire_after_ms: None,
     };
     let first_set = sender.send_many(
         "schema",
@@ -446,6 +449,7 @@ fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
                 ordered: false,
                 sequenced: false,
                 now_ms: sequence,
+                            reliable_expire_after_ms: None,
             },
         )?;
         if oldest.is_none() {
@@ -477,6 +481,7 @@ fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
                 ordered: false,
                 sequenced: false,
                 now_ms: step,
+                            reliable_expire_after_ms: None,
             },
         )?;
         if oldest_reliable.is_none() {
