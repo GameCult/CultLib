@@ -8,7 +8,7 @@ import {
   type CacheBackingStore,
   type CultCacheEnvelope,
   type CultCacheDocumentValue,
-} from "cultcache-ts";
+} from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,

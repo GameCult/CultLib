@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
-    "cultcache-ts": "^0.13.5",
+    "@gamecult/cultcache-ts": "^0.13.5",
     "cultnet-ts": "^0.2.0"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020";
-import type { CultCacheSchema } from "cultcache-ts";
+import type { CultCacheSchema } from "@gamecult/cultcache-ts";
 
 export interface JsonSchemaContract<TValue> extends CultCacheSchema<TValue> {
   readonly schemaId: string;

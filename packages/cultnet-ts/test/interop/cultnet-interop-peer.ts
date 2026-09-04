@@ -6,7 +6,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { decode, encode } from "@msgpack/msgpack";
-import { CultCache, SingleFileMessagePackBackingStore, defineDocumentType, type AnyCultCacheDocumentDefinition } from "cultcache-ts";
+import { CultCache, SingleFileMessagePackBackingStore, defineDocumentType, type AnyCultCacheDocumentDefinition } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,

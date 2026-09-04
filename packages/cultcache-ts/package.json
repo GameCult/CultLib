@@ -1,5 +1,5 @@
 {
-  "name": "cultcache-ts",
+  "name": "@gamecult/cultcache-ts",
   "version": "0.13.5",
   "description": "CultCache-style typed persistence for TypeScript with schema-backed polymorphic MessagePack storage.",
   "main": "dist/index.js",

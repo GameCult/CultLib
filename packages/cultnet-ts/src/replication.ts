@@ -6,7 +6,7 @@ import type {
   CultCacheDocumentFormatter,
   CultCacheDocumentValue,
   CultCacheEnvelope,
-} from "cultcache-ts";
+} from "@gamecult/cultcache-ts";
 
 import {
   type CultNetDocumentDeleteMessage,

@@ -12,7 +12,7 @@ import {
   CultCache,
   SingleFileMessagePackBackingStore,
   defineDocumentType,
-} from "cultcache-ts";
+} from "@gamecult/cultcache-ts";
 
 import {
   CultNetClientSecurityOptions,

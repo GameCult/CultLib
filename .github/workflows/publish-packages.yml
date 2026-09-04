@@ -1,0 +1,114 @@
+name: Publish packages
+
+# Non-Rust consumers cannot take a package from a subdirectory of a git repo the
+# way cargo can, which is why they ended up vendoring forks instead. This gives
+# them a versioned artifact to depend on so CultLib stays the only source.
+#
+# Rust needs nothing here: cargo git dependencies pin a CultLib revision
+# directly, which is already how Ghostlight, Epiphany, CodexConnector and Odin
+# consume the core stack.
+#
+# Tag a release to publish, for example `cultcache-ts-v0.13.6`. The tag's
+# version must match the version in the package manifest; the workflow refuses
+# the publish otherwise rather than shipping a mislabelled artifact.
+
+on:
+  push:
+    tags:
+      - "cultcache-ts-v*"
+      - "cultcache-py-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build and test (publishes nothing on manual runs)
+        required: true
+        type: choice
+        options:
+          - cultcache-ts
+          - cultcache-py
+
+permissions:
+  contents: read
+
+jobs:
+  cultcache-ts:
+    name: "@gamecult/cultcache-ts to npm"
+    if: startsWith(github.ref, 'refs/tags/cultcache-ts-v') || inputs.package == 'cultcache-ts'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Verify the tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
+        run: |
+          manifest="$(node -p "require('./packages/cultcache-ts/package.json').version")"
+          tagged="${GITHUB_REF_NAME#cultcache-ts-v}"
+          if [ "$manifest" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
+            exit 1
+          fi
+
+      - name: Build and test
+        working-directory: packages/cultcache-ts
+        run: npm test
+
+      # Scoped packages default to restricted even on public npm, and this is
+      # MIT like the rest of the repo, so say public explicitly.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
+        working-directory: packages/cultcache-ts
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  cultcache-py:
+    name: cultcache-py to PyPI
+    if: startsWith(github.ref, 'refs/tags/cultcache-py-v') || inputs.package == 'cultcache-py'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pypi
+    permissions:
+      contents: read
+      # PyPI trusted publishing exchanges this for a short-lived token, so no
+      # long-lived API token is stored in the repository.
+      id-token: write
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify the tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/cultcache-py-v')
+        run: |
+          manifest="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/cultcache-py/pyproject.toml').read_text())['project']['version'])")"
+          tagged="${GITHUB_REF_NAME#cultcache-py-v}"
+          if [ "$manifest" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build packages/cultcache-py
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/cultcache-py-v')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/cultcache-py/dist

@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { encode } from "@msgpack/msgpack";
 import { z } from "zod";
-import { defineDocumentType } from "cultcache-ts";
+import { defineDocumentType } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,

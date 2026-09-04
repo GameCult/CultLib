@@ -8,9 +8,10 @@ version = "0.1.0"
 description = "Python CultCache, CultNet, and CultMesh runtime package for GameCult typed state."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Private GameCult infrastructure" }
+license = "MIT"
 authors = [{ name = "GameCult" }]
 classifiers = [
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
