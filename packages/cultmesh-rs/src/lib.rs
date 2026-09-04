@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use cultcache_rs::CultCache;
 use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::CultSoaTable;
 use cultcache_rs::DatabaseEntry;
+use cultcache_rs::SoaDocument;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
@@ -637,6 +639,14 @@ impl CultMeshNode {
         self.cache.get_required::<T>(key)
     }
 
+    pub fn get_all_with_keys<T: DatabaseEntry>(&self) -> Result<Vec<(String, T)>> {
+        self.cache.get_all_with_keys::<T>()
+    }
+
+    pub fn soa<T: SoaDocument>(&self) -> Result<CultSoaTable<T>> {
+        self.cache.soa::<T>()
+    }
+
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         self.cache.put(key, value)
     }
@@ -762,6 +772,7 @@ fn request_raw_snapshot_from_rudp_catalog(
     socket.set_read_timeout(Some(options.poll_interval))?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_reliable_expire_after_ms: None,
             runtime_id: options.runtime_id.clone(),
             socket,
             mode: cultnet_rs::CultNetRudpSocketMode::Client,
@@ -860,6 +871,7 @@ pub fn publish_cultnet_messages_to_rudp_catalog(
     socket.set_read_timeout(Some(options.poll_interval))?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_reliable_expire_after_ms: None,
             runtime_id: options.runtime_id.clone(),
             socket,
             mode: cultnet_rs::CultNetRudpSocketMode::Client,

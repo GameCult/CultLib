@@ -540,7 +540,7 @@ impl CultNetDocumentRegistry {
         })
     }
 
-    fn raw_document_record_from_envelope(
+    pub fn raw_document_record_from_envelope(
         &self,
         envelope: &CultCacheEnvelope,
     ) -> Result<CultNetRawDocumentRecord> {
