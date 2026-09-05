@@ -21,6 +21,7 @@ pub const IDUNN_PROVIDER_ACTIVE_REASON: &str = "authenticated_provider_active";
 pub const IDUNN_PROVIDER_WARMING_REASON: &str = "authenticated_provider_warming";
 pub const IDUNN_PROVIDER_DEGRADED_REASON: &str = "authenticated_provider_degraded";
 pub const IDUNN_PROVIDER_FAILED_REASON: &str = "authenticated_provider_failed";
+pub const IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA: &str = "idunn.daemon_health_trust_binding.v1";
 
 /// Provider-owned health statement. Ingress verifies `signature` over the
 /// complete positional record with this field empty before admitting it.
@@ -195,6 +196,68 @@ fn messagepack_array_len(payload: &[u8]) -> Option<usize> {
         ]))
         .ok(),
         _ => None,
+    }
+}
+
+/// Root-owned admission binding. Store ownership is the physical authority;
+/// this document names the only signer accepted for one daemon/contract/runtime.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.daemon_health_trust_binding",
+    schema = "idunn.daemon_health_trust_binding.v1"
+)]
+pub struct IdunnDaemonHealthTrustBindingRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub binding_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub health_contract: String,
+    #[cultcache(key = 4)]
+    pub source_runtime_id: String,
+    #[cultcache(key = 5)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 6)]
+    pub signer_public_key: Vec<u8>,
+    #[cultcache(key = 7)]
+    pub binding_authority: String,
+    #[cultcache(key = 8)]
+    pub bound_at_unix_millis: u64,
+    #[cultcache(key = 9)]
+    pub release_binding_required: bool,
+    #[cultcache(key = 10)]
+    pub private_state_exposed: bool,
+}
+
+impl IdunnDaemonHealthTrustBindingRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA {
+            bail!("daemon health trust binding schema is unsupported");
+        }
+        validate_identifier(&self.binding_id, "binding id")?;
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.health_contract, "health contract")?;
+        validate_identifier(&self.source_runtime_id, "source runtime id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        if self.signer_public_key.len() != 32
+            || self.binding_authority != "root"
+            || self.bound_at_unix_millis == 0
+        {
+            bail!("daemon health trust binding authority or key is invalid");
+        }
+        if self.private_state_exposed {
+            bail!("daemon health trust binding exposes private state");
+        }
+        if self.signer_identity_id
+            != derive_service_identity_id::<GameCultProviderHealthIdentity>(
+                &self.signer_public_key,
+            )?
+        {
+            bail!("daemon health trust binding identity does not match its public key");
+        }
+        Ok(())
     }
 }
 
