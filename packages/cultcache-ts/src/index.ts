@@ -27,3 +27,8 @@ export type {
   InspectedCatalogMember,
   InspectedRecord,
 } from "./cult-cache-inspector";
+export {
+  defineSwarmDocuments,
+  type DefineDocumentType,
+  type SwarmDocumentCatalog,
+} from "./swarm-documents";
