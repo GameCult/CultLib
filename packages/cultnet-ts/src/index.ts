@@ -156,3 +156,21 @@ export {
   type SignedDaemonHealthPublisher,
   type SignedDaemonHealthPublisherOptions,
 } from "./signed-daemon-health";
+
+export {
+  GAMECULT_RUNTIME_ACTIVATION_PROOF_SIGNING_PURPOSE,
+  GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+  GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
+  GAMECULT_RUNTIME_PRESENCE_IDENTITY_NAME,
+  IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
+  RUNTIME_PRESENCE_FIELD_COUNT,
+  RUNTIME_PRESENCE_SLOT,
+  encodeRuntimePresenceHealth,
+  runtimePresenceActivationSigningMessage,
+  runtimePresenceProofPayload,
+  runtimePresenceProviderSigningMessage,
+  validateRuntimePresence,
+  type GameCultRuntimeCapability,
+  type RuntimePresenceHealth,
+  type RuntimePresenceState,
+} from "./runtime-presence-health";
