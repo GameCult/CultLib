@@ -163,6 +163,7 @@ fn client(target: SocketAddr, id: u32) -> Result<CultNetRudpSocketTransportConne
     let socket = UdpSocket::bind("127.0.0.1:0")?;
     socket.set_nonblocking(true)?;
     CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+        media_delivery: None,
         runtime_id: "test-client".into(),
         socket,
         mode: CultNetRudpSocketMode::Client,

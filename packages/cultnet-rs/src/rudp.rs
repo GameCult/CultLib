@@ -1210,6 +1210,8 @@ pub struct CultNetRudpSocketTransportOptions {
     pub max_pending_reliable_packets: Option<u32>,
     pub reconnect_policy: Option<CultNetReconnectPolicy>,
     pub media_reliable_expire_after_ms: Option<u64>,
+    /// `None` means the historical default, `Reliable`.
+    pub media_delivery: Option<CultNetTransportDelivery>,
 }
 
 impl CultNetRudpSocketTransportOptions {
@@ -1221,6 +1223,7 @@ impl CultNetRudpSocketTransportOptions {
     ) -> Self {
         Self {
             media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
+            media_delivery: None,
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Client,
@@ -1239,6 +1242,7 @@ impl CultNetRudpSocketTransportOptions {
     pub fn server(runtime_id: impl Into<String>, socket: UdpSocket, connection_id: u32) -> Self {
         Self {
             media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
+            media_delivery: None,
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Server,
@@ -1280,12 +1284,15 @@ pub struct CultNetRudpServerHubOptions {
     pub max_pending_reliable_packets: Option<u32>,
     pub max_peers: usize,
     pub media_reliable_expire_after_ms: Option<u64>,
+    /// `None` means the historical default, `Reliable`.
+    pub media_delivery: Option<CultNetTransportDelivery>,
 }
 
 impl CultNetRudpServerHubOptions {
     pub fn new(runtime_id: impl Into<String>, socket: UdpSocket, connection_id: u32) -> Self {
         Self {
             media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
+            media_delivery: None,
             runtime_id: runtime_id.into(),
             socket,
             connection_id,
@@ -1372,6 +1379,7 @@ impl CultNetRudpServerHub {
             options.runtime_id,
             RudpTransportProfileOptions {
                 media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
+                media_delivery: options.media_delivery,
                 transport_id: options.transport_id,
                 host: Some(local_addr.ip().to_string()),
                 port: Some(local_addr.port()),
@@ -1451,6 +1459,7 @@ impl CultNetRudpServerHub {
                 channel_id,
                 now_ms(),
                 channel_reliable_expire_after_ms(&self.profile, channel_id),
+                channel_delivery(&self.profile, channel_id),
             ),
                 self.max_fragment_bytes,
             )?
@@ -1671,6 +1680,7 @@ impl CultNetRudpSocketTransportConnection {
             options.runtime_id,
             RudpTransportProfileOptions {
                 media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
+                media_delivery: options.media_delivery,
                 transport_id: options.transport_id,
                 host: Some(local_addr.ip().to_string()),
                 port: Some(local_addr.port()),
@@ -1738,6 +1748,7 @@ impl CultNetRudpSocketTransportConnection {
                 channel_id,
                 now_ms(),
                 channel_reliable_expire_after_ms(&self.profile, channel_id),
+                channel_delivery(&self.profile, channel_id),
             );
         let packets =
             self.session
@@ -1759,6 +1770,7 @@ impl CultNetRudpSocketTransportConnection {
                 channel_id,
                 now_ms(),
                 channel_reliable_expire_after_ms(&self.profile, channel_id),
+                channel_delivery(&self.profile, channel_id),
             );
         // This lineage has no reliable-expiry concept, so every reliable channel is
         // already non-expiring. Restore the expiry half of this guard if one is added.
@@ -2073,6 +2085,8 @@ pub struct RudpTransportProfileOptions {
     pub max_pending_reliable_packets: Option<u32>,
     pub reconnect_policy: Option<CultNetReconnectPolicy>,
     pub media_reliable_expire_after_ms: Option<u64>,
+    /// `None` means the historical default, `Reliable`.
+    pub media_delivery: Option<CultNetTransportDelivery>,
 }
 
 pub fn create_rudp_transport_profile(
@@ -2125,7 +2139,9 @@ pub fn create_rudp_transport_profile(
                 },
                 CultNetTransportChannel {
                     channel_id: "media".to_string(),
-                    delivery: CultNetTransportDelivery::Reliable,
+                    delivery: options
+                        .media_delivery
+                        .unwrap_or(CultNetTransportDelivery::Reliable),
                     ordering: CultNetTransportOrdering::Unordered,
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
@@ -2254,10 +2270,30 @@ fn channel_reliable_expire_after_ms(
         .and_then(|channel| channel.reliable_expire_after_ms)
 }
 
+/// The advertised profile owns each channel's delivery, for the same reason it
+/// owns expiry: a send path that hardcodes reliability can disagree with the
+/// profile the peer was shown, and then no one can say what the channel does.
+///
+/// Falls back to `Reliable` for a channel the profile does not describe, which
+/// is what every channel got before delivery was configurable.
+fn channel_delivery(
+    profile: &CultNetTransportProfile,
+    channel_id: &str,
+) -> CultNetTransportDelivery {
+    profile
+        .transports
+        .iter()
+        .flat_map(|transport| transport.channels.iter())
+        .find(|channel| channel.channel_id == channel_id)
+        .map(|channel| channel.delivery)
+        .unwrap_or(CultNetTransportDelivery::Reliable)
+}
+
 fn channel_send_options(
     channel_id: &str,
     now_ms: u64,
     reliable_expire_after_ms: Option<u64>,
+    delivery: CultNetTransportDelivery,
 ) -> CultNetRudpSendOptions {
     match channel_id {
         "schema" => CultNetRudpSendOptions {
@@ -2274,8 +2310,11 @@ fn channel_send_options(
             now_ms,
             reliable_expire_after_ms: None,
         },
+        // The one channel whose delivery a caller chooses. Media that has gone
+        // stale is worth dropping, not retransmitting: a reliable media channel
+        // under loss adds load exactly when the link has least to give.
         "media" => CultNetRudpSendOptions {
-            reliable: true,
+            reliable: matches!(delivery, CultNetTransportDelivery::Reliable),
             ordered: false,
             sequenced: false,
             now_ms,
