@@ -18,6 +18,12 @@
 //! wire format: append new fields with `default` at the next free index, never
 //! reorder or renumber. `missing_video_chunk_keys` shows the pattern.
 //!
+//! Payloads carry `bytes` so they serialize as MessagePack `bin` rather than an
+//! array of integers, which is what the C#, TypeScript and Python runtimes
+//! expect and what keeps a 848-byte payload at 851 bytes instead of 1234. Note
+//! that this is the derive's own attribute — `#[serde(with = "serde_bytes")]`
+//! is inert here, because `DatabaseEntry` writes its own `Serialize`.
+//!
 //! # Timebase
 //!
 //! `pts_ticks`, `duration_ticks` and `deadline_ticks` are expressed in
@@ -76,7 +82,7 @@ pub struct GameCultMediaVideoAccessUnitRecord {
     pub chunk_index: u16,
     #[cultcache(key = 12)]
     pub chunk_count: u16,
-    #[cultcache(key = 13)]
+    #[cultcache(key = 13, bytes)]
     pub payload: Vec<u8>,
 }
 
@@ -123,7 +129,7 @@ pub struct GameCultMediaVideoParityShardRecord {
     pub chunk_payload_bytes: u32,
     #[cultcache(key = 15)]
     pub last_chunk_payload_bytes: u32,
-    #[cultcache(key = 16)]
+    #[cultcache(key = 16, bytes)]
     pub payload: Vec<u8>,
 }
 
@@ -153,7 +159,7 @@ pub struct GameCultMediaAudioPacketRecord {
     pub timebase_den: u32,
     #[cultcache(key = 8)]
     pub deadline_ticks: i64,
-    #[cultcache(key = 9)]
+    #[cultcache(key = 9, bytes)]
     pub payload: Vec<u8>,
 }
 

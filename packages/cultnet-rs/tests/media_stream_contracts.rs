@@ -67,33 +67,23 @@ fn video_access_unit_encodes_as_a_positional_array() {
     assert_eq!(slots[8].as_bool(), Some(true), "slot 8 is keyframe");
     assert!(slots[9].is_nil(), "an absent dependency stays nil, not 0");
     assert_eq!(slots[12].as_u64(), Some(5), "slot 12 is chunk_count");
-    assert!(
-        matches!(&slots[13], Value::Binary(_) | Value::Array(_)),
-        "slot 13 is the payload; see payload_should_encode_as_messagepack_bin \
-         for which of the two it ought to be"
+    assert_eq!(
+        slots[13].as_slice(),
+        Some([0xDE, 0xAD, 0xBE, 0xEF].as_slice()),
+        "slot 13 is the payload, carried as bin"
     );
 }
 
-/// Ignored until `cultcache-rs-derive` grows a `bytes` hint.
+/// Payloads must reach the wire as MessagePack `bin`, not as an array of
+/// integers. The C#, TypeScript and Python runtimes all read byte fields as
+/// `bin`, so a payload serialized as a sequence is unreadable by the reference
+/// implementation, and costs 1.45x besides: 848 bytes encode to 1234 as an
+/// integer array against 851 as `bin`.
 ///
-/// The derive writes its own `Serialize` and calls `serialize_element` per slot,
-/// so a `Vec<u8>` field goes out as a MessagePack array of integers. C#,
-/// TypeScript and Python all emit `bin` for byte fields, which makes Rust the
-/// divergent runtime and these records unreadable by the reference
-/// implementation. `#[serde(with = "serde_bytes")]` cannot fix it — the derive
-/// ignores serde attributes.
-///
-/// It also costs 1.45x on every media byte: an 848-byte payload encodes to 1234
-/// bytes as an integer array against 851 as `bin`.
-///
-/// The fix is not local to this file. Changing byte encoding globally would
-/// invalidate every signature in the Idunn authority chain, because signatures
-/// are taken over the whole positional serialization and canonical hashes over
-/// the same bytes. It needs an opt-in hint so these three media records can
-/// adopt `bin` without moving the signature-bearing ones. Owned by the Swarm
-/// Migration work; un-ignore this when the hint lands.
+/// This is what the derive's `bytes` attribute buys. `#[serde(with =
+/// "serde_bytes")]` will not do it — `DatabaseEntry` emits its own `Serialize`
+/// and reads only its own `cultcache` attribute namespace.
 #[test]
-#[ignore = "blocked on a `bytes` opt-in hint in cultcache-rs-derive"]
 fn payload_should_encode_as_messagepack_bin() {
     let encoded = rmp_serde::to_vec(&access_unit()).expect("encodes");
     let Value::Array(slots) = decode_as_value(&encoded) else {
