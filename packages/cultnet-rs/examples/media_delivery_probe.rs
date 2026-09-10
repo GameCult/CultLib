@@ -87,10 +87,11 @@ fn recv(bind: SocketAddr, expect: u64) -> Result<()> {
     let elapsed = started.elapsed().as_secs_f64();
     println!("RESULT recv frames={frames} expected={expect} payload_bytes={payload_bytes}");
     println!(
-        "RESULT recv wire_bytes_in={} wire_bytes_out={} elapsed_s={elapsed:.2} delivered_pct={:.2}",
+        "RESULT recv wire_bytes_in={} wire_bytes_out={} elapsed_s={elapsed:.2} delivered_pct={:.2} fragment_sets_evicted={}",
         stats.bytes_received,
         stats.bytes_sent,
-        (frames as f64 / expect as f64) * 100.0
+        (frames as f64 / expect as f64) * 100.0,
+        stats.fragment_sets_evicted
     );
     Ok(())
 }

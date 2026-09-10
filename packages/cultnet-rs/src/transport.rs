@@ -22,6 +22,10 @@ pub struct CultNetTransportStats {
     /// Reliable packets dropped by a send-side expiry deadline instead of being
     /// retransmitted. Always zero for transports without reliable expiry.
     pub reliable_packets_expired: u64,
+    /// Incomplete fragment sets discarded to admit newer ones. Each is one
+    /// payload that lost a fragment on the wire. Zero for non-fragmenting
+    /// transports.
+    pub fragment_sets_evicted: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
