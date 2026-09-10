@@ -2856,3 +2856,88 @@ fn rudp_profile_expires_only_the_media_channel() -> Result<()> {
     }
     Ok(())
 }
+
+fn connected_rudp_pair() -> Result<(CultNetRudpSession, CultNetRudpSession)> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 311,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 311,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 1, Vec::new())?;
+    client.receive(&accept, 2)?;
+    Ok((client, server))
+}
+
+#[test]
+fn rudp_evicts_stalest_incomplete_fragment_set_instead_of_dying() -> Result<()> {
+    let (mut client, mut server) = connected_rudp_pair()?;
+    client.set_max_pending_fragment_sets(4)?;
+    let fragmented = |server: &mut CultNetRudpSession, fill: u8| {
+        server.send_many(
+            "media",
+            vec![fill; 2500],
+            CultNetRudpSendOptions::default(),
+            Some(1000),
+        )
+    };
+
+    // Eight payloads each lose their last fragment on the wire. Before, the
+    // fifth new set errored the receiver out and every later fragmented
+    // payload with it.
+    let mut stranded = Vec::new();
+    for fill in 1..=8u8 {
+        let packets = fragmented(&mut server, fill)?;
+        assert_eq!(packets.len(), 3);
+        for packet in &packets[..2] {
+            assert!(client.receive(packet, 10)?.delivered.is_empty());
+        }
+        stranded.push(packets[2].clone());
+    }
+    assert_eq!(client.fragment_sets_evicted(), 4);
+
+    // A complete payload still lands.
+    let complete = fragmented(&mut server, 9)?;
+    let mut delivered = Vec::new();
+    for packet in &complete {
+        delivered.extend(client.receive(packet, 11)?.delivered);
+    }
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload, vec![9u8; 2500]);
+    assert_eq!(client.fragment_sets_evicted(), 5);
+
+    // The eviction order is stalest-first: set 8 is still pending and completes
+    // when its late fragment shows up; set 1 was evicted long ago, so its late
+    // fragment opens a fresh set and delivers nothing.
+    assert_eq!(
+        client.receive(&stranded[7], 12)?.delivered[0].payload,
+        vec![8u8; 2500]
+    );
+    assert!(client.receive(&stranded[0], 13)?.delivered.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_fragment_ids_wrap_instead_of_saturating() -> Result<()> {
+    let (_client, mut server) = connected_rudp_pair()?;
+    let mut ids = Vec::new();
+    for _ in 0..(u16::MAX as usize + 1) {
+        let packets = server.send_many(
+            "media",
+            vec![0u8; 1500],
+            CultNetRudpSendOptions::default(),
+            Some(1000),
+        )?;
+        ids.push(packets[0].fragment_id);
+    }
+    assert_eq!(ids[0], 1);
+    assert_eq!(ids[u16::MAX as usize - 1], u16::MAX);
+    // The 65,536th set must not share an id with the 65,535th.
+    assert_eq!(ids[u16::MAX as usize], 1);
+    Ok(())
+}
