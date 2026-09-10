@@ -955,6 +955,7 @@ fn connect_rudp_client(
     socket.set_read_timeout(Some(poll_interval))?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: runtime_id.to_string(),
             socket,
             mode: cultnet_rs::CultNetRudpSocketMode::Client,

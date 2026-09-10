@@ -359,6 +359,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
     let profile = create_rudp_transport_profile(
         "rust-rudp",
         cultnet_rs::RudpTransportProfileOptions {
+            media_delivery: None,
             transport_id: Some("public-rudp".to_string()),
             host: Some("127.0.0.1".to_string()),
             port: Some(7777),
@@ -1248,6 +1249,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
     let connection_id = 0x1020_3040;
     let mut server =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-server".to_string(),
             socket: server_socket,
             mode: CultNetRudpSocketMode::Server,
@@ -1264,6 +1266,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-client".to_string(),
             socket: client_socket,
             mode: CultNetRudpSocketMode::Client,
@@ -1340,6 +1343,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
     let connection_id = 0x1020_3041;
     let mut server =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-fragment-server".to_string(),
             socket: server_socket,
             mode: CultNetRudpSocketMode::Server,
@@ -1356,6 +1360,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-fragment-client".to_string(),
             socket: client_socket,
             mode: CultNetRudpSocketMode::Client,
@@ -1470,6 +1475,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
     let connection_id = 0x1020_3043;
     let mut server =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-window-server".into(),
             socket: server_socket,
             mode: CultNetRudpSocketMode::Server,
@@ -1486,6 +1492,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            media_delivery: None,
             runtime_id: "rust-rudp-window-client".into(),
             socket: client_socket,
             mode: CultNetRudpSocketMode::Client,
