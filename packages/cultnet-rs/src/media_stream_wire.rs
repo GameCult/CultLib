@@ -35,8 +35,13 @@ use crate::media_stream_contracts::{
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
 };
 
-/// The CultNet channel media rides.
+/// The CultNet channel video and receiver feedback ride.
 pub const GAMECULT_MEDIA_CHANNEL: &str = "media";
+
+/// The CultNet channel audio rides. Audio has its own channel so one session
+/// can carry it reliably with a short expiry while video stays lossy under
+/// parity; the RUDP transport profile owns each channel's delivery.
+pub const GAMECULT_MEDIA_AUDIO_CHANNEL: &str = "audio";
 
 /// One media record on its way somewhere.
 #[derive(Clone, Debug, PartialEq, Eq)]

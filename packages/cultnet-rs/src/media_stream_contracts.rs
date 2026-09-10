@@ -62,7 +62,7 @@ pub const GAMECULT_MEDIA_STREAM_REQUEST_SCHEMA: &str = "gamecult.media_stream_re
 ///
 /// This is the record a consumer's picker is built from: which streams exist,
 /// which video and audio sources each can capture, which codecs it can encode,
-/// and the defaults it would use. It is state, not media — it travels as a
+/// the defaults it would use, and where it serves the stream from. It is state, not media — it travels as a
 /// CultMesh document through Odin, never on the media channel — and it names no
 /// consumer. `producer_id` is the runtime that answers requests for it.
 ///
@@ -106,10 +106,16 @@ pub struct GameCultMediaStreamAdvertisementRecord {
     pub default_latency_budget_ms: u32,
     #[cultcache(key = 14)]
     pub media_packet_bytes: u32,
-    /// The CultNet RUDP connection id the producer dials the receiver with.
+    /// `host:port` the producer serves this stream from. A consumer dials it
+    /// with `media_connection_id` once its request is answered `running`;
+    /// the producer listens. The consumer's host admits nothing inbound,
+    /// which is what lets a viewer install a plugin without opening a port.
     #[cultcache(key = 15)]
-    pub media_connection_id: u32,
+    pub media_endpoint: String,
+    /// The CultNet RUDP connection id a consumer dials `media_endpoint` with.
     #[cultcache(key = 16)]
+    pub media_connection_id: u32,
+    #[cultcache(key = 17)]
     pub updated_at: String,
 }
 
@@ -118,6 +124,9 @@ pub struct GameCultMediaStreamAdvertisementRecord {
 /// The producer answers by rewriting `state` and `detail` on the same record
 /// key, so a consumer watches one document for the outcome. A newer request for
 /// the same `stream_id` and `receiver_id` supersedes an older one.
+///
+/// It carries no consumer endpoint. The consumer dials the advertised
+/// `media_endpoint` and identifies itself on the wire by `receiver_id`.
 ///
 /// Keyed by `media_stream_request_key(stream_id, receiver_id)`.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -134,35 +143,32 @@ pub struct GameCultMediaStreamRequestRecord {
     pub producer_id: String,
     #[cultcache(key = 3)]
     pub receiver_id: String,
-    /// `host:port` the producer should dial with the advertised connection id.
-    #[cultcache(key = 4)]
-    pub receiver_endpoint: String,
     /// `start` or `stop`.
-    #[cultcache(key = 5)]
+    #[cultcache(key = 4)]
     pub action: String,
     /// `pending`, `running`, `stopped`, or `failed`; the producer owns it after
     /// `pending`.
-    #[cultcache(key = 6)]
+    #[cultcache(key = 5)]
     pub state: String,
     /// Empty means no video.
-    #[cultcache(key = 7)]
+    #[cultcache(key = 6)]
     pub video_source_id: String,
     /// Empty means no audio.
-    #[cultcache(key = 8)]
+    #[cultcache(key = 7)]
     pub audio_source_id: String,
-    #[cultcache(key = 9)]
+    #[cultcache(key = 8)]
     pub video_codec: String,
-    #[cultcache(key = 10)]
+    #[cultcache(key = 9)]
     pub audio_codec: String,
-    #[cultcache(key = 11)]
+    #[cultcache(key = 10)]
     pub video_bitrate_kbps: u32,
-    #[cultcache(key = 12)]
+    #[cultcache(key = 11)]
     pub latency_budget_ms: u32,
-    #[cultcache(key = 13)]
+    #[cultcache(key = 12)]
     pub media_packet_bytes: u32,
-    #[cultcache(key = 14)]
+    #[cultcache(key = 13)]
     pub detail: String,
-    #[cultcache(key = 15)]
+    #[cultcache(key = 14)]
     pub updated_at: String,
 }
 
@@ -218,6 +224,12 @@ pub fn validate_media_stream_advertisement(
     if record.media_connection_id == 0 {
         return Err(anyhow!("media stream advertisement media_connection_id must be non-zero"));
     }
+    if !is_host_port(&record.media_endpoint) {
+        return Err(anyhow!(
+            "media stream advertisement media_endpoint {:?} must be host:port",
+            record.media_endpoint
+        ));
+    }
     Ok(())
 }
 
@@ -251,12 +263,6 @@ pub fn validate_media_stream_request(
         ));
     }
     if record.action == "start" {
-        if record.receiver_endpoint.parse::<std::net::SocketAddr>().is_err() {
-            return Err(anyhow!(
-                "media stream request receiver_endpoint {:?} must be host:port",
-                record.receiver_endpoint
-            ));
-        }
         if record.video_source_id.is_empty() && record.audio_source_id.is_empty() {
             return Err(anyhow!("media stream request asks for neither video nor audio"));
         }
@@ -268,6 +274,16 @@ pub fn validate_media_stream_request(
         }
     }
     Ok(())
+}
+
+/// A hostname or IP and a non-zero port. Not `SocketAddr`: a producer may
+/// advertise a name the consumer resolves.
+fn is_host_port(value: &str) -> bool {
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port != 0)
 }
 
 #[cfg(test)]
@@ -291,6 +307,7 @@ mod media_stream_catalog_tests {
             default_video_bitrate_kbps: 12_000,
             default_latency_budget_ms: 250,
             media_packet_bytes: 848,
+            media_endpoint: "192.168.178.20:5220".into(),
             media_connection_id: 0x6d75_0001,
             updated_at: "2026-09-10T00:00:00Z".into(),
         }
@@ -302,7 +319,6 @@ mod media_stream_catalog_tests {
             stream_id: "muninn.raven.av.rudp".into(),
             producer_id: "raven".into(),
             receiver_id: "starfire.obs".into(),
-            receiver_endpoint: "192.168.178.146:5204".into(),
             action: "start".into(),
             state: "pending".into(),
             video_source_id: "display:0".into(),
@@ -342,11 +358,23 @@ mod media_stream_catalog_tests {
         assert!(validate_media_stream_advertisement(&record).is_ok(), "no audio, no requirement");
     }
 
+    /// The producer is the listener, so it must say where.
     #[test]
-    fn a_start_needs_somewhere_to_send_and_something_to_send() {
-        let mut record = request();
-        record.receiver_endpoint = "starfire".into();
-        assert!(validate_media_stream_request(&record).unwrap_err().to_string().contains("host:port"));
+    fn an_advertisement_says_where_the_stream_is_served() {
+        for bad in ["", "raven", "raven:", "raven:0", ":5220"] {
+            let mut record = advertisement();
+            record.media_endpoint = bad.into();
+            assert!(validate_media_stream_advertisement(&record).unwrap_err().to_string().contains("host:port"), "{bad:?}");
+        }
+        for good in ["raven:5220", "10.77.0.2:5220", "[::1]:5220"] {
+            let mut record = advertisement();
+            record.media_endpoint = good.into();
+            assert!(validate_media_stream_advertisement(&record).is_ok(), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_needs_something_to_send() {
         let mut record = request();
         record.video_source_id.clear();
         record.audio_source_id.clear();
@@ -357,10 +385,9 @@ mod media_stream_catalog_tests {
     }
 
     #[test]
-    fn a_stop_needs_no_endpoint_or_sources() -> anyhow::Result<()> {
+    fn a_stop_needs_no_sources() -> anyhow::Result<()> {
         let mut record = request();
         record.action = "stop".into();
-        record.receiver_endpoint.clear();
         record.video_source_id.clear();
         record.audio_source_id.clear();
         validate_media_stream_request(&record)
