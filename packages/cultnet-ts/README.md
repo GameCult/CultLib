@@ -195,7 +195,7 @@ the helper path.
 ## Quick Example
 
 ```ts
-import { CultCache, defineDocumentType } from "cultcache-ts";
+import { CultCache, defineDocumentType } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   createTcpFramedCultNetPeer,

@@ -87,7 +87,10 @@ jobs:
         run: npm test --workspace packages/cultnet-ts
 
       - name: Verify Python RUDP reliability
-        run: python -m unittest packages/cultcache-py/tests/test_cultcache.py
+        run: |
+          python -m unittest discover -s packages/cultcache-py/tests
+          python -m unittest discover -s packages/cultnet-py/tests
+          python -m unittest discover -s packages/cultmesh-py/tests
 
       - name: Verify Rust RUDP reliability
         run: cargo test --manifest-path packages/cultnet-rs/Cargo.toml rudp
