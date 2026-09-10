@@ -449,8 +449,9 @@ pub fn validate_feedback_record(record: &GameCultMediaReceiverFeedbackRecord) ->
 /// What a receiver has to say about a stream. The record it builds is the
 /// contract's; this normalises it so both ends agree on its shape: damage
 /// lists sorted and unique, chunk keys well-formed, and a keyframe requested
-/// whenever something is missing, since a producer cannot repair a reference
-/// the receiver never had.
+/// whenever a whole frame is missing, since a producer's repair cache holds
+/// chunks, not references. Missing chunks alone are a repair request, which
+/// exists precisely so that a keyframe is not needed.
 #[derive(Clone, Debug)]
 pub struct ReceiverFeedbackOptions<'a> {
     pub stream_id: &'a str,
@@ -477,9 +478,7 @@ pub fn build_receiver_feedback(
     let mut late_frame_ids = options.late_frame_ids;
     late_frame_ids.sort_unstable();
     late_frame_ids.dedup();
-    let requested_keyframe = options.requested_keyframe
-        || !missing_frame_ids.is_empty()
-        || !missing_video_chunk_keys.is_empty();
+    let requested_keyframe = options.requested_keyframe || !missing_frame_ids.is_empty();
 
     let record = GameCultMediaReceiverFeedbackRecord {
         stream_id: options.stream_id.to_string(),
@@ -535,7 +534,19 @@ mod receiver_feedback_tests {
         assert_eq!(feedback.missing_frame_ids, vec![42, 43]);
         assert_eq!(feedback.missing_video_chunk_keys, vec!["42:1", "43:2"]);
         assert_eq!(feedback.late_frame_ids, vec![38, 39]);
-        assert!(feedback.requested_keyframe, "missing chunks imply a lost reference");
+        assert!(feedback.requested_keyframe, "a whole missing frame is a lost reference");
+        Ok(())
+    }
+
+    /// A producer answers a keyframe request with an IDR. A repair request is
+    /// the cheaper alternative and must not carry one by accident.
+    #[test]
+    fn a_repair_request_does_not_ask_for_a_keyframe() -> Result<()> {
+        let feedback = build_receiver_feedback(ReceiverFeedbackOptions {
+            missing_video_chunk_keys: vec![video_chunk_feedback_key(42, 1)],
+            ..options()
+        })?;
+        assert!(!feedback.requested_keyframe);
         Ok(())
     }
 
