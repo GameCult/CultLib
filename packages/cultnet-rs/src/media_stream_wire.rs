@@ -445,3 +445,121 @@ pub fn validate_feedback_record(record: &GameCultMediaReceiverFeedbackRecord) ->
     normalize_video_chunk_feedback_keys(record.missing_video_chunk_keys.clone())?;
     Ok(())
 }
+
+/// What a receiver has to say about a stream. The record it builds is the
+/// contract's; this normalises it so both ends agree on its shape: damage
+/// lists sorted and unique, chunk keys well-formed, and a keyframe requested
+/// whenever something is missing, since a producer cannot repair a reference
+/// the receiver never had.
+#[derive(Clone, Debug)]
+pub struct ReceiverFeedbackOptions<'a> {
+    pub stream_id: &'a str,
+    pub session_id: &'a str,
+    pub receiver_id: &'a str,
+    pub highest_decodable_frame_id: Option<u64>,
+    pub missing_frame_ids: Vec<u64>,
+    pub missing_video_chunk_keys: Vec<String>,
+    pub late_frame_ids: Vec<u64>,
+    pub requested_keyframe: bool,
+    pub jitter_us: i64,
+    pub decode_queue_us: i64,
+    pub observed_at: &'a str,
+}
+
+pub fn build_receiver_feedback(
+    options: ReceiverFeedbackOptions<'_>,
+) -> Result<GameCultMediaReceiverFeedbackRecord> {
+    let mut missing_frame_ids = options.missing_frame_ids;
+    missing_frame_ids.sort_unstable();
+    missing_frame_ids.dedup();
+    let missing_video_chunk_keys =
+        normalize_video_chunk_feedback_keys(options.missing_video_chunk_keys)?;
+    let mut late_frame_ids = options.late_frame_ids;
+    late_frame_ids.sort_unstable();
+    late_frame_ids.dedup();
+    let requested_keyframe = options.requested_keyframe
+        || !missing_frame_ids.is_empty()
+        || !missing_video_chunk_keys.is_empty();
+
+    let record = GameCultMediaReceiverFeedbackRecord {
+        stream_id: options.stream_id.to_string(),
+        session_id: options.session_id.to_string(),
+        receiver_id: options.receiver_id.to_string(),
+        highest_decodable_frame_id: options.highest_decodable_frame_id,
+        missing_frame_ids,
+        late_frame_ids,
+        requested_keyframe,
+        jitter_us: options.jitter_us,
+        decode_queue_us: options.decode_queue_us,
+        observed_at: options.observed_at.to_string(),
+        missing_video_chunk_keys,
+    };
+    validate_feedback_record(&record)?;
+    Ok(record)
+}
+
+#[cfg(test)]
+mod receiver_feedback_tests {
+    use super::*;
+
+    fn options() -> ReceiverFeedbackOptions<'static> {
+        ReceiverFeedbackOptions {
+            stream_id: "muninn.raven.av.rudp",
+            session_id: "session-1",
+            receiver_id: "starfire.obs",
+            highest_decodable_frame_id: Some(40),
+            missing_frame_ids: Vec::new(),
+            missing_video_chunk_keys: Vec::new(),
+            late_frame_ids: Vec::new(),
+            requested_keyframe: false,
+            jitter_us: 0,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z",
+        }
+    }
+
+    #[test]
+    fn builds_receiver_feedback_with_sorted_unique_damage_lists() -> Result<()> {
+        let feedback = build_receiver_feedback(ReceiverFeedbackOptions {
+            missing_frame_ids: vec![43, 42, 43],
+            missing_video_chunk_keys: vec![
+                video_chunk_feedback_key(43, 2),
+                video_chunk_feedback_key(42, 1),
+                video_chunk_feedback_key(42, 1),
+            ],
+            late_frame_ids: vec![39, 39, 38],
+            jitter_us: 700,
+            ..options()
+        })?;
+
+        assert_eq!(feedback.missing_frame_ids, vec![42, 43]);
+        assert_eq!(feedback.missing_video_chunk_keys, vec!["42:1", "43:2"]);
+        assert_eq!(feedback.late_frame_ids, vec![38, 39]);
+        assert!(feedback.requested_keyframe, "missing chunks imply a lost reference");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_negative_receiver_feedback_timing() {
+        let error = build_receiver_feedback(ReceiverFeedbackOptions { jitter_us: -1, ..options() })
+            .unwrap_err();
+        assert!(error.to_string().contains("jitter_us"));
+    }
+
+    #[test]
+    fn rejects_malformed_receiver_feedback_chunk_keys() {
+        let error = build_receiver_feedback(ReceiverFeedbackOptions {
+            missing_video_chunk_keys: vec!["frame:chunk".to_string()],
+            ..options()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("frame_id"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_empty_receiver_id() {
+        let error = build_receiver_feedback(ReceiverFeedbackOptions { receiver_id: "", ..options() })
+            .unwrap_err();
+        assert!(error.to_string().contains("receiver_id"));
+    }
+}
