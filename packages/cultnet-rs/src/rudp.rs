@@ -167,6 +167,10 @@ struct FragmentBuffer {
     fragment_count: u16,
     payloads: BTreeMap<u16, Vec<u8>>,
     sequences: BTreeMap<u16, u32>,
+    /// Session-local arrival ordinal of the newest fragment in this set. A
+    /// set that stops being touched is one that lost a fragment; it is the
+    /// first to go when the pending-set bound is reached.
+    last_touched: u64,
 }
 
 pub struct CultNetRudpSession {
@@ -191,6 +195,8 @@ pub struct CultNetRudpSession {
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
+    fragment_touches: u64,
+    fragment_sets_evicted: u64,
 }
 
 impl CultNetRudpSession {
@@ -217,6 +223,8 @@ impl CultNetRudpSession {
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
             fragment_buffers: BTreeMap::new(),
+            fragment_touches: 0,
+            fragment_sets_evicted: 0,
         }
     }
 
@@ -245,6 +253,14 @@ impl CultNetRudpSession {
     /// acknowledged. A rising count means the peer is not keeping up.
     pub fn reliable_packets_expired(&self) -> u64 {
         self.reliable_packets_expired
+    }
+
+    /// Incomplete fragment sets discarded to admit a newer one. Each is a
+    /// payload that lost at least one fragment on the wire; a rising count is
+    /// the link's loss rate multiplied by the fragment count, and the reason
+    /// media payloads should fit in one packet.
+    pub fn fragment_sets_evicted(&self) -> u64 {
+        self.fragment_sets_evicted
     }
 
     pub fn queued_reliable_packet_count(&self) -> usize {
@@ -968,7 +984,19 @@ impl CultNetRudpSession {
         if !self.fragment_buffers.contains_key(&key)
             && self.fragment_buffers.len() >= self.max_pending_fragment_sets
         {
-            return Err(anyhow!("RUDP pending fragment-set limit reached"));
+            // A set that is still incomplete when the bound is reached has
+            // almost certainly lost a fragment; its siblings were delivered
+            // long ago. Drop the one untouched longest so the session keeps
+            // receiving. Erroring here made any lossy fragmenting channel a
+            // countdown to a dead receiver.
+            let stalest = self
+                .fragment_buffers
+                .iter()
+                .min_by_key(|(_, buffer)| buffer.last_touched)
+                .map(|(key, _)| key.clone())
+                .expect("bound reached implies a pending set exists");
+            self.fragment_buffers.remove(&stalest);
+            self.fragment_sets_evicted += 1;
         }
         let buffered_bytes = self
             .fragment_buffers
@@ -995,12 +1023,15 @@ impl CultNetRudpSession {
                 fragment_count: packet.fragment_count,
                 payloads: BTreeMap::new(),
                 sequences: BTreeMap::new(),
+                last_touched: 0,
             });
         if buffer.fragment_count != packet.fragment_count || buffer.ordered != packet.ordered {
             return Err(anyhow!(
                 "RUDP fragment metadata changed within a fragment set"
             ));
         }
+        self.fragment_touches += 1;
+        buffer.last_touched = self.fragment_touches;
         buffer
             .payloads
             .insert(packet.fragment_index, packet.payload.clone());
@@ -1171,7 +1202,9 @@ impl CultNetRudpSession {
 
     fn allocate_fragment_id(&mut self) -> u16 {
         let fragment_id = self.next_fragment_id;
-        self.next_fragment_id = self.next_fragment_id.saturating_add(1);
+        // Wrap, never saturate: `saturating_add` parked every set after the
+        // 65,535th on one shared id, and the reassembler stitched them together.
+        self.next_fragment_id = self.next_fragment_id.wrapping_add(1);
         if self.next_fragment_id == 0 {
             self.next_fragment_id = 1;
         }
