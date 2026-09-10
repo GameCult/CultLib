@@ -516,3 +516,7 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Python package build output
+packages/*-py/build/
+*.egg-info/
