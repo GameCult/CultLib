@@ -131,7 +131,7 @@ import {
 
 const identity: CultMeshBrowserIdentity = {
   verseId: "smoke",
-  providerId: "smoke.provider",
+  authorityRuntimeId: "smoke.authority",
 };
 const lease: CultMeshRawDocumentLeaseOptions = {
   schemaId: "smoke.document.v1",

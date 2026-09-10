@@ -28,7 +28,9 @@
         "protocolIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "priority": { "type": "integer", "minimum": 0 },
         "generation": { "type": "string", "minLength": 1 },
-        "certificate": { "$ref": "#/$defs/routeCertificate" }
+        "certificate": {
+          "anyOf": [{ "$ref": "#/$defs/routeCertificate" }, { "type": "null" }]
+        }
       }
     },
     "routeCertificate": {
