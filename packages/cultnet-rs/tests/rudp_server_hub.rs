@@ -399,7 +399,12 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     )?;
     let second_set = sender.send_many("schema", vec![5, 6, 7, 8], fragment_options, Some(2))?;
     receiver.receive(&first_set[0], 2)?;
-    assert!(receiver.receive(&second_set[0], 2).is_err());
+    // The fragment-set bound evicts the stalest incomplete set rather than
+    // refusing the packet: a receiver that dies at its bound under loss is a
+    // fuse, not a limit (measured 2026-09-10, see tests/cultnet.rs).
+    assert_eq!(receiver.fragment_sets_evicted(), 0);
+    receiver.receive(&second_set[0], 2)?;
+    assert_eq!(receiver.fragment_sets_evicted(), 1, "the first set was evicted for the second");
 
     let server_socket = socket()?;
     let server_addr = server_socket.local_addr()?;
@@ -509,5 +514,61 @@ fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
     std::thread::sleep(Duration::from_millis(2));
     assert_eq!(hub.remove_timed_out_sessions(0), vec![context]);
     assert!(hub.sessions().is_empty());
+    Ok(())
+}
+
+/// A packet that carries no event — an acknowledgement, a ping — must not
+/// make the reader report "nothing waiting" while frames sit behind it.
+/// A caller that polls once per send fell behind its peer's acknowledgements
+/// this way and a reliable channel resent everything.
+#[test]
+fn a_reader_does_not_stop_at_a_packet_that_carries_no_event() -> Result<()> {
+    let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new(
+        "hub",
+        socket()?,
+        CONNECTION_ID,
+    ))?;
+    let mut peer = client(hub.local_addr()?)?;
+    let session = connect(&mut hub, &mut peer, b"evidence")?;
+
+    // Hub side: a ping (reply, no event) ahead of a reliable frame.
+    peer.ping(b"keepalive".to_vec())?;
+    peer.send("schema", b"after the ping".to_vec())?;
+    std::thread::sleep(Duration::from_millis(20));
+    match hub.receive_event_once()? {
+        Some(CultNetRudpServerEvent::Frame { frame, .. }) => {
+            assert_eq!(frame.payload, b"after the ping");
+        }
+        other => panic!("the first read must reach the frame behind the ping, got {other:?}"),
+    }
+
+    // Client side: the hub's acknowledgement of that frame is queued ahead of
+    // two unreliable frames; the client must reach both without a "nothing"
+    // in between, and must not acknowledge unreliable frames back.
+    let mut unreliable_hub_options =
+        CultNetRudpServerHubOptions::new("hub-unreliable", socket()?, CONNECTION_ID);
+    unreliable_hub_options.media_delivery = Some(CultNetTransportDelivery::Unreliable);
+    let mut media_hub = CultNetRudpServerHub::new(unreliable_hub_options)?;
+    let mut media_client = client(media_hub.local_addr()?)?;
+    let media_session = connect(&mut media_hub, &mut media_client, b"media")?;
+    media_client.send("schema", b"reliable, will be acked".to_vec())?;
+    std::thread::sleep(Duration::from_millis(20));
+    while media_hub.receive_event_once()?.is_some() {}
+    media_hub.send(&media_session, "media", b"one".to_vec())?;
+    media_hub.send(&media_session, "media", b"two".to_vec())?;
+    std::thread::sleep(Duration::from_millis(20));
+    let before = media_hub.stats().bytes_received;
+    let first = media_client.receive_once()?.expect("the first read reaches the frame behind the ack");
+    let second = media_client.receive_once()?.expect("the second frame follows");
+    assert_eq!((first.payload, second.payload), (b"one".to_vec(), b"two".to_vec()));
+    assert!(media_client.receive_once()?.is_none());
+    std::thread::sleep(Duration::from_millis(20));
+    while media_hub.receive_event_once()?.is_some() {}
+    assert_eq!(
+        media_hub.stats().bytes_received,
+        before,
+        "unreliable frames are not acknowledged; the hub read nothing back"
+    );
+    let _ = session;
     Ok(())
 }

@@ -1538,11 +1538,26 @@ impl CultNetRudpServerHub {
         Ok(true)
     }
 
+    /// The next event, or `None` only when nothing is waiting on the socket.
+    ///
+    /// Packets that carry no event for the caller — acknowledgements, pings,
+    /// a repeated Connect, a fragment that completes nothing yet — are
+    /// consumed here and reading continues. Returning `None` after one of
+    /// those made a caller that polls once per send fall behind its own
+    /// peers' acknowledgements, and a reliable channel then resent everything.
     pub fn receive_event_once(&mut self) -> Result<Option<CultNetRudpServerEvent>> {
-        if let Some(event) = self.pending_events.pop_front() {
-            return Ok(Some(event));
+        loop {
+            if let Some(event) = self.pending_events.pop_front() {
+                return Ok(Some(event));
+            }
+            if !self.receive_packet_once()? {
+                return Ok(None);
+            }
         }
+    }
 
+    /// Reads one datagram and applies it. `false` when the socket is empty.
+    fn receive_packet_once(&mut self) -> Result<bool> {
         let mut wire = vec![0_u8; 65_535];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
@@ -1551,7 +1566,7 @@ impl CultNetRudpServerHub {
                     || error.kind() == ErrorKind::TimedOut
                     || error.kind() == ErrorKind::ConnectionReset =>
             {
-                return Ok(None);
+                return Ok(false);
             }
             Err(error) => return Err(error.into()),
         };
@@ -1559,7 +1574,7 @@ impl CultNetRudpServerHub {
         self.stats.bytes_received += received as u64;
         let packet = decode_rudp_packet(&wire)?;
         if packet.connection_id != self.connection_id {
-            return Ok(None);
+            return Ok(true);
         }
 
         if packet.packet_type == CultNetRudpPacketType::Connect {
@@ -1572,7 +1587,7 @@ impl CultNetRudpServerHub {
                     .pending_accept_for_resend(now_ms())
                     .unwrap_or_else(|| peer.session.create_ack());
                 self.send_packet(remote_addr, &reply)?;
-                return Ok(None);
+                return Ok(true);
             }
             if !self.peers.contains_key(&remote_addr) && self.peers.len() >= self.max_peers {
                 return Err(anyhow!("RUDP server hub peer limit reached"));
@@ -1613,11 +1628,11 @@ impl CultNetRudpServerHub {
             }
             self.pending_events
                 .push_back(CultNetRudpServerEvent::Connected { session: context });
-            return Ok(self.pending_events.pop_front());
+            return Ok(true);
         }
 
         let Some(peer) = self.peers.get_mut(&remote_addr) else {
-            return Ok(None);
+            return Ok(true);
         };
         let result = peer.session.receive(&packet, now_ms())?;
         let context = peer.context.clone();
@@ -1660,7 +1675,7 @@ impl CultNetRudpServerHub {
                 });
             self.peers.remove(&remote_addr);
         }
-        Ok(self.pending_events.pop_front())
+        Ok(true)
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
@@ -1923,11 +1938,23 @@ impl CultNetRudpSocketTransportConnection {
         }
     }
 
+    /// The next delivered frame, or `None` only when nothing is waiting on
+    /// the socket. Acknowledgements, pongs and incomplete fragments are
+    /// consumed and reading continues; see the hub's `receive_event_once`.
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
-        if let Some(frame) = self.delivered_frames.pop_front() {
-            return Ok(Some(frame));
+        loop {
+            if let Some(frame) = self.delivered_frames.pop_front() {
+                return Ok(Some(frame));
+            }
+            if !self.receive_packet_once()? {
+                return Ok(None);
+            }
         }
+    }
 
+    /// Reads one datagram and applies it. `false` when the socket is empty
+    /// or the session has been disconnected.
+    fn receive_packet_once(&mut self) -> Result<bool> {
         let mut wire = vec![0_u8; 65_535];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
@@ -1936,7 +1963,7 @@ impl CultNetRudpSocketTransportConnection {
                     || error.kind() == ErrorKind::TimedOut
                     || error.kind() == ErrorKind::ConnectionReset =>
             {
-                return Ok(None);
+                return Ok(false);
             }
             Err(error) => return Err(error.into()),
         };
@@ -1951,14 +1978,14 @@ impl CultNetRudpSocketTransportConnection {
                 {
                     self.remote_addr = Some(remote_addr);
                 } else {
-                    return Ok(None);
+                    return Ok(true);
                 }
             }
         } else {
             if self.mode == CultNetRudpSocketMode::Server
                 && packet.packet_type != CultNetRudpPacketType::Connect
             {
-                return Ok(None);
+                return Ok(true);
             }
             self.remote_addr = Some(remote_addr);
         }
@@ -1968,7 +1995,7 @@ impl CultNetRudpSocketTransportConnection {
             self.session.reset_peer_state();
             let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
             self.send_packet(&accept)?;
-            return Ok(None);
+            return Ok(true);
         }
 
         let result = self.session.receive(&packet, now_ms())?;
@@ -1983,7 +2010,7 @@ impl CultNetRudpSocketTransportConnection {
         }
         if result.disconnected {
             self.disconnect_reason = Some(result.disconnect_reason);
-            return Ok(None);
+            return Ok(false);
         }
 
         for frame in result.delivered {
@@ -1993,13 +2020,14 @@ impl CultNetRudpSocketTransportConnection {
             });
             self.stats.frames_received += 1;
         }
-        let frame = self.delivered_frames.pop_front();
-        if packet.reliable || packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some()
-        {
+        // Only what the sender is waiting on is acknowledged. An unreliable
+        // frame carries no sequence, so an ACK for it tells the sender
+        // nothing and costs it one datagram to read for every one it sent.
+        if packet.reliable || packet.packet_type == CultNetRudpPacketType::Accept {
             let ack = self.session.create_ack_for_received(packet.sequence);
             self.send_packet(&ack)?;
         }
-        Ok(frame)
+        Ok(true)
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
