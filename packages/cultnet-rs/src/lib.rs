@@ -1,6 +1,8 @@
 mod contracts;
 mod idunn_deployment_brake;
 mod idunn_lifecycle_brake;
+mod media_stream_contracts;
+mod media_stream_wire;
 mod provider_health_contracts;
 mod runtime_authority_contracts;
 mod service_identity;
@@ -19,6 +21,8 @@ mod transport;
 pub use contracts::*;
 pub use idunn_deployment_brake::*;
 pub use idunn_lifecycle_brake::*;
+pub use media_stream_contracts::*;
+pub use media_stream_wire::*;
 pub use provider_health_contracts::*;
 pub use runtime_authority_contracts::*;
 pub use service_identity::*;
