@@ -1453,6 +1453,11 @@ impl CultNetRudpServerHub {
             .values()
             .map(|peer| peer.session.reliable_packets_expired())
             .fold(0_u64, |total, expired| total.saturating_add(expired));
+        stats.fragment_sets_evicted = self
+            .peers
+            .values()
+            .map(|peer| peer.session.fragment_sets_evicted())
+            .fold(0_u64, |total, evicted| total.saturating_add(evicted));
         stats
     }
 
@@ -1754,6 +1759,7 @@ impl CultNetRudpSocketTransportConnection {
     pub fn stats(&self) -> CultNetTransportStats {
         let mut stats = self.stats.clone();
         stats.reliable_packets_expired = self.session.reliable_packets_expired();
+        stats.fragment_sets_evicted = self.session.fragment_sets_evicted();
         stats
     }
 
