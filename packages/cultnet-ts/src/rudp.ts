@@ -160,6 +160,12 @@ export class CultNetRudpSession {
   readonly #orderedNextSequenceByChannel = new Map<string, number>();
   readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
   readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
+  /// Matches cultnet-rs's `max_pending_fragment_sets`. A fragment set is only
+  /// removed on successful reassembly, so a set that loses one fragment is
+  /// stranded for the life of the session. Without a bound the map grows
+  /// forever under any loss on a fragmenting channel.
+  #maxPendingFragmentSets = 64;
+  #fragmentSetsEvicted = 0;
 
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
@@ -187,6 +193,17 @@ export class CultNetRudpSession {
     return this.#pendingReliable.size + this.#queuedReliable.length;
   }
 
+  /// Incomplete fragment sets dropped to stay within the pending bound.
+  /// Non-zero means the peer is losing fragments: the receiver is still
+  /// serving, and something upstream is not.
+  get fragmentSetsEvicted(): number {
+    return this.#fragmentSetsEvicted;
+  }
+
+  get pendingFragmentSetCount(): number {
+    return this.#fragmentBuffers.size;
+  }
+
   get lastReceivedAtMs(): number | undefined {
     return this.#lastReceivedAtMs;
   }
@@ -203,6 +220,7 @@ export class CultNetRudpSession {
     this.#orderedNextSequenceByChannel.clear();
     this.#orderedBuffers.clear();
     this.#fragmentBuffers.clear();
+    this.#fragmentSetsEvicted = 0;
   }
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
@@ -636,6 +654,20 @@ export class CultNetRudpSession {
         payloads: new Map(),
         sequences: new Map(),
       };
+      // Evict the oldest stranded set rather than refusing the payload. A
+      // receiver that stops accepting fragmented traffic after a bounded
+      // number of losses is a denial of service delivered by the network;
+      // dropping the least recent incomplete set costs one payload that was
+      // already incomplete. Map iteration is insertion-ordered, so the first
+      // key is the oldest.
+      while (this.#fragmentBuffers.size >= this.#maxPendingFragmentSets) {
+        const oldest = this.#fragmentBuffers.keys().next();
+        if (oldest.done) {
+          break;
+        }
+        this.#fragmentBuffers.delete(oldest.value);
+        this.#fragmentSetsEvicted += 1;
+      }
       this.#fragmentBuffers.set(key, buffer);
     }
     if (buffer.fragmentCount !== fragmentCount || buffer.ordered !== (packet.ordered ?? false)) {
