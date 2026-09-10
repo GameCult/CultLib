@@ -1,4 +1,4 @@
-import { parseEveCommandReceipt, parseEveSurfaceDocument } from "@gamecult/eve-contracts";
+import { parseEveCommandReceipt, parseEveProviderAdvertisement, parseEveSurfaceDocument } from "@gamecult/eve-contracts";
 import { renderEveSurface } from "@gamecult/eve-browser-lowering";
 import {
   CultMeshBrowserClient,
@@ -52,14 +52,23 @@ try {
     recordKey: "sample.counter",
     subscriptionId: "browser-surface",
   });
+  // The provider owns the declaration of where this surface's commands go and
+  // what comes back; the page reads it rather than restating it.
+  const advertisement = await mesh.leaseRawDocument({
+    schemaId: "gamecult.eve.provider_advertisement.v1",
+    recordKey: "sample.counter-ui",
+    subscriptionId: "browser-provider",
+  });
+  const provider = parseEveProviderAdvertisement(decodeCultNetPayload(advertisement.current!));
   const currentSurface = parseEveSurfaceDocument(decodeCultNetPayload(surface.current!));
   renderEveSurface(currentSurface, host, {
     activeSurfaceId: "sample.counter",
     clientId: "sample.chromium",
+    provider,
     commandSink: async intent => {
       const response = await mesh.invoke({
         serviceId: "sample.counter",
-        operation: intent.command,
+        operation: intent.operation.operationId,
         payloadSchema: "sample.increment.v1",
         payload: { amount: 1 },
         idempotencyKey: window.__sampleCommandId,

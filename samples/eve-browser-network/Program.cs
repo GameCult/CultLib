@@ -14,6 +14,8 @@ using Microsoft.Extensions.DependencyInjection;
 
 const string counterKey = "counter:main";
 const string surfaceKey = "sample.counter";
+const string providerKey = "sample.counter-ui";
+const string commandBoundary = "sample.counter.commands";
 var arguments = Args.Parse(args);
 if (arguments.Mode == "provider")
 {
@@ -89,7 +91,7 @@ static async Task RunOdinAsync(Args arguments)
 
 static async Task RunProviderAsync(Args arguments)
 {
-    var documentTypes = new[] { typeof(CounterState), typeof(EveSurfaceDocument) };
+    var documentTypes = new[] { typeof(CounterState), typeof(EveSurfaceDocument), typeof(EveProviderAdvertisementDocument) };
     var registry = CultMesh.CreateCultCacheDocumentRegistry(documentTypes);
     var documents = CultMesh.CreateCultNetDocumentRegistry(documentTypes, registry);
     using var node = await CultMesh.CreateNodeAsync(arguments.StatePath, new CultMeshNodeOptions
@@ -111,6 +113,10 @@ static async Task RunProviderAsync(Args arguments)
         await node.Database.PutAsync(new CultRecordKey(counterKey), CounterState.Initial(counterKey));
     if (node.Cache.Get<EveSurfaceDocument>(new CultRecordKey(surfaceKey)) == null)
         await node.Database.PutAsync(new CultRecordKey(surfaceKey), CreateCounterSurface());
+    // The advertisement is how a lowering learns where this surface's commands
+    // go and what comes back. Eve refuses to build a command intent without it,
+    // and the browser must not have to restate it: the provider is the owner.
+    await node.Database.PutAsync(new CultRecordKey(providerKey), CreateProviderAdvertisement(arguments));
     await node.FlushAsync();
 
     await using var schemaServer = new CultNetWebSocketSchemaServer();
@@ -339,6 +345,43 @@ static void ForceCollection()
     GC.Collect();
     GC.WaitForPendingFinalizers();
     GC.Collect();
+}
+
+static EveProviderAdvertisementDocument CreateProviderAdvertisement(Args arguments)
+{
+    var worldInteraction = new EveWorldInteractionAdvertisement(
+        projectionKind: "surface-state",
+        stateSchemas: ["sample.counter_state.v1"],
+        commandBoundary: commandBoundary,
+        commandRecordRef: "",
+        receiptSchema: EveCommandReceiptDocument.SchemaId,
+        receiptRecordRef: "",
+        assetManifestRecordRef: "",
+        loweringTargets: ["browser"],
+        ownership: arguments.AuthorityRuntimeId);
+    return new EveProviderAdvertisementDocument(
+        providerId: providerKey,
+        serviceId: arguments.VerseId,
+        verseId: arguments.VerseId,
+        title: "CultMesh browser counter",
+        kind: "sample.daemon",
+        cultMeshAddress: arguments.AuthorityRuntimeId,
+        updatedAtUtc: DateTime.UtcNow.ToString("O"),
+        freshness: new EveProviderFreshness("live", DateTime.UtcNow.ToString("O"), 0),
+        schemas: ["sample.counter_state.v1", EveSurfaceDocument.SchemaId, EveCommandReceiptDocument.SchemaId],
+        witnesses: [],
+        surfaces:
+        [
+            new EveAdvertisedSurface(
+                surfaceKey,
+                EveSurfaceDocument.SchemaId,
+                surfaceKey,
+                "cultmesh",
+                "live",
+                "surface",
+                worldInteraction)
+        ],
+        commands: [new EveAdvertisedCommand("sample.counter.increment", surfaceKey, "cultmesh", "Increment")]);
 }
 
 static EveSurfaceDocument CreateCounterSurface()

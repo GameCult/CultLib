@@ -107,6 +107,10 @@ try {
 
   browser = await chromium.launch({ executablePath: resolveChromiumExecutable(), headless: true });
   let page = await browser.newPage();
+  // A command the lowering refuses is caught inside the page; without this
+  // the only symptom is a 30 s timeout on the receipt.
+  page.on("console", message => console.log(`[browser:${message.type()}] ${message.text()}`));
+  page.on("pageerror", error => console.log(`[browser:pageerror] ${error.message}`));
   const url = `http://127.0.0.1:${httpPort}/?odin=${encodeURIComponent(odinEndpoint)}&token=${token}`;
   await page.goto(url);
   await page.waitForFunction(() => window.__sampleReady || window.__sampleError);
