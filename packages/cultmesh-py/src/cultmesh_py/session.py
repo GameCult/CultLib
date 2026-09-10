@@ -23,7 +23,7 @@ from .simulation import (
     CultMeshSimulationFactCommitter,
     simulation_fact_document,
 )
-from .wire import CultMeshAuthorityLeaseCatalog, CultMeshPeerCatalog, CultMeshVerseCatalog
+from cultnet_py.cultmesh_contracts import CultMeshAuthorityLeaseCatalog, CultMeshPeerCatalog, CultMeshVerseCatalog
 
 if TYPE_CHECKING:
     from .server import CultMeshLocalServer

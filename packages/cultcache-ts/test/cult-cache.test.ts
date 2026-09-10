@@ -3,7 +3,7 @@ import { exec, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -24,7 +24,9 @@ const pythonCommand = process.env.PYTHON ?? "python";
 const cultCacheTsRoot = resolve(__dirname, "../..");
 const cultLibRoot = findAncestor(cultCacheTsRoot, "CultLib.sln") ?? resolve(cultCacheTsRoot, "..", "CultLib");
 const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
-const cultcachePySrc = resolve(cultcachePyRoot, "src");
+const cultcachePySrc = ["cultcache-py", "cultnet-py", "cultmesh-py"]
+  .map((name) => resolve(cultLibRoot, "packages", name, "src"))
+  .join(delimiter);
 const cultcacheRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultcache-rs"))
   ? resolve(cultLibRoot, "packages", "cultcache-rs")
   : resolve(cultCacheTsRoot, "..", "cultcache-rs");

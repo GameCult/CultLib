@@ -8,15 +8,18 @@ name: Publish packages
 # directly, which is already how Ghostlight, Epiphany, CodexConnector and Odin
 # consume the core stack.
 #
-# Tag a release to publish, for example `cultcache-ts-v0.13.6`. The tag's
-# version must match the version in the package manifest; the workflow refuses
-# the publish otherwise rather than shipping a mislabelled artifact.
+# Tag a release to publish, for example `cultcache-ts-v0.13.6` or
+# `cultnet-py-v0.1.0`. The tag's version must match the version in the package
+# manifest; the workflow refuses the publish otherwise rather than shipping a
+# mislabelled artifact.
 
 on:
   push:
     tags:
       - "cultcache-ts-v*"
       - "cultcache-py-v*"
+      - "cultnet-py-v*"
+      - "cultmesh-py-v*"
   workflow_dispatch:
     inputs:
       package:
@@ -26,6 +29,8 @@ on:
         options:
           - cultcache-ts
           - cultcache-py
+          - cultnet-py
+          - cultmesh-py
 
 permissions:
   contents: read
@@ -72,9 +77,16 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  cultcache-py:
-    name: cultcache-py to PyPI
-    if: startsWith(github.ref, 'refs/tags/cultcache-py-v') || inputs.package == 'cultcache-py'
+  # The three Python packages layer cultcache-py < cultnet-py < cultmesh-py, the
+  # same way the Rust crates and npm packages do. One job shape serves all
+  # three; the matrix entry names the package and the tag prefix that releases it.
+  python:
+    name: ${{ matrix.package }} to PyPI
+    if: startsWith(github.ref, 'refs/tags/cultcache-py-v') || startsWith(github.ref, 'refs/tags/cultnet-py-v') || startsWith(github.ref, 'refs/tags/cultmesh-py-v') || endsWith(inputs.package, '-py')
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [cultcache-py, cultnet-py, cultmesh-py]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pypi
@@ -84,31 +96,51 @@ jobs:
       # long-lived API token is stored in the repository.
       id-token: write
     steps:
+      - name: Skip packages this run does not name
+        id: selected
+        run: |
+          if [ "${GITHUB_REF_NAME#${{ matrix.package }}-v}" != "$GITHUB_REF_NAME" ] || [ "${{ inputs.package }}" = "${{ matrix.package }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out CultLib
+        if: steps.selected.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.selected.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Verify the tag matches the manifest version
-        if: startsWith(github.ref, 'refs/tags/cultcache-py-v')
+        if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
         run: |
-          manifest="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/cultcache-py/pyproject.toml').read_text())['project']['version'])")"
-          tagged="${GITHUB_REF_NAME#cultcache-py-v}"
+          manifest="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/${{ matrix.package }}/pyproject.toml').read_text())['project']['version'])")"
+          tagged="${GITHUB_REF_NAME#${{ matrix.package }}-v}"
           if [ "$manifest" != "$tagged" ]; then
             echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
             exit 1
           fi
 
+      # Lower layers install from source so a release of one package is tested
+      # against the sibling revision it was cut with, not whatever PyPI has.
+      - name: Install and test
+        if: steps.selected.outputs.run == 'true'
+        run: |
+          python -m pip install -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py
+          python -m unittest discover -s packages/${{ matrix.package }}/tests
+
       - name: Build sdist and wheel
+        if: steps.selected.outputs.run == 'true'
         run: |
           python -m pip install --upgrade build
-          python -m build packages/cultcache-py
+          python -m build packages/${{ matrix.package }}
 
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/cultcache-py-v')
+        if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: packages/cultcache-py/dist
+          packages-dir: packages/${{ matrix.package }}/dist

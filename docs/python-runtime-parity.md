@@ -1,7 +1,7 @@
 # Python Runtime Parity Map
 
-This file is the current audit map for `cultcache-py` as a Python runtime for
-CultCache, CultNet, and CultMesh. It is evidence, not confetti.
+This file is the current audit map for the Python runtime packages
+`cultcache-py`, `cultnet-py`, and `cultmesh-py`. It is evidence, not confetti.
 
 ## Proven Surfaces
 
@@ -255,14 +255,14 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
   individual discovery, peer exchange, or simulation surfaces unserved without
   advertising disabled capabilities.
 - Python package health:
-  `cultcache-py-verify --json` checks the public CultCache/CultNet/CultMesh
+  `cultmesh-py-verify --json` checks the public CultCache/CultNet/CultMesh
   export surface declared by each package `__all__`, `py.typed` markers, a live
   local CultMesh framed-wire smoke over hello/schema/snapshot/shard
   catalog/shard log, typed peer-error export availability, peer-advertised
   mutation contracts, payload schema wire contracts, simulation capability
   truth, and benchmark sanity for Python-owned hot paths.
 - Python/C# public cache baseline:
-  `cultcache_py.compare_csharp` runs Python and C# `CultCache` upsert/get
+  `cultnet_py.compare_csharp` runs Python and C# `CultCache` upsert/get
   benchmarks with the same operation names and reports median Python-to-C# ratios
   from three samples by default. It also emits per-metric threshold checks and an
   overall parity status so performance claims have an explicit evidence gate.
@@ -275,12 +275,14 @@ CultCache, CultNet, and CultMesh. It is evidence, not confetti.
 ## Local Python Gates
 
 ```powershell
-$env:PYTHONPATH="$PWD\packages\cultcache-py\src"
+$env:PYTHONPATH="$PWD\packages\cultcache-py\src;$PWD\packages\cultnet-py\src;$PWD\packages\cultmesh-py\src"
 python -m unittest discover -s packages\cultcache-py\tests
-python -m cultcache_py.verify --json
-python -m cultcache_py.benchmark --records 1000 --json
-python -m cultcache_py.compare_csharp --records 1000 --samples 3 --json
-python -m pip wheel --no-deps -w $env:TEMP packages\cultcache-py
+python -m unittest discover -s packages\cultnet-py\tests
+python -m unittest discover -s packages\cultmesh-py\tests
+python -m cultmesh_py.verify --json
+python -m cultnet_py.benchmark --records 1000 --json
+python -m cultnet_py.compare_csharp --records 1000 --samples 3 --json
+python -m pip wheel --no-deps -w $env:TEMP packages\cultcache-py packages\cultnet-py packages\cultmesh-py
 ```
 
 ## Cross-Runtime Gate

@@ -24,7 +24,7 @@ from cultnet_py import (
 )
 
 from .node import CultMeshNode
-from .wire import (
+from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     VERSE_CATALOG_REQUEST,
     CultMeshPeerCatalog,

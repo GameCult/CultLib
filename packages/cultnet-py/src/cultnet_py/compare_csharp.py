@@ -16,7 +16,7 @@ DEFAULT_PARITY_THRESHOLD = 0.90
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="cultcache-py-compare-csharp")
+    parser = argparse.ArgumentParser(prog="cultnet-py-compare-csharp")
     parser.add_argument("--records", type=int, default=5000)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLE_COUNT)
     parser.add_argument("--parity-threshold", type=float, default=DEFAULT_PARITY_THRESHOLD)

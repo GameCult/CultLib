@@ -39,7 +39,7 @@ from .simulation import (
     CultMeshSimulationFactCommitter,
     simulation_fact_document,
 )
-from .wire import (
+from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     PEER_EXCHANGE_RESPONSE,
     VERSE_CATALOG_REQUEST,

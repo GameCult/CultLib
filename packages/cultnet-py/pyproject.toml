@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cultcache-py"
-version = "0.2.0"
-description = "Python CultCache runtime for GameCult typed state."
+name = "cultnet-py"
+version = "0.1.0"
+description = "Python CultNet transport, wire contracts, and replication for GameCult typed state."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -17,12 +17,17 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["msgpack>=1.0"]
+dependencies = ["cultcache-py>=0.2.0", "msgpack>=1.0"]
+[project.optional-dependencies]
+crypto = ["cryptography>=42"]
+
 [project.scripts]
-cultcache-py-interop = "cultcache_py.interop:main"
+cultnet-py-interop = "cultnet_py.interop_peer:main"
+cultnet-py-benchmark = "cultnet_py.benchmark:main"
+cultnet-py-compare-csharp = "cultnet_py.compare_csharp:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-cultcache_py = ["py.typed"]
+cultnet_py = ["py.typed"]

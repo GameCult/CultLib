@@ -24,7 +24,7 @@ from cultcache_py import (
     define_document_type,
 )
 from cultcache_py.documents import DocumentDefinition
-from cultmesh_py import (
+from .cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     SIMULATION_FACT_DOCUMENT_TYPE,
     VERSE_CATALOG_REQUEST,

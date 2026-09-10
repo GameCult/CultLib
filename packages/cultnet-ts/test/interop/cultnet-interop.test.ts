@@ -24,7 +24,9 @@ const pythonCommand = process.env.PYTHON ?? resolvePythonCommand();
 const cultNetTsRoot = resolve(__dirname, "../../..");
 const cultLibRoot = findAncestor(cultNetTsRoot, "CultLib.sln") ?? resolve(cultNetTsRoot, "..", "CultLib");
 const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
-const cultcachePySrc = resolve(cultcachePyRoot, "src");
+const cultcachePySrc = ["cultcache-py", "cultnet-py", "cultmesh-py"]
+  .map((name) => resolve(cultLibRoot, "packages", name, "src"))
+  .join(delimiter);
 const cultmeshKotlinRoot = resolve(cultLibRoot, "packages", "cultmesh-kotlin");
 const kotlinHome = process.env.KOTLIN_HOME ?? "C:\\Program Files\\Android\\Android Studio\\plugins\\Kotlin\\kotlinc";
 const kotlinJavaHome = process.env.KOTLIN_JAVA_HOME ?? "C:\\Program Files\\Android\\Android Studio\\jbr";

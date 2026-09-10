@@ -1,11 +1,15 @@
-﻿# cultcache-py
+# cultcache-py
 
-`cultcache-py` is the Python runtime package for CultCache, CultNet, and
-CultMesh. Callers work with registered domain documents while the cache owns
-schema identity, routing, globals, name lookups, indexes, and backing-store
-envelopes.
+`cultcache-py` is the Python CultCache runtime. Callers work with registered
+domain documents while the cache owns schema identity, routing, globals, name
+lookups, indexes, and backing-store envelopes.
 
 It is intentionally small. It is not an ORM, a database, or distributed consensus wearing rented authority.
+
+It is the bottom of the Python CultLib stack and depends only on `msgpack`.
+`cultnet-py` (transport and wire contracts) and `cultmesh-py` (nodes,
+discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
+`cultnet-rs` / `cultmesh-rs` and the npm packages.
 
 ## Current Shape
 
@@ -21,10 +25,6 @@ It is intentionally small. It is not an ORM, a database, or distributed consensu
 - the JSONL store uses only the Python standard library for bootstrap consumers
 - `define_database_entry_type(...)` emits Rust/C#-style slot-indexed
   MessagePack array payloads for cross-runtime `DatabaseEntry` contracts
-- `cultnet_py` exposes schema-v0 MessagePack helpers and 4-byte big-endian
-  frame helpers for raw document state, subscriptions, shard catch-up,
-  simulation observations, and witness artifact bundles
-- `cultmesh_py` exposes a cache-backed local node surface for Python tools
 
 ## Example
 
@@ -144,382 +144,28 @@ That matches the Rust `#[derive(DatabaseEntry)]` formatter shape and the C#
 `[Key(n)]` intent: schema evolution comes from stable field slots, not source
 member order.
 
-## CultNet And CultMesh
-
-`cultnet_py` provides the Python schema-v0 wire helpers and an interop peer:
-
-```python
-from datetime import UTC, datetime
-
-from cultnet_py import (
-    CultNetSecret,
-    CultNetServerSecurityOptions,
-    CultNetRawClient,
-    CultNetSimulationObservation,
-    CultNetWitnessArtifactBundle,
-    apply_raw_snapshot,
-    apply_shard_log_response,
-    compute_simulation_claim_hash,
-    database_subscribe,
-    decode_frame,
-    encode_frame,
-    hello,
-    parse_message,
-    shard_catalog_request,
-    simulation_observation,
-    witness_artifact_bundle,
-)
-from cultmesh_py import CultMesh
-
-payload = hello(runtime_id="python-runtime").to_bytes()
-message = parse_message(decode_frame(encode_frame(payload)))
-
-client = CultNetRawClient("127.0.0.1", 3075)
-catalog = client.fetch_schema_catalog(kinds=["wire_message"])
-snapshot = client.fetch_snapshot_response(schema_ids=["cultnet.interop-note"])
-shard_catalog = client.fetch_shard_catalog(schema_ids=["cultnet.interop-note"])
-# With a local CultCache and the matching registered document definitions:
-# applied = apply_raw_snapshot(cache, [note_doc], snapshot)
-
-subscription = database_subscribe(subscription_id="ui", schema_ids=["cultnet.interop-note"])
-shard_request = shard_catalog_request(message_id="shards", schema_ids=["cultnet.interop-note"])
-shard_log = client.fetch_shard_log_response(shard_id="interop", shard_epoch=1, after_sequence=0)
-# log_changes = apply_shard_log_response(cache, [note_doc], shard_log)
-with client.subscribe_database(subscription_id="ui", schema_ids=["cultnet.interop-note"]) as live:
-    initial_snapshot = live.read_next_snapshot_response()
-
-# The same raw-client request surface can ride RUDP when the peer advertises a
-# rudp:// endpoint and shares the connection id for that lane.
-rudp_client = CultMesh.create_client(
-    endpoint="rudp://127.0.0.1:3076",
-    connection_id=0x43554C54,
-)
-rudp_catalog = rudp_client.fetch_schema_catalog(kinds=["wire_message"])
-
-claim_hash = compute_simulation_claim_hash("frame:42", "subject:player-1", "hit")
-observation = simulation_observation(
-    message_id="obs-1",
-    witness_runtime_id="python-runtime",
-    shard_id="interop",
-    shard_epoch=1,
-    frame=42,
-    subject_id="player-1",
-    claim_kind="hit",
-    claim_hash=claim_hash,
-)
-typed_observation = CultNetSimulationObservation.from_wire(observation.to_wire())
-witness = witness_artifact_bundle(
-    bundle_id="bundle-1",
-    witness_kind="interop-proof",
-    captured_at="2026-06-13T00:00:00Z",
-    subject={"documentType": "cultnet.interop-note", "subjectId": "note:python"},
-    contracts=[{"role": "payload", "schemaId": "cultnet.interop-note"}],
-    artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
-    provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-runtime"},
-)
-typed_witness = CultNetWitnessArtifactBundle.from_wire(witness)
-witness_payload = typed_witness.to_payload()
-
-security = CultNetServerSecurityOptions.development()
-token = CultNetSecret.create_session_token(
-    "318fb4b6-ff5e-4c4f-b911-d81807de53a8",
-    datetime(2035, 1, 1, tzinfo=UTC),
-    security,
-    session_version=1,
-)
-session = CultNetSecret.try_validate_session_token(token, security)
-```
-
-AES-GCM string/byte encryption helpers are available through the same
-`CultNetSecret` surface when the optional `crypto` extra is installed.
-
-The peer can serve, dial, and probe the same raw-state interop lane used by the
-TypeScript, Rust, and C# test peers:
-
-```powershell
-python -m cultnet_py.interop_peer serve --runtime-id python-peer --runtime-kind python --display-name "Python Peer" --agent-id python-agent --advertise-host 127.0.0.1 --tcp-port 3075 --discovery-port 4075 --discovery-group 239.77.44.11 --schema-path ..\cultnet-ts\integration\contracts\cultnet.interop-note.schema.json
-python -m cultnet_py.interop_peer dial --runtime-id python-client --runtime-kind python --display-name "Python Client" --agent-id python-client --target-host 127.0.0.1 --target-port 3075 --schema-path ..\cultnet-ts\integration\contracts\cultnet.interop-note.schema.json
-python -m cultnet_py.interop_peer probe --runtime-id python-prober --discovery-port 4075 --discovery-group 239.77.44.11
-```
-
-`cultmesh_py` includes a local cache-backed node, schema-v0 helpers for the
-CultMesh Verse catalog and peer exchange wire messages, local and verified
-authority lease checks, stream transport negotiation, committed simulation fact
-documents, and local prediction reconciliation:
-
-```python
-from datetime import UTC, datetime, timedelta
-
-from cultcache_py import define_database_entry_type
-from cultnet_py import (
-    CultNetClientAuthorityScope,
-    CultNetFileShardReplicaCursorStore,
-    CultNetRawClient,
-    CultNetSchemaShardLogFetcher,
-    CultNetSchemaShardSnapshotFetcher,
-    CultNetShardDescriptor,
-    CultNetShardReplicator,
-    CultNetShardReplicatorOptions,
-)
-from cultmesh_py import (
-    CultMesh,
-    CultMeshAuthorityLease,
-    CultMeshGameSessionOptions,
-    CultMeshHmacAuthorityLeaseVerifier,
-    CultMeshNodeOptions,
-    CultMeshSnapshotFanout,
-    peer_exchange_request,
-)
-
-note_doc = define_database_entry_type(
-    "mesh.note",
-    [("body", 0), ("name", 1), ("kind", 2)],
-    name="name",
-    indexes={"kind": "kind"},
-)
-node = CultMesh.start_node(
-    "mesh.cc",
-    runtime_id="python-runtime",
-    options=CultMeshNodeOptions(enable_durable_shard_logs=True),
-)
-node.database.register_document(note_doc)
-unsubscribe = node.database.watch_record(note_doc, "note:1", lambda change: print(change.change_kind))
-unsubscribe_named = node.database.watch_by_name(note_doc, "intro", lambda change: print(change.record_key))
-unsubscribe_kind = node.database.watch_by_index(note_doc, "kind", "guide", lambda change: print(change.record_key))
-node.database.put(note_doc, "note:1", {"body": "hello", "name": "intro", "kind": "guide"})
-live_note = node.database.get_required(note_doc, "note:1")
-put_message = node.database.put_raw_message(
-    note_doc,
-    "note:2",
-    {"body": "wire me", "name": "wire", "kind": "interop"},
-    shard_id="interop",
-    shard_epoch=1,
-)
-snapshot_response = node.database.build_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
-snapshot_wire = node.database.create_snapshot_response(schema_ids=[note_doc.catalog_entry().schema_id])
-delete_message = node.database.delete_raw_message(note_doc, "note:2", shard_id="interop", shard_epoch=1)
-shard_log_response = node.database.build_shard_log_response(shard_id="interop", shard_epoch=1)
-shard_log_wire = node.database.create_shard_log_response(shard_id="interop", shard_epoch=1)
-
-station_stock_doc = define_database_entry_type(
-    "aetheria.station_stock",
-    [("missiles", 0), ("coolant", 1)],
-    schema_id="gamecult.aetheria.station_stock.v1",
-)
-station_stock_ui_doc = define_database_entry_type(
-    "aetheria.station_stock.ui",
-    [("missiles", 0), ("coolant", 1)],
-    schema_id="gamecult.aetheria.station_stock.v1",
-)
-node.database.register_document(station_stock_doc)
-node.database.put(station_stock_ui_doc, "station:starbridge:stock", {"missiles": 24, "coolant": 80})
-stock = node.database.get_required(station_stock_ui_doc, "station:starbridge:stock")
-
-peers = CultMesh.create_peer_catalog()
-response = peers.create_response(peer_exchange_request("pex-1", verse_id="local"))
-lease_verifier = CultMeshHmacAuthorityLeaseVerifier({"odin": b"shared-lease-key"})
-lease_catalog = CultMesh.create_authority_lease_catalog(
-    signature_verifier=lease_verifier.verify,
-    require_verified_signatures=True,
-)
-lease_valid_from = datetime.now(UTC)
-lease = lease_verifier.issue(CultMeshAuthorityLease(
-    lease_id="lease:python-runtime",
-    verse_id="local",
-    peer_id="python-runtime",
-    roles=("shard-primary",),
-    valid_from=lease_valid_from,
-    expires_at=lease_valid_from + timedelta(minutes=5),
-    shard_ids=("interop",),
-    issuer_runtime_id="odin",
-))
-lease_catalog.upsert(lease)
-session = CultMesh.create_game_session(
-    node,
-    CultMeshGameSessionOptions(
-        client_authority_scopes=(
-            CultNetClientAuthorityScope("python-runtime", schema_ids=(note_doc.catalog_entry().schema_id,), key_prefix="input:python"),
-        ),
-    ),
-)
-server = CultMesh.serve_node(
-    node,
-    peer_catalog=peers,
-    observation_hub=session.observation_hub,
-    port=3075,
-    max_snapshot_documents=1000,
-    max_snapshot_bytes=4 * 1024 * 1024,
-)
-```
-
-The same local server can be launched as a package daemon when another runtime
-or operator process needs a CultNet endpoint without embedding Python glue:
-
-```powershell
-python -m cultmesh_py.daemon --runtime-id python-runtime --display-name "Python Runtime" --host 127.0.0.1 --port 3075 --cache-file mesh.cc --enable-durable-shard-logs --seed-interop-note --seed-shard-id interop --verse-id local --role shard-primary --ready-file mesh.ready.json
-```
-
-The ready file and stdout line are process readiness hints. The served state and
-capability truth still live on the framed CultNet/CultMesh endpoint. Use
-`--register-interop-note` to expose the package interop-note schema without
-seeding a note, or `--seed-interop-note` to register it and publish one local
-record for wire probes. Seeded records are committed through the raw mutation
-path, so peers can read them through both snapshot and shard-log catch-up. Add
-`--verse-id` and one or more `--role` values to publish the launched endpoint in
-its own Verse and peer catalogs for discovery clients. When the daemon is
-launched with `--cache-file`, `--enable-durable-shard-logs`, and
-`--shard-log-file`, a later daemon process can rehydrate and serve the persisted
-snapshot and shard log without reseeding.
-
-`CultMeshPeerHealthMonitor` probes peer-card endpoints with `cultnet.hello.v0`
-and preserves the runtime id, display name, document types, message versions,
-and mutation contracts reported by the peer.
-
-```python
-
-client = CultMesh.create_verse_discovery_client("127.0.0.1", 3075)
-verses = client.fetch_verses(transport_version="cultmesh.v0")
-mesh_peers = client.fetch_peers(verse_id="python-interop", roles=["read-replica"])
-client.sync_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
-client.fanout_peer_catalog(peers, verse_id="python-interop", roles=["read-replica"])
-replica_notes = client.sync_documents(
-    node.database,
-    peers,
-    verse_id="python-interop",
-    roles=["read-replica"],
-    documents=[(note_doc, "note:remote")],
-)
-snapshot_fanout = CultMeshSnapshotFanout(
-    client,
-    node.database,
-    peers,
-    verse_id="python-interop",
-    roles=["read-replica"],
-    documents=[(note_doc, "note:remote")],
-    on_document=lambda note: print(note),
-)
-snapshot_fanout.sync_once()
-
-raw_client = CultNetRawClient("127.0.0.1", 3075)
-synced_note = node.database.sync_document(raw_client, note_doc, "note:remote")
-synced_stock = CultMesh.sync_document(
-    node,
-    raw_client,
-    station_stock_ui_doc,
-    "station:starbridge:stock",
-)
-with CultMesh.subscribe_document(
-    node,
-    raw_client,
-    station_stock_ui_doc,
-    "station:starbridge:stock",
-) as stock_subscription:
-    stock = stock_subscription.sync_initial()
-    next_change = stock_subscription.read_next_change()
-node.database.sync_shard_log(raw_client, shard_id="interop", shard_epoch=1)
-replicator = CultNetShardReplicator(
-    node.database,
-    CultNetShardReplicatorOptions(
-        fetcher=CultNetSchemaShardLogFetcher(),
-        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(),
-        cursor_store=CultNetFileShardReplicaCursorStore("mesh.replica-cursors.msgpack"),
-        poll_interval_seconds=1.0,
-        on_error=lambda error: print(error),
-    ),
-)
-replica_shard = CultNetShardDescriptor(
-    shard_id="interop",
-    owner_runtime_id="primary-runtime",
-    epoch=1,
-    schema_ids=(note_doc.catalog_entry().schema_id,),
-    primary_endpoints=("cultnet://127.0.0.1:3075",),
-)
-replicator.pull_once(replica_shard)
-replicator.start([replica_shard])
-replicator.stop()
-server.stop()
-
-streams = CultMesh.create_stream_catalog()
-
-claim_hash = "accepted-claim-hash"
-facts = CultMesh.create_simulation_fact_committer(node)
-committed = facts.commit({
-    "shardId": "arena",
-    "shardEpoch": 4,
-    "frame": 100,
-    "subjectId": "bob",
-    "claimKind": "hit",
-    "claimHash": claim_hash,
-    "witnessCount": 2,
-    "supportWeight": 2.0,
-    "totalWeight": 2.0,
-    "confidence": 1.0,
-    "hasQuorum": True,
-})
-session_commits = session.submit_and_commit(typed_observation)
-prediction = session.predict(note_doc, "input:python:move", {"body": "predicted input"})
-unsubscribe()
-```
-
 ## Wire Parity
 
-See [PARITY.md](PARITY.md) for the current evidence map, gates, and things this
-package still does not claim.
+See [docs/python-runtime-parity.md](../../docs/python-runtime-parity.md) for
+the evidence map across the three Python packages.
 
-The Python interop peer is `cultcache_py.interop`:
+The store interop peer is `cultcache_py.interop`:
 
 ```powershell
 python -m cultcache_py.interop write --file cache.cc --runtime-id python
 python -m cultcache_py.interop read --file cache.cc
 ```
 
-Current receipts:
+`packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
+CultCache v1 parity matrix with TypeScript, Rust, and C#. `cultcache_py` ships
+a `py.typed` marker so downstream type checkers can inspect the package surface.
 
-- `packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
-  CultCache v1 parity matrix with TypeScript, Rust, and C#.
-- `packages/cultnet-ts/test/interop/cultnet-interop.test.ts` includes Python in
-  the live TS/Rust/C#/Python schema-v0 peer ring: discovery, hello, schema
-  catalog, wire-message catalog discovery, raw snapshot, raw document
-  put/delete, mutation receipt, fire-command receipt, database subscription
-  changes, shard catalog, shard log catch-up, simulation consensus candidates,
-  committed simulation fact snapshots, Python session prediction reconciliation,
-  and witness artifact bundle round-trips. The same test asks the Python peer
-  for CultMesh Verse catalog and peer exchange responses over the CultNet pipe,
-  then verifies the public `CultMeshDiscoveryClient` can fetch typed Python
-  Verse and peer descriptors from that live endpoint. It also verifies
-  `CultNetRawClient` can fetch the live Python peer's schema catalog, raw
-  snapshot, and shard catalog.
-- `packages/cultcache-py/tests/test_cultcache.py` covers Python CultMesh
-  Verse catalog, peer exchange, authority lease, stream negotiation, CultNet
-  helper shapes, raw snapshot/shard-log application, simulation claim hashing,
-  consensus aggregation, game-session fact commits, local prediction
-  reconciliation, committed simulation fact payload slots, the local CultMesh
-  server's TCP and RUDP schema request paths, and witness artifact bundle
-  payload slots.
-- `cultcache_py`, `cultnet_py`, and `cultmesh_py` ship `py.typed` markers so
-  downstream type checkers can inspect the package surface instead of treating
-  the runtime as an untyped xenos swamp.
-
-## Performance Baseline
-
-The package ships a lightweight benchmark for Python-owned hot paths. In a
-CultLib source checkout, it can also run the C# reference benchmark beside it:
+## Tests
 
 ```powershell
-python -m cultcache_py.benchmark --records 1000 --json
-python -m cultcache_py.compare_csharp --records 1000 --json
-python -m cultcache_py.verify --json
+$env:PYTHONPATH="$PWD\packages\cultcache-py\src"
+python -m unittest discover -s packages\cultcache-py\tests
 ```
 
-It reports slot-indexed `DatabaseEntry` encode/decode throughput, framed
-CultNet MessagePack parse throughput, raw snapshot application into a
-registered cache, and public `CultCache` upsert/get throughput. The C# compare
-command also runs `packages/cultcache-py/tools/GameCult.Caching.Benchmark` and
-reports median Python-to-C# ratios for the shared public cache operations. It
-uses three samples by default; pass `--samples` when you need a different
-evidence shape. Both runtimes precompute record keys before measured cache
-upsert/get loops so the comparison is about public cache access, not string
-construction noise. The public in-memory cache owner stores records in
-type-partitioned dictionaries so hot `get(...)` calls avoid per-call
-composite-key allocation. Treat the benchmark numbers as a local baseline, not
-a claim that Python matches the C# reference in every workload.
+The suite runs with only this package on the path. If a test here needs
+`cultnet_py` or `cultmesh_py`, it belongs in that package.

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cultcache-py"
-version = "0.2.0"
-description = "Python CultCache runtime for GameCult typed state."
+name = "cultmesh-py"
+version = "0.1.0"
+description = "Python CultMesh node, discovery, sessions, and local server for GameCult typed state."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -17,12 +17,13 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["msgpack>=1.0"]
+dependencies = ["cultcache-py>=0.2.0", "cultnet-py>=0.1.0"]
 [project.scripts]
-cultcache-py-interop = "cultcache_py.interop:main"
+cultmesh-py-daemon = "cultmesh_py.daemon:main"
+cultmesh-py-verify = "cultmesh_py.verify:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-cultcache_py = ["py.typed"]
+cultmesh_py = ["py.typed"]

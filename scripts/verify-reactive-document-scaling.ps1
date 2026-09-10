@@ -81,7 +81,7 @@ finally {
     Pop-Location
 }
 
-$pythonPath = Join-Path $root "packages\cultcache-py\src"
+$pythonPath = (@("cultcache-py", "cultnet-py", "cultmesh-py") | ForEach-Object { Join-Path $root "packages\$_\src" }) -join [IO.Path]::PathSeparator
 $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
     $pythonPath
@@ -91,8 +91,8 @@ else {
 }
 try {
     & $pythonExecutable -m unittest discover `
-        -s (Join-Path $root "packages\cultcache-py\tests") `
-        -p "test_cultcache.py" `
+        -s (Join-Path $root "packages\cultmesh-py\tests") `
+        -p "test_cultmesh.py" `
         -k "reactive_scheduling_scales_with_changed_documents_only"
     if ($LASTEXITCODE -ne 0) {
         throw "CultMesh Python reactive scaling verification failed."

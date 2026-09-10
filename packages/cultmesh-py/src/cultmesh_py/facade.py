@@ -34,7 +34,7 @@ from .node import (
 from .server import CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
-from .wire import (
+from cultnet_py.cultmesh_contracts import (
     AuthorityLeaseVerifier,
     CultMeshAuthorityLeaseCatalog,
     CultMeshPeerCard,

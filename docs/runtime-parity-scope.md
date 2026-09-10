@@ -52,7 +52,7 @@ CultMesh.
   `reconnectPolicy` profile field from C#, Rust, Python, and Kotlin peers.
   Runtime-local tests cover the deterministic delay helper and reconnect
   controller in C#, TypeScript, Rust, Python, and Kotlin.
-- `packages/cultcache-py/PARITY.md` is the Python-specific audit ledger. Its
+- `docs/python-runtime-parity.md` is the Python-specific audit ledger. Its
   "Still Not Claimed" section is part of the contract, not an apology.
 - `docs/cultnet-transport-parity.md` is the transport ownership map. It tracks
   the remaining work to lower older LiteNetLib/WebSocket bodies behind the

@@ -303,6 +303,10 @@ node_modules/
 !packages/cultmesh-ts/**
 !packages/cultcache-py/
 !packages/cultcache-py/**
+!packages/cultnet-py/
+!packages/cultnet-py/**
+!packages/cultmesh-py/
+!packages/cultmesh-py/**
 !packages/cultcache-rs/
 !packages/cultcache-rs/**
 !packages/cultnet-rs/

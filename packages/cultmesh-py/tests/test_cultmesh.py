@@ -1,0 +1,4491 @@
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable
+from cultcache_py import (
+    CultCache,
+    SingleFileMessagePackBackingStore,
+    define_database_entry_type,
+    define_document_type,
+)
+from cultcache_py.interop import INTEROP_SCHEMA_VERSION, interop_note_document
+from cultmesh_py.verify import verify
+from cultnet_py import (
+    compute_simulation_claim_hash,
+    CultNetClientAuthorityScope,
+    CultNetRawClient,
+    CultNetRawDocumentRecord,
+    CultNetRawSnapshotResponse,
+    CultNetSchemaCatalog,
+    CultNetShardCatalog,
+    CultNetShardDescriptor,
+    CultNetShardLogResponse,
+    CultNetFileShardReplicaCursorStore,
+    CultNetFileShardMutationLogStore,
+    CultNetInMemoryShardReplicaCursorStore,
+    CultNetSchemaWriteForwarder,
+    CultNetSchemaShardLogFetcher,
+    CultNetSchemaShardSnapshotFetcher,
+    CultNetPeerError,
+    CultNetShardReplicator,
+    CultNetShardReplicatorOptions,
+    CultNetShardMutationLogStore,
+    CultNetShardWriteForwarder,
+    CultNetSimulationConsensusOptions,
+    CultNetSimulationConsensusCandidate,
+    CultNetSimulationObservation,
+    CultNetSimulationObservationHub,
+    CultNetRudpSocketMode,
+    CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions,
+    apply_shard_log_response,
+    document_delete,
+    document_put_raw,
+    hello,
+    simulation_observation,
+    snapshot_request,
+)
+from cultmesh_py import create_node
+from cultmesh_py import (
+    CultMesh,
+    CultMeshDatabase,
+    CultMeshDatabaseChange,
+    CultMeshGameSessionOptions,
+    CultMeshNodeOptions,
+    CultMeshReactiveDocumentOptions,
+    CultMeshPeerCard,
+    CultMeshPeerCatalog,
+    CultMeshSimulationFact,
+    CultMeshAuthorityLease,
+    CultMeshAuthorityLeaseCatalog,
+    CultMeshHmacAuthorityLeaseVerifier,
+    CultMeshDiscoveryClient,
+    CultMeshPeerExchangeClient,
+    CultMeshPeerHealthMonitor,
+    CultMeshSimulationObservationFanout,
+    CultMeshSnapshotFanout,
+    CultMeshStreamCatalog,
+    CultMeshStreamConsumerProfile,
+    CultMeshStreamDescriptor,
+    CultMeshStreamFrameHandle,
+    CultMeshVerseCatalog,
+    CultMeshVerseCompatibility,
+    CultMeshVerseDescriptor,
+    CultMeshVerseDiscoveryClient,
+    READY_SCHEMA_VERSION,
+    peer_exchange_request,
+    simulation_fact_document,
+    verse_catalog_request,
+)
+
+
+def bind_udp_socket() -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(0.02)
+    return sock
+
+
+def pump_rudp_handshake(
+    client: CultNetRudpSocketTransportConnection,
+    server: CultNetRudpSocketTransportConnection,
+) -> None:
+    for _ in range(20):
+        server.receive_once()
+        client.receive_once()
+        server.receive_once()
+        if client.connected and server.connected:
+            return
+        time.sleep(0.005)
+    raise AssertionError("RUDP socket handshake did not complete")
+
+
+def receive_rudp_frame(transport: CultNetRudpSocketTransportConnection):
+    for _ in range(20):
+        frame = transport.receive_once()
+        if frame is not None:
+            return frame
+        time.sleep(0.005)
+    raise AssertionError("RUDP socket frame was not delivered")
+
+
+@dataclass
+class Item:
+    name: str
+    category: str
+    value: int
+
+
+class CultMeshTests(unittest.TestCase):
+    def _wait_until(self, predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("Timed out waiting for condition")
+
+    def test_verify_reports_python_runtime_surface_health(self) -> None:
+        result = verify(records=4)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            {check["name"] for check in result["checks"]},
+            {
+                "public_exports",
+                "typed_markers",
+                "local_cultmesh_wire_smoke",
+                "cultmesh_capability_truth",
+                "benchmark_sanity",
+            },
+        )
+        by_name = {check["name"]: check for check in result["checks"]}
+        self.assertEqual(by_name["public_exports"]["missing"], {})
+        self.assertEqual(by_name["cultmesh_capability_truth"]["failures"], [])
+
+    def test_cultmesh_client_uses_rudp_schema_transport_endpoint(self) -> None:
+        import msgpack  # type: ignore
+
+        server_socket = bind_udp_socket()
+        server_host, server_port = server_socket.getsockname()[:2]
+        connection_id = 0x43554C54
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-schema-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+                initial_sequence=100,
+                resend_delay_ms=25,
+            )
+        )
+        received_messages: list[dict[str, object]] = []
+
+        def serve_once() -> None:
+            deadline = time.monotonic() + 2.0
+            try:
+                while time.monotonic() < deadline:
+                    frame = server.receive_once()
+                    server.poll_resends()
+                    if frame is None:
+                        time.sleep(0.005)
+                        continue
+                    received = msgpack.unpackb(frame.payload, raw=False)
+                    received_messages.append(received)
+                    response = {
+                        "schemaVersion": "cultnet.schema_catalog_response.v0",
+                        "messageId": received["messageId"],
+                        "schemas": [],
+                    }
+                    server.send("schema", msgpack.packb(response, use_bin_type=True))
+                    return
+                raise AssertionError("RUDP schema server did not receive a request")
+            finally:
+                server.close()
+
+        server_thread = threading.Thread(target=serve_once, daemon=True)
+        server_thread.start()
+        client = CultMesh.create_client(
+            endpoint=f"rudp://{server_host}:{server_port}",
+            timeout_seconds=2.0,
+            connection_id=connection_id,
+            runtime_id="python-rudp-schema-client",
+        )
+
+        response = client.fetch_schema_catalog(message_id="rudp-transport-factory")
+        server_thread.join(timeout=2.0)
+
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(response["schemaVersion"], "cultnet.schema_catalog_response.v0")
+        self.assertEqual(response["messageId"], "rudp-transport-factory")
+        self.assertEqual(received_messages[0]["schemaVersion"], "cultnet.schema_catalog_request.v0")
+        self.assertEqual(received_messages[0]["messageId"], "rudp-transport-factory")
+
+    def test_cultmesh_facade_creates_rudp_client_from_peer_endpoint(self) -> None:
+        connection_id = 0x10203042
+        server = CultMesh.create_rudp_server(
+            "python-cultmesh-rudp-server",
+            connection_id,
+            initial_sequence=100,
+            resend_delay_ms=25,
+            max_fragment_bytes=1024,
+            max_pending_reliable_packets=16,
+        )
+        server_host, server_port = server.socket.getsockname()[:2]
+        endpoint = CultMesh.parse_rudp_endpoint(f"rudp://{server_host}:{server_port}")
+        self.assertEqual(endpoint.host, server_host)
+        self.assertEqual(endpoint.port, server_port)
+        peer = CultMeshPeerCard(
+            peer_id="python-cultmesh-rudp-server",
+            verse_id="local",
+            endpoints=(endpoint.uri,),
+            roles=("schema",),
+            authority_lease_id="lease:python-cultmesh-rudp-server",
+        )
+        peers = CultMesh.create_peer_catalog()
+        leases = CultMesh.create_authority_lease_catalog()
+        peers.upsert(peer)
+        with self.assertRaisesRegex(ValueError, "No authorized RUDP peer"):
+            CultMesh.create_rudp_client_for_authorized_peer(
+                "python-cultmesh-rudp-client",
+                connection_id,
+                peers,
+                leases,
+                "local",
+                "schema",
+                resend_delay_ms=25,
+                max_fragment_bytes=1024,
+                max_pending_reliable_packets=16,
+            )
+        leases.upsert(
+            CultMeshAuthorityLease(
+                lease_id="lease:python-cultmesh-rudp-server",
+                verse_id="local",
+                peer_id="python-cultmesh-rudp-server",
+                roles=("schema",),
+                valid_from=datetime.now(UTC) - timedelta(seconds=1),
+                expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                issuer_runtime_id="python-authority",
+            )
+        )
+        client = CultMesh.create_rudp_client_for_authorized_peer(
+            "python-cultmesh-rudp-client",
+            connection_id,
+            peers,
+            leases,
+            "local",
+            "schema",
+            resend_delay_ms=25,
+            max_fragment_bytes=1024,
+            max_pending_reliable_packets=16,
+        )
+
+        try:
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            self.assertTrue(client.connected)
+            self.assertTrue(server.connected)
+
+            client.send("schema", b"client-state")
+            server_frame = receive_rudp_frame(server)
+            self.assertEqual(server_frame.channel_id, "schema")
+            self.assertEqual(server_frame.payload, b"client-state")
+            self.assertEqual(server.profile["transports"][0]["protocol"], "rudp")
+            self.assertEqual(client.profile["transports"][0]["protocol"], "rudp")
+        finally:
+            client.close()
+            server.close()
+
+    def test_cultmesh_node_applies_foreign_schema_snapshot_as_local_update(self) -> None:
+        document = define_database_entry_type(
+            "mesh.runtime-policy",
+            [
+                ("schema_version", 0),
+                ("name", 1),
+                ("value", 2),
+            ],
+            schema_id="mesh.runtime-policy.current",
+            schema_name="mesh.runtime_policy",
+            schema_version="mesh.runtime_policy.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        node.put(document, "policy:1", {
+            "schema_version": "mesh.runtime_policy.v1",
+            "name": "policy",
+            "value": "old",
+        })
+        observed: list[CultMeshDatabaseChange] = []
+        unsubscribe = node.database.watch_record(document, "policy:1", observed.append)
+        try:
+            applied = node.database.apply_snapshot_response({
+                "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                "messageId": "foreign-schema-snapshot",
+                "documents": [
+                    {
+                        "schemaId": "sha256:foreign-mesh-runtime-policy",
+                        "recordKey": "policy:1",
+                        "storedAt": "2026-06-25T00:00:00Z",
+                        "payloadEncoding": "messagepack",
+                        "payload": document.encode_payload({
+                            "schema_version": "mesh.runtime_policy.v1",
+                            "name": "policy",
+                            "value": "new",
+                        }),
+                    },
+                ],
+            })
+        finally:
+            unsubscribe()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(applied[0].schema_id, local_schema_id)
+        self.assertEqual(observed[0].schema_id, local_schema_id)
+        self.assertEqual(observed[0].change_kind, "updated")
+        self.assertEqual(observed[0].previous_value["value"], "old")
+        self.assertEqual(observed[0].value["value"], "new")
+        self.assertEqual(node.cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
+
+    def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        document = define_database_entry_type(
+            "mesh.sync_item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        schema_id = document.catalog_entry().schema_id
+        ready = threading.Event()
+        server_error: list[BaseException] = []
+        port_holder: list[int] = []
+
+        def serve_requests() -> None:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    server.bind(("127.0.0.1", 0))
+                    port_holder.append(server.getsockname()[1])
+                    server.listen(2)
+                    ready.set()
+                    for _ in range(2):
+                        connection, _ = server.accept()
+                        with connection:
+                            stream = connection.makefile("rwb")
+                            request = msgpack.unpackb(read_frame(stream), raw=False)
+                            if request["schemaVersion"] == "cultnet.snapshot_request.v0":
+                                response = {
+                                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                                    "messageId": request["messageId"],
+                                    "documents": [
+                                        {
+                                            "schemaId": schema_id,
+                                            "recordKey": "item:node",
+                                            "storedAt": "2026-06-13T00:00:00Z",
+                                            "payloadEncoding": "messagepack",
+                                            "payload": document.encode_payload(Item("node", "mesh", 1)),
+                                        }
+                                    ],
+                                }
+                            elif request["schemaVersion"] == "cultnet.shard_log_request.v0":
+                                response = {
+                                    "schemaVersion": "cultnet.shard_log_response.v0",
+                                    "messageId": request["messageId"],
+                                    "shardId": request["shardId"],
+                                    "shardEpoch": request["shardEpoch"],
+                                    "resyncRequired": False,
+                                    "entries": [
+                                        {
+                                            "sequence": 1,
+                                            "changeKind": "updated",
+                                            "put": {
+                                                "schemaVersion": "cultnet.document_put_raw.v0",
+                                                "messageId": "put-node",
+                                                "document": {
+                                                    "schemaId": schema_id,
+                                                    "recordKey": "item:node",
+                                                    "storedAt": "2026-06-13T00:00:01Z",
+                                                    "payloadEncoding": "messagepack",
+                                                    "payload": document.encode_payload(Item("node", "mesh", 9)),
+                                                },
+                                                "shardId": request["shardId"],
+                                                "shardEpoch": request["shardEpoch"],
+                                            },
+                                        }
+                                    ],
+                                }
+                            else:
+                                raise AssertionError(f"unexpected request {request['schemaVersion']}")
+                            write_frame(stream, msgpack.packb(response, use_bin_type=True))
+                            stream.flush()
+            except BaseException as error:
+                server_error.append(error)
+                ready.set()
+
+        thread = threading.Thread(target=serve_requests, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+        self.assertFalse(server_error)
+
+        client = CultNetRawClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        snapshot_changes = node.sync_snapshot(client, schema_ids=[schema_id])
+        log_changes = node.sync_shard_log(client, shard_id="mesh", shard_epoch=1)
+
+        thread.join(2.0)
+        self.assertFalse(server_error)
+        self.assertEqual(snapshot_changes[0].record_key, "item:node")
+        self.assertEqual(log_changes[0].change_kind, "updated")
+        self.assertEqual(node.get_required(document, "item:node").value, 9)
+
+    def test_cultmesh_node_sync_document_returns_requested_alias_type(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.sync_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.sync_alias_note.v1",
+            schema_name="mesh.sync_alias_note",
+            schema_version="mesh.sync_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.sync_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.sync_alias_note.v1",
+            schema_name="mesh.sync_alias_note",
+            schema_version="mesh.sync_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        requests: list[dict[str, Any]] = []
+
+        class SnapshotClient:
+            def fetch_snapshot_response(
+                self,
+                *,
+                schema_ids: list[str] | None = None,
+                record_keys: list[str] | None = None,
+                shard_id: str | None = None,
+                shard_epoch: int | None = None,
+            ) -> dict[str, Any]:
+                requests.append({
+                    "schema_ids": schema_ids,
+                    "record_keys": record_keys,
+                    "shard_id": shard_id,
+                    "shard_epoch": shard_epoch,
+                })
+                return {
+                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                    "messageId": "sync-document",
+                    "documents": [
+                        {
+                            "schemaId": document.catalog_entry().schema_id,
+                            "recordKey": "note:remote",
+                            "storedAt": "2026-06-27T00:00:00Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(CanonicalNote("synced-alias")),
+                        }
+                    ],
+                }
+
+        synced = node.sync_document(SnapshotClient(), alias, "note:remote")
+        facade_synced = CultMesh.sync_document(node, SnapshotClient(), alias, "note:remote")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "synced-alias")
+        self.assertIsInstance(facade_synced, UiNote)
+        self.assertEqual(facade_synced.body, "synced-alias")
+        self.assertEqual(node.get_required(document, "note:remote").body, "synced-alias")
+        self.assertIsInstance(node.get_required(alias, "note:remote"), UiNote)
+        self.assertEqual(requests, [
+            {
+                "schema_ids": ["mesh.sync_alias_note.v1"],
+                "record_keys": ["note:remote"],
+                "shard_id": None,
+                "shard_epoch": None,
+            },
+            {
+                "schema_ids": ["mesh.sync_alias_note.v1"],
+                "record_keys": ["note:remote"],
+                "shard_id": None,
+                "shard_epoch": None,
+            },
+        ])
+
+    def test_cultmesh_node_sync_document_from_publication_returns_requested_alias_type(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.publication_alias_note.v1",
+            schema_name="mesh.publication_alias_note",
+            schema_version="mesh.publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.publication_alias_note.v1",
+            schema_name="mesh.publication_alias_note",
+            schema_version="mesh.publication_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-publication-node")
+        node.register_document(document)
+        requests: list[dict[str, Any]] = []
+
+        class SnapshotClient:
+            def fetch_snapshot_response(
+                self,
+                *,
+                schema_ids: list[str] | None = None,
+                record_keys: list[str] | None = None,
+                shard_id: str | None = None,
+                shard_epoch: int | None = None,
+            ) -> dict[str, Any]:
+                requests.append({
+                    "schema_ids": schema_ids,
+                    "record_keys": record_keys,
+                    "shard_id": shard_id,
+                    "shard_epoch": shard_epoch,
+                })
+                return {
+                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                    "messageId": "publication-sync-document",
+                    "documents": [
+                        {
+                            "schemaId": document.catalog_entry().schema_id,
+                            "recordKey": "note:published-peer",
+                            "storedAt": "2026-06-27T00:00:00Z",
+                            "payloadEncoding": "messagepack",
+                            "payload": document.encode_payload(CanonicalNote("peer-publication-alias")),
+                        }
+                    ],
+                }
+
+        source = CultMesh.publication_source_from_peer_snapshot(
+            SnapshotClient(),
+            shard_id="notes",
+            shard_epoch=3,
+        )
+
+        synced = node.sync_document_from_publication(source, alias, "note:published-peer")
+        facade_synced = CultMesh.sync_document_from_publication(node, source, alias, "note:published-peer")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "peer-publication-alias")
+        self.assertIsInstance(facade_synced, UiNote)
+        self.assertEqual(facade_synced.body, "peer-publication-alias")
+        self.assertEqual(node.get_required(document, "note:published-peer").body, "peer-publication-alias")
+        self.assertEqual(requests, [
+            {
+                "schema_ids": ["mesh.publication_alias_note.v1"],
+                "record_keys": ["note:published-peer"],
+                "shard_id": "notes",
+                "shard_epoch": 3,
+            },
+            {
+                "schema_ids": ["mesh.publication_alias_note.v1"],
+                "record_keys": ["note:published-peer"],
+                "shard_id": "notes",
+                "shard_epoch": 3,
+            },
+        ])
+
+    def test_cultmesh_node_sync_document_from_single_file_publication_uses_node_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.file_publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.file_publication_alias_note.v1",
+            schema_name="mesh.file_publication_alias_note",
+            schema_version="mesh.file_publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.file_publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.file_publication_alias_note.v1",
+            schema_name="mesh.file_publication_alias_note",
+            schema_version="mesh.file_publication_alias_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "publication.ccmp"
+            writer = CultCache()
+            writer.register_document_type(document)
+            writer.add_generic_store(SingleFileMessagePackBackingStore(path))
+            writer.put(document, "note:published-file", CanonicalNote("file-publication-alias"))
+
+            node = create_node(runtime_id="python-file-publication-node")
+            node.register_document(document)
+            source = CultMesh.publication_source_from_single_file(path)
+
+            synced = CultMesh.sync_document_from_publication(node, source, alias, "note:published-file")
+
+        self.assertIsInstance(synced, UiNote)
+        self.assertEqual(synced.body, "file-publication-alias")
+        self.assertEqual(node.get_required(document, "note:published-file").body, "file-publication-alias")
+        self.assertIsInstance(node.get_required(alias, "note:published-file"), UiNote)
+
+    def test_cultmesh_node_sync_documents_from_publication_uses_binding_sources_and_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.catalog_publication_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.catalog_publication_alias_note.v1",
+            schema_name="mesh.catalog_publication_alias_note",
+            schema_version="mesh.catalog_publication_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.catalog_publication_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.catalog_publication_alias_note.v1",
+            schema_name="mesh.catalog_publication_alias_note",
+            schema_version="mesh.catalog_publication_alias_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.ccmp"
+            second_path = Path(tmp) / "second.ccmp"
+            first = CultCache()
+            first.register_document_type(document)
+            first.add_generic_store(SingleFileMessagePackBackingStore(first_path))
+            first.put(document, "note:first", CanonicalNote("first catalog publication"))
+            second = CultCache()
+            second.register_document_type(document)
+            second.add_generic_store(SingleFileMessagePackBackingStore(second_path))
+            second.put(document, "note:second", CanonicalNote("second catalog publication"))
+
+            node = create_node(runtime_id="python-catalog-publication-node")
+            node.register_document(document)
+            source = CultMesh.publication_source_from_single_file(first_path)
+            bindings = [
+                CultMesh.publication_document(alias, "note:first"),
+                CultMesh.publication_document(
+                    alias,
+                    "note:second",
+                    source=CultMesh.publication_source_from_single_file(second_path),
+                ),
+            ]
+
+            synced = node.sync_documents_from_publication(source, bindings)
+            facade_synced = CultMesh.sync_documents_from_publication(node, source, bindings)
+
+        self.assertEqual([value.body for value in synced], [
+            "first catalog publication",
+            "second catalog publication",
+        ])
+        self.assertTrue(all(isinstance(value, UiNote) for value in synced))
+        self.assertEqual([value.body for value in facade_synced], [
+            "first catalog publication",
+            "second catalog publication",
+        ])
+        self.assertEqual(node.get_required(document, "note:first").body, "first catalog publication")
+        self.assertEqual(node.get_required(document, "note:second").body, "second catalog publication")
+        self.assertIsInstance(node.get_required(alias, "note:second"), UiNote)
+
+    def test_cultmesh_node_emits_raw_put_and_delete_messages_for_local_writes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.emit_item",
+            [
+                ("name", 0),
+                ("category", 1),
+                ("value", 2, 0),
+            ],
+            cls=Item,
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+
+        put = node.put_raw_message(
+            document,
+            "item:emit",
+            Item("wand", "gear", 4),
+            message_id="put-emit",
+            shard_id="mesh",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertEqual(node.get_required(document, "item:emit").name, "wand")
+        self.assertEqual(put["schemaVersion"], "cultnet.document_put_raw.v0")
+        self.assertEqual(put["messageId"], "put-emit")
+        self.assertEqual(put["document"]["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(put["document"]["recordKey"], "item:emit")
+        self.assertEqual(put["document"]["sourceRuntimeId"], "python-node")
+        self.assertEqual(put["shardId"], "mesh")
+        self.assertEqual(put["shardEpoch"], 1)
+
+        delete = node.delete_raw_message(
+            document,
+            "item:emit",
+            message_id="delete-emit",
+            shard_id="mesh",
+            shard_epoch=1,
+        ).to_wire()
+        self.assertIsNone(node.get(document, "item:emit"))
+        self.assertEqual(delete["schemaVersion"], "cultnet.document_delete.v0")
+        self.assertEqual(delete["messageId"], "delete-emit")
+        self.assertEqual(delete["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(delete["recordKey"], "item:emit")
+        self.assertEqual(delete["shardId"], "mesh")
+        self.assertEqual(delete["shardEpoch"], 1)
+
+    def test_cultmesh_node_resolves_same_schema_aliases_for_local_state(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.alias_note.v1",
+            schema_name="mesh.alias_note",
+            schema_version="mesh.alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.alias_note.v1",
+            schema_name="mesh.alias_note",
+            schema_version="mesh.alias_note.v1",
+        )
+        node = create_node(runtime_id="python-node")
+        node.register_document(document)
+        seen: list[CultMeshDatabaseChange] = []
+        all_seen: list[CultMeshDatabaseChange] = []
+        node.database.watch(all_seen.append, document=alias)
+        node.database.watch_record(alias, "note:alias", seen.append)
+
+        node.put(alias, "note:alias", UiNote("from-alias-put"))
+        self.assertEqual(node.get_required(document, "note:alias").body, "from-alias-put")
+        alias_value = node.get_required(alias, "note:alias")
+        self.assertIsInstance(alias_value, UiNote)
+        self.assertEqual(alias_value.body, "from-alias-put")
+        alias_collection = node.get_all(alias)
+        self.assertEqual(len(alias_collection), 1)
+        self.assertIsInstance(alias_collection[0], UiNote)
+        self.assertEqual(alias_collection[0].body, "from-alias-put")
+        self.assertEqual(seen[0].document.type, alias.type)
+        self.assertEqual(seen[0].schema_id, "mesh.alias_note.v1")
+        self.assertIsInstance(seen[0].value, UiNote)
+        self.assertEqual(seen[0].value.body, "from-alias-put")
+        self.assertEqual(all_seen[0].document.type, alias.type)
+        self.assertIsInstance(all_seen[0].value, UiNote)
+        self.assertEqual(all_seen[0].value.body, "from-alias-put")
+
+        node.put(document, "note:alias", CanonicalNote("from-canonical-put"))
+        self.assertEqual(seen[1].document.type, alias.type)
+        self.assertIsInstance(seen[1].value, UiNote)
+        self.assertIsInstance(seen[1].previous_value, UiNote)
+        self.assertEqual(seen[1].value.body, "from-canonical-put")
+        self.assertEqual(seen[1].previous_value.body, "from-alias-put")
+
+        put = node.put_raw_message(
+            alias,
+            "note:alias",
+            UiNote("from-alias-raw-put"),
+            message_id="alias-put",
+        ).to_wire()
+        self.assertEqual(put["document"]["schemaId"], "mesh.alias_note.v1")
+        self.assertEqual(put["document"]["recordKey"], "note:alias")
+        self.assertEqual(node.get_required(alias, "note:alias").body, "from-alias-raw-put")
+
+        delete = node.delete_raw_message(alias, "note:alias", message_id="alias-delete").to_wire()
+        self.assertEqual(delete["schemaId"], "mesh.alias_note.v1")
+        self.assertIsNone(node.get(alias, "note:alias"))
+        self.assertEqual(node.get_all(alias), [])
+
+    def test_cultmesh_reactive_document_coalesces_explicit_alias_updates(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+            revision: int
+
+        @dataclass
+        class UiNote:
+            body: str
+            revision: int
+
+        document = define_database_entry_type(
+            "mesh.reactive_alias_note",
+            [("body", 0), ("revision", 1)],
+            cls=CanonicalNote,
+            schema_id="mesh.reactive_alias_note.v1",
+            schema_name="mesh.reactive_alias_note",
+            schema_version="mesh.reactive_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.reactive_alias_note.ui",
+            [("body", 0), ("revision", 1)],
+            cls=UiNote,
+            schema_id="mesh.reactive_alias_note.v1",
+            schema_name="mesh.reactive_alias_note",
+            schema_version="mesh.reactive_alias_note.v1",
+        )
+        node = create_node(runtime_id="python-reactive")
+        node.register_document(document)
+        node.put(document, "note:reactive", CanonicalNote("initial", 1))
+        seen: list[CultMeshDatabaseChange] = []
+        node.database.watch_record(alias, "note:reactive", seen.append)
+
+        reactive = node.authoritative_writer(alias, "note:reactive").reactive(
+            CultMeshReactiveDocumentOptions(flush_delay_seconds=0.02)
+        )
+        try:
+            self.assertIsInstance(reactive.snapshot, UiNote)
+            reactive.update(lambda note: setattr(note, "body", "first-local-edit"))
+            reactive.update(lambda note: setattr(note, "body", "second-local-edit"))
+            reactive.update(lambda note: setattr(note, "revision", 2))
+
+            self._wait_until(lambda: node.get_required(alias, "note:reactive").body == "second-local-edit")
+
+            self.assertFalse(reactive.is_dirty)
+            self.assertEqual(node.get_required(document, "note:reactive").revision, 2)
+            self.assertEqual(seen[-1].value.body, "second-local-edit")
+        finally:
+            reactive.dispose()
+
+    def test_cultmesh_reactive_document_tracks_canonical_reconciliation_delta(self) -> None:
+        @dataclass
+        class Note:
+            body: str
+            revision: int
+
+        document = define_database_entry_type(
+            "mesh.reactive_reconcile_note",
+            [("body", 0), ("revision", 1)],
+            cls=Note,
+            schema_id="mesh.reactive_reconcile_note.v1",
+            schema_name="mesh.reactive_reconcile_note",
+            schema_version="mesh.reactive_reconcile_note.v1",
+        )
+        node = create_node(runtime_id="python-reactive-reconcile")
+        node.register_document(document)
+        node.put(document, "note:reconcile", Note("initial", 1))
+
+        reactive = CultMesh.authoritative_writer(
+            node,
+            document,
+            "note:reconcile",
+        ).reactive(CultMeshReactiveDocumentOptions(flush_delay_seconds=60))
+        try:
+            reactive.update(lambda note: setattr(note, "body", "local-prediction"))
+            reactive.update(lambda note: setattr(note, "revision", 2))
+
+            node.put(document, "note:reconcile", Note("authoritative", 7))
+
+            self.assertEqual(reactive.snapshot.body, "local-prediction")
+            self.assertIsNotNone(reactive.reconciliation)
+            self.assertEqual(reactive.reconciliation.canonical.body, "authoritative")
+            self.assertEqual(reactive.reconciliation.predicted.body, "local-prediction")
+            self.assertEqual(reactive.reconciliation.delta["body"], "local-prediction")
+            self.assertEqual(reactive.reconciliation.delta["revision"], -5)
+
+            reactive.flush()
+            self.assertEqual(node.get_required(document, "note:reconcile").body, "local-prediction")
+            self.assertIsNone(reactive.reconciliation)
+        finally:
+            reactive.dispose()
+
+    def test_cultmesh_reactive_document_is_idle_until_explicit_nested_update(self) -> None:
+        document = define_document_type(
+            "mesh.nested_loadout",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-reactive-nested")
+        node.register_document(document)
+        node.put(
+            document,
+            "ship:nested",
+            {"loadout": {"weapon": {"tuning": {"damage": 10}}}},
+        )
+
+        with patch("cultmesh_py.node.threading.Timer") as timer:
+            reactive = node.authoritative_writer(document, "ship:nested").reactive()
+            timer.assert_not_called()
+
+        try:
+            borrowed = reactive.snapshot
+            borrowed["loadout"]["weapon"]["tuning"]["damage"] = 99
+            self.assertEqual(
+                node.get_required(document, "ship:nested")["loadout"]["weapon"]["tuning"]["damage"],
+                10,
+            )
+
+            reactive.update(
+                lambda draft: draft["loadout"]["weapon"]["tuning"].__setitem__("damage", 12)
+            )
+            reactive.flush()
+
+            self.assertEqual(reactive.snapshot["loadout"]["weapon"]["tuning"]["damage"], 12)
+            self.assertEqual(
+                node.get_required(document, "ship:nested")["loadout"]["weapon"]["tuning"]["damage"],
+                12,
+            )
+        finally:
+            reactive.dispose()
+
+    def test_cultmesh_reactive_scheduling_scales_with_changed_documents_only(self) -> None:
+        document = define_document_type(
+            "mesh.reactive_scale_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+
+        for document_count in (1, 100, 1000):
+            node = create_node(runtime_id=f"python-reactive-scale-{document_count}")
+            node.register_document(document)
+            for index in range(document_count):
+                node.put(document, f"note:{index}", {"body": "initial", "revision": 1})
+
+            scheduled_timers: list[Any] = []
+
+            class FakeScheduledCall:
+                def __init__(self, delay_seconds: float, callback: Callable[[], None]) -> None:
+                    self.delay_seconds = delay_seconds
+                    self.callback = callback
+                    self.cancelled = False
+
+                def cancel(self) -> None:
+                    self.cancelled = True
+
+            class FakeScheduler:
+                def schedule(
+                    self,
+                    delay_seconds: float,
+                    callback: Callable[[], None],
+                ) -> FakeScheduledCall:
+                    call = FakeScheduledCall(delay_seconds, callback)
+                    scheduled_timers.append(call)
+                    return call
+
+            reactive_documents: list[Any] = []
+            with patch("cultmesh_py.node._REACTIVE_SCHEDULER", FakeScheduler()):
+                try:
+                    for index in range(document_count):
+                        reactive_documents.append(
+                            node.authoritative_writer(document, f"note:{index}").reactive()
+                        )
+
+                    self.assertEqual(
+                        len(scheduled_timers),
+                        0,
+                        f"{document_count} idle documents must schedule no timers",
+                    )
+
+                    changed_document_count = max(1, document_count // 100)
+                    for index in range(changed_document_count):
+                        reactive_documents[index].update(
+                            lambda draft, changed=index: draft.update(
+                                body=f"changed-{changed}",
+                                revision=2,
+                            )
+                        )
+
+                    self.assertEqual(len(scheduled_timers), changed_document_count)
+                    self.assertEqual(
+                        sum(reactive.is_dirty for reactive in reactive_documents),
+                        changed_document_count,
+                    )
+                finally:
+                    for reactive in reactive_documents:
+                        reactive.dispose()
+
+            self.assertTrue(all(timer.cancelled for timer in scheduled_timers))
+
+    def test_cultmesh_reactive_documents_share_one_lazy_scheduler_thread(self) -> None:
+        document = define_document_type(
+            "mesh.reactive_shared_scheduler_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-reactive-shared-scheduler")
+        node.register_document(document)
+        reactive_documents: list[Any] = []
+        try:
+            for index in range(100):
+                node.put(document, f"note:{index}", {"body": "initial", "revision": 1})
+                reactive_documents.append(
+                    node.authoritative_writer(document, f"note:{index}").reactive(
+                        CultMeshReactiveDocumentOptions(flush_delay_seconds=60.0)
+                    )
+                )
+
+            before = sum(
+                thread.name == "cultmesh-reactive-scheduler"
+                for thread in threading.enumerate()
+            )
+            for index, reactive in enumerate(reactive_documents):
+                reactive.update(
+                    lambda draft, changed=index: draft.update(
+                        body=f"changed-{changed}",
+                        revision=2,
+                    )
+                )
+            after = sum(
+                thread.name == "cultmesh-reactive-scheduler"
+                for thread in threading.enumerate()
+            )
+
+            self.assertLessEqual(before, 1)
+            self.assertEqual(after, 1)
+        finally:
+            for reactive in reactive_documents:
+                reactive.dispose()
+
+    def test_cultmesh_observed_document_cannot_publish_borrowed_mutation(self) -> None:
+        document = define_document_type(
+            "mesh.observed_note",
+            encode=lambda value: value,
+            decode=lambda value: value,
+        )
+        node = create_node(runtime_id="python-observed")
+        node.register_document(document)
+        node.put(document, "note:observed", {"body": "initial"})
+
+        observed = node.observe_document(document, "note:observed")
+        try:
+            observed.current["body"] = "borrowed-local-edit"
+            self.assertEqual(node.get_required(document, "note:observed")["body"], "initial")
+
+            node.put(document, "note:observed", {"body": "canonical"})
+            self.assertEqual(observed.current["body"], "canonical")
+        finally:
+            observed.dispose()
+
+    def test_cultmesh_node_uses_cultcache_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = define_database_entry_type("mesh.note", [("body", 0)])
+            store_path = Path(tmp) / "mesh.cc"
+            node = create_node(store_path, runtime_id="mesh-test")
+            self.assertIsInstance(node.database, CultMeshDatabase)
+            node.database.register_document(document)
+            node.database.put(document, "note:1", {"body": "hello"})
+            self.assertEqual(node.get_required(document, "note:1")["body"], "hello")
+
+            reopened = create_node(store_path, runtime_id="mesh-test")
+            reopened.database.register_document(document)
+            reopened.database.pull()
+            self.assertEqual(reopened.database.get(document, "note:1")["body"], "hello")
+
+    def test_cultmesh_node_options_attach_default_durable_shard_log_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = define_database_entry_type(
+                "mesh.durable_option_note",
+                [("body", 0)],
+                schema_id="mesh.durable_option_note.v1",
+            )
+            cache_path = Path(tmp) / "world.cc"
+            node = CultMesh.create_node(
+                cache_path,
+                runtime_id="durable-option-primary",
+                options=CultMeshNodeOptions(enable_durable_shard_logs=True),
+            )
+            node.database.register_document(document)
+            node.database.put_raw_message(document, "note:1", {"body": "stored"}, shard_id="notes", shard_epoch=5)
+
+            log_path = Path(tmp) / "world.cultmesh" / "shard-logs"
+            self.assertTrue(log_path.exists())
+
+            reopened = CultMesh.start_node(
+                cache_path,
+                runtime_id="durable-option-primary",
+                enable_durable_shard_logs=True,
+            )
+            reopened.database.register_document(document)
+            response = reopened.database.build_shard_log_response(shard_id="notes", shard_epoch=5)
+
+            self.assertEqual(reopened.database.shard_ids(), ["notes"])
+            self.assertEqual([entry.sequence for entry in response.entries], [1])
+            self.assertEqual(response.entries[0].raw_document.record_key, "note:1")
+
+    def test_cultmesh_database_watchers_observe_local_changes_and_unsubscribe(self) -> None:
+        document = define_database_entry_type("mesh.watch", [("body", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-watch")
+        node.database.register_document(document)
+        changes: list[CultMeshDatabaseChange] = []
+        all_changes: list[CultMeshDatabaseChange] = []
+
+        unsubscribe_record = node.database.watch_record(document, "note:1", changes.append)
+        unsubscribe_all = node.database.watch(all_changes.append, document=document)
+
+        node.database.put(document, "note:1", {"body": "hello"})
+        node.database.put(document, "note:2", {"body": "skip"})
+        node.database.put(document, "note:1", {"body": "updated"})
+        node.database.delete(document, "note:1")
+        unsubscribe_record()
+        node.database.put(document, "note:1", {"body": "after-unsubscribe"})
+        unsubscribe_all()
+
+        self.assertEqual([change.change_kind for change in changes], ["added", "updated", "removed"])
+        self.assertEqual([change.record_key for change in changes], ["note:1", "note:1", "note:1"])
+        self.assertEqual(changes[1].previous_value, {"body": "hello"})
+        self.assertIsNone(changes[2].value)
+        self.assertEqual([change.record_key for change in all_changes], ["note:1", "note:2", "note:1", "note:1", "note:1"])
+
+    def test_cultmesh_database_register_document_is_idempotent(self) -> None:
+        document = define_database_entry_type("mesh.idempotent", [("body", 0)])
+        conflicting = define_database_entry_type("mesh.idempotent", [("title", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-idempotent")
+
+        node.database.register_document(document)
+        node.database.register_document(document)
+        node.database.put(document, "note:1", {"body": "still registered once"})
+
+        self.assertEqual(node.database.get_required(document, "note:1")["body"], "still registered once")
+        self.assertEqual([registered.type for registered in node.documents], ["mesh.idempotent"])
+        with self.assertRaises(ValueError):
+            node.database.register_document(conflicting)
+
+    def test_cultmesh_database_global_document_facade_uses_singleton_key_and_watchers(self) -> None:
+        document = define_database_entry_type(
+            "mesh.global_settings",
+            [("theme", 0)],
+            global_document=True,
+        )
+        node = CultMesh.create_node(runtime_id="mesh-global")
+        node.database.register_document(document)
+        changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_global(document, changes.append)
+        node.database.put_global(document, {"theme": "ash"})
+        node.put_global(document, {"theme": "ember"})
+        node.delete_global(document)
+
+        self.assertIsNone(node.database.get_global(document))
+        self.assertEqual([change.record_key for change in changes], [node.cache.GLOBAL_KEY] * 3)
+        self.assertEqual([change.change_kind for change in changes], ["added", "updated", "removed"])
+        self.assertEqual(changes[1].previous_value, {"theme": "ash"})
+        self.assertEqual(changes[2].previous_value, {"theme": "ember"})
+        with self.assertRaises(Exception):
+            node.database.put(document, "settings:wrong", {"theme": "bad"})
+
+    def test_cultmesh_database_creates_raw_snapshot_response_from_envelopes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-snapshot-source")
+        source.database.register_document(document)
+        source.database.put(document, "note:1", {"body": "include"})
+        source.database.put(document, "note:2", {"body": "skip"})
+
+        typed_response = source.database.build_snapshot_response(
+            message_id="snapshot-1",
+            schema_ids=["mesh.snapshot_note.v1"],
+            record_keys=["note:1"],
+            shard_id="notes",
+            shard_epoch=4,
+            shard_log_sequence=7,
+        )
+        response = source.database.create_snapshot_response(
+            message_id="snapshot-1",
+            schema_ids=["mesh.snapshot_note.v1"],
+            record_keys=["note:1"],
+            shard_id="notes",
+            shard_epoch=4,
+            shard_log_sequence=7,
+        )
+
+        self.assertIsInstance(typed_response, CultNetRawSnapshotResponse)
+        self.assertEqual(typed_response.message_id, "snapshot-1")
+        self.assertEqual(typed_response.documents[0].record_key, "note:1")
+        self.assertEqual(typed_response.to_wire(), response)
+        self.assertEqual(source.build_snapshot_response(schema_ids=["mesh.snapshot_note.v1"]).documents[0].record_key, "note:1")
+        self.assertEqual(response["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(response["messageId"], "snapshot-1")
+        self.assertEqual(response["shardId"], "notes")
+        self.assertEqual(response["shardEpoch"], 4)
+        self.assertEqual(response["shardLogSequence"], 7)
+        self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:1"])
+        self.assertEqual(response["documents"][0]["schemaId"], "mesh.snapshot_note.v1")
+        self.assertEqual(response["documents"][0]["payloadEncoding"], "messagepack")
+
+        target = CultMesh.create_node(runtime_id="mesh-snapshot-target")
+        target.database.register_document(document)
+        applied = target.database.apply_snapshot_response(response)
+        self.assertEqual([(record.schema_id, record.record_key) for record in applied], [("mesh.snapshot_note.v1", "note:1")])
+        self.assertEqual(target.database.get_required(document, "note:1"), {"body": "include"})
+        self.assertIsNone(target.database.get(document, "note:2"))
+
+        typed_target = CultMesh.create_node(runtime_id="mesh-snapshot-typed-target")
+        typed_target.database.register_document(document)
+        typed_applied = typed_target.database.apply_snapshot_response(typed_response)
+        self.assertEqual([(record.schema_id, record.record_key) for record in typed_applied], [("mesh.snapshot_note.v1", "note:1")])
+        self.assertEqual(typed_target.database.get_required(document, "note:1"), {"body": "include"})
+
+    def test_cultmesh_database_filters_snapshot_by_logged_shard_membership(self) -> None:
+        document = define_database_entry_type(
+            "mesh.sharded_snapshot_note",
+            [("body", 0)],
+            schema_id="mesh.sharded_snapshot_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-sharded-snapshot-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:notes", {"body": "include"}, shard_id="notes", shard_epoch=2)
+        source.database.put_raw_message(document, "note:other", {"body": "skip"}, shard_id="other", shard_epoch=1)
+
+        response = source.database.build_snapshot_response(
+            schema_ids=["mesh.sharded_snapshot_note.v1"],
+            shard_id="notes",
+            shard_epoch=2,
+        )
+
+        self.assertEqual(response.shard_id, "notes")
+        self.assertEqual(response.shard_epoch, 2)
+        self.assertEqual([record.record_key for record in response.documents], ["note:notes"])
+
+    def test_cultmesh_database_creates_shard_log_response_from_raw_mutations(self) -> None:
+        document = define_database_entry_type(
+            "mesh.log_note",
+            [("body", 0)],
+            schema_id="mesh.log_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="mesh-log-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:1", {"body": "first"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:1", {"body": "second"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:2", {"body": "other"}, shard_id="other", shard_epoch=1)
+        source.database.delete_raw_message(document, "note:1", shard_id="notes", shard_epoch=3)
+
+        self.assertEqual(source.database.shard_ids(), ["notes", "other"])
+        self.assertEqual(source.database.shard_schema_ids("notes"), ["mesh.log_note.v1"])
+
+        typed_response = source.database.build_shard_log_response(
+            message_id="log-1",
+            shard_id="notes",
+            shard_epoch=3,
+            after_sequence=1,
+            limit=2,
+        )
+        response = source.database.create_shard_log_response(
+            message_id="log-1",
+            shard_id="notes",
+            shard_epoch=3,
+            after_sequence=1,
+            limit=2,
+        )
+
+        self.assertIsInstance(typed_response, CultNetShardLogResponse)
+        self.assertEqual(typed_response.message_id, "log-1")
+        self.assertEqual([entry.sequence for entry in typed_response.entries], [2, 3])
+        self.assertEqual(typed_response.to_wire(), response)
+        self.assertEqual([entry.sequence for entry in source.build_shard_log_response(shard_id="notes").entries], [1, 2, 3])
+        self.assertEqual(response["schemaVersion"], "cultnet.shard_log_response.v0")
+        self.assertEqual(response["messageId"], "log-1")
+        self.assertEqual(response["shardId"], "notes")
+        self.assertEqual(response["shardEpoch"], 3)
+        self.assertFalse(response["resyncRequired"])
+        self.assertEqual([entry["sequence"] for entry in response["entries"]], [2, 3])
+        self.assertEqual([entry["changeKind"] for entry in response["entries"]], ["updated", "removed"])
+        self.assertEqual(response["entries"][0]["put"]["document"]["recordKey"], "note:1")
+        self.assertEqual(response["entries"][1]["delete"]["recordKey"], "note:1")
+        empty = source.database.create_shard_log_response(shard_id="missing")
+        self.assertEqual(empty["shardEpoch"], 0)
+        self.assertEqual(empty["entries"], [])
+        self.assertTrue(empty["resyncRequired"])
+        self.assertEqual(empty["reason"], "unknown_shard")
+        stale = source.database.create_shard_log_response(shard_id="notes", shard_epoch=2)
+        self.assertEqual(stale["shardEpoch"], 3)
+        self.assertEqual(stale["entries"], [])
+        self.assertTrue(stale["resyncRequired"])
+        self.assertEqual(stale["reason"], "stale_epoch")
+        with self.assertRaises(ValueError):
+            source.database.create_shard_log_response(shard_id="notes", after_sequence=-1)
+        with self.assertRaises(ValueError):
+            source.database.create_shard_log_response(shard_id="notes", limit=-1)
+
+        target = CultMesh.create_node(runtime_id="mesh-log-target")
+        target.database.register_document(document)
+        target.database.put(document, "note:1", {"body": "first"})
+        applied = target.database.apply_shard_log_response(response)
+        self.assertEqual([record.change_kind for record in applied], ["updated", "removed"])
+        self.assertIsNone(target.database.get(document, "note:1"))
+        self.assertIsNone(target.database.get(document, "note:2"))
+
+        typed_target = CultMesh.create_node(runtime_id="mesh-log-typed-target")
+        typed_target.database.register_document(document)
+        typed_target.database.put(document, "note:1", {"body": "first"})
+        typed_applied = typed_target.database.apply_shard_log_response(typed_response)
+        self.assertEqual([record.change_kind for record in typed_applied], ["updated", "removed"])
+        self.assertIsNone(typed_target.database.get(document, "note:1"))
+
+    def test_cultnet_file_shard_mutation_log_store_persists_authoritative_entries(self) -> None:
+        document = define_database_entry_type(
+            "mesh.durable_log_note",
+            [("body", 0)],
+            schema_id="mesh.durable_log_note.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store: CultNetShardMutationLogStore = CultNetFileShardMutationLogStore(Path(tmp) / "logs")
+            source = CultMesh.create_node(runtime_id="durable-primary")
+            source.database.register_document(document)
+            source.database.use_shard_mutation_log_store(store)
+            source.database.put_raw_message(document, "note:1", {"body": "first"}, shard_id="durable", shard_epoch=4)
+            source.database.put_raw_message(document, "note:2", {"body": "second"}, shard_id="durable", shard_epoch=4)
+
+            reopened = CultMesh.create_node(runtime_id="durable-primary")
+            reopened.database.register_document(document)
+            reopened.database.use_shard_mutation_log_store(CultNetFileShardMutationLogStore(Path(tmp) / "logs"))
+            response = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4)
+            self.assertEqual(reopened.database.shard_ids(), ["durable"])
+            self.assertEqual(reopened.database.shard_schema_ids("durable"), ["mesh.durable_log_note.v1"])
+            self.assertEqual([entry.sequence for entry in response.entries], [1, 2])
+            self.assertEqual(response.entries[0].raw_document.record_key, "note:1")
+
+            store.compact_through("durable", 1)
+            compacted = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4, after_sequence=0)
+            retained = reopened.database.build_shard_log_response(shard_id="durable", shard_epoch=4, after_sequence=1)
+            self.assertTrue(compacted.resync_required)
+            self.assertEqual(compacted.reason, "compacted_history")
+            self.assertEqual(compacted.compacted_through, 1)
+            self.assertEqual([entry.sequence for entry in retained.entries], [2])
+
+    def test_cultnet_shard_replicator_pulls_logs_and_resyncs_from_snapshot(self) -> None:
+        document = define_database_entry_type(
+            "mesh.replica_note",
+            [("body", 0)],
+            schema_id="mesh.replica_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="primary")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:1", {"body": "one"}, shard_id="notes", shard_epoch=3)
+        source.database.put_raw_message(document, "note:2", {"body": "two"}, shard_id="notes", shard_epoch=3)
+        with tempfile.TemporaryDirectory() as tmp:
+            cursor_path = Path(tmp) / "replica-cursors.msgpack"
+            server = CultMesh.serve_node(source)
+            try:
+                shard = CultNetShardDescriptor(
+                    shard_id="notes",
+                    owner_runtime_id="primary",
+                    epoch=3,
+                    is_primary=False,
+                    schema_ids=("mesh.replica_note.v1",),
+                    primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                )
+                target = CultMesh.create_node(runtime_id="replica")
+                target.database.register_document(document)
+                cursor_store = CultNetFileShardReplicaCursorStore(cursor_path)
+                replicator = CultNetShardReplicator(
+                    target.database,
+                    CultNetShardReplicatorOptions(
+                        fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
+                        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
+                        cursor_store=cursor_store,
+                        batch_size=16,
+                    ),
+                )
+
+                first_sequence = replicator.pull_once(shard)
+                restarted_replicator = CultNetShardReplicator(
+                    target.database,
+                    CultNetShardReplicatorOptions(
+                        fetcher=CultNetSchemaShardLogFetcher(timeout_seconds=2.0),
+                        snapshot_fetcher=CultNetSchemaShardSnapshotFetcher(timeout_seconds=2.0),
+                        cursor_store=CultNetFileShardReplicaCursorStore(cursor_path),
+                        batch_size=16,
+                    ),
+                )
+                second_sequence = restarted_replicator.pull_once(shard)
+
+                self.assertEqual(first_sequence, 2)
+                self.assertEqual(second_sequence, 2)
+                self.assertEqual(target.get_required(document, "note:1")["body"], "one")
+                self.assertEqual(target.get_required(document, "note:2")["body"], "two")
+                cursor = CultNetFileShardReplicaCursorStore(cursor_path).read("notes")
+                self.assertIsNotNone(cursor)
+                assert cursor is not None
+                self.assertEqual(cursor.last_applied_sequence, 2)
+                self.assertEqual(cursor.shard_epoch, 3)
+            finally:
+                server.stop()
+
+        resync_target = CultMesh.create_node(runtime_id="resync-replica")
+        resync_target.database.register_document(document)
+        snapshot = source.database.build_snapshot_response(shard_id="notes", shard_epoch=3, shard_log_sequence=2)
+
+        class CompactingFetcher:
+            def fetch(self, shard: CultNetShardDescriptor, *, after_sequence: int, limit: int | None = None) -> CultNetShardLogResponse:
+                return CultNetShardLogResponse(
+                    message_id="compact",
+                    shard_id=shard.shard_id,
+                    shard_epoch=shard.epoch,
+                    entries=(),
+                    resync_required=True,
+                    reason="compacted_history",
+                    compacted_through=after_sequence,
+                )
+
+        class SnapshotFetcher:
+            def fetch(self, shard: CultNetShardDescriptor) -> CultNetRawSnapshotResponse:
+                return snapshot
+
+        resync_replicator = CultNetShardReplicator(
+            resync_target.database,
+            CultNetShardReplicatorOptions(
+                fetcher=CompactingFetcher(),
+                snapshot_fetcher=SnapshotFetcher(),
+                cursor_store=CultNetInMemoryShardReplicaCursorStore(),
+            ),
+        )
+        resync_sequence = resync_replicator.pull_once(CultNetShardDescriptor(
+            shard_id="notes",
+            owner_runtime_id="primary",
+            epoch=3,
+            is_primary=False,
+            schema_ids=("mesh.replica_note.v1",),
+            primary_endpoints=("cultnet://primary:3075",),
+        ))
+
+        self.assertEqual(resync_sequence, 2)
+        self.assertEqual(resync_target.get_required(document, "note:1")["body"], "one")
+
+    def test_cultnet_shard_replicator_background_loop_polls_non_primary_shards(self) -> None:
+        document = define_database_entry_type(
+            "mesh.background_replica_note",
+            [("body", 0)],
+            schema_id="mesh.background_replica_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="background-primary")
+        source.database.register_document(document)
+        target = CultMesh.create_node(runtime_id="background-replica")
+        target.database.register_document(document)
+        cursor_store = CultNetInMemoryShardReplicaCursorStore()
+        errors: list[Exception] = []
+
+        class FlakySourceFetcher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fetch(self, shard: CultNetShardDescriptor, *, after_sequence: int, limit: int | None = None) -> CultNetShardLogResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient fetch failure")
+                return source.database.build_shard_log_response(
+                    shard_id=shard.shard_id,
+                    shard_epoch=shard.epoch,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+
+        fetcher = FlakySourceFetcher()
+        shard = CultNetShardDescriptor(
+            shard_id="background",
+            owner_runtime_id="background-primary",
+            epoch=7,
+            is_primary=False,
+            schema_ids=("mesh.background_replica_note.v1",),
+            primary_endpoints=("cultnet://127.0.0.1:3075",),
+        )
+        replicator = CultNetShardReplicator(
+            target.database,
+            CultNetShardReplicatorOptions(
+                fetcher=fetcher,
+                cursor_store=cursor_store,
+                batch_size=1,
+                poll_interval_seconds=0.01,
+                on_error=errors.append,
+            ),
+        )
+        try:
+            source.database.put_raw_message(document, "note:1", {"body": "one"}, shard_id="background", shard_epoch=7)
+            replicator.start([shard])
+            self._wait_until(lambda: target.database.get(document, "note:1") is not None)
+            source.database.put_raw_message(document, "note:2", {"body": "two"}, shard_id="background", shard_epoch=7)
+            self._wait_until(lambda: target.database.get(document, "note:2") is not None)
+        finally:
+            replicator.stop()
+
+        cursor = cursor_store.read("background")
+        self.assertEqual(target.get_required(document, "note:1")["body"], "one")
+        self.assertEqual(target.get_required(document, "note:2")["body"], "two")
+        self.assertIsNotNone(cursor)
+        assert cursor is not None
+        self.assertEqual(cursor.last_applied_sequence, 2)
+        self.assertEqual(cursor.shard_epoch, 7)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), "transient fetch failure")
+
+    def test_cultnet_schema_write_forwarder_sends_raw_writes_to_primary(self) -> None:
+        document = define_database_entry_type(
+            "mesh.forward_note",
+            [("body", 0)],
+            schema_id="mesh.forward_note.v1",
+        )
+        primary = CultMesh.create_node(runtime_id="forward-primary")
+        primary.database.register_document(document)
+        server = CultMesh.serve_node(primary)
+        try:
+            shard = CultNetShardDescriptor(
+                shard_id="forward",
+                owner_runtime_id="forward-primary",
+                epoch=9,
+                is_primary=False,
+                schema_ids=("mesh.forward_note.v1",),
+                primary_endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+            )
+            forwarder: CultNetShardWriteForwarder = CultNetSchemaWriteForwarder(timeout_seconds=2.0)
+            put = document_put_raw(
+                message_id="forward-put",
+                key="note:forward",
+                schema_id=document.catalog_entry().schema_id,
+                stored_at="2026-06-14T00:00:00Z",
+                payload=document.encode_payload({"body": "forwarded"}),
+            ).to_wire()
+            delete = document_delete(
+                message_id="forward-delete",
+                schema_id=document.catalog_entry().schema_id,
+                record_key="note:forward",
+            ).to_wire()
+
+            forwarder.forward_put(shard, put)
+            self._eventually(lambda: primary.database.get(document, "note:forward") is not None)
+            self.assertEqual(primary.database.get_required(document, "note:forward")["body"], "forwarded")
+            forwarder.forward_delete(shard, delete)
+            self._eventually(lambda: primary.database.get(document, "note:forward") is None)
+
+            log = primary.database.build_shard_log_response(shard_id="forward", shard_epoch=9)
+            self.assertIsNone(primary.database.get(document, "note:forward"))
+            self.assertEqual([entry.change_kind for entry in log.entries], ["added", "removed"])
+            self.assertEqual(log.entries[0].put["shardId"], "forward")
+            self.assertEqual(log.entries[1].delete["shardEpoch"], 9)
+        finally:
+            server.stop()
+
+    def _eventually(self, predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.assertTrue(predicate())
+
+    def test_cultmesh_database_watchers_observe_name_and_index_changes(self) -> None:
+        document = define_database_entry_type(
+            "mesh.named_watch",
+            [("name", 0), ("kind", 1)],
+            name="name",
+            indexes={"kind": "kind"},
+        )
+        node = CultMesh.create_node(runtime_id="mesh-named-watch")
+        node.database.register_document(document)
+        name_changes: list[CultMeshDatabaseChange] = []
+        index_changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_by_name(document, "Potion", name_changes.append)
+        node.database.watch_by_index(document, "kind", "consumable", index_changes.append)
+
+        node.database.put(document, "item:1", {"name": "Potion", "kind": "consumable"})
+        node.database.put(document, "item:2", {"name": "Sword", "kind": "weapon"})
+        node.database.put(document, "item:1", {"name": "Elixir", "kind": "rare"})
+        node.database.delete(document, "item:1")
+
+        self.assertEqual([change.change_kind for change in name_changes], ["added", "updated"])
+        self.assertEqual([change.record_key for change in name_changes], ["item:1", "item:1"])
+        self.assertEqual(name_changes[1].previous_value, {"name": "Potion", "kind": "consumable"})
+        self.assertEqual([change.change_kind for change in index_changes], ["added", "updated"])
+        self.assertEqual([change.record_key for change in index_changes], ["item:1", "item:1"])
+        self.assertEqual(index_changes[1].value, {"name": "Elixir", "kind": "rare"})
+
+    def test_cultmesh_database_collection_reads_resolve_same_schema_aliases(self) -> None:
+        @dataclass
+        class CanonicalItem:
+            name: str
+            kind: str
+
+        @dataclass
+        class UiItem:
+            name: str
+            kind: str
+
+        document = define_database_entry_type(
+            "mesh.alias_collection_item",
+            [("name", 0), ("kind", 1)],
+            cls=CanonicalItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_item.v1",
+            schema_name="mesh.alias_collection_item",
+            schema_version="mesh.alias_collection_item.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.alias_collection_item.ui",
+            [("name", 0), ("kind", 1)],
+            cls=UiItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_item.v1",
+            schema_name="mesh.alias_collection_item",
+            schema_version="mesh.alias_collection_item.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-collection")
+        node.database.register_document(document)
+
+        node.database.put(alias, "item:potion", UiItem("Potion", "consumable"))
+        node.database.put(document, "item:sword", CanonicalItem("Sword", "weapon"))
+
+        all_items = node.database.get_all(alias)
+        potion = node.database.get_by_name(alias, "Potion")
+        sword = node.get_by_index(alias, "kind", "weapon")
+
+        self.assertEqual([item.name for item in all_items], ["Potion", "Sword"])
+        self.assertTrue(all(isinstance(item, UiItem) for item in all_items))
+        self.assertIsInstance(potion, UiItem)
+        self.assertEqual(potion.kind, "consumable")
+        self.assertIsInstance(sword, UiItem)
+        self.assertEqual(sword.name, "Sword")
+        self.assertIsNone(node.database.get_by_name(alias, "Missing"))
+
+    def test_cultmesh_database_alias_collection_watches_emit_alias_values(self) -> None:
+        @dataclass
+        class CanonicalItem:
+            name: str
+            kind: str
+
+        @dataclass
+        class UiItem:
+            name: str
+            kind: str
+
+        document = define_database_entry_type(
+            "mesh.alias_collection_watch_item",
+            [("name", 0), ("kind", 1)],
+            cls=CanonicalItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_watch_item.v1",
+            schema_name="mesh.alias_collection_watch_item",
+            schema_version="mesh.alias_collection_watch_item.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.alias_collection_watch_item.ui",
+            [("name", 0), ("kind", 1)],
+            cls=UiItem,
+            name="name",
+            indexes={"kind": "kind"},
+            schema_id="mesh.alias_collection_watch_item.v1",
+            schema_name="mesh.alias_collection_watch_item",
+            schema_version="mesh.alias_collection_watch_item.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-collection-watch")
+        node.database.register_document(document)
+        name_changes: list[CultMeshDatabaseChange] = []
+        index_changes: list[CultMeshDatabaseChange] = []
+
+        node.database.watch_by_name(alias, "Potion", name_changes.append)
+        node.database.watch_by_index(alias, "kind", "consumable", index_changes.append)
+
+        node.database.put(document, "item:potion", CanonicalItem("Potion", "consumable"))
+        node.database.put(document, "item:potion", CanonicalItem("Elixir", "rare"))
+
+        self.assertEqual([change.change_kind for change in name_changes], ["added", "updated"])
+        self.assertTrue(all(change.document.type == alias.type for change in name_changes))
+        self.assertIsInstance(name_changes[0].value, UiItem)
+        self.assertIsInstance(name_changes[1].value, UiItem)
+        self.assertIsInstance(name_changes[1].previous_value, UiItem)
+        self.assertEqual(name_changes[1].previous_value.name, "Potion")
+        self.assertEqual(name_changes[1].value.name, "Elixir")
+        self.assertEqual([change.change_kind for change in index_changes], ["added", "updated"])
+        self.assertTrue(all(change.document.type == alias.type for change in index_changes))
+        self.assertIsInstance(index_changes[0].value, UiItem)
+        self.assertIsInstance(index_changes[1].previous_value, UiItem)
+
+    def test_cultmesh_database_watch_by_name_and_index_validate_lookup_shape(self) -> None:
+        document = define_database_entry_type("mesh.unnamed_watch", [("body", 0)])
+        node = CultMesh.create_node(runtime_id="mesh-watch-validation")
+        node.database.register_document(document)
+
+        with self.assertRaises(ValueError):
+            node.database.watch_by_name(document, "missing", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "missing", "value", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "", "value", lambda _: None)
+        with self.assertRaises(ValueError):
+            node.database.watch_by_index(document, "missing", "", lambda _: None)
+
+    def test_cultmesh_facade_matches_peer_runtime_entrypoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "mesh.cc"
+            node = CultMesh.start_node(store_path, runtime_id="mesh-facade")
+
+            self.assertEqual(node.runtime_id, "mesh-facade")
+            self.assertIsInstance(CultMesh.create_node(), type(node))
+            self.assertIsInstance(CultMesh.create_verse_catalog(), CultMeshVerseCatalog)
+            self.assertIsInstance(CultMesh.create_peer_catalog(), CultMeshPeerCatalog)
+            self.assertIsInstance(CultMesh.create_authority_lease_catalog(), CultMeshAuthorityLeaseCatalog)
+            self.assertIsInstance(CultMesh.create_stream_catalog(), CultMeshStreamCatalog)
+            self.assertIsInstance(CultMesh.create_schema_catalog(), CultNetSchemaCatalog)
+            self.assertIsInstance(CultMesh.create_builtin_schema_catalog(), CultNetSchemaCatalog)
+            self.assertIsInstance(CultMesh.create_shard_catalog(), CultNetShardCatalog)
+            builtins = CultMesh.create_builtin_schema_catalog(
+                include_schema_json=False,
+                kinds=["shared_contract"],
+            )
+            self.assertEqual(
+                builtins.list()[0].schema_id,
+                "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+            )
+            self.assertIsNone(builtins.list()[0].schema_json)
+            peer_exchange_schema_id = (
+                "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.peer-exchange-request.schema.json"
+            )
+            filtered_builtin = CultMesh.create_builtin_schema_catalog(
+                include_schema_json=True,
+                schema_ids=[peer_exchange_schema_id],
+            )
+            self.assertEqual(
+                filtered_builtin.list()[0].schema_version,
+                "cultmesh.peer_exchange_request.v0",
+            )
+            self.assertIn(
+                "cultmesh.peer_exchange_request.v0",
+                filtered_builtin.list()[0].schema_json or "",
+            )
+            shard_catalog = CultMesh.create_shard_catalog()
+            shard_catalog.upsert(
+                CultNetShardDescriptor(
+                    shard_id="python-notes-a",
+                    owner_runtime_id="mesh-facade",
+                    epoch=7,
+                    is_primary=True,
+                    schema_ids=("python.note.v1",),
+                    key_prefix="note:",
+                )
+            )
+            self.assertEqual(
+                [
+                    shard.shard_id
+                    for shard in shard_catalog.list(schema_ids=["python.note.v1"], record_keys=["note:1"])
+                ],
+                ["python-notes-a"],
+            )
+            verse_client = CultMesh.create_verse_discovery_client("127.0.0.1", 4010, timeout_seconds=1.5)
+            peer_client = CultMesh.create_peer_exchange_client("127.0.0.1", 4011, timeout_seconds=1.5)
+            raw_client = CultMesh.create_client("127.0.0.1", 4012, timeout_seconds=1.5)
+            connected_client = CultMesh.connect_client("127.0.0.1", 4013, timeout_seconds=1.5)
+            self.assertIsInstance(verse_client, CultMeshVerseDiscoveryClient)
+            self.assertIsInstance(peer_client, CultMeshPeerExchangeClient)
+            self.assertIsInstance(verse_client, CultMeshDiscoveryClient)
+            self.assertIsInstance(peer_client, CultMeshDiscoveryClient)
+            self.assertIsInstance(raw_client, CultNetRawClient)
+            self.assertIsInstance(connected_client, CultNetRawClient)
+            self.assertEqual((verse_client.host, verse_client.port, verse_client.timeout_seconds), ("127.0.0.1", 4010, 1.5))
+            self.assertEqual((peer_client.host, peer_client.port, peer_client.timeout_seconds), ("127.0.0.1", 4011, 1.5))
+            self.assertEqual((raw_client.host, raw_client.port, raw_client.timeout_seconds), ("127.0.0.1", 4012, 1.5))
+            self.assertEqual((connected_client.host, connected_client.port, connected_client.timeout_seconds), ("127.0.0.1", 4013, 1.5))
+
+    def test_cultmesh_simulation_fact_uses_csharp_slot_contract(self) -> None:
+        import msgpack  # type: ignore
+
+        candidate = {
+            "shardId": "arena",
+            "shardEpoch": 4,
+            "frame": 100,
+            "subjectId": "bob",
+            "claimKind": "hit",
+            "claimHash": compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+            "claimSummary": "alice shot bob first",
+            "witnessCount": 2,
+            "supportWeight": 2.0,
+            "totalWeight": 2.0,
+            "confidence": 1.0,
+            "hasQuorum": True,
+        }
+
+        fact = CultMeshSimulationFact.from_candidate(candidate, committed_at="2026-06-13T00:00:00Z")
+        payload = simulation_fact_document.encode_payload(fact)
+        slots = msgpack.unpackb(payload, raw=False)
+
+        self.assertEqual(CultMeshSimulationFact.create_record_key(candidate), f"simulation:{fact.fact_id}")
+        self.assertEqual(slots[0], fact.fact_id)
+        self.assertEqual(slots[1], "arena")
+        self.assertEqual(slots[2], 4)
+        self.assertEqual(slots[3], 100)
+        self.assertEqual(slots[4], "bob")
+        self.assertEqual(slots[5], "hit")
+        self.assertEqual(slots[6], candidate["claimHash"])
+        self.assertEqual(slots[7], "alice shot bob first")
+        self.assertEqual(slots[8], 2)
+        self.assertEqual(slots[9], 2.0)
+        self.assertEqual(slots[10], 2.0)
+        self.assertEqual(slots[11], 1.0)
+        self.assertEqual(slots[12], "2026-06-13T00:00:00Z")
+
+    def test_cultmesh_simulation_fact_committer_rejects_without_quorum_and_stores_fact(self) -> None:
+        candidate = {
+            "shardId": "arena",
+            "shardEpoch": 4,
+            "frame": 100,
+            "subjectId": "bob",
+            "claimKind": "hit",
+            "claimHash": compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+            "claimSummary": "alice shot bob first",
+            "witnessCount": 2,
+            "supportWeight": 2.0,
+            "totalWeight": 2.0,
+            "confidence": 1.0,
+            "hasQuorum": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "facts.cc", runtime_id="mesh-facts")
+            committer = CultMesh.create_simulation_fact_committer(node)
+
+            rejected = dict(candidate)
+            rejected["hasQuorum"] = False
+            with self.assertRaisesRegex(ValueError, "before quorum"):
+                committer.commit(rejected)
+
+            committed = committer.commit(candidate, committed_at="2026-06-13T00:00:00Z")
+            stored = node.get_required(simulation_fact_document, committed.key)
+
+            self.assertEqual(stored.claim_hash, candidate["claimHash"])
+            self.assertEqual(stored.committed_at, "2026-06-13T00:00:00Z")
+            self.assertEqual(committed.fact.fact_id, stored.fact_id)
+
+    def test_cultmesh_game_session_submits_observations_and_commits_quorum_once(self) -> None:
+        claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+        first = simulation_observation(
+            message_id="obs-1",
+            witness_runtime_id="watcher-1",
+            shard_id="arena",
+            shard_epoch=4,
+            frame=100,
+            subject_id="bob",
+            claim_kind="hit",
+            claim_hash=claim_hash,
+            claim_summary="alice shot bob first",
+        ).to_wire()
+        second = simulation_observation(
+            message_id="obs-2",
+            witness_runtime_id="watcher-2",
+            shard_id="arena",
+            shard_epoch=4,
+            frame=100,
+            subject_id="bob",
+            claim_kind="hit",
+            claim_hash=claim_hash,
+            claim_summary="alice shot bob first",
+        ).to_wire()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "session.cc", runtime_id="mesh-session")
+            session = CultMesh.create_game_session(
+                node,
+                CultMeshGameSessionOptions(
+                    consensus_options=CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
+                ),
+            )
+            seen_candidates: list[CultNetSimulationConsensusCandidate] = []
+            seen_facts: list[CultMeshDatabaseChange] = []
+            unsubscribe_candidates = session.watch_candidates(seen_candidates.append)
+            unsubscribe_facts = session.watch_simulation_facts(seen_facts.append)
+
+            self.assertEqual(session.submit_and_commit(CultNetSimulationObservation.from_wire(first)), [])
+            typed_candidates = session.submit_observation_candidates(CultNetSimulationObservation.from_wire(second))
+            commits = session.commit_quorum_candidate_objects(typed_candidates)
+            replay = session.commit_quorum_candidates(session.submit_observation(second))
+            unsubscribe_candidates()
+            unsubscribe_facts()
+
+            self.assertEqual(len(typed_candidates), 1)
+            self.assertTrue(typed_candidates[0].has_quorum)
+            self.assertEqual(len(commits), 1)
+            self.assertEqual(replay, [])
+            self.assertEqual([candidate.claim_hash for candidate in seen_candidates], [claim_hash, claim_hash, claim_hash])
+            self.assertEqual(len(seen_facts), 1)
+            self.assertEqual(seen_facts[0].change_kind, "added")
+            self.assertEqual(seen_facts[0].value.claim_hash, claim_hash)
+            stored = node.get_required(simulation_fact_document, commits[0].key)
+            self.assertEqual(stored.claim_hash, claim_hash)
+            self.assertEqual(stored.witness_count, 2)
+
+    def test_cultmesh_game_session_serves_catalogs_and_observations_over_wire(self) -> None:
+        verse_catalog = CultMeshVerseCatalog()
+        peer_catalog = CultMeshPeerCatalog()
+        verse_catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="session-verse",
+            display_name="Session Verse",
+            authority_model="local",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "session-rules"),
+        ))
+        peer_catalog.upsert(CultMeshPeerCard(
+            peer_id="session-peer",
+            verse_id="session-verse",
+            endpoints=("cultnet://127.0.0.1:0",),
+            roles=("simulation-observer", "read-replica"),
+            shard_ids=("arena",),
+        ))
+        session = CultMesh.create_game_session(
+            CultMesh.create_node(runtime_id="session-peer"),
+            CultMeshGameSessionOptions(
+                verse_catalog=verse_catalog,
+                peer_catalog=peer_catalog,
+                consensus_options=CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0),
+            ),
+        )
+        server = session.serve(display_name="Session Peer")
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(
+                hello(runtime_id="session-prober"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            peers = discovery_client.fetch_peers(verse_id="session-verse", roles=["simulation-observer"])
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+            first = raw_client.request(
+                simulation_observation(
+                    message_id="session-wire-1",
+                    witness_runtime_id="watcher-1",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+            second = raw_client.request(
+                simulation_observation(
+                    message_id="session-wire-2",
+                    witness_runtime_id="watcher-2",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+        finally:
+            server.stop()
+
+        self.assertIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(verses[0].verse_id, "session-verse")
+        self.assertEqual(peers[0].peer_id, "session-peer")
+        self.assertIn("simulation-observer", peers[0].roles)
+        self.assertFalse(first["hasQuorum"])
+        self.assertEqual(first["witnessCount"], 1)
+        self.assertTrue(second["hasQuorum"])
+        self.assertEqual(second["witnessCount"], 2)
+
+    def test_cultmesh_game_session_can_disable_served_simulation_observations(self) -> None:
+        verse_catalog = CultMeshVerseCatalog()
+        verse_catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="session-quiet",
+            display_name="Quiet Session",
+            authority_model="local",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "quiet-rules"),
+        ))
+        session = CultMesh.create_game_session(
+            CultMesh.create_node(runtime_id="quiet-session-peer"),
+            CultMeshGameSessionOptions(
+                verse_catalog=verse_catalog,
+                serve_simulation_observations=False,
+            ),
+        )
+        server = session.serve(display_name="Quiet Session Peer")
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(
+                hello(runtime_id="quiet-session-prober"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            with self.assertRaisesRegex(CultNetPeerError, "Simulation observations are not enabled") as raised:
+                raw_client.request(
+                    simulation_observation(
+                        message_id="quiet-session-sim",
+                        witness_runtime_id="watcher-1",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=compute_simulation_claim_hash("hit", "alice", "bob", "frame:100"),
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+        finally:
+            server.stop()
+
+        self.assertNotIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(verses[0].verse_id, "session-quiet")
+        self.assertEqual(raised.exception.response["code"], "simulation_observations_disabled")
+
+    def test_cultmesh_game_session_prediction_requires_scope_and_reconciles_shard_log(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.input",
+            [("body", 0)],
+            schema_id="mesh.input.v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            node = CultMesh.create_node(Path(tmp) / "prediction.cc", runtime_id="client-a")
+            node.register_document(note_doc)
+            session = CultMesh.create_game_session(
+                node,
+                CultMeshGameSessionOptions(
+                    client_authority_scopes=(
+                        CultNetClientAuthorityScope(
+                            "client-a",
+                            schema_ids=("mesh.input.v1",),
+                            key_prefix="input:client-a",
+                        ),
+                    )
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not have client prediction authority"):
+                session.predict(note_doc, "input:other", {"body": "nope"})
+
+            prediction = session.predict(note_doc, "input:client-a:move", {"body": "predicted"})
+            put = document_put_raw(
+                message_id="authoritative",
+                key=prediction.key,
+                schema_id=prediction.schema_id,
+                stored_at="2026-06-13T00:00:00Z",
+                payload=note_doc.encode_payload({"body": "authoritative"}),
+                shard_id="inputs",
+                shard_epoch=1,
+            )
+            authoritative_response = {
+                "schemaVersion": "cultnet.shard_log_response.v0",
+                "messageId": "inputs-log",
+                "shardId": "inputs",
+                "shardEpoch": 1,
+                "entries": [
+                    {
+                        "sequence": 1,
+                        "committedAt": "2026-06-13T00:00:00Z",
+                        "changeKind": "updated",
+                        "put": put.to_wire(),
+                    }
+                ],
+                "resyncRequired": False,
+            }
+            changes = session.apply_shard_log_response(CultNetShardLogResponse.from_wire(authoritative_response))
+
+            self.assertEqual(changes[0].change_kind, "reconciled")
+            self.assertEqual(node.get_required(note_doc, prediction.key)["body"], "authoritative")
+            self.assertEqual(session.pending_predictions(), ())
+            self.assertEqual(session.resimulation_inputs(), ())
+
+    def test_cultmesh_game_session_partial_reconciliation_keeps_unmatched_predictions(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.partial_input",
+            [("body", 0)],
+            schema_id="mesh.partial_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-partial")
+        node.register_document(note_doc)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-partial",
+                        schema_ids=("mesh.partial_input.v1",),
+                        key_prefix="input:client-partial",
+                    ),
+                )
+            ),
+        )
+        pending = session.predict(note_doc, "input:client-partial:pending", {"body": "pending-local"})
+        accepted = session.predict(note_doc, "input:client-partial:accepted", {"body": "accepted-local"})
+        put = document_put_raw(
+            message_id="authoritative-partial",
+            key=accepted.key,
+            schema_id=accepted.schema_id,
+            stored_at="2026-06-13T00:00:00Z",
+            payload=note_doc.encode_payload({"body": "accepted-authority"}),
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+
+        changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-partial-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "updated",
+                    "put": put.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual([(change.change_kind, change.record_key) for change in changes], [
+            ("reconciled", accepted.key),
+        ])
+        self.assertEqual(node.get_required(note_doc, accepted.key)["body"], "accepted-authority")
+        self.assertEqual(node.get_required(note_doc, pending.key)["body"], "pending-local")
+        self.assertEqual([prediction.key for prediction in session.pending_predictions()], [pending.key])
+        self.assertEqual([prediction.key for prediction in session.resimulation_inputs()], [pending.key])
+
+    def test_cultmesh_game_session_rolls_back_pending_predictions(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.rollback_input",
+            [("body", 0)],
+            schema_id="mesh.rollback_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-rollback")
+        node.register_document(note_doc)
+        node.put(note_doc, "input:client-rollback:existing", {"body": "previous"})
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-rollback",
+                        schema_ids=("mesh.rollback_input.v1",),
+                        key_prefix="input:client-rollback",
+                    ),
+                )
+            ),
+        )
+
+        existing = session.predict(note_doc, "input:client-rollback:existing", {"body": "predicted-existing"})
+        created = session.predict(note_doc, "input:client-rollback:new", {"body": "predicted-new"})
+        self.assertEqual(
+            [prediction.key for prediction in session.pending_predictions()],
+            ["input:client-rollback:existing", "input:client-rollback:new"],
+        )
+        self.assertEqual([prediction.key for prediction in session.resimulation_inputs()], [
+            "input:client-rollback:existing",
+            "input:client-rollback:new",
+        ])
+
+        restored = session.rollback_prediction(existing)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.change_kind, "rolled_back")
+        self.assertEqual(restored.value, {"body": "previous"})
+        self.assertEqual(node.get_required(note_doc, "input:client-rollback:existing")["body"], "previous")
+
+        rolled_back = session.rollback_predictions()
+        self.assertEqual([(change.change_kind, change.record_key, change.value) for change in rolled_back], [
+            ("rolled_back", created.key, None),
+        ])
+        self.assertIsNone(node.get(note_doc, created.key))
+        self.assertEqual(session.pending_predictions(), ())
+
+    def test_cultmesh_game_session_authoritative_delete_rolls_back_prediction(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.deleted_input",
+            [("body", 0)],
+            schema_id="mesh.deleted_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-delete")
+        node.register_document(note_doc)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-delete",
+                        schema_ids=("mesh.deleted_input.v1",),
+                        key_prefix="input:client-delete",
+                    ),
+                )
+            ),
+        )
+
+        prediction = session.predict(note_doc, "input:client-delete:move", {"body": "predicted"})
+        delete = document_delete(
+            message_id="authoritative-delete",
+            schema_id=prediction.schema_id,
+            record_key=prediction.key,
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+        changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-delete-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "removed",
+                    "delete": delete.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual(changes[0].change_kind, "rolled_back")
+        self.assertIsNone(node.get(note_doc, prediction.key))
+        self.assertEqual(session.pending_predictions(), ())
+
+    def test_cultmesh_database_watchers_observe_authoritative_shard_log_reconciliation(self) -> None:
+        note_doc = define_database_entry_type(
+            "mesh.watched_input",
+            [("body", 0)],
+            schema_id="mesh.watched_input.v1",
+        )
+        node = CultMesh.create_node(runtime_id="client-watch")
+        node.database.register_document(note_doc)
+        seen: list[CultMeshDatabaseChange] = []
+        node.database.watch_record(note_doc, "input:client-watch:move", seen.append)
+        session = CultMesh.create_game_session(
+            node,
+            CultMeshGameSessionOptions(
+                client_authority_scopes=(
+                    CultNetClientAuthorityScope(
+                        "client-watch",
+                        schema_ids=("mesh.watched_input.v1",),
+                        key_prefix="input:client-watch",
+                    ),
+                )
+            ),
+        )
+
+        prediction = session.predict(note_doc, "input:client-watch:move", {"body": "predicted"})
+        put = document_put_raw(
+            message_id="authoritative-watch",
+            key=prediction.key,
+            schema_id=prediction.schema_id,
+            stored_at="2026-06-13T00:00:00Z",
+            payload=note_doc.encode_payload({"body": "authoritative"}),
+            shard_id="inputs",
+            shard_epoch=1,
+        )
+        session_changes = session.apply_shard_log_response({
+            "schemaVersion": "cultnet.shard_log_response.v0",
+            "messageId": "inputs-watch-log",
+            "shardId": "inputs",
+            "shardEpoch": 1,
+            "entries": [
+                {
+                    "sequence": 1,
+                    "committedAt": "2026-06-13T00:00:00Z",
+                    "changeKind": "updated",
+                    "put": put.to_wire(),
+                }
+            ],
+            "resyncRequired": False,
+        })
+
+        self.assertEqual([change.change_kind for change in seen], ["added", "updated"])
+        self.assertEqual(seen[1].value, {"body": "authoritative"})
+        self.assertEqual(seen[1].previous_value, {"body": "predicted"})
+        self.assertEqual(session_changes[0].change_kind, "reconciled")
+
+    def test_cultmesh_verse_catalog_response_matches_schema_v0_wire_shape(self) -> None:
+        import msgpack  # type: ignore
+
+        catalog = CultMeshVerseCatalog()
+        catalog.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="aetheria-main",
+                display_name="Aetheria",
+                authority_model="OperatorCluster",
+                compatibility=CultMeshVerseCompatibility(
+                    transport_version="cultmesh.v0",
+                    rules_hash="rules",
+                    compatible_verse_ids=("aetheria-modded",),
+                    required_plugin_ids=("core",),
+                    optional_plugin_ids=("skylands",),
+                ),
+                discovery_endpoints=("cultmesh://aetheria.example.test:3075",),
+                authority_runtime_ids=("runtime-a",),
+                description="main branch",
+            )
+        )
+
+        response = catalog.create_response(verse_catalog_request("verses-1"))
+        decoded = msgpack.unpackb(msgpack.packb(response, use_bin_type=True), raw=False)
+        self.assertEqual(decoded["schemaVersion"], "cultmesh.verse_catalog_response.v0")
+        self.assertEqual(decoded["messageId"], "verses-1")
+        self.assertEqual(decoded["verses"][0]["verseId"], "aetheria-main")
+        self.assertEqual(decoded["verses"][0]["compatibility"]["requiredPluginIds"], ["core"])
+
+    def test_cultmesh_verse_catalog_watches_updates_and_finds_transfer_targets(self) -> None:
+        source = CultMeshVerseDescriptor(
+            verse_id="aetheria-main",
+            display_name="Aetheria",
+            authority_model="federated",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-main",
+            ),
+        )
+        compatible = CultMeshVerseDescriptor(
+            verse_id="aetheria-modded",
+            display_name="Aetheria Modded",
+            authority_model="federated",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-modded",
+                compatible_verse_ids=("aetheria-main",),
+            ),
+        )
+        incompatible = CultMeshVerseDescriptor(
+            verse_id="old-world",
+            display_name="Old World",
+            authority_model="solo",
+            compatibility=CultMeshVerseCompatibility(
+                transport_version="cultmesh.v0",
+                rules_hash="rules-old",
+            ),
+        )
+        catalog = CultMeshVerseCatalog()
+        seen: list[str] = []
+        unsubscribe = catalog.watch(lambda verse: seen.append(verse.verse_id))
+
+        catalog.upsert(source)
+        catalog.apply_response({
+            "schemaVersion": "cultmesh.verse_catalog_response.v0",
+            "messageId": "verses-watch",
+            "verses": [compatible.to_wire(), incompatible.to_wire()],
+        })
+        unsubscribe()
+        catalog.upsert(CultMeshVerseDescriptor(
+            verse_id="after-unsubscribe",
+            display_name="After",
+            authority_model="none",
+            compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules-after"),
+        ))
+
+        self.assertEqual(seen, ["aetheria-main", "aetheria-modded", "old-world"])
+        self.assertEqual([verse.verse_id for verse in catalog.verses], ["aetheria-main", "aetheria-modded", "after-unsubscribe", "old-world"])
+        self.assertEqual(catalog.get("aetheria-modded"), compatible)
+        self.assertEqual([verse.verse_id for verse in catalog.find_transfer_targets(source)], ["aetheria-modded"])
+
+    def test_cultmesh_peer_exchange_response_matches_schema_v0_wire_shape(self) -> None:
+        import msgpack  # type: ignore
+
+        catalog = CultMeshPeerCatalog()
+        catalog.upsert(
+            CultMeshPeerCard(
+                peer_id="peer-a",
+                verse_id="aetheria-main",
+                endpoints=("cultnet://peer-a.example.test:3075",),
+                roles=("discovery", "read-replica"),
+                shard_ids=("players",),
+                region="eu-west",
+                authority_lease_id="lease-1",
+                expires_at="2026-05-20T12:00:00.0000000Z",
+                signature="sig",
+            )
+        )
+
+        response = catalog.create_response(
+            peer_exchange_request("pex-1", verse_id="aetheria-main", roles=["read-replica"])
+        )
+        decoded = msgpack.unpackb(msgpack.packb(response, use_bin_type=True), raw=False)
+        self.assertEqual(decoded["schemaVersion"], "cultmesh.peer_exchange_response.v0")
+        self.assertEqual(decoded["messageId"], "pex-1")
+        self.assertEqual(decoded["peers"][0]["peerId"], "peer-a")
+        self.assertIn("read-replica", decoded["peers"][0]["roles"])
+        self.assertEqual(decoded["peers"][0]["authorityLeaseId"], "lease-1")
+
+    def test_cultmesh_peer_catalog_watches_updates_and_gets_peers(self) -> None:
+        first = CultMeshPeerCard(
+            peer_id="peer-a",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-a.example.test:3075",),
+            roles=("discovery", "read-replica"),
+        )
+        second = CultMeshPeerCard(
+            peer_id="peer-b",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-b.example.test:3075",),
+            roles=("shard-primary",),
+        )
+        catalog = CultMeshPeerCatalog()
+        seen: list[str] = []
+        unsubscribe = catalog.watch(lambda peer: seen.append(peer.peer_id))
+
+        catalog.upsert(first)
+        catalog.apply_response({
+            "schemaVersion": "cultmesh.peer_exchange_response.v0",
+            "messageId": "peers-watch",
+            "peers": [second.to_wire()],
+        })
+        unsubscribe()
+        catalog.upsert(CultMeshPeerCard(
+            peer_id="peer-c",
+            verse_id="aetheria-main",
+            endpoints=("cultnet://peer-c.example.test:3075",),
+            roles=("read-replica",),
+        ))
+
+        self.assertEqual(seen, ["peer-a", "peer-b"])
+        self.assertTrue(first.has_role("read-replica"))
+        self.assertEqual([peer.peer_id for peer in catalog.peers], ["peer-a", "peer-b", "peer-c"])
+        self.assertEqual(catalog.get("peer-b"), second)
+        self.assertEqual([peer.peer_id for peer in catalog.find("aetheria-main", role="read-replica")], ["peer-a", "peer-c"])
+
+    def test_cultmesh_discovery_client_fetches_typed_catalogs_over_cultnet_frames(self) -> None:
+        import msgpack  # type: ignore
+        from cultnet_py import read_frame, write_frame
+
+        verses = CultMeshVerseCatalog()
+        verses.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="aetheria-main",
+                display_name="Aetheria",
+                authority_model="federated",
+                compatibility=CultMeshVerseCompatibility(
+                    transport_version="cultmesh.v0",
+                    rules_hash="rules-1",
+                    required_plugin_ids=("core",),
+                ),
+                discovery_endpoints=("cultmesh://aetheria.example.test:3075",),
+                authority_runtime_ids=("runtime-a",),
+            )
+        )
+        peers = CultMeshPeerCatalog()
+        peers.upsert(
+            CultMeshPeerCard(
+                peer_id="peer-a",
+                verse_id="aetheria-main",
+                endpoints=("cultnet://peer-a.example.test:3075",),
+                roles=("read-replica",),
+                shard_ids=("players",),
+            )
+        )
+
+        ready = threading.Event()
+        server_error: list[BaseException] = []
+
+        def serve_requests() -> None:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    server.bind(("127.0.0.1", 0))
+                    port_holder.append(server.getsockname()[1])
+                    server.listen(8)
+                    ready.set()
+                    for _ in range(8):
+                        connection, _ = server.accept()
+                        with connection:
+                            stream = connection.makefile("rwb")
+                            request = msgpack.unpackb(read_frame(stream), raw=False)
+                            if request["schemaVersion"] == "cultmesh.verse_catalog_request.v0":
+                                response = verses.create_response(request)
+                            elif request["schemaVersion"] == "cultmesh.peer_exchange_request.v0":
+                                response = peers.create_response(request)
+                            else:
+                                raise AssertionError(f"unexpected request {request['schemaVersion']}")
+                            write_frame(stream, msgpack.packb(response, use_bin_type=True))
+                            stream.flush()
+            except BaseException as error:
+                server_error.append(error)
+                ready.set()
+
+        port_holder: list[int] = []
+        thread = threading.Thread(target=serve_requests, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2.0))
+        self.assertFalse(server_error)
+
+        client = CultMeshDiscoveryClient("127.0.0.1", port_holder[0], timeout_seconds=2.0)
+        fetched_verses = client.fetch_verses(transport_version="cultmesh.v0")
+        fetched_peers = client.fetch_peers(verse_id="aetheria-main", roles=["read-replica"])
+        local_verses = CultMeshVerseCatalog()
+        local_peers = CultMeshPeerCatalog()
+        synced_verses = client.sync_verse_catalog(local_verses, transport_version="cultmesh.v0")
+        synced_peers = client.sync_peer_catalog(local_peers, verse_id="aetheria-main", roles=["read-replica"])
+        discovered_verses = CultMeshVerseCatalog()
+        discovered_peers = CultMeshPeerCatalog()
+        endpoint = f"cultnet://127.0.0.1:{port_holder[0]}"
+        verse_discovery = CultMeshVerseDiscoveryClient.from_endpoint(endpoint, timeout_seconds=2.0)
+        peer_discovery = CultMeshPeerExchangeClient.from_endpoint(endpoint, timeout_seconds=2.0)
+        discovered_verse_count = verse_discovery.discover(
+            discovered_verses,
+            endpoints=[endpoint, endpoint, ""],
+            transport_version="cultmesh.v0",
+        )
+        discovered_peer_count = peer_discovery.discover(
+            discovered_peers,
+            verse_id="aetheria-main",
+            endpoints=[endpoint, endpoint, ""],
+            roles=["read-replica"],
+        )
+        fanout_verses = CultMeshVerseCatalog()
+        fanout_verses.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="aetheria-main",
+                display_name="Known Aetheria",
+                authority_model="federated",
+                compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules-1"),
+                discovery_endpoints=(endpoint, endpoint, ""),
+            )
+        )
+        fanout_peers = CultMeshPeerCatalog()
+        fanout_peers.upsert(
+            CultMeshPeerCard(
+                peer_id="known-peer",
+                verse_id="aetheria-main",
+                endpoints=(endpoint, endpoint, ""),
+                roles=("read-replica",),
+            )
+        )
+        fanout_verse_count = verse_discovery.fanout(fanout_verses, transport_version="cultmesh.v0")
+        fanout_peer_count = peer_discovery.fanout(
+            fanout_peers,
+            verse_id="aetheria-main",
+            roles=["read-replica"],
+        )
+
+        thread.join(2.0)
+        self.assertFalse(server_error)
+        self.assertEqual(fetched_verses[0].verse_id, "aetheria-main")
+        self.assertEqual(fetched_verses[0].compatibility.required_plugin_ids, ("core",))
+        self.assertEqual(fetched_peers[0].peer_id, "peer-a")
+        self.assertEqual(fetched_peers[0].shard_ids, ("players",))
+        self.assertEqual(synced_verses[0].verse_id, "aetheria-main")
+        self.assertEqual(local_peers.find("aetheria-main", role="read-replica")[0].peer_id, "peer-a")
+        self.assertEqual(synced_peers[0].roles, ("read-replica",))
+        self.assertEqual(discovered_verse_count, 1)
+        self.assertEqual(discovered_peer_count, 1)
+        self.assertEqual(discovered_verses.get("aetheria-main").display_name, "Aetheria")
+        self.assertEqual(discovered_peers.find("aetheria-main", role="read-replica")[0].peer_id, "peer-a")
+        self.assertEqual(fanout_verse_count, 1)
+        self.assertEqual(fanout_peer_count, 1)
+        self.assertEqual(fanout_verses.get("aetheria-main").display_name, "Aetheria")
+        self.assertIn(
+            "peer-a",
+            {peer.peer_id for peer in fanout_peers.find("aetheria-main", role="read-replica")},
+        )
+
+    def test_cultmesh_discovery_client_fans_out_simulation_observations_to_peers(self) -> None:
+        first_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        second_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        first_server = CultMesh.serve_node(
+            CultMesh.create_node(runtime_id="sim-peer-a"),
+            observation_hub=first_hub,
+        )
+        second_server = CultMesh.serve_node(
+            CultMesh.create_node(runtime_id="sim-peer-b"),
+            observation_hub=second_hub,
+        )
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-peer-a",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{first_server.port}",),
+                roles=("simulation-witness",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-peer-b",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{second_server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:200")
+            message = simulation_observation(
+                message_id="fanout-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=200,
+                subject_id="bob",
+                claim_kind="hit",
+                claim_hash=claim_hash,
+                claim_summary="alice hit bob",
+            ).to_wire()
+
+            client = CultMeshDiscoveryClient("127.0.0.1", first_server.port, timeout_seconds=2.0)
+            candidates = client.fanout_simulation_observation(
+                peers,
+                message,
+                verse_id="arena",
+                roles=["simulation-witness"],
+            )
+        finally:
+            first_server.stop()
+            second_server.stop()
+
+        self.assertEqual([candidate["schemaVersion"] for candidate in candidates], [
+            "cultnet.simulation_consensus_candidate.v0",
+            "cultnet.simulation_consensus_candidate.v0",
+        ])
+        self.assertEqual({candidate["claimHash"] for candidate in candidates}, {claim_hash})
+        self.assertEqual({candidate["messageId"] for candidate in candidates}, {"fanout-observation"})
+        self.assertEqual({candidate["hasQuorum"] for candidate in candidates}, {True})
+
+    def test_cultmesh_simulation_observation_fanout_flushes_queued_messages(self) -> None:
+        hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="sim-flush-peer"), observation_hub=hub)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-flush-peer",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:210")
+            seen_candidates: list[dict[str, object]] = []
+            fanout = CultMeshSimulationObservationFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                peers,
+                verse_id="arena",
+                roles=["simulation-witness"],
+                on_candidate=seen_candidates.append,
+            )
+            fanout.enqueue(simulation_observation(
+                message_id="queued-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=210,
+                subject_id="bob",
+                claim_kind="hit",
+                claim_hash=claim_hash,
+                claim_summary="alice hit bob",
+            ).to_wire())
+
+            candidates = fanout.flush()
+        finally:
+            server.stop()
+
+        self.assertEqual(fanout.pending_count(), 0)
+        self.assertEqual([candidate["claimHash"] for candidate in candidates], [claim_hash])
+        self.assertEqual(seen_candidates[0]["messageId"], "queued-observation")
+
+    def test_cultmesh_simulation_observation_fanout_keeps_failed_messages_pending(self) -> None:
+        closed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed_socket.bind(("127.0.0.1", 0))
+        closed_port = closed_socket.getsockname()[1]
+        closed_socket.close()
+        peers = CultMeshPeerCatalog()
+        peers.upsert(CultMeshPeerCard(
+            peer_id="closed-simulation-peer",
+            verse_id="arena",
+            endpoints=(f"cultnet://127.0.0.1:{closed_port}",),
+            roles=("simulation-witness",),
+        ))
+        errors: list[tuple[str, str]] = []
+        fanout = CultMeshSimulationObservationFanout(
+            CultMeshDiscoveryClient("127.0.0.1", closed_port, timeout_seconds=0.2),
+            peers,
+            verse_id="arena",
+            roles=["simulation-witness"],
+            on_error=lambda endpoint, error: errors.append((endpoint, str(error))),
+        )
+        fanout.enqueue(simulation_observation(
+            message_id="retry-observation",
+            witness_runtime_id="python-fanout",
+            shard_id="arena",
+            shard_epoch=1,
+            frame=212,
+            subject_id="bob",
+            claim_kind="miss",
+            claim_hash=compute_simulation_claim_hash("miss", "alice", "bob", "frame:212"),
+            claim_summary="alice missed bob",
+        ).to_wire())
+
+        candidates = fanout.flush()
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(fanout.pending_count(), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(f"127.0.0.1:{closed_port}", errors[0][0])
+
+    def test_cultmesh_simulation_observation_fanout_runs_background_loop(self) -> None:
+        hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=1, quorum_ratio=1.0)
+        )
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="sim-loop-peer"), observation_hub=hub)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="sim-loop-peer",
+                verse_id="arena",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("simulation-witness",),
+            ))
+            claim_hash = compute_simulation_claim_hash("block", "dana", "eve", "frame:211")
+            seen_candidates: list[dict[str, object]] = []
+            fanout = CultMeshSimulationObservationFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                peers,
+                verse_id="arena",
+                roles=["simulation-witness"],
+                interval_seconds=0.05,
+                on_candidate=seen_candidates.append,
+            )
+            fanout.start()
+            fanout.enqueue(simulation_observation(
+                message_id="loop-observation",
+                witness_runtime_id="python-fanout",
+                shard_id="arena",
+                shard_epoch=1,
+                frame=211,
+                subject_id="eve",
+                claim_kind="block",
+                claim_hash=claim_hash,
+                claim_summary="dana blocked eve",
+            ).to_wire())
+            deadline = time.monotonic() + 2.0
+            while not seen_candidates and time.monotonic() < deadline:
+                time.sleep(0.01)
+            fanout.stop()
+        finally:
+            server.stop()
+
+        self.assertEqual(fanout.pending_count(), 0)
+        self.assertTrue(seen_candidates)
+        self.assertEqual(seen_candidates[0]["claimHash"], claim_hash)
+        self.assertEqual(seen_candidates[0]["messageId"], "loop-observation")
+
+    def test_cultmesh_discovery_client_fans_out_snapshots_to_peers(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_fanout_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_fanout_note.v1",
+        )
+        first = CultMesh.create_node(runtime_id="snapshot-peer-a")
+        first.database.register_document(document)
+        first.database.put_raw_message(document, "note:a", {"body": "from-a"}, shard_id="notes", shard_epoch=1)
+        second = CultMesh.create_node(runtime_id="snapshot-peer-b")
+        second.database.register_document(document)
+        second.database.put_raw_message(document, "note:b", {"body": "from-b"}, shard_id="notes", shard_epoch=1)
+        target = CultMesh.create_node(runtime_id="snapshot-target")
+        target.database.register_document(document)
+        first_server = CultMesh.serve_node(first)
+        second_server = CultMesh.serve_node(second)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-peer-a",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{first_server.port}", f"cultnet://127.0.0.1:{first_server.port}"),
+                roles=("read-replica",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-peer-b",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{second_server.port}",),
+                roles=("read-replica",),
+            ))
+
+            client = CultMeshDiscoveryClient("127.0.0.1", first_server.port, timeout_seconds=2.0)
+            responses = client.fanout_snapshot_responses(
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_fanout_note.v1"],
+            )
+            applied = client.sync_snapshots(
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_fanout_note.v1"],
+            )
+        finally:
+            first_server.stop()
+            second_server.stop()
+
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(isinstance(response, CultNetRawSnapshotResponse) for response in responses))
+        self.assertEqual(
+            sorted(record.record_key for response in responses for record in response.documents),
+            ["note:a", "note:b"],
+        )
+        self.assertEqual(sorted(record.record_key for record in applied), ["note:a", "note:b"])
+        self.assertEqual(target.database.get_required(document, "note:a")["body"], "from-a")
+        self.assertEqual(target.database.get_required(document, "note:b")["body"], "from-b")
+
+    def test_cultmesh_discovery_client_sync_documents_returns_requested_aliases(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.snapshot_fanout_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.snapshot_fanout_alias_note.v1",
+            schema_name="mesh.snapshot_fanout_alias_note",
+            schema_version="mesh.snapshot_fanout_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.snapshot_fanout_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.snapshot_fanout_alias_note.v1",
+            schema_name="mesh.snapshot_fanout_alias_note",
+            schema_version="mesh.snapshot_fanout_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:alias", CanonicalNote("from-source"))
+        target = CultMesh.create_node(runtime_id="snapshot-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-alias-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+
+            values = CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0).sync_documents(
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                documents=[(alias, "note:alias")],
+            )
+        finally:
+            server.stop()
+
+        self.assertEqual(len(values), 1)
+        self.assertIsInstance(values[0], UiNote)
+        self.assertEqual(values[0].body, "from-source")
+        self.assertEqual(target.database.get_required(document, "note:alias").body, "from-source")
+        self.assertIsInstance(target.database.get_required(alias, "note:alias"), UiNote)
+
+    def test_cultmesh_document_subscription_syncs_alias_snapshot_and_changes(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.subscription_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.subscription_alias_note.v1",
+            schema_name="mesh.subscription_alias_note",
+            schema_version="mesh.subscription_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.subscription_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.subscription_alias_note.v1",
+            schema_name="mesh.subscription_alias_note",
+            schema_version="mesh.subscription_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="subscription-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:live", CanonicalNote("initial"))
+        target = CultMesh.create_node(runtime_id="subscription-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with CultMesh.subscribe_document(target, raw_client, alias, "note:live") as subscription:
+                initial = subscription.sync_initial()
+                subscription.send(document_put_raw(
+                    message_id="subscription-alias-put",
+                    key="note:live",
+                    schema_id="mesh.subscription_alias_note.v1",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=document.encode_payload(CanonicalNote("updated")),
+                ))
+                updated = subscription.read_next_change()
+                subscription.send(document_delete(
+                    message_id="subscription-alias-delete",
+                    schema_id="mesh.subscription_alias_note.v1",
+                    record_key="note:live",
+                ))
+                removed = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        self.assertIsInstance(initial, UiNote)
+        self.assertEqual(initial.body, "initial")
+        self.assertEqual(updated.change_kind, "updated")
+        self.assertIsInstance(updated.value, UiNote)
+        self.assertEqual(updated.value.body, "updated")
+        self.assertIsInstance(updated.previous_value, UiNote)
+        self.assertEqual(updated.previous_value.body, "initial")
+        self.assertEqual(removed.change_kind, "removed")
+        self.assertIsNone(removed.value)
+        self.assertIsInstance(removed.previous_value, UiNote)
+        self.assertEqual(removed.previous_value.body, "updated")
+        self.assertIsNone(target.database.get(alias, "note:live"))
+
+    def test_cultmesh_snapshot_fanout_syncs_once_and_reports_applied_records(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_loop_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_loop_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-loop-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:sync-once", {"body": "from-source"})
+        target = CultMesh.create_node(runtime_id="snapshot-loop-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-loop-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_loop_note.v1"],
+                on_applied=lambda record: seen.append(record.record_key),
+            )
+
+            applied = fanout.sync_once()
+        finally:
+            server.stop()
+
+        self.assertEqual([record.record_key for record in applied], ["note:sync-once"])
+        self.assertEqual(seen, ["note:sync-once"])
+        self.assertEqual(target.database.get_required(document, "note:sync-once")["body"], "from-source")
+
+    def test_cultmesh_snapshot_fanout_syncs_typed_documents_and_reports_alias_values(self) -> None:
+        @dataclass
+        class CanonicalNote:
+            body: str
+
+        @dataclass
+        class UiNote:
+            body: str
+
+        document = define_database_entry_type(
+            "mesh.snapshot_loop_alias_note",
+            [("body", 0)],
+            cls=CanonicalNote,
+            schema_id="mesh.snapshot_loop_alias_note.v1",
+            schema_name="mesh.snapshot_loop_alias_note",
+            schema_version="mesh.snapshot_loop_alias_note.v1",
+        )
+        alias = define_database_entry_type(
+            "mesh.snapshot_loop_alias_note.ui",
+            [("body", 0)],
+            cls=UiNote,
+            schema_id="mesh.snapshot_loop_alias_note.v1",
+            schema_name="mesh.snapshot_loop_alias_note",
+            schema_version="mesh.snapshot_loop_alias_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-loop-alias-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:typed-loop", CanonicalNote("from-source"))
+        target = CultMesh.create_node(runtime_id="snapshot-loop-alias-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-loop-alias-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[UiNote] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                documents=[(alias, "note:typed-loop")],
+                on_document=seen.append,
+            )
+
+            values = fanout.sync_once()
+        finally:
+            server.stop()
+
+        self.assertEqual(len(values), 1)
+        self.assertIsInstance(values[0], UiNote)
+        self.assertEqual(values[0].body, "from-source")
+        self.assertEqual(seen, [values[0]])
+        self.assertEqual(target.database.get_required(document, "note:typed-loop").body, "from-source")
+        self.assertIsInstance(target.database.get_required(alias, "note:typed-loop"), UiNote)
+
+    def test_cultmesh_snapshot_fanout_runs_background_loop(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_background_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_background_note.v1",
+        )
+        source = CultMesh.create_node(runtime_id="snapshot-background-source")
+        source.database.register_document(document)
+        source.database.put_raw_message(document, "note:background", {"body": "from-background"})
+        target = CultMesh.create_node(runtime_id="snapshot-background-target")
+        target.database.register_document(document)
+        server = CultMesh.serve_node(source)
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="snapshot-background-source",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            fanout = CultMeshSnapshotFanout(
+                CultMeshDiscoveryClient("127.0.0.1", server.port, timeout_seconds=2.0),
+                target.database,
+                peers,
+                verse_id="mesh",
+                roles=["read-replica"],
+                schema_ids=["mesh.snapshot_background_note.v1"],
+                interval_seconds=0.05,
+                on_applied=lambda record: seen.append(record.record_key),
+            )
+            fanout.start()
+            deadline = time.monotonic() + 2.0
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            fanout.stop()
+        finally:
+            server.stop()
+
+        self.assertTrue(seen)
+        self.assertEqual(target.database.get_required(document, "note:background")["body"], "from-background")
+
+    def test_cultmesh_peer_health_monitor_probes_reachable_and_failed_endpoints(self) -> None:
+        document = define_database_entry_type(
+            "mesh.health_note",
+            [("body", 0)],
+            schema_id="mesh.health_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="health-peer")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node)
+        closed_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed_socket.bind(("127.0.0.1", 0))
+        closed_port = closed_socket.getsockname()[1]
+        closed_socket.close()
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="health-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            peers.upsert(CultMeshPeerCard(
+                peer_id="closed-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{closed_port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[tuple[str, bool]] = []
+            monitor = CultMeshPeerHealthMonitor(
+                runtime_id="health-prober",
+                timeout_seconds=0.2,
+                on_update=lambda health: seen.append((health.peer_id, health.is_reachable)),
+            )
+
+            results = monitor.probe_catalog(peers, verse_id="mesh", roles=["read-replica"])
+        finally:
+            server.stop()
+
+        by_peer = {result.peer_id: result for result in results}
+        self.assertTrue(by_peer["health-peer"].is_reachable)
+        self.assertEqual(by_peer["health-peer"].runtime_id, "health-peer")
+        self.assertEqual(by_peer["health-peer"].runtime_kind, "python")
+        self.assertEqual(by_peer["health-peer"].display_name, "health-peer")
+        self.assertEqual(by_peer["health-peer"].supported_document_types, ("mesh.health_note",))
+        self.assertIn("cultnet.hello.v0", by_peer["health-peer"].supported_message_versions)
+        self.assertIn("cultnet.error.v0", by_peer["health-peer"].supported_message_versions)
+        self.assertEqual(by_peer["health-peer"].supported_mutation_contracts[0]["documentType"], "mesh.health_note")
+        self.assertIn("shardLog", by_peer["health-peer"].supported_mutation_contracts[0]["operations"])
+        self.assertFalse(by_peer["closed-peer"].is_reachable)
+        self.assertIsNone(by_peer["closed-peer"].runtime_kind)
+        self.assertEqual(by_peer["closed-peer"].supported_document_types, ())
+        self.assertEqual(by_peer["closed-peer"].supported_message_versions, ())
+        self.assertEqual(by_peer["closed-peer"].supported_mutation_contracts, ())
+        self.assertTrue(by_peer["closed-peer"].error)
+        self.assertEqual({peer_id for peer_id, _ in seen}, {"health-peer", "closed-peer"})
+        self.assertEqual(len(monitor.latest()), 2)
+
+    def test_cultmesh_peer_health_monitor_runs_background_probe_loop(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="health-loop-peer"))
+        try:
+            peers = CultMeshPeerCatalog()
+            peers.upsert(CultMeshPeerCard(
+                peer_id="health-loop-peer",
+                verse_id="mesh",
+                endpoints=(f"cultnet://127.0.0.1:{server.port}",),
+                roles=("read-replica",),
+            ))
+            seen: list[str] = []
+            monitor = CultMeshPeerHealthMonitor(
+                runtime_id="health-loop-prober",
+                timeout_seconds=0.2,
+                interval_seconds=0.05,
+                on_update=lambda health: seen.append(health.peer_id),
+            )
+            monitor.start(peers, verse_id="mesh", roles=["read-replica"])
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                latest = monitor.latest()
+                if latest and latest[0].is_reachable:
+                    break
+                time.sleep(0.01)
+            monitor.stop()
+        finally:
+            server.stop()
+
+        self.assertTrue(seen)
+        latest = monitor.latest()
+        self.assertEqual(latest[0].peer_id, "health-loop-peer")
+        self.assertTrue(latest[0].is_reachable)
+
+    def test_cultmesh_daemon_entrypoint_serves_framed_cultnet_hello(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "daemon-test-peer",
+                    "--display-name",
+                    "Daemon Test Peer",
+                    "--port",
+                    "0",
+                    "--ready-file",
+                    str(ready_path),
+                    "--seed-interop-note",
+                    "--seed-shard-id",
+                    "daemon-interop",
+                    "--verse-id",
+                    "daemon-verse",
+                    "--verse-display-name",
+                    "Daemon Verse",
+                    "--role",
+                    "shard-primary",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                deadline = time.monotonic() + 5.0
+                while not ready_path.exists() and time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if not ready_path.exists():
+                    _, stderr = process.communicate(timeout=2.0)
+                    self.fail(f"cultmesh daemon did not publish readiness: {stderr}")
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
+                self.assertEqual(ready["schemaVersion"], READY_SCHEMA_VERSION)
+                self.assertEqual(ready["runtimeId"], "daemon-test-peer")
+                self.assertEqual(ready["runtimeKind"], "python")
+                self.assertEqual(ready["displayName"], "Daemon Test Peer")
+                self.assertEqual(ready["endpoint"], f"cultnet://127.0.0.1:{ready['port']}")
+                self.assertEqual(ready["shardIds"], ["daemon-interop"])
+                self.assertEqual(ready["supportedDocumentTypes"], ["cultcache.interop-note"])
+                self.assertIn("cultnet.hello.v0", ready["supportedMessageVersions"])
+                self.assertIn("cultnet.document_put_raw.v0", ready["supportedMessageVersions"])
+                self.assertNotIn("cultnet.simulation_observation.v0", ready["supportedMessageVersions"])
+                self.assertEqual(ready["supportedMutationContracts"][0]["documentType"], "cultcache.interop-note")
+                self.assertIn("shardLog", ready["supportedMutationContracts"][0]["operations"])
+                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": None})
+                self.assertEqual(ready["verses"][0]["verseId"], "daemon-verse")
+                self.assertEqual(ready["verses"][0]["displayName"], "Daemon Verse")
+                self.assertEqual(ready["verses"][0]["discoveryEndpoints"], [ready["endpoint"]])
+                self.assertEqual(ready["verses"][0]["authorityRuntimeIds"], ["daemon-test-peer"])
+                self.assertEqual(ready["peers"][0]["peerId"], "daemon-test-peer")
+                self.assertEqual(ready["peers"][0]["endpoints"], [ready["endpoint"]])
+                self.assertEqual(ready["peers"][0]["roles"], ["shard-primary"])
+                self.assertEqual(ready["peers"][0]["shardIds"], ["daemon-interop"])
+
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                hello_response = client.request(
+                    hello(runtime_id="daemon-test-prober"),
+                    expected_schema_version="cultnet.hello.v0",
+                )
+
+                self.assertEqual(hello_response["runtimeId"], "daemon-test-peer")
+                self.assertEqual(hello_response["displayName"], "Daemon Test Peer")
+                self.assertIn("cultnet.hello.v0", hello_response["supportedMessageVersions"])
+                self.assertIn("cultnet.schema_catalog_request.v0", hello_response["supportedMessageVersions"])
+                self.assertNotIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+                self.assertEqual(hello_response["supportedDocumentTypes"], ["cultcache.interop-note"])
+                self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
+                self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["port"], int(ready["port"]))
+                self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
+                self.assertEqual(ready["supportedMutationContracts"], hello_response["supportedMutationContracts"])
+                self.assertEqual(ready["transportProfiles"], hello_response["transportProfiles"])
+
+                schema_response = client.fetch_schema_catalog(schema_ids=["cultcache.interop-note"], include_schema_json=True)
+                self.assertEqual(schema_response["schemas"][0]["schemaVersion"], INTEROP_SCHEMA_VERSION)
+                self.assertEqual(schema_response["schemas"][0]["documentType"], "cultcache.interop-note")
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(snapshot_response.documents[0].record_key, "note:daemon-test-peer")
+                note = interop_note_document.decode_payload(snapshot_response.documents[0].payload)
+                self.assertEqual(note["authorRuntimeId"], "daemon-test-peer")
+                self.assertIn("daemon", note["tags"])
+
+                shard_catalog = client.fetch_shard_catalog(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(shard_catalog["shards"][0]["shardId"], "daemon-interop")
+                self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["cultcache.interop-note"])
+
+                shard_log = client.fetch_shard_log_response(shard_id="daemon-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual(shard_log.entries[0].sequence, 1)
+                self.assertEqual(shard_log.entries[0].change_kind, "added")
+                self.assertIsNotNone(shard_log.entries[0].raw_document)
+                assert shard_log.entries[0].raw_document is not None
+                self.assertEqual(shard_log.entries[0].raw_document.record_key, "note:daemon-test-peer")
+
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+                self.assertEqual(verses[0].verse_id, "daemon-verse")
+                self.assertEqual(verses[0].display_name, "Daemon Verse")
+                self.assertEqual(verses[0].discovery_endpoints, (ready["endpoint"],))
+                self.assertEqual(verses[0].authority_runtime_ids, ("daemon-test-peer",))
+                self.assertEqual([verse.to_wire() for verse in verses], ready["verses"])
+
+                peers = discovery_client.fetch_peers(verse_id="daemon-verse", roles=["shard-primary"])
+                self.assertEqual(peers[0].peer_id, "daemon-test-peer")
+                self.assertEqual(peers[0].endpoints, (ready["endpoint"],))
+                self.assertEqual(peers[0].roles, ("shard-primary",))
+                self.assertEqual(peers[0].shard_ids, ("daemon-interop",))
+                self.assertEqual([peer.to_wire() for peer in peers], ready["peers"])
+
+                monitor = CultMeshPeerHealthMonitor(runtime_id="daemon-health-prober", timeout_seconds=2.0)
+                health = monitor.probe_peer(peers[0])[0]
+                self.assertTrue(health.is_reachable)
+                self.assertEqual(health.runtime_id, "daemon-test-peer")
+                self.assertEqual(health.supported_document_types, ("cultcache.interop-note",))
+                self.assertEqual(health.supported_mutation_contracts[0]["documentType"], "cultcache.interop-note")
+            finally:
+                process.terminate()
+                try:
+                    process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5.0)
+
+    def test_cultmesh_daemon_restarts_with_persisted_cache_and_shard_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache_path = root / "mesh.cc"
+            shard_log_path = root / "shard-log"
+            env = dict(os.environ)
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+
+            first_ready = root / "first-ready.json"
+            first = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "durable-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--seed-interop-note",
+                    "--seed-shard-id",
+                    "durable-interop",
+                    "--ready-file",
+                    str(first_ready),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                self._wait_for_ready_file(first, first_ready)
+            finally:
+                self._terminate_process(first)
+
+            second_ready = root / "second-ready.json"
+            second = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "durable-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--register-interop-note",
+                    "--verse-id",
+                    "durable-verse",
+                    "--role",
+                    "shard-primary",
+                    "--ready-file",
+                    str(second_ready),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(second, second_ready)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(snapshot_response.documents[0].record_key, "note:durable-daemon-peer")
+                note = interop_note_document.decode_payload(snapshot_response.documents[0].payload)
+                self.assertEqual(note["authorRuntimeId"], "durable-daemon-peer")
+
+                shard_log = client.fetch_shard_log_response(shard_id="durable-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual(shard_log.entries[0].sequence, 1)
+                self.assertIsNotNone(shard_log.entries[0].raw_document)
+                assert shard_log.entries[0].raw_document is not None
+                self.assertEqual(shard_log.entries[0].raw_document.record_key, "note:durable-daemon-peer")
+
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                peers = discovery_client.fetch_peers(verse_id="durable-verse", roles=["shard-primary"])
+                self.assertEqual(peers[0].shard_ids, ("durable-interop",))
+            finally:
+                self._terminate_process(second)
+
+    def test_cultmesh_daemon_serves_live_database_subscription_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "live-daemon-peer",
+                    "--port",
+                    "0",
+                    "--seed-interop-note",
+                    "--seed-shard-id",
+                    "live-interop",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                live_note = {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:daemon-live",
+                    "authorRuntimeId": "daemon-live-client",
+                    "title": "daemon live subscription note",
+                    "body": "live subscription put from Python daemon smoke",
+                    "tags": ["daemon", "subscription", "interop"],
+                }
+
+                with client.subscribe_database(
+                    subscription_id="daemon-live-sub",
+                    schema_ids=["cultcache.interop-note"],
+                ) as subscription:
+                    snapshot = subscription.read_next_snapshot_response()
+                    subscription.send(document_put_raw(
+                        message_id="daemon-live-put",
+                        key="note:daemon-live",
+                        schema_id="cultcache.interop-note",
+                        stored_at="2026-06-14T00:00:00Z",
+                        payload=interop_note_document.encode_payload(live_note),
+                        source_runtime_id="daemon-live-client",
+                        shard_id="live-interop",
+                        shard_epoch=1,
+                    ))
+                    change = subscription.read_next_change()
+
+                self.assertEqual(snapshot.documents[0].record_key, "note:live-daemon-peer")
+                self.assertEqual(change.change_kind, "added")
+                self.assertEqual(change.record_key, "note:daemon-live")
+                self.assertIsNotNone(change.raw_document)
+                assert change.raw_document is not None
+                self.assertEqual(
+                    interop_note_document.decode_payload(change.raw_document.payload),
+                    live_note,
+                )
+
+                shard_log = client.fetch_shard_log_response(shard_id="live-interop", shard_epoch=1)
+                self.assertFalse(shard_log.resync_required)
+                self.assertEqual([entry.sequence for entry in shard_log.entries], [1, 2])
+                self.assertEqual(shard_log.entries[1].change_kind, "added")
+                self.assertIsNotNone(shard_log.entries[1].raw_document)
+                assert shard_log.entries[1].raw_document is not None
+                self.assertEqual(shard_log.entries[1].raw_document.record_key, "note:daemon-live")
+            finally:
+                self._terminate_process(process)
+
+    def test_cultmesh_daemon_serves_compacted_shard_log_resync_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache_path = root / "mesh.cc"
+            shard_log_path = root / "shard-log"
+            store = CultNetFileShardMutationLogStore(shard_log_path)
+            node = CultMesh.create_node(
+                cache_path,
+                runtime_id="compacted-daemon-peer",
+                enable_durable_shard_logs=True,
+                shard_log_path=shard_log_path,
+            )
+            node.database.register_document(interop_note_document)
+            node.database.put_raw_message(
+                interop_note_document,
+                "note:compacted-one",
+                {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:compacted-one",
+                    "authorRuntimeId": "compacted-daemon-peer",
+                    "title": "compacted daemon note one",
+                    "body": "first retained cache value",
+                    "tags": ["daemon", "compaction"],
+                },
+                message_id="compacted-put-1",
+                shard_id="compacted-interop",
+                shard_epoch=7,
+            )
+            node.database.put_raw_message(
+                interop_note_document,
+                "note:compacted-two",
+                {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:compacted-two",
+                    "authorRuntimeId": "compacted-daemon-peer",
+                    "title": "compacted daemon note two",
+                    "body": "second retained cache value",
+                    "tags": ["daemon", "compaction"],
+                },
+                message_id="compacted-put-2",
+                shard_id="compacted-interop",
+                shard_epoch=7,
+            )
+            store.compact_through("compacted-interop", 1)
+
+            ready_path = root / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "compacted-daemon-peer",
+                    "--port",
+                    "0",
+                    "--cache-file",
+                    str(cache_path),
+                    "--enable-durable-shard-logs",
+                    "--shard-log-file",
+                    str(shard_log_path),
+                    "--register-interop-note",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                snapshot_response = client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+                self.assertEqual(
+                    {document.record_key for document in snapshot_response.documents},
+                    {"note:compacted-one", "note:compacted-two"},
+                )
+
+                compacted = client.fetch_shard_log_response(
+                    shard_id="compacted-interop",
+                    shard_epoch=7,
+                    after_sequence=0,
+                )
+                retained = client.fetch_shard_log_response(
+                    shard_id="compacted-interop",
+                    shard_epoch=7,
+                    after_sequence=1,
+                )
+
+                self.assertTrue(compacted.resync_required)
+                self.assertEqual(compacted.reason, "compacted_history")
+                self.assertEqual(compacted.compacted_through, 1)
+                self.assertEqual(compacted.entries, ())
+                self.assertFalse(retained.resync_required)
+                self.assertEqual([entry.sequence for entry in retained.entries], [2])
+                self.assertIsNotNone(retained.entries[0].raw_document)
+                assert retained.entries[0].raw_document is not None
+                self.assertEqual(retained.entries[0].raw_document.record_key, "note:compacted-two")
+            finally:
+                self._terminate_process(process)
+
+    def test_cultmesh_daemon_accepts_schema_write_forwarder_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "forwarder-daemon-peer",
+                    "--port",
+                    "0",
+                    "--register-interop-note",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                endpoint = f"cultnet://127.0.0.1:{ready['port']}"
+                shard = CultNetShardDescriptor(
+                    shard_id="forwarded-interop",
+                    owner_runtime_id="forwarder-daemon-peer",
+                    epoch=3,
+                    is_primary=False,
+                    schema_ids=("cultcache.interop-note",),
+                    primary_endpoints=(endpoint,),
+                )
+                forwarder: CultNetShardWriteForwarder = CultNetSchemaWriteForwarder(timeout_seconds=2.0)
+                note = {
+                    "schemaVersion": INTEROP_SCHEMA_VERSION,
+                    "documentId": "note:forwarded-daemon",
+                    "authorRuntimeId": "forwarding-client",
+                    "title": "forwarded daemon note",
+                    "body": "forwarded through the schema write-forwarder",
+                    "tags": ["daemon", "forwarded"],
+                }
+
+                forwarder.forward_put(shard, document_put_raw(
+                    message_id="forwarded-daemon-put",
+                    key="note:forwarded-daemon",
+                    schema_id="cultcache.interop-note",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=interop_note_document.encode_payload(note),
+                    source_runtime_id="forwarding-client",
+                ).to_wire())
+
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                self._eventually(lambda: bool(client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                ).documents))
+                snapshot = client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                )
+                self.assertEqual(
+                    interop_note_document.decode_payload(snapshot.documents[0].payload),
+                    note,
+                )
+
+                forwarder.forward_delete(shard, document_delete(
+                    message_id="forwarded-daemon-delete",
+                    schema_id="cultcache.interop-note",
+                    record_key="note:forwarded-daemon",
+                ).to_wire())
+                self._eventually(lambda: not client.fetch_snapshot_response(
+                    schema_ids=["cultcache.interop-note"],
+                    record_keys=["note:forwarded-daemon"],
+                ).documents)
+
+                shard_log = client.fetch_shard_log_response(shard_id="forwarded-interop", shard_epoch=3)
+                self.assertEqual([entry.change_kind for entry in shard_log.entries], ["added", "removed"])
+                self.assertEqual(shard_log.entries[0].put["shardId"], "forwarded-interop")
+                self.assertEqual(shard_log.entries[0].put["shardEpoch"], 3)
+                self.assertEqual(shard_log.entries[1].delete["shardId"], "forwarded-interop")
+                self.assertEqual(shard_log.entries[1].delete["shardEpoch"], 3)
+            finally:
+                self._terminate_process(process)
+
+    def test_cultmesh_daemon_enforces_snapshot_document_limit_as_peer_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "limited-daemon-peer",
+                    "--port",
+                    "0",
+                    "--seed-interop-note",
+                    "--max-snapshot-documents",
+                    "0",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": 0})
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+
+                with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:
+                    client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
+
+                self.assertEqual(raised.exception.response["schemaVersion"], "cultnet.error.v0")
+                self.assertEqual(raised.exception.response["code"], "snapshot_document_limit_exceeded")
+                self.assertEqual(raised.exception.response["details"]["documentCount"], 1)
+                self.assertEqual(raised.exception.response["details"]["maxSnapshotDocuments"], 0)
+            finally:
+                self._terminate_process(process)
+
+    def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ready_path = Path(temp) / "ready.json"
+            package_src = Path(__file__).resolve().parents[1] / "src"
+            env = dict(os.environ)
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(package_src)
+                if not existing_pythonpath
+                else f"{package_src}{os.pathsep}{existing_pythonpath}"
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "cultmesh_py.daemon",
+                    "--runtime-id",
+                    "simulation-daemon-peer",
+                    "--port",
+                    "0",
+                    "--enable-simulation-observations",
+                    "--simulation-minimum-witnesses",
+                    "2",
+                    "--simulation-quorum-ratio",
+                    "1.0",
+                    "--verse-id",
+                    "simulation-verse",
+                    "--ready-file",
+                    str(ready_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                ready = self._wait_for_ready_file(process, ready_path)
+                self.assertIn("cultnet.simulation_observation.v0", ready["supportedMessageVersions"])
+                self.assertIn("cultnet.simulation_consensus_candidate.v0", ready["supportedMessageVersions"])
+                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                hello_response = client.request(
+                    hello(runtime_id="simulation-daemon-prober"),
+                    expected_schema_version="cultnet.hello.v0",
+                )
+                self.assertEqual(ready["supportedMessageVersions"], hello_response["supportedMessageVersions"])
+                discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
+                peers = discovery_client.fetch_peers(verse_id="simulation-verse", roles=["simulation-observer"])
+                self.assertEqual(peers[0].peer_id, "simulation-daemon-peer")
+                self.assertIn("simulation-observer", peers[0].roles)
+                self.assertIn("read-replica", peers[0].roles)
+
+                claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+                first = client.request(
+                    simulation_observation(
+                        message_id="daemon-sim-1",
+                        witness_runtime_id="watcher-1",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=claim_hash,
+                        claim_summary="alice shot bob first",
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+                second = client.request(
+                    simulation_observation(
+                        message_id="daemon-sim-2",
+                        witness_runtime_id="watcher-2",
+                        shard_id="arena",
+                        shard_epoch=4,
+                        frame=100,
+                        subject_id="bob",
+                        claim_kind="hit",
+                        claim_hash=claim_hash,
+                        claim_summary="alice shot bob first",
+                    ),
+                    expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+                )
+
+                self.assertEqual(first["messageId"], "daemon-sim-1")
+                self.assertFalse(first["hasQuorum"])
+                self.assertEqual(first["witnessCount"], 1)
+                self.assertEqual(second["messageId"], "daemon-sim-2")
+                self.assertTrue(second["hasQuorum"])
+                self.assertEqual(second["witnessCount"], 2)
+                self.assertEqual(second["claimHash"], claim_hash)
+            finally:
+                self._terminate_process(process)
+
+    def _wait_for_ready_file(self, process: subprocess.Popen[str], ready_path: Path) -> dict[str, object]:
+        deadline = time.monotonic() + 5.0
+        while not ready_path.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not ready_path.exists():
+            _, stderr = process.communicate(timeout=2.0)
+            self.fail(f"cultmesh daemon did not publish readiness: {stderr}")
+        return json.loads(ready_path.read_text(encoding="utf-8"))
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        process.terminate()
+        try:
+            process.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5.0)
+
+    def test_cultmesh_local_server_serves_node_and_catalogs_over_clients(self) -> None:
+        document = define_database_entry_type(
+            "mesh.server_note",
+            [("body", 0)],
+            schema_id="mesh.server_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(document, "note:1", {"body": "served"}, shard_id="notes", shard_epoch=1)
+        observation_hub = CultNetSimulationObservationHub(
+            CultNetSimulationConsensusOptions(minimum_witnesses=2, quorum_ratio=1.0)
+        )
+        seen_candidates: list[CultNetSimulationConsensusCandidate] = []
+        unsubscribe_candidates = observation_hub.watch_candidates(seen_candidates.append)
+        claim_hash = compute_simulation_claim_hash("hit", "alice", "bob", "frame:100")
+        verses = CultMeshVerseCatalog()
+        verses.upsert(
+            CultMeshVerseDescriptor(
+                verse_id="server-verse",
+                display_name="Server Verse",
+                authority_model="local",
+                compatibility=CultMeshVerseCompatibility("cultmesh.v0", "rules"),
+            )
+        )
+        peers = CultMeshPeerCatalog()
+        peers.upsert(
+            CultMeshPeerCard(
+                peer_id="mesh-server",
+                verse_id="server-verse",
+                endpoints=("cultnet://127.0.0.1:0",),
+                roles=("read-replica",),
+            )
+        )
+
+        server = CultMesh.serve_node(
+            node,
+            verse_catalog=verses,
+            peer_catalog=peers,
+            observation_hub=observation_hub,
+            display_name="Mesh Server",
+        )
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            hello_response = raw_client.request(hello(runtime_id="probe"), expected_schema_version="cultnet.hello.v0")
+            schema_response = raw_client.fetch_schema_catalog(schema_ids=["mesh.server_note.v1"], include_schema_json=True)
+            rudp_client = CultMesh.create_client(
+                endpoint=f"rudp://127.0.0.1:{server.port}",
+                timeout_seconds=2.0,
+                connection_id=server.rudp_connection_id,
+                runtime_id="rudp-probe",
+            )
+            rudp_hello_response = rudp_client.request(
+                hello(runtime_id="rudp-probe"),
+                expected_schema_version="cultnet.hello.v0",
+            )
+            rudp_schema_response = rudp_client.fetch_schema_catalog(
+                schema_ids=["mesh.server_note.v1"],
+                include_schema_json=True,
+            )
+            wire_schema_response = raw_client.fetch_schema_catalog(kinds=["wire_message"], include_schema_json=True)
+            synced_schema_catalog = CultNetSchemaCatalog()
+            synced_wire_descriptors = raw_client.sync_schema_catalog(
+                synced_schema_catalog,
+                kinds=["wire_message"],
+                include_schema_json=True,
+            )
+            snapshot_response = raw_client.fetch_snapshot(schema_ids=["mesh.server_note.v1"])
+            typed_snapshot_response = raw_client.fetch_snapshot_response(schema_ids=["mesh.server_note.v1"])
+            shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.server_note.v1"])
+            synced_shard_catalog = CultNetShardCatalog()
+            synced_shards = raw_client.sync_shard_catalog(synced_shard_catalog, schema_ids=["mesh.server_note.v1"])
+            shard_log = raw_client.fetch_shard_log(shard_id="notes", shard_epoch=1)
+            typed_shard_log = raw_client.fetch_shard_log_response(shard_id="notes", shard_epoch=1)
+            self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["protocol"], "tcp_framed")
+            self.assertEqual(hello_response["transportProfiles"][0]["transports"][0]["port"], server.port)
+            stale_shard_log = raw_client.fetch_shard_log(shard_id="notes", shard_epoch=0)
+            discovery_client = CultMesh.create_verse_discovery_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            fetched_verses = discovery_client.fetch_verses(transport_version="cultmesh.v0")
+            fetched_peers = discovery_client.fetch_peers(verse_id="server-verse", roles=["read-replica"])
+            first_candidate = raw_client.request(
+                simulation_observation(
+                    message_id="obs-1",
+                    witness_runtime_id="watcher-1",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+            quorum_candidate = raw_client.request(
+                simulation_observation(
+                    message_id="obs-2",
+                    witness_runtime_id="watcher-2",
+                    shard_id="arena",
+                    shard_epoch=4,
+                    frame=100,
+                    subject_id="bob",
+                    claim_kind="hit",
+                    claim_hash=claim_hash,
+                    claim_summary="alice shot bob first",
+                ),
+                expected_schema_version="cultnet.simulation_consensus_candidate.v0",
+            )
+            with raw_client.subscribe_database(subscription_id="sub-server", schema_ids=["mesh.server_note.v1"]) as subscription:
+                subscription_snapshot = subscription.read_next_snapshot_response()
+                subscription.send(document_put_raw(
+                    message_id="server-put",
+                    key="note:2",
+                    schema_id="mesh.server_note.v1",
+                    stored_at="2026-06-14T00:00:00Z",
+                    payload=document.encode_payload({"body": "subscribed"}),
+                    shard_id="primary",
+                    shard_epoch=1,
+                ))
+                subscription_change = subscription.read_next_change()
+                subscription.send(document_delete(
+                    message_id="server-delete",
+                    schema_id="mesh.server_note.v1",
+                    record_key="note:2",
+                    shard_id="primary",
+                    shard_epoch=1,
+                ))
+                subscription_delete = subscription.read_next_change()
+        finally:
+            unsubscribe_candidates()
+            server.stop()
+
+        self.assertEqual(hello_response["runtimeId"], "mesh-server")
+        self.assertEqual(hello_response["displayName"], "Mesh Server")
+        self.assertIn("cultnet.database_subscribe.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.error.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.document_put_raw.v0", hello_response["supportedMessageVersions"])
+        self.assertIn("cultnet.simulation_observation.v0", hello_response["supportedMessageVersions"])
+        self.assertEqual(hello_response["supportedMutationContracts"][0]["documentType"], "mesh.server_note")
+        self.assertIn("documentDelete", hello_response["supportedMutationContracts"][0]["operations"])
+        self.assertIn("shardLog", hello_response["supportedMutationContracts"][0]["operations"])
+        advertised_transports = {
+            transport["protocol"]: transport
+            for profile in hello_response["transportProfiles"]
+            for transport in profile["transports"]
+        }
+        self.assertEqual(advertised_transports["tcp_framed"]["port"], server.port)
+        self.assertEqual(advertised_transports["rudp"]["port"], server.port)
+        self.assertEqual(rudp_hello_response["runtimeId"], "mesh-server")
+        self.assertEqual(rudp_schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
+        self.assertEqual(schema_response["schemas"][0]["schemaId"], "mesh.server_note.v1")
+        self.assertIn("schemaJson", schema_response["schemas"][0])
+        self.assertIn("cultnet.document_delete.v0", schema_response["schemas"][0]["wireContracts"])
+        self.assertIn("cultnet.shard_log_response.v0", schema_response["schemas"][0]["wireContracts"])
+        wire_descriptors = {schema["schemaVersion"]: schema for schema in wire_schema_response["schemas"]}
+        self.assertEqual(wire_descriptors["cultnet.error.v0"]["kind"], "wire_message")
+        self.assertEqual(wire_descriptors["cultnet.document_put_raw.v0"]["kind"], "wire_message")
+        self.assertIn("schemaJson", wire_descriptors["cultnet.document_put_raw.v0"])
+        self.assertIn("cultmesh.peer_exchange_response.v0", wire_descriptors)
+        self.assertIn("cultnet.error.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
+        self.assertIn("cultnet.document_put_raw.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
+        self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json"))
+        self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
+        self.assertEqual(typed_snapshot_response.documents[0].record_key, "note:1")
+        self.assertEqual(typed_snapshot_response.documents[0].schema_id, "mesh.server_note.v1")
+        self.assertEqual(shard_catalog["shards"][0]["schemaIds"], ["mesh.server_note.v1"])
+        self.assertEqual(shard_catalog["shards"][0]["epoch"], 1)
+        self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
+        self.assertEqual(synced_shards[0].shard_id, "notes")
+        self.assertEqual(synced_shards[0].epoch, 1)
+        self.assertEqual(synced_shard_catalog.get("notes"), synced_shards[0])
+        self.assertEqual(shard_log["entries"][0]["changeKind"], "added")
+        self.assertTrue(stale_shard_log["resyncRequired"])
+        self.assertEqual(stale_shard_log["reason"], "stale_epoch")
+        self.assertEqual(stale_shard_log["shardEpoch"], 1)
+        self.assertEqual(stale_shard_log["entries"], [])
+        self.assertEqual(typed_shard_log.last_sequence, 1)
+        self.assertEqual(typed_shard_log.entries[0].put["document"]["recordKey"], "note:1")
+        self.assertIsInstance(typed_shard_log.entries[0].raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(typed_shard_log.entries[0].raw_document.record_key, "note:1")
+        self.assertEqual(fetched_verses[0].verse_id, "server-verse")
+        self.assertEqual(fetched_peers[0].peer_id, "mesh-server")
+        self.assertEqual(first_candidate["messageId"], "obs-1")
+        self.assertFalse(first_candidate["hasQuorum"])
+        self.assertEqual(quorum_candidate["messageId"], "obs-2")
+        self.assertEqual(quorum_candidate["claimHash"], claim_hash)
+        self.assertTrue(quorum_candidate["hasQuorum"])
+        self.assertEqual(quorum_candidate["witnessCount"], 2)
+        self.assertEqual([candidate.claim_hash for candidate in seen_candidates], [claim_hash, claim_hash])
+        self.assertIsInstance(subscription_snapshot, CultNetRawSnapshotResponse)
+        self.assertEqual(subscription_snapshot.to_wire()["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual(subscription_change.change_kind, "added")
+        self.assertEqual(subscription_change.record_key, "note:2")
+        self.assertEqual(subscription_change.document["recordKey"], "note:2")
+        self.assertIsInstance(subscription_change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(subscription_change.raw_document.schema_id, "mesh.server_note.v1")
+        self.assertEqual(subscription_delete.change_kind, "removed")
+        self.assertEqual(subscription_delete.record_key, "note:2")
+        self.assertIsNone(subscription_delete.raw_document)
+        self.assertIsNone(node.database.get(document, "note:2"))
+
+    def test_cultmesh_local_server_resolves_snapshot_and_shard_catalog_schema_aliases(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_server_note",
+            [("body", 0)],
+            schema_id="sha256:mesh-alias-server-note",
+            schema_name="mesh.alias_server_note",
+            schema_version="mesh.alias_server_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(
+            document,
+            "note:alias",
+            {"body": "served through alias"},
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            snapshot = raw_client.fetch_snapshot(schema_ids=["mesh.alias_server_note.v1"])
+            typed_snapshot = raw_client.fetch_snapshot_response(schema_ids=["mesh.alias_server_note.v1"])
+            shard_catalog = raw_client.fetch_shard_catalog(schema_ids=["mesh.alias_server_note.v1"])
+        finally:
+            server.stop()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(snapshot["documents"][0]["schemaId"], local_schema_id)
+        self.assertEqual(snapshot["documents"][0]["recordKey"], "note:alias")
+        self.assertEqual(typed_snapshot.documents[0].schema_id, local_schema_id)
+        self.assertEqual(shard_catalog["shards"][0]["schemaIds"], [local_schema_id])
+        self.assertEqual(shard_catalog["shards"][0]["shardId"], "notes")
+
+    def test_cultmesh_shard_snapshot_keeps_foreign_schema_alias_membership(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_shard_note",
+            [
+                ("schema_version", 0),
+                ("body", 1),
+            ],
+            schema_id="sha256:mesh-alias-shard-note",
+            schema_name="mesh.alias_shard_note",
+            schema_version="mesh.alias_shard_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-shard-server")
+        node.database.register_document(document)
+
+        node.database.apply_raw_put_message(document_put_raw(
+            message_id="put-foreign-shard-alias",
+            key="note:foreign-shard",
+            schema_id="runtime.generated.mesh.alias_shard_note.ui.99",
+            stored_at="2026-06-27T00:00:00Z",
+            payload=document.encode_payload({
+                "schema_version": "mesh.alias_shard_note.v1",
+                "body": "visible through shard snapshot",
+            }),
+            shard_id="notes",
+            shard_epoch=1,
+        ).to_wire())
+        node.database.put_raw_message(
+            document,
+            "note:other-shard",
+            {
+                "schema_version": "mesh.alias_shard_note.v1",
+                "body": "hidden by shard filter",
+            },
+            shard_id="other",
+            shard_epoch=1,
+        )
+
+        response = node.database.build_snapshot_response(
+            schema_ids=["mesh.alias_shard_note.v1"],
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(response.shard_id, "notes")
+        self.assertEqual(response.shard_epoch, 1)
+        self.assertEqual([(record.schema_id, record.record_key) for record in response.documents], [
+            (local_schema_id, "note:foreign-shard"),
+        ])
+        self.assertEqual(node.cache.get_required_envelope(document, "note:foreign-shard").schema_id, local_schema_id)
+
+        node.database.apply_raw_delete_message(document_delete(
+            message_id="delete-foreign-shard-alias",
+            schema_id="mesh.alias_shard_note.v1",
+            record_key="note:foreign-shard",
+            shard_id="notes",
+            shard_epoch=1,
+        ).to_wire())
+        deleted_response = node.database.build_snapshot_response(
+            schema_ids=["mesh.alias_shard_note.v1"],
+            shard_id="notes",
+            shard_epoch=1,
+        )
+        self.assertEqual(deleted_response.documents, ())
+
+    def test_cultmesh_local_server_notifies_schema_alias_subscription_for_raw_put(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_sub_note",
+            [
+                ("schema_version", 0),
+                ("body", 1),
+            ],
+            schema_id="sha256:mesh-alias-sub-note",
+            schema_name="mesh.alias_sub_note",
+            schema_version="mesh.alias_sub_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-sub-server")
+        node.database.register_document(document)
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with raw_client.subscribe_database(
+                subscription_id="sub-alias",
+                schema_ids=["mesh.alias_sub_note.v1"],
+                include_snapshot=False,
+            ) as subscription:
+                subscription.send(document_put_raw(
+                    message_id="put-foreign-alias",
+                    key="note:alias-sub",
+                    schema_id="runtime.generated.mesh.alias_sub_note.ui.99",
+                    stored_at="2026-06-27T00:00:00Z",
+                    payload=document.encode_payload({
+                        "schema_version": "mesh.alias_sub_note.v1",
+                        "body": "notified",
+                    }),
+                ))
+                change = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        local_schema_id = document.catalog_entry().schema_id
+        self.assertEqual(change.subscription_id, "sub-alias")
+        self.assertEqual(change.change_kind, "added")
+        self.assertEqual(change.record_key, "note:alias-sub")
+        self.assertIsInstance(change.raw_document, CultNetRawDocumentRecord)
+        self.assertEqual(change.raw_document.schema_id, "runtime.generated.mesh.alias_sub_note.ui.99")
+        self.assertEqual(node.database.get_required(document, "note:alias-sub")["body"], "notified")
+        self.assertEqual(node.cache.get_required_envelope(document, "note:alias-sub").schema_id, local_schema_id)
+
+    def test_cultmesh_local_server_notifies_schema_alias_subscription_for_delete(self) -> None:
+        document = define_database_entry_type(
+            "mesh.alias_delete_note",
+            [("body", 0)],
+            schema_id="sha256:mesh-alias-delete-note",
+            schema_name="mesh.alias_delete_note",
+            schema_version="mesh.alias_delete_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-alias-delete-server")
+        node.database.register_document(document)
+        node.database.put_raw_message(
+            document,
+            "note:delete-alias",
+            {"body": "remove me"},
+            shard_id="notes",
+            shard_epoch=1,
+        )
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with raw_client.subscribe_database(
+                subscription_id="sub-delete-alias",
+                schema_ids=[document.catalog_entry().schema_id],
+                include_snapshot=False,
+            ) as subscription:
+                subscription.send(document_delete(
+                    message_id="delete-foreign-alias",
+                    schema_id="mesh.alias_delete_note.v1",
+                    record_key="note:delete-alias",
+                    shard_id="notes",
+                    shard_epoch=1,
+                ))
+                change = subscription.read_next_change()
+        finally:
+            server.stop()
+
+        self.assertEqual(change.subscription_id, "sub-delete-alias")
+        self.assertEqual(change.change_kind, "removed")
+        self.assertEqual(change.schema_id, "mesh.alias_delete_note.v1")
+        self.assertEqual(change.record_key, "note:delete-alias")
+        self.assertIsNone(change.raw_document)
+        self.assertIsNone(node.database.get(document, "note:delete-alias"))
+
+    def test_cultmesh_local_server_rejects_oversized_snapshot_responses(self) -> None:
+        document = define_database_entry_type(
+            "mesh.snapshot_limit_note",
+            [("body", 0)],
+            schema_id="mesh.snapshot_limit_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-snapshot-limits")
+        node.database.register_document(document)
+        node.database.put_raw_message(document, "note:1", {"body": "first"})
+        node.database.put_raw_message(document, "note:2", {"body": "second"})
+
+        server = CultMesh.serve_node(node, max_snapshot_documents=1)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            filtered_snapshot = raw_client.fetch_snapshot(record_keys=["note:1"])
+            error = raw_client.request(
+                snapshot_request(schema_ids=["mesh.snapshot_limit_note.v1"]),
+                expected_schema_version="cultnet.error.v0",
+            )
+            with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded"):
+                raw_client.fetch_snapshot(schema_ids=["mesh.snapshot_limit_note.v1"])
+        finally:
+            server.stop()
+
+        self.assertEqual(filtered_snapshot["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([document["recordKey"] for document in filtered_snapshot["documents"]], ["note:1"])
+        self.assertEqual(error["schemaVersion"], "cultnet.error.v0")
+        self.assertIn("Snapshot document limit exceeded", error["error"])
+        self.assertEqual(error["code"], "snapshot_document_limit_exceeded")
+        self.assertEqual(error["details"]["documentCount"], 2)
+        self.assertEqual(error["details"]["maxSnapshotDocuments"], 1)
+
+    def test_cultmesh_local_server_returns_errors_for_bad_requests(self) -> None:
+        document = define_database_entry_type(
+            "mesh.error_note",
+            [("body", 0)],
+            schema_id="mesh.error_note.v1",
+        )
+        node = CultMesh.create_node(runtime_id="mesh-error-server")
+        node.database.register_document(document)
+
+        server = CultMesh.serve_node(node)
+        try:
+            raw_client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            unsupported = raw_client.request(
+                {"schemaVersion": "cultnet.nope.v0", "messageId": "bad-schema"},
+                expected_schema_version="cultnet.error.v0",
+            )
+            malformed_put = raw_client.request(
+                {"schemaVersion": "cultnet.document_put_raw.v0", "messageId": "bad-put"},
+                expected_schema_version="cultnet.error.v0",
+            )
+            malformed_delete = raw_client.request(
+                {"schemaVersion": "cultnet.document_delete.v0", "messageId": "bad-delete", "schemaId": "mesh.error_note.v1"},
+                expected_schema_version="cultnet.error.v0",
+            )
+        finally:
+            server.stop()
+
+        self.assertEqual(unsupported["messageId"], "bad-schema")
+        self.assertEqual(unsupported["code"], "unsupported_schema_version")
+        self.assertEqual(unsupported["details"]["schemaVersion"], "cultnet.nope.v0")
+        self.assertIn("Unsupported CultNet message schema", unsupported["error"])
+        self.assertEqual(malformed_put["messageId"], "bad-put")
+        self.assertEqual(malformed_put["code"], "malformed_document_put")
+        self.assertEqual(malformed_delete["messageId"], "bad-delete")
+        self.assertEqual(malformed_delete["code"], "malformed_document_delete")
+
+    def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
+        peer = CultMeshPeerCard(
+            peer_id="voidbot-local",
+            verse_id="local",
+            endpoints=("cultmesh://localhost",),
+            roles=("shard-primary",),
+            authority_lease_id="lease:voidbot-local",
+        )
+        leases = CultMeshAuthorityLeaseCatalog()
+        peers = CultMeshPeerCatalog()
+        peers.upsert(peer)
+        now = datetime.now(UTC)
+        self.assertFalse(leases.is_authorized(peer, "shard-primary", at=now))
+        self.assertEqual(peers.find_authorized("local", "shard-primary", leases, at=now), [])
+
+        leases.upsert(
+            CultMeshAuthorityLease(
+                lease_id="lease:voidbot-local",
+                verse_id="local",
+                peer_id="voidbot-local",
+                roles=("shard-primary", "shard-primary", ""),
+                valid_from=now - timedelta(seconds=1),
+                expires_at=now + timedelta(seconds=1),
+                shard_ids=("shard-a",),
+                issuer_runtime_id="odin",
+                signature="signed",
+            )
+        )
+
+        lease = leases.get("lease:voidbot-local")
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertEqual(leases.leases, (lease,))
+        self.assertEqual(lease.roles, ("shard-primary",))
+        self.assertEqual(lease.issuer_runtime_id, "odin")
+        self.assertEqual(lease.signature, "signed")
+        self.assertTrue(lease.is_valid_at(now))
+        self.assertTrue(lease.covers(peer, "shard-primary", shard_id="shard-a", at=now))
+        self.assertFalse(lease.covers(peer, "shard-primary", shard_id="shard-b", at=now))
+        self.assertTrue(leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+        self.assertEqual(
+            peers.find_authorized("local", "shard-primary", leases, shard_id="shard-a", at=now),
+            [peer],
+        )
+        self.assertEqual(
+            peers.first_authorized("local", "shard-primary", leases, shard_id="shard-a", at=now),
+            peer,
+        )
+        self.assertIsNone(peers.first_authorized("local", "read-replica", leases, at=now))
+        self.assertFalse(leases.is_authorized(peer, "shard-primary", shard_id="shard-b", at=now))
+        self.assertFalse(leases.is_authorized(peer, "read-replica", at=now))
+        self.assertIsNone(leases.get("missing"))
+
+    def test_cultmesh_authority_lease_catalog_can_require_verified_signatures(self) -> None:
+        peer = CultMeshPeerCard(
+            peer_id="voidbot-local",
+            verse_id="local",
+            endpoints=("cultmesh://localhost",),
+            roles=("shard-primary",),
+            shard_ids=("shard-a",),
+            authority_lease_id="lease:voidbot-local",
+        )
+        now = datetime.now(UTC)
+        unsigned = CultMeshAuthorityLease(
+            lease_id="lease:voidbot-local",
+            verse_id="local",
+            peer_id="voidbot-local",
+            roles=("shard-primary",),
+            valid_from=now - timedelta(seconds=1),
+            expires_at=now + timedelta(seconds=30),
+            shard_ids=("shard-a",),
+            issuer_runtime_id="odin",
+        )
+        verifier = CultMeshHmacAuthorityLeaseVerifier({"odin": b"lease-secret"})
+        signed = verifier.issue(unsigned)
+        strict_leases = CultMesh.create_authority_lease_catalog(
+            signature_verifier=verifier.verify,
+            require_verified_signatures=True,
+        )
+        strict_leases.upsert(unsigned)
+        self.assertFalse(strict_leases.is_verified(unsigned.lease_id))
+        self.assertFalse(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        strict_leases.upsert(signed)
+        self.assertTrue(strict_leases.is_verified(signed.lease_id))
+        self.assertTrue(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        wrong_key = CultMesh.create_authority_lease_catalog(
+            signature_verifier=CultMeshHmacAuthorityLeaseVerifier({"odin": b"wrong-secret"}).verify,
+            require_verified_signatures=True,
+        )
+        wrong_key.upsert(signed)
+        self.assertFalse(wrong_key.is_verified(signed.lease_id))
+        self.assertFalse(wrong_key.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+        tampered = CultMeshAuthorityLease(
+            lease_id=signed.lease_id,
+            verse_id=signed.verse_id,
+            peer_id=signed.peer_id,
+            roles=("shard-primary", "read-replica"),
+            valid_from=signed.valid_from,
+            expires_at=signed.expires_at,
+            shard_ids=signed.shard_ids,
+            issuer_runtime_id=signed.issuer_runtime_id,
+            signature=signed.signature,
+        )
+        strict_leases.upsert(tampered)
+        self.assertFalse(strict_leases.is_verified(tampered.lease_id))
+        self.assertFalse(strict_leases.is_authorized(peer, "shard-primary", shard_id="shard-a", at=now))
+
+    def test_cultmesh_stream_catalog_negotiates_transport_and_latest_frame(self) -> None:
+        streams = CultMeshStreamCatalog()
+        streams.declare(
+            CultMeshStreamDescriptor(
+                stream_id="mimir:kiyo-pro",
+                verse_id="studio",
+                owner_peer_id="starfire",
+                kind="video",
+                label="Kiyo Pro",
+                clock={"clockDomainId": "starfire-qpc", "confidence": 0.25},
+                video={"width": 1920, "height": 1080, "pixelFormat": "YUY2", "framesPerSecond": 30},
+                preferred_transports=("shared-d3d12-texture", "shared-memory", "cultcache-page"),
+                max_in_flight_frames=3,
+            )
+        )
+
+        negotiation = streams.negotiate(
+            "mimir:kiyo-pro",
+            CultMeshStreamConsumerProfile(
+                peer_id="fensalir",
+                verse_id="studio",
+                supported_transports=("shared-d3d12-texture", "cultcache-page"),
+                accepted_kinds=("video",),
+                can_import_gpu_handles=True,
+                max_in_flight_frames=2,
+            ),
+        )
+
+        self.assertEqual(negotiation.transport, "shared-d3d12-texture")
+        self.assertEqual(negotiation.max_in_flight_frames, 2)
+        self.assertEqual(negotiation.copy_budget, "zero-copy-target")
+
+        streams.publish_frame(
+            CultMeshStreamFrameHandle(
+                stream_id="mimir:kiyo-pro",
+                sequence=42,
+                timestamp_ns=1_000_000_000,
+                duration_ns=33_333_334,
+                transport="shared-d3d12-texture",
+                native_handle="0xfeed",
+                fence_handle="0xbeef",
+                fence_value=7,
+                unavoidable_copy_count=0,
+            )
+        )
+        self.assertEqual(streams.latest_frame("mimir:kiyo-pro").sequence, 42)
+
+
+if __name__ == "__main__":
+    unittest.main()

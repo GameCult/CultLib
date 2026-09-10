@@ -6,7 +6,7 @@ import json
 from importlib import resources
 from typing import Any
 
-from .benchmark import run_benchmark
+from cultnet_py.benchmark import run_benchmark
 
 
 EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
@@ -150,7 +150,7 @@ EXPECTED_EXPORTS: dict[str, tuple[str, ...]] = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="cultcache-py-verify")
+    parser = argparse.ArgumentParser(prog="cultmesh-py-verify")
     parser.add_argument("--records", type=int, default=64)
     parser.add_argument("--json", action="store_true", dest="emit_json")
     args = parser.parse_args(argv)
@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.emit_json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        print(f"cultcache-py verify: {result['status']}")
+        print(f"cultmesh-py verify: {result['status']}")
         for check in result["checks"]:
             print(f"- {check['name']}: {check['status']}")
     return 0 if result["status"] == "ok" else 1

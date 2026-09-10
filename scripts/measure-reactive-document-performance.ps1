@@ -69,7 +69,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "CultMesh TypeScript reactive document performance probe failed."
 }
 
-$pythonSource = Join-Path $root "packages\cultcache-py\src"
+$pythonSource = (@("cultcache-py", "cultnet-py", "cultmesh-py") | ForEach-Object { Join-Path $root "packages\$_\src" }) -join [IO.Path]::PathSeparator
 $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
     $pythonSource
@@ -78,7 +78,7 @@ else {
     $pythonSource + [IO.Path]::PathSeparator + $previousPythonPath
 }
 try {
-    & $pythonExecutable (Join-Path $root "packages\cultcache-py\tools\reactive_performance_probe.py") @runtimeArguments
+    & $pythonExecutable (Join-Path $root "packages\cultmesh-py\tools\reactive_performance_probe.py") @runtimeArguments
     if ($LASTEXITCODE -ne 0) {
         throw "CultMesh Python reactive document performance probe failed."
     }

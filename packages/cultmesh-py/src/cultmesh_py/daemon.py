@@ -13,7 +13,7 @@ from cultnet_py import CultNetSimulationConsensusOptions, CultNetSimulationObser
 
 from .facade import CultMesh
 from .server import CultMeshLocalServer
-from .wire import (
+from cultnet_py.cultmesh_contracts import (
     CultMeshPeerCard,
     CultMeshPeerCatalog,
     CultMeshVerseCatalog,

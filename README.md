@@ -112,7 +112,9 @@ The solution includes:
 - `packages/cultnet-ts`: TypeScript CultNet schema-v0 contracts, framing, discovery, raw document replication, and interop tests
 - `packages/cultmesh-ts`: TypeScript CultMesh local node and mesh catalog surface for local runtimes such as VoidBot
 - `packages/cultmesh-browser`: browser-safe, read-only CultMesh document leases and typed operations over an Odin-resolved WebSocket route
-- `packages/cultcache-py`: Python CultCache/CultNet/CultMesh package with CultCache v1 wire parity
+- `packages/cultcache-py`: Python CultCache with CultCache v1 wire parity
+- `packages/cultnet-py`: Python CultNet contracts, framing, RUDP transport, replication, and interop peer
+- `packages/cultmesh-py`: Python CultMesh local node, discovery, sessions, local server, and daemon
 - `packages/cultcache-rs`: Rust CultCache and derive macro
 - `packages/cultnet-rs`: Rust CultNet contracts, framing, discovery, and interop peer
 - `packages/cultmesh-kotlin`: Kotlin/JVM CultMesh and CultNet surface for Android-adjacent runtimes
@@ -145,6 +147,8 @@ packages/
   cultmesh-browser/
   cultmesh-kotlin/
   cultcache-py/
+  cultnet-py/
+  cultmesh-py/
   cultcache-rs/
   cultnet-rs/
 ```

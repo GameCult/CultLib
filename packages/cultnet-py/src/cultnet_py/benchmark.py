@@ -19,7 +19,7 @@ class BenchItem:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="cultcache-py-benchmark")
+    parser = argparse.ArgumentParser(prog="cultnet-py-benchmark")
     parser.add_argument("--records", type=int, default=5000)
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)

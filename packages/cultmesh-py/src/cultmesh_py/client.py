@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from cultcache_py.documents import DocumentDefinition
 from cultnet_py import CultNetDatabaseSubscription, CultNetRawClient, CultNetRawSnapshotResponse, hello
 
-from .wire import (
+from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_RESPONSE,
     VERSE_CATALOG_RESPONSE,
     CultMeshPeerCard,
