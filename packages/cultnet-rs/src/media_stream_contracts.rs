@@ -52,6 +52,14 @@ pub const GAMECULT_MEDIA_STREAM_REQUEST_SCHEMA: &str = "gamecult.media_stream_re
 
 /// A media stream a producer can serve on request, as it appears in Odin.
 ///
+/// Odin admits these without any registration: it derives the document type
+/// from the schema id (`prefix.vN` -> `prefix`) and refuses only a short list
+/// of authority-owned types (`gamecult.runtime_presence_health`,
+/// `odin.runtime_topology_correlation`, `idunn.expected_incarnation`,
+/// `idunn.runtime_activation`, `idunn.process_write_lease`,
+/// `gamecult.service_trust_anchor`). A new record whose type collided with one
+/// of those would be rejected at the catalog with no mention of the collision.
+///
 /// This is the record a consumer's picker is built from: which streams exist,
 /// which video and audio sources each can capture, which codecs it can encode,
 /// and the defaults it would use. It is state, not media — it travels as a
