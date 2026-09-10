@@ -58,7 +58,7 @@ try {
 
   writeFileSync(join(consumerRoot, "runtime-smoke.cjs"), `
 const assert = require("node:assert/strict");
-const cache = require("cultcache-ts");
+const cache = require("@gamecult/cultcache-ts");
 const net = require("cultnet-ts");
 const mesh = require("cultmesh-ts");
 assert.equal(typeof cache.defineDocumentType, "function");
@@ -81,7 +81,7 @@ assert.equal("putDocument" in CultMeshBrowserClient.prototype, false);
   execFileSync(process.execPath, ["browser-runtime-smoke.mjs"], { cwd: consumerRoot, stdio: "inherit" });
 
   writeFileSync(join(consumerRoot, "types-smoke.ts"), `
-import { defineDocumentType } from "cultcache-ts";
+import { defineDocumentType } from "@gamecult/cultcache-ts";
 import { CultNetPeer } from "cultnet-ts";
 import {
   CultMesh,

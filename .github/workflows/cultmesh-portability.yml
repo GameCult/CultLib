@@ -28,7 +28,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: GameCult/Eve
-          ref: ${{ vars.EVE_INTEGRATION_REF || 'codex/eve-browser-host-isolation' }}
+          # Eve main is the contract this sample is written against; the codex
+          # branch this used to pin was never merged and stopped on 2026-08-25.
+          ref: ${{ vars.EVE_INTEGRATION_REF || 'main' }}
           path: Eve
 
       - name: Set up .NET

@@ -53,7 +53,7 @@ import {
   SingleFileMessagePackBackingStore,
   defineDocumentRegistry,
   defineDocumentType,
-} from "cultcache-ts";
+} from "@gamecult/cultcache-ts";
 
 const itemDocument = defineDocumentType({
   type: "item",

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JSDOM } from "jsdom";
 import { z } from "zod";
-import { defineDocumentType } from "cultcache-ts";
+import { defineDocumentType } from "@gamecult/cultcache-ts";
 import { CultMesh } from "cultmesh-ts";
 import {
   parseEveCommandReceipt,
@@ -172,6 +172,19 @@ let browserReceipt;
 renderEveSurface(await node.document(surfaceDocument, surfaceId).latest(), host, {
   activeSurfaceId: surfaceId,
   clientId: "browser-client",
+  // Eve refuses to build a command intent for a surface that has not
+  // advertised where its commands go and what comes back. The provider
+  // advertisement is that declaration; a lowering cannot infer it.
+  provider: {
+    providerId,
+    surfaces: [{
+      surfaceId,
+      worldInteraction: {
+        commandBoundary: "sample.counter.commands",
+        receiptSchema: "gamecult.eve.command_receipt.v1",
+      },
+    }],
+  },
   commandSink: async intent => {
     browserReceipt = await increment.bind(browserVerse).invoke(intent.payload, {
       idempotencyKey: "browser-click-1",
