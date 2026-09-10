@@ -45,9 +45,10 @@ fn main() -> Result<()> {
             args.get(4).ok_or_else(|| anyhow!("payload bytes"))?.parse()?,
             args.get(5).ok_or_else(|| anyhow!("count"))?.parse()?,
             args.get(6).map(|v| v.parse()).transpose()?.unwrap_or(12.0),
+            args.get(7).map(|v| v.parse()).transpose()?,
         ),
         _ => Err(anyhow!(
-            "usage: media_delivery_probe recv <bind> <count> | send <endpoint> <reliable|unreliable> <bytes> <count>"
+            "usage: media_delivery_probe recv <bind> <count> | send <endpoint> <reliable|unreliable> <bytes> <count> [mbps] [max_fragment_bytes]"
         )),
     }
 }
@@ -102,6 +103,7 @@ fn send(
     payload_bytes: usize,
     count: u64,
     target_mbps: f64,
+    max_fragment_bytes: Option<u32>,
 ) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_nonblocking(true)?;
@@ -109,6 +111,9 @@ fn send(
         CultNetRudpSocketTransportOptions::client("probe-send", socket, endpoint, 0x0BE0_0001);
     options.media_delivery = Some(delivery);
     options.media_reliable_expire_after_ms = None;
+    // Fragment above this many bytes so a lost datagram costs a whole payload;
+    // None sends each payload as one datagram, which loopback carries whole.
+    options.max_fragment_bytes = max_fragment_bytes;
 
     let mut transport = CultNetRudpSocketTransportConnection::new(options)?;
     transport.connect(b"probe".to_vec())?;
