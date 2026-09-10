@@ -418,10 +418,20 @@ class CultNetRudpSession:
         self._ordered_next_sequence_by_channel: dict[str, int] = {}
         self._ordered_buffers: dict[str, dict[int, tuple[CultNetRudpDeliveredFrame, int]]] = {}
         self._fragment_buffers: dict[tuple[str, int], dict[str, Any]] = {}
+        # Matches cultnet-rs max_pending_fragment_sets. A set that loses one
+        # fragment is never completed; without a bound it is kept for the life
+        # of the session and the map grows under any loss on a fragmenting channel.
+        self._max_pending_fragment_sets = 64
+        self._fragment_sets_evicted = 0
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def fragment_sets_evicted(self) -> int:
+        """Incomplete fragment sets dropped to admit newer ones; one lost payload each."""
+        return self._fragment_sets_evicted
 
     @property
     def last_received_at_ms(self) -> int | None:
@@ -785,6 +795,11 @@ class CultNetRudpSession:
             raise ValueError("RUDP fragment index must be lower than fragment count")
 
         key = (packet.channel_id, packet.fragment_id)
+        if key not in self._fragment_buffers and len(self._fragment_buffers) >= self._max_pending_fragment_sets:
+            # Evict the oldest stranded set rather than refusing the payload; dicts
+            # iterate in insertion order, so the first key is the oldest.
+            del self._fragment_buffers[next(iter(self._fragment_buffers))]
+            self._fragment_sets_evicted += 1
         buffer = self._fragment_buffers.setdefault(
             key,
             {

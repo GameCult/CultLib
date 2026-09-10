@@ -6654,5 +6654,40 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(streams.latest_frame("mimir:kiyo-pro").sequence, 42)
 
 
+class CultNetRudpFragmentBoundTests(unittest.TestCase):
+    def _pair(self) -> tuple[CultNetRudpSession, CultNetRudpSession]:
+        sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=311, initial_sequence=1))
+        receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=311, initial_sequence=100))
+        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 311, 90, 0, 0, "control"))
+        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 311, 91, 0, 0, "control"))
+        return sender, receiver
+
+    def test_stranded_fragment_sets_are_bounded_and_evicted_oldest_first(self) -> None:
+        sender, receiver = self._pair()
+        receiver._max_pending_fragment_sets = 4
+
+        # Eight payloads each lose their last fragment; the map must not grow past four.
+        stranded = []
+        for fill in range(1, 9):
+            packets = sender.send_many("media", bytes([fill]) * 2500, max_fragment_bytes=1000)
+            self.assertEqual(len(packets), 3)
+            for packet in packets[:2]:
+                self.assertEqual(receiver.receive(packet).delivered, ())
+            stranded.append(packets[2])
+        self.assertEqual(len(receiver._fragment_buffers), 4)
+        self.assertEqual(receiver.fragment_sets_evicted, 4)
+
+        # A complete payload still lands.
+        delivered = []
+        for packet in sender.send_many("media", bytes([9]) * 2500, max_fragment_bytes=1000):
+            delivered.extend(receiver.receive(packet).delivered)
+        self.assertEqual([frame.payload for frame in delivered], [bytes([9]) * 2500])
+        self.assertEqual(receiver.fragment_sets_evicted, 5)
+
+        # Oldest-first: set 8 still pends and completes late; set 1 was evicted.
+        self.assertEqual(receiver.receive(stranded[7]).delivered[0].payload, bytes([8]) * 2500)
+        self.assertEqual(receiver.receive(stranded[0]).delivered, ())
+
+
 if __name__ == "__main__":
     unittest.main()
