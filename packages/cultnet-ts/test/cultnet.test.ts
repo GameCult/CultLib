@@ -1821,3 +1821,49 @@ test("Generated Ghostlight contracts can feed CultCacheTS directly without a Zod
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("rudp receiver evicts stranded fragment sets instead of refusing new ones", () => {
+  // A fragment set is removed only on successful reassembly, so every set that
+  // loses a fragment is stranded for the life of the session. Ghostlight sends
+  // Heimdall fragmented envelopes (max_fragment_bytes = 2048), so on the live
+  // auth path this map grew for every lost fragment and was never swept.
+  const receiver = new CultNetRudpSession({ connectionId: 9, initialSequence: 1, resendDelayMs: 50 });
+  receiver.receive({ packetType: "accept", connectionId: 9, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
+
+  // 200 fragment sets that each lose their second fragment.
+  for (let id = 1; id <= 200; id += 1) {
+    const stranded = receiver.receive({
+      packetType: "data",
+      connectionId: 9,
+      sequence: 100 + id,
+      ack: 0,
+      ackMask: 0,
+      channelId: "schema",
+      fragmentId: id,
+      fragmentIndex: 0,
+      fragmentCount: 2,
+      payload: Buffer.from([id & 0xff]),
+    });
+    assert.equal(stranded.delivered.length, 0, "an incomplete set must not reassemble");
+  }
+
+  // Bounded rather than unbounded, and still serving.
+  assert.ok(receiver.pendingFragmentSetCount <= 64, `pending ${receiver.pendingFragmentSetCount}`);
+  assert.ok(receiver.fragmentSetsEvicted > 0, "nothing was evicted");
+
+  // The receiver still completes a fresh fragmented payload, which is what
+  // erroring at the cap took away: any nonzero loss killed the channel.
+  const first = receiver.receive({
+    packetType: "data", connectionId: 9, sequence: 900, ack: 0, ackMask: 0,
+    channelId: "schema", fragmentId: 1000, fragmentIndex: 0, fragmentCount: 2,
+    payload: Buffer.from("he"),
+  });
+  assert.equal(first.delivered.length, 0);
+  const second = receiver.receive({
+    packetType: "data", connectionId: 9, sequence: 901, ack: 0, ackMask: 0,
+    channelId: "schema", fragmentId: 1000, fragmentIndex: 1, fragmentCount: 2,
+    payload: Buffer.from("llo"),
+  });
+  assert.equal(second.delivered.length, 1);
+  assert.equal(Buffer.from(second.delivered[0]!.payload).toString(), "hello");
+});
