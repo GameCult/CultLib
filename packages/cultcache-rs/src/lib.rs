@@ -2662,23 +2662,77 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let success = unsafe {
-        MoveFileExW(
-            staged_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if success == 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| {
-            format!(
-                "failed to atomically replace {} with {}",
-                destination.display(),
-                staged.display()
+    // A concurrent reader of the destination (another process opening the
+    // store, an indexer, an antivirus scan) makes the replace fail with a
+    // sharing or access error for as long as it holds the handle. That is
+    // transient by construction; a daemon that treats it as fatal dies on
+    // the first overlap (Muninn serve did, 2026-09-11). Retry briefly.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const ATTEMPTS: u32 = 25;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+    let mut attempt = 0;
+    loop {
+        let success = unsafe {
+            MoveFileExW(
+                staged_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             )
-        });
+        };
+        if success != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        attempt += 1;
+        let transient = matches!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        );
+        if !transient || attempt >= ATTEMPTS {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to atomically replace {} with {} after {attempt} attempt(s)",
+                    destination.display(),
+                    staged.display()
+                )
+            });
+        }
+        std::thread::sleep(BACKOFF);
     }
-    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_replace_tests {
+    use super::replace_file_atomically;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// A reader holding the destination open with no sharing makes the
+    /// replace fail for as long as it holds on; it must succeed once the
+    /// reader lets go, not report the first refusal as the outcome.
+    #[test]
+    fn a_replace_waits_out_a_reader_that_holds_the_destination() {
+        let dir = std::env::temp_dir().join(format!("cultcache-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("store.cc");
+        let staged = dir.join("store.cc.tmp");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            drop(held);
+        });
+        replace_file_atomically(&staged, &destination).expect("the replace outlasts the reader");
+        releaser.join().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(unix)]
