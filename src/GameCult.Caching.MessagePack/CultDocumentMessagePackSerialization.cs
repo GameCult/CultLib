@@ -1,5 +1,8 @@
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Reflection;
 using GameCult.Caching;
 using MessagePack;
 using MessagePack.Formatters;
@@ -32,12 +35,39 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
-    public static readonly MessagePackSerializerOptions Options =
-        MessagePackSerializerOptions.Standard
+    public static readonly MessagePackSerializerOptions Options = Compose(Array.Empty<IFormatterResolver>());
+
+    private static readonly ConcurrentDictionary<Assembly, MessagePackSerializerOptions> AssemblyOptions = new();
+
+    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly)
+    {
+        if (documentAssembly == null) throw new ArgumentNullException(nameof(documentAssembly));
+        return AssemblyOptions.GetOrAdd(documentAssembly, static assembly =>
+        {
+            var resolvers = assembly.GetCustomAttributes<CultCacheFormatterResolverAttribute>()
+                .Select(attribute => CreateResolver(attribute.ResolverType))
+                .ToArray();
+            return resolvers.Length == 0 ? Options : Compose(resolvers);
+        });
+    }
+
+    private static MessagePackSerializerOptions Compose(IFormatterResolver[] consumerResolvers)
+    {
+        return MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(
-                CultDocumentResolver.Instance,
-                StandardResolver.Instance))
-            .WithSecurity(MessagePackSecurity.UntrustedData);
+                consumerResolvers.Append(CultDocumentResolver.Instance).Append(StandardResolver.Instance).ToArray()))
+            .WithSecurity(CultMessagePackSecurity.Instance);
+    }
+
+    private static IFormatterResolver CreateResolver(Type resolverType)
+    {
+        var instance = resolverType.GetField("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null)
+                       ?? resolverType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null)
+                       ?? (resolverType.GetConstructor(Type.EmptyTypes) != null ? Activator.CreateInstance(resolverType) : null);
+        return instance as IFormatterResolver
+               ?? throw new InvalidOperationException(
+                   $"Formatter resolver {resolverType.FullName} needs a public static Instance or a public parameterless constructor and must implement {nameof(IFormatterResolver)}.");
+    }
 
     public static byte[] Serialize<T>(T value)
     {
@@ -66,7 +96,7 @@ public static class CultDocumentMessagePackSerialization
             }
         }
 
-        return MessagePackSerializer.Serialize(type, value, Options);
+        return MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
     }
 
     public static object DeserializeUntyped(Type type, byte[] payload)
@@ -83,7 +113,7 @@ public static class CultDocumentMessagePackSerialization
             return descriptor.GeneratedPayloadDeserializer(payload);
         }
 
-        return MessagePackSerializer.Deserialize(type, payload, Options)
+        return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 

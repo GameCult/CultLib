@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using GameCult.Caching;
+using MessagePack;
 
 var records = 5000;
 var emitJson = false;
@@ -95,10 +96,12 @@ internal sealed record BenchmarkMetric(string Name, int Operations, double Elaps
 [CultDocument("bench.item", "bench.item.v1")]
 internal sealed class BenchItem
 {
-    [CultName]
+    [Key(0)] [CultName]
     public string Name { get; set; } = string.Empty;
 
+    [Key(1)]
     public string Category { get; set; } = string.Empty;
 
+    [Key(2)]
     public int Value { get; set; }
 }
