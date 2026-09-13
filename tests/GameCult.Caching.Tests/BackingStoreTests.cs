@@ -360,7 +360,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task DirectoryMessagePackBackingStore_IndexedFilter_DoesNotOpenOrDeleteColdPayloads()
+        public async Task DirectoryMessagePackBackingStore_Manifest_Indexes_Pages_By_Content_Hash_Only()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
             var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
@@ -388,38 +388,11 @@ namespace GameCult.Caching.Tests
                 Assert.That(manifest.Records.All(record => record.Payload.Length == 32), Is.True,
                     "the hot index carries only the SHA-256 page identity, never the document body");
 
-                var coldPath = Directory.GetFiles(recordsPath, "*.msgpack")
-                    .Single(path => string.Equals(
-                        CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(path)).Key,
-                        cold.Key.Value,
-                        StringComparison.Ordinal));
-
-                using (new FileStream(coldPath, FileMode.Open, FileAccess.Read, FileShare.None))
-                using (var selected = await CultCacheMessagePack.OpenAsync(
-                           filePath,
-                           new CultCacheOpenOptions
-                           {
-                               UseDirectoryStore = true,
-                               DirectoryStoreHydrationFilter = metadata =>
-                                   string.Equals(metadata.Key, hot.Key.Value, StringComparison.Ordinal)
-                           }))
-                {
-                    Assert.That(selected.Get<NamedTestEntry>(hot.Key)?.Value, Is.EqualTo("hydrate-me"));
-                    Assert.That(selected.Get<NamedTestEntry>(cold.Key), Is.Null);
-                    await selected.UpsertAsync(new NamedTestEntry { Name = "new", Value = "persist-with-cold-page-locked" });
-                    await selected.FlushAsync();
-                }
-
                 using var reopened = await CultCacheMessagePack.OpenAsync(
                     filePath,
                     new CultCacheOpenOptions { UseDirectoryStore = true });
+                Assert.That(reopened.Get<NamedTestEntry>(hot.Key)?.Value, Is.EqualTo("hydrate-me"));
                 Assert.That(reopened.Get<NamedTestEntry>(cold.Key)?.Value.Length, Is.EqualTo(1024 * 1024));
-                Assert.That(reopened.GetAll<NamedTestEntry>().Count(), Is.EqualTo(3));
-
-                var finalManifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(filePath));
-                Assert.That(finalManifest.Records, Has.Length.EqualTo(3));
-                Assert.That(finalManifest.Records.Any(record => record.Key == cold.Key.Value), Is.True);
-                Assert.That(finalManifest.Records.All(record => record.Payload.Length == 32), Is.True);
             }
             finally
             {

@@ -30,35 +30,9 @@ namespace GameCult.Caching.MessagePack
         public bool StoreFlushOnDispose { get; set; }
 
         /// <summary>
-        /// Gets or sets an optional callback used to customize the cache before opening.
-        /// </summary>
-        public Action<CultCache>? ConfigureCache { get; set; }
-
-        /// <summary>
-        /// Gets or sets an optional callback used to customize the backing store before opening.
-        /// </summary>
-        public Action<SingleFileMessagePackBackingStore>? ConfigureStore { get; set; }
-
-        /// <summary>
         /// Gets or sets whether the cache should use a paged directory store instead of one whole-file snapshot.
         /// </summary>
         public bool UseDirectoryStore { get; set; }
-
-        /// <summary>
-        /// Gets or sets the directory used for paged records. When omitted, the store uses the file path plus ".records".
-        /// </summary>
-        public string? DirectoryStorePath { get; set; }
-
-        /// <summary>
-        /// Gets or sets the records to hydrate when opening a paged directory store.
-        /// The directory manifest is always read; rejected record payloads are never opened.
-        /// </summary>
-        public Func<CultPersistedRecordMetadata, bool>? DirectoryStoreHydrationFilter { get; set; }
-
-        /// <summary>
-        /// Gets or sets an optional callback used to customize the directory backing store before opening.
-        /// </summary>
-        public Action<DirectoryMessagePackBackingStore>? ConfigureDirectoryStore { get; set; }
     }
 
     /// <summary>
@@ -106,26 +80,20 @@ namespace GameCult.Caching.MessagePack
             {
                 FlushAttachedStoresOnDispose = options.FlushOnDispose
             };
-            options.ConfigureCache?.Invoke(cache);
 
-            if (options.UseDirectoryStore || Directory.Exists(options.DirectoryStorePath ?? DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath)))
+            if (options.UseDirectoryStore || Directory.Exists(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath)))
             {
-                var directoryStore = new DirectoryMessagePackBackingStore(filePath, options.DirectoryStorePath)
+                cache.AddBackingStore(new DirectoryMessagePackBackingStore(filePath)
                 {
-                    FlushOnDispose = options.StoreFlushOnDispose,
-                    HydrationFilter = options.DirectoryStoreHydrationFilter
-                };
-                options.ConfigureDirectoryStore?.Invoke(directoryStore);
-                cache.AddBackingStore(directoryStore);
+                    FlushOnDispose = options.StoreFlushOnDispose
+                });
             }
             else
             {
-                var store = new SingleFileMessagePackBackingStore(filePath)
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath)
                 {
                     FlushOnDispose = options.StoreFlushOnDispose
-                };
-                options.ConfigureStore?.Invoke(store);
-                cache.AddBackingStore(store);
+                });
             }
 
             return cache;
