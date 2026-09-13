@@ -757,6 +757,67 @@ namespace GameCult.Caching.Tests
             batch.Upsert(new Counter { Name = "counter", Value = value }, new CultRecordHandle<Counter>(Key));
         });
 
+        // Delivered in save order: each change replaces the document the previously delivered change installed.
+        [Test]
+        public void ConcurrentWritersDeliverInSaveOrder()
+        {
+            using var cache = new CultCache(Registry);
+            var key = new CultRecordKey("ordered");
+            var observed = new System.Collections.Generic.List<(object? Document, object? Previous)>();
+            using var subscription = cache.Watch<Counter>().Subscribe(change =>
+            {
+                lock (observed)
+                    observed.Add((change.Document, change.PreviousDocument));
+            });
+
+            var writers = Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+            {
+                for (var i = 0; i < 2000; i++)
+                    cache.UpsertAsync(new Counter { Name = "ordered", Value = i }, new CultRecordHandle<Counter>(key));
+            })).ToArray();
+
+            Assert.That(Task.WaitAll(writers, TimeSpan.FromSeconds(60)), Is.True);
+            Assert.That(observed, Has.Count.EqualTo(16000));
+            Assert.That(FirstOutOfOrder(observed), Is.EqualTo(-1), "a change was delivered out of save order");
+        }
+
+        // The cache is not disposed on failure because a deadlocked delivery would hang the test thread too.
+        [Test]
+        public void ObserverWritingTheSameCacheDuringConcurrentDeliveryDoesNotDeadlock()
+        {
+            var cache = new CultCache(Registry);
+            var tally = new CultRecordKey("tally");
+            var observed = new System.Collections.Generic.List<(object? Document, object? Previous)>();
+            using var counters = cache.Watch<Counter>().Subscribe(_ =>
+                cache.UpsertAsync(new Tally { Name = "tally" }, new CultRecordHandle<Tally>(tally)));
+            using var tallies = cache.Watch<Tally>().Subscribe(change =>
+            {
+                lock (observed)
+                    observed.Add((change.Document, change.PreviousDocument));
+            });
+
+            var writers = Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+            {
+                for (var i = 0; i < 500; i++)
+                    cache.UpsertAsync(new Counter { Name = $"c:{thread}", Value = i }, new CultRecordHandle<Counter>(new CultRecordKey($"c:{thread}")));
+            })).ToArray();
+
+            Assert.That(Task.WaitAll(writers, TimeSpan.FromSeconds(60)), Is.True, "an observer writing the cache during delivery deadlocked");
+            Assert.That(observed, Has.Count.EqualTo(4000));
+            Assert.That(FirstOutOfOrder(observed), Is.EqualTo(-1), "an observer's write was delivered out of save order");
+            cache.Dispose();
+        }
+
+        private static int FirstOutOfOrder(System.Collections.Generic.List<(object? Document, object? Previous)> observed)
+        {
+            for (var i = 1; i < observed.Count; i++)
+            {
+                if (!ReferenceEquals(observed[i].Previous, observed[i - 1].Document))
+                    return i;
+            }
+            return -1;
+        }
+
         private string PathOf(string fileName) => System.IO.Path.Combine(_directory, fileName);
 
         private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(Counter), typeof(Tally), typeof(Slow) });
