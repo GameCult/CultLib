@@ -298,11 +298,6 @@ namespace GameCult.Networking
         /// Gets or sets the durable store for accepted shard mutation logs.
         /// </summary>
         public ICultNetShardMutationLogStore? MutationLogStore { get; set; }
-        /// <summary>
-        /// Gets or sets whether authoritative writes must occur inside ExecuteTransactionAsync.
-        /// Use this for state owners that forbid record-at-a-time mutation bypasses.
-        /// </summary>
-        public bool RequireTransactionsForAuthoritativeWrites { get; set; }
     }
 
     /// <summary>
@@ -470,8 +465,6 @@ namespace GameCult.Networking
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _appliedShardSequences = new(StringComparer.Ordinal);
         private readonly Subject<object> _changes = new();
-        private readonly AsyncLocal<CultNetDatabaseTransaction?> _ambientTransaction = new();
-        private readonly bool _requireTransactionsForAuthoritativeWrites;
         private bool _disposed;
 
         /// <summary>
@@ -484,7 +477,6 @@ namespace GameCult.Networking
             _runtimeId = options.RuntimeId;
             _documents = options.DocumentRegistry ?? new CultNetDocumentRegistry(cache.Registry);
             _mutationLogStore = options.MutationLogStore;
-            _requireTransactionsForAuthoritativeWrites = options.RequireTransactionsForAuthoritativeWrites;
             _shards = (options.Shards == null || options.Shards.Count == 0
                     ? new[] { CultNetShardDescriptor.PrimaryAll(options.RuntimeId) }
                     : options.Shards)
@@ -511,49 +503,6 @@ namespace GameCult.Networking
         /// Gets the document scopes this runtime may predict before authoritative commit.
         /// </summary>
         public IReadOnlyList<CultNetClientAuthorityScope> ClientAuthorityScopes => _clientAuthorityScopes;
-
-        /// <summary>
-        /// Runs one buffered authoritative database mutation. Cache state, durable state,
-        /// mutation logs, and database observers advance only after the complete stage succeeds.
-        /// </summary>
-        public async Task ExecuteTransactionAsync(Func<Task> stageAsync, bool soft = false)
-        {
-            ThrowIfDisposed();
-            if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
-            if (_ambientTransaction.Value != null)
-            {
-                await stageAsync().ConfigureAwait(false);
-                return;
-            }
-
-            var transaction = new CultNetDatabaseTransaction();
-            IReadOnlyList<Action> afterCommit;
-            _ambientTransaction.Value = transaction;
-            try
-            {
-                await _cache.ExecuteTransactionAsync(stageAsync, soft).ConfigureAwait(false);
-                afterCommit = transaction.AfterCommit.ToArray();
-            }
-            finally
-            {
-                _ambientTransaction.Value = null;
-            }
-
-            foreach (var publish in afterCommit)
-                publish();
-        }
-
-        /// <summary>Runs one value-producing buffered authoritative database mutation.</summary>
-        public async Task<T> ExecuteTransactionAsync<T>(Func<Task<T>> stageAsync, bool soft = false)
-        {
-            if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
-            T result = default!;
-            await ExecuteTransactionAsync(async () =>
-            {
-                result = await stageAsync().ConfigureAwait(false);
-            }, soft).ConfigureAwait(false);
-            return result;
-        }
 
         /// <summary>Gets whether this database instance can authoritatively replace the document at a key.</summary>
         public bool CanWriteAuthoritatively<T>(CultRecordKey key) where T : class
@@ -854,7 +803,6 @@ namespace GameCult.Networking
         public async Task<CultRecordHandle<T>> PutAsync<T>(CultRecordKey key, T document) where T : class
         {
             ThrowIfDisposed();
-            EnsureAuthoritativeTransaction();
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired<T>();
@@ -880,10 +828,7 @@ namespace GameCult.Networking
                     document,
                     previous));
             }
-            if (_ambientTransaction.Value is { } transaction)
-                transaction.AfterCommit.Add(PublishCommittedPut);
-            else
-                PublishCommittedPut();
+            PublishCommittedPut();
             return handle;
         }
 
@@ -918,7 +863,6 @@ namespace GameCult.Networking
         public Task DeleteAsync<T>(CultRecordKey key) where T : class
         {
             ThrowIfDisposed();
-            EnsureAuthoritativeTransaction();
             var descriptor = _cache.Registry.GetRequired<T>();
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
@@ -944,10 +888,7 @@ namespace GameCult.Networking
                         document: null,
                         previousDocument: previous));
                 }
-                if (_ambientTransaction.Value is { } transaction)
-                    transaction.AfterCommit.Add(PublishCommittedDelete);
-                else
-                    PublishCommittedDelete();
+                PublishCommittedDelete();
             }
 
             return Task.CompletedTask;
@@ -959,7 +900,6 @@ namespace GameCult.Networking
         public async Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message)
         {
             ThrowIfDisposed();
-            EnsureAuthoritativeTransaction();
             if (message == null) throw new ArgumentNullException(nameof(message));
             if (message.Document == null)
             {
@@ -1005,10 +945,7 @@ namespace GameCult.Networking
                     document,
                     previous);
             }
-            if (_ambientTransaction.Value is { } transaction)
-                transaction.AfterCommit.Add(PublishCommittedPut);
-            else
-                PublishCommittedPut();
+            PublishCommittedPut();
             return document;
         }
 
@@ -1018,7 +955,6 @@ namespace GameCult.Networking
         public Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message)
         {
             ThrowIfDisposed();
-            EnsureAuthoritativeTransaction();
             if (message == null) throw new ArgumentNullException(nameof(message));
 
             var key = new CultRecordKey(message.RecordKey);
@@ -1055,10 +991,7 @@ namespace GameCult.Networking
                     document: null,
                     previousDocument: previous);
             }
-            if (_ambientTransaction.Value is { } transaction)
-                transaction.AfterCommit.Add(PublishCommittedDelete);
-            else
-                PublishCommittedDelete();
+            PublishCommittedDelete();
             return Task.CompletedTask;
         }
 
@@ -1769,20 +1702,6 @@ namespace GameCult.Networking
                 ReadReplicaEndpoints = shard.ReadReplicaEndpoints.ToArray(),
                 Region = shard.Region
             };
-        }
-
-        private sealed class CultNetDatabaseTransaction
-        {
-            public List<Action> AfterCommit { get; } = new();
-        }
-
-        private void EnsureAuthoritativeTransaction()
-        {
-            if (_requireTransactionsForAuthoritativeWrites && _ambientTransaction.Value == null)
-            {
-                throw new InvalidOperationException(
-                    "This CultNet database requires authoritative writes to use ExecuteTransactionAsync.");
-            }
         }
 
         private void ThrowIfDisposed()
