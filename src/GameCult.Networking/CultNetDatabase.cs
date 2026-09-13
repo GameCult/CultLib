@@ -805,7 +805,7 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (document == null) throw new ArgumentNullException(nameof(document));
 
-            var descriptor = _cache.Registry.GetRequired<T>();
+            var descriptor = _cache.Registry.GetRequired(document.GetType());
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
@@ -840,7 +840,7 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (document == null) throw new ArgumentNullException(nameof(document));
 
-            var descriptor = _cache.Registry.GetRequired<T>();
+            var descriptor = _cache.Registry.GetRequired(document.GetType());
             var shard = ResolveShardInternal(descriptor, key);
             EnsureClientAuthority(descriptor, key);
 

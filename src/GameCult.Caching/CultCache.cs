@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1053,56 +1055,167 @@ namespace GameCult.Caching
         }
     }
 
+    public enum CultCommitOutcome
+    {
+        Committed,
+        Mismatch,
+        Contended
+    }
+
+    public sealed class CultCommitRequest
+    {
+        internal CultCommitRequest(
+            IReadOnlyList<CultStoredDocument> upserts,
+            IReadOnlyList<CultStoredDocument> deletes,
+            IReadOnlyList<(CultRecordKey Key, string? SchemaId, string? StoredAt)> expected,
+            bool expectUnchanged)
+        {
+            Upserts = upserts;
+            Deletes = deletes;
+            Expected = expected;
+            ExpectUnchanged = expectUnchanged;
+        }
+
+        public IReadOnlyList<CultStoredDocument> Upserts { get; }
+        public IReadOnlyList<CultStoredDocument> Deletes { get; }
+        public IReadOnlyList<(CultRecordKey Key, string? SchemaId, string? StoredAt)> Expected { get; }
+        public bool ExpectUnchanged { get; }
+        public bool HasConditions => Expected.Count > 0 || ExpectUnchanged;
+
+        // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
+        // Identity is (schemaId, storedAt), sound because every write to a key mints a later storedAt.
+        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
+        {
+            var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
+            foreach (var (key, schemaId, storedAt) in Expected)
+            {
+                byKey.TryGetValue(key.Value, out var record);
+                var holds = schemaId == null
+                    ? record == null
+                    : record != null && record.SchemaId == schemaId && record.StoredAt == storedAt;
+                if (!holds)
+                    return false;
+            }
+
+            return !ExpectUnchanged ||
+                   durable.Select(record => Identity(record.Key, record.SchemaId, record.StoredAt))
+                       .OrderBy(identity => identity, StringComparer.Ordinal)
+                       .SequenceEqual(observed
+                           .Select(stored => Identity(stored.Key.Value, stored.Descriptor.SchemaId, stored.StoredAt))
+                           .OrderBy(identity => identity, StringComparer.Ordinal));
+        }
+
+        private static string Identity(string key, string schemaId, string storedAt) => $"{key}\n{schemaId}\n{storedAt}";
+    }
+
+    // An explicit value: nothing staged here is visible to anyone until Commit returns.
+    public sealed class CultCacheBatch
+    {
+        private readonly CultCache _cache;
+        internal readonly Dictionary<string, (CultRecordKey Key, CultStoredDocument? Stored)> Operations = new(StringComparer.Ordinal);
+        internal readonly List<(CultRecordKey Key, string? SchemaId, string? StoredAt)> Expected = new();
+        internal bool ExpectsUnchanged;
+        internal bool Sealed;
+
+        internal CultCacheBatch(CultCache cache)
+        {
+            _cache = cache;
+        }
+
+        public CultRecordHandle<T> Upsert<T>(T document, CultRecordHandle<T>? handle = null)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            return new CultRecordHandle<T>(Stage(document, handle?.Key));
+        }
+
+        public CultRecordKey Upsert(Type type, object document, CultRecordKey? key = null)
+        {
+            CultCache.RequireInstanceOf(type, document);
+            return Stage(document, key);
+        }
+
+        public void Remove(CultRecordKey key)
+        {
+            ThrowIfSealed();
+            Operations[key.Value] = (key, null);
+        }
+
+        public void Expect(CultRecordKey key, object? current)
+        {
+            ThrowIfSealed();
+            var observed = _cache.Observe(key, current);
+            Expected.Add((key, observed?.Descriptor.SchemaId, observed?.StoredAt));
+        }
+
+        public void ExpectUnchanged()
+        {
+            ThrowIfSealed();
+            ExpectsUnchanged = true;
+        }
+
+        private CultRecordKey Stage(object document, CultRecordKey? key)
+        {
+            ThrowIfSealed();
+            var stored = _cache.CreateStoredDocument(document, key);
+            Operations[stored.Key.Value] = (stored.Key, stored);
+            return stored.Key;
+        }
+
+        private void ThrowIfSealed()
+        {
+            if (Sealed)
+                throw new InvalidOperationException("This batch has already been committed or abandoned.");
+        }
+    }
+
     public sealed class CultCache : IDisposable
     {
         private readonly CultDocumentRegistry _registry;
-        private readonly List<CacheBackingStore> _backingStores = new();
-        private readonly ConcurrentDictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, CultStoredDocument>> _typeMaps = new();
-        private readonly ConcurrentDictionary<Type, ConcurrentDictionary<string, string>> _nameMaps = new();
-        private readonly ConcurrentDictionary<(Type Type, string Alias), ConcurrentDictionary<string, string>> _indexMaps = new();
-        private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
-        private readonly ConditionalWeakTable<object, DocumentHandleBox> _documentHandles = new();
-        private readonly Subject<object> _changes = new();
-        private readonly SemaphoreSlim _transactionGate = new(1, 1);
-        private readonly AsyncLocal<CultCacheTransaction?> _ambientTransaction = new();
-        private readonly object _stateGate = new();
-        private bool _hasUnflushedMutations;
+        private readonly List<(CacheBackingStore Store, Type[] Homes)> _stores = new();
+        private readonly Dictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
+        private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
+        private readonly Dictionary<(Type Type, string Alias), Dictionary<string, string>> _indexes = new();
+        private readonly Dictionary<Type, string> _globals = new();
+        private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
+        private readonly Subject<Change> _changes = new();
+        private readonly object _gate = new();
+        private bool _dirtyInMemory;
 
         public CultCache(CultDocumentRegistry? registry = null)
-            : this(registry, initializeGlobals: true)
-        {
-        }
-
-        public CultCache(CultDocumentRegistry? registry, bool initializeGlobals)
         {
             _registry = registry ?? CultDocumentRegistry.Shared;
-            if (initializeGlobals)
+        }
+
+        public CultDocumentRegistry Registry => _registry;
+
+        public bool IsDirty
+        {
+            get
             {
-                MaterializeMissingGlobals();
+                lock (_gate)
+                    return _stores.Count == 0 ? _dirtyInMemory : _stores.Any(entry => entry.Store.IsDirty);
             }
         }
-
-        // Durable open paths call this after hydration so persisted globals remain authoritative.
-        public void MaterializeMissingGlobals()
-        {
-            InitializeGlobals();
-        }
-
-        public bool IsDirty => _hasUnflushedMutations || _backingStores.Any(store => store.IsDirty);
 
         public bool FlushAttachedStoresOnDispose { get; set; }
 
         public event Action<object?, object?>? OnUpdate;
 
-        public IReadOnlyList<CacheBackingStore> BackingStores => _backingStores;
+        public IReadOnlyList<CacheBackingStore> BackingStores
+        {
+            get
+            {
+                lock (_gate)
+                    return _stores.Select(entry => entry.Store).ToArray();
+            }
+        }
 
         public IEnumerable<object> AllEntries
         {
             get
             {
-                lock (_stateGate)
-                    return VisibleStoredDocuments().Select(entry => entry.Document).ToArray();
+                lock (_gate)
+                    return _entries.Values.Select(entry => entry.Document).ToArray();
             }
         }
 
@@ -1110,21 +1223,23 @@ namespace GameCult.Caching
         {
             get
             {
-                lock (_stateGate)
-                    return VisibleStoredDocuments()
+                lock (_gate)
+                    return _entries.Values
                         .OrderBy(entry => entry.Descriptor.SchemaName, StringComparer.Ordinal)
                         .ThenBy(entry => entry.Key.Value, StringComparer.Ordinal)
                         .ToArray();
             }
         }
 
-        public CultDocumentRegistry Registry => _registry;
-
         public Observable<CultCacheDocumentChange<T>> Watch<T>() where T : class
         {
             return _changes
-                .Where(change => change is CultCacheDocumentChange<T>)
-                .Select(change => (CultCacheDocumentChange<T>)change);
+                .Where(change => typeof(T).IsAssignableFrom(change.Stored.Descriptor.DocumentType))
+                .Select(change => new CultCacheDocumentChange<T>(
+                    change.Kind,
+                    change.Stored.Key,
+                    change.Document as T,
+                    change.Previous as T));
         }
 
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
@@ -1132,58 +1247,72 @@ namespace GameCult.Caching
             return Watch<T>().Where(change => change.Key.Equals(key));
         }
 
-        public void AddBackingStore(CacheBackingStore store)
+        // Attaching reads the store; there is no interval in which it is attached but unread.
+        public void AddBackingStore(CacheBackingStore store, params Type[] homes)
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
-            store.AttachRegistry(_registry);
-            store.Loaded = entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true);
-            store.Unloaded = entry => RemoveStoredDocumentInternal(entry, store, raiseUpdate: true);
-
-            foreach (var entry in _entries.Values.OrderBy(entry => entry.Key.Value, StringComparer.Ordinal))
+            homes ??= Array.Empty<Type>();
+            lock (_gate)
             {
-                store.Push(entry);
-            }
+                if (store.Loaded != null)
+                    throw new InvalidOperationException($"Backing store {store} is already attached to a cache.");
+                if (store.IsDirty)
+                    throw new InvalidOperationException($"Backing store {store} has staged writes; attach it clean.");
+                if (homes.Length == 0 && _stores.Any(entry => entry.Homes.Length == 0))
+                    throw new InvalidOperationException(
+                        $"Backing store {store} would be a second untyped store; name the types it is home to.");
+                foreach (var home in homes)
+                {
+                    var owner = _stores.FirstOrDefault(entry => entry.Homes.Contains(home)).Store;
+                    if (owner != null)
+                        throw new InvalidOperationException($"{home.FullName} is already routed to {owner}; it cannot also route to {store}.");
+                }
 
-            _backingStores.Add(store);
+                var candidate = (store, homes);
+                foreach (var type in _entries.Values.Select(entry => entry.Descriptor).Distinct())
+                {
+                    var before = Home(type.DocumentType);
+                    _stores.Add(candidate);
+                    var after = Home(type.DocumentType);
+                    _stores.RemoveAt(_stores.Count - 1);
+                    if (before != after)
+                        throw new InvalidOperationException(
+                            $"Attaching {store} would move {type.SchemaName} from {before?.ToString() ?? "memory"} to {after}; " +
+                            "attach routed stores before the untyped store.");
+                }
+
+                store.AttachRegistry(_registry);
+                store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, _ => CultCommitOutcome.Committed);
+                _stores.Add(candidate);
+                try
+                {
+                    store.PullAll();
+                }
+                catch
+                {
+                    _stores.Remove(candidate);
+                    store.Loaded = null;
+                    throw;
+                }
+            }
         }
 
-        public async Task PullAllBackingStoresAsync()
+        public Task PullAllBackingStoresAsync()
         {
-            if (_ambientTransaction.Value != null)
-                throw new InvalidOperationException(
-                    "CultCache hydration cannot run inside a mutation transaction; hydrate before opening the commit scope.");
-
-            await _transactionGate.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                foreach (var store in _backingStores)
-                    store.PullAll();
-
-                _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
+            foreach (var store in BackingStores)
+                store.PullAll();
+            return Task.CompletedTask;
         }
 
         public void FlushAllBackingStores()
         {
-            if (_ambientTransaction.Value != null)
-                throw new InvalidOperationException("A CultCache transaction owns durable commit; do not flush inside its stage callback.");
-
-            _transactionGate.Wait();
-            try
+            lock (_gate)
             {
-                foreach (var store in _backingStores)
+                foreach (var (store, _) in _stores)
                 {
-                    store.PushAll();
-                    RecomputeDirtyState();
+                    if (!store.IsReadOnly && store.IsDirty)
+                        store.PushAll();
                 }
-            }
-            finally
-            {
-                _transactionGate.Release();
             }
         }
 
@@ -1194,127 +1323,66 @@ namespace GameCult.Caching
             return Task.CompletedTask;
         }
 
-        // Staged records are visible only to the executing async flow. The durable backing store
-        // commits before the live cache and its observers advance; an exception discards the whole batch.
-        public async Task ExecuteTransactionAsync(Func<Task> stageAsync)
+        public Task<CultRecordHandle<T>> AddAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
-            if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
-            if (_ambientTransaction.Value != null)
-            {
-                await stageAsync().ConfigureAwait(false);
-                return;
-            }
-
-            await _transactionGate.WaitAsync().ConfigureAwait(false);
-            var transaction = new CultCacheTransaction();
-            IReadOnlyList<(CultStoredDocument Stored, object? Previous, bool Removed)> changes;
-            _ambientTransaction.Value = transaction;
-            try
-            {
-                await stageAsync().ConfigureAwait(false);
-                transaction.Seal();
-                changes = CommitTransaction(transaction);
-            }
-            finally
-            {
-                transaction.Seal();
-                _ambientTransaction.Value = null;
-                _transactionGate.Release();
-            }
-
-            foreach (var change in changes)
-                PublishChange(change.Stored, change.Previous, change.Removed);
-        }
-
-        public async Task<T> ExecuteTransactionAsync<T>(Func<Task<T>> stageAsync)
-        {
-            if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
-            T result = default!;
-            await ExecuteTransactionAsync(async () =>
-            {
-                result = await stageAsync().ConfigureAwait(false);
-            }).ConfigureAwait(false);
-            return result;
-        }
-
-        public async Task<CultRecordHandle<T>> AddAsync<T>(T document, CultRecordHandle<T>? handle = null)
-        {
-            if (document == null) throw new ArgumentNullException(nameof(document));
-            if (_ambientTransaction.Value is { } transaction)
-            {
-                var staged = CreateStoredDocument(typeof(T), document, handle?.Key);
-                transaction.Stage(staged);
-                return new CultRecordHandle<T>(staged.Key);
-            }
-
-            await _transactionGate.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                var stored = CreateStoredDocument(typeof(T), document, handle?.Key);
-                AddStoredDocumentInternal(stored, source: null, raiseUpdate: false);
-                return new CultRecordHandle<T>(stored.Key);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
+            return UpsertAsync(document, handle);
         }
 
         public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
-            return AddAsync(document, handle);
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            return Task.FromResult(new CultRecordHandle<T>(Write(document, handle?.Key)));
         }
 
-        public async Task<CultRecordKey> UpsertAsync(Type documentType, object document, CultRecordKey? key = null)
+        public Task<CultRecordKey> UpsertAsync(Type documentType, object document, CultRecordKey? key = null)
         {
-            if (documentType == null) throw new ArgumentNullException(nameof(documentType));
-            if (document == null) throw new ArgumentNullException(nameof(document));
-            if (!documentType.IsInstanceOfType(document))
-            {
-                throw new ArgumentException(
-                    $"Document instance must be assignable to {documentType.FullName}.",
-                    nameof(document));
-            }
+            RequireInstanceOf(documentType, document);
+            return Task.FromResult(Write(document, key));
+        }
 
-            if (_ambientTransaction.Value is { } transaction)
-            {
-                var staged = CreateStoredDocument(documentType, document, key);
-                transaction.Stage(staged);
-                return staged.Key;
-            }
+        public bool Remove(CultRecordKey key)
+        {
+            CultStoredDocument? existing;
+            lock (_gate)
+                _entries.TryGetValue(key.Value, out existing);
+            if (existing == null)
+                return false;
 
-            await _transactionGate.WaitAsync().ConfigureAwait(false);
-            try
+            Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, home =>
             {
-                var stored = CreateStoredDocument(documentType, document, key);
-                AddStoredDocumentInternal(stored, source: null, raiseUpdate: false);
-                return stored.Key;
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
+                home?.Delete(existing);
+                return CultCommitOutcome.Committed;
+            });
+            return true;
+        }
+
+        public void Remove<T>(CultRecordHandle<T> handle)
+        {
+            Remove(handle.Key);
+        }
+
+        // false: a condition failed; nothing was written, changed in memory, or published.
+        public bool Commit(Action<CultCacheBatch> stage)
+        {
+            return Land(stage, wait: true) == CultCommitOutcome.Committed;
+        }
+
+        public CultCommitOutcome TryCommit(Action<CultCacheBatch> stage)
+        {
+            return Land(stage, wait: false);
         }
 
         public CultRecordHandle<T>? TryGetHandle<T>(T document)
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
-            return _documentHandles.TryGetValue(document, out var box)
-                ? new CultRecordHandle<T>(box.Key)
-                : null;
+            lock (_gate)
+                return _handles.TryGetValue(document, out var box) ? new CultRecordHandle<T>(box.Key) : null;
         }
 
         public object? Get(CultRecordKey key)
         {
-            lock (_stateGate)
-            {
-                if (_ambientTransaction.Value is { } transaction &&
-                    transaction.TryGet(key, out var staged))
-                    return staged?.Document;
-                return _entries.TryGetValue(key.Value, out var stored)
-                    ? stored.Document
-                    : null;
-            }
+            lock (_gate)
+                return _entries.TryGetValue(key.Value, out var stored) ? stored.Document : null;
         }
 
         public T? Get<T>(CultRecordKey key) where T : class
@@ -1330,469 +1398,352 @@ namespace GameCult.Caching
 
         public IEnumerable<T> GetAll<T>() where T : class
         {
-            lock (_stateGate)
-            {
-                var type = typeof(T);
-                return VisibleStoredDocuments()
-                    .Where(entry => type.IsAssignableFrom(entry.Descriptor.DocumentType))
-                    .Select(entry => (T)entry.Document)
-                    .ToArray();
-            }
+            lock (_gate)
+                return _entries.Values.Select(entry => entry.Document).OfType<T>().ToArray();
         }
 
         public T? GetGlobal<T>() where T : class
         {
-            return _globalKeys.TryGetValue(typeof(T), out var key)
-                ? Get<T>(new CultRecordKey(key))
-                : null;
+            return Single<T>("global", () => _globals
+                .Where(pair => typeof(T).IsAssignableFrom(pair.Key))
+                .Select(pair => pair.Value));
         }
 
         public T? GetByName<T>(string name) where T : class
         {
-            var type = typeof(T);
-            if (_nameMaps.TryGetValue(type, out var map) &&
-                map.TryGetValue(name, out var key))
-            {
-                return Get<T>(new CultRecordKey(key));
-            }
-
-            return null;
+            return Single<T>($"name '{name}'", () => _names
+                .Where(pair => typeof(T).IsAssignableFrom(pair.Key))
+                .SelectMany(pair => pair.Value.TryGetValue(name, out var key) ? new[] { key } : Array.Empty<string>()));
         }
 
         public T? GetByIndex<T>(string alias, string value) where T : class
         {
-            if (_indexMaps.TryGetValue((typeof(T), alias), out var map) &&
-                map.TryGetValue(value, out var key))
-            {
-                return Get<T>(new CultRecordKey(key));
-            }
-
-            return null;
-        }
-
-        public void Remove<T>(CultRecordHandle<T> handle)
-        {
-            if (_ambientTransaction.Value is { } transaction)
-            {
-                transaction.Delete(handle.Key);
-                return;
-            }
-
-            _transactionGate.Wait();
-            try
-            {
-                if (_entries.TryGetValue(handle.Key.Value, out var stored))
-                    RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
-        }
-
-        public bool Remove(CultRecordKey key)
-        {
-            if (Get(key) == null)
-            {
-                return false;
-            }
-
-            if (_ambientTransaction.Value is { } transaction)
-            {
-                transaction.Delete(key);
-                return true;
-            }
-
-            _transactionGate.Wait();
-            try
-            {
-                if (_entries.TryGetValue(key.Value, out var stored))
-                    RemoveStoredDocumentInternal(stored, source: null, raiseUpdate: false);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
-            return true;
-        }
-
-        public Task DeleteAsync<T>(CultRecordHandle<T> handle)
-        {
-            Remove(handle);
-            return Task.CompletedTask;
+            return Single<T>($"index {alias}='{value}'", () => _indexes
+                .Where(pair => pair.Key.Alias == alias && typeof(T).IsAssignableFrom(pair.Key.Type))
+                .SelectMany(pair => pair.Value.TryGetValue(value, out var key) ? new[] { key } : Array.Empty<string>()));
         }
 
         public void Dispose()
         {
             if (FlushAttachedStoresOnDispose && IsDirty)
-            {
                 FlushAllBackingStores();
-            }
 
-            foreach (var store in _backingStores.OfType<IDisposable>())
-            {
+            foreach (var store in BackingStores)
                 store.Dispose();
-            }
 
-            _transactionGate.Dispose();
             _changes.Dispose();
         }
 
-        private IEnumerable<CultStoredDocument> VisibleStoredDocuments()
+        internal static void RequireInstanceOf(Type documentType, object document)
         {
-            if (_ambientTransaction.Value == null)
-                return _entries.Values.ToArray();
-
-            var visible = _entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            foreach (var pair in _ambientTransaction.Value.Mutations)
-            {
-                if (pair.Value == null)
-                    visible.Remove(pair.Key);
-                else
-                    visible[pair.Key] = pair.Value;
-            }
-            return visible.Values.ToArray();
+            if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (!documentType.IsInstanceOfType(document))
+                throw new ArgumentException($"Document instance must be assignable to {documentType.FullName}.", nameof(document));
         }
 
-        private IReadOnlyList<(CultStoredDocument Stored, object? Previous, bool Removed)> CommitTransaction(
-            CultCacheTransaction transaction)
+        // The runtime type decides the schema; a minted storedAt is always later than the record it replaces.
+        internal CultStoredDocument CreateStoredDocument(object document, CultRecordKey? key)
         {
-            var mutations = transaction.SnapshotForCommit()
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .ToArray();
-            if (mutations.Length == 0)
-                return Array.Empty<(CultStoredDocument, object?, bool)>();
-
-            if (_backingStores.Count > 1)
+            var descriptor = _registry.GetRequired(document.GetType());
+            lock (_gate)
             {
-                throw new InvalidOperationException(
-                    "A CultCache transaction requires zero or one durable backing store; multiple stores cannot share one atomic commit boundary.");
+                var resolved = key
+                               ?? (_handles.TryGetValue(document, out var box) ? box.Key
+                                   : descriptor.IsGlobal ? new CultRecordKey($"global:{descriptor.SchemaId}")
+                                   : new CultRecordKey(Guid.NewGuid().ToString("N")));
+                _entries.TryGetValue(resolved.Value, out var previous);
+                return new CultStoredDocument(resolved, MintStoredAt(previous?.StoredAt), descriptor, document);
+            }
+        }
+
+        internal CultStoredDocument? Observe(CultRecordKey key, object? current)
+        {
+            if (current == null)
+                return null;
+            lock (_gate)
+            {
+                if (_handles.TryGetValue(current, out var box) && box.Key.Equals(key) &&
+                    _entries.TryGetValue(key.Value, out var stored) && ReferenceEquals(stored.Document, current))
+                    return stored;
             }
 
-            CultStoredDocument[] previous;
-            lock (_stateGate)
+            throw new ArgumentException($"Expect({key.Value}) was given an instance this cache does not hold at that key.", nameof(current));
+        }
+
+        private static string MintStoredAt(string? previous)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (previous != null &&
+                DateTimeOffset.TryParse(previous, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last) &&
+                now <= last)
+                now = last.ToUniversalTime().AddTicks(1);
+            return now.ToString("O", CultureInfo.InvariantCulture);
+        }
+
+        private CultRecordKey Write(object document, CultRecordKey? key)
+        {
+            var stored = CreateStoredDocument(document, key);
+            Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, home =>
             {
-                previous = mutations
-                    .Select(pair => _entries.TryGetValue(pair.Key, out var stored) ? stored : null)
-                    .Where(stored => stored != null)
-                    .Cast<CultStoredDocument>()
+                home?.Push(stored);
+                return CultCommitOutcome.Committed;
+            });
+            return stored.Key;
+        }
+
+        private CultCommitOutcome Land(Action<CultCacheBatch> stage, bool wait)
+        {
+            if (stage == null) throw new ArgumentNullException(nameof(stage));
+            var batch = new CultCacheBatch(this);
+            try
+            {
+                stage(batch);
+            }
+            finally
+            {
+                batch.Sealed = true;
+            }
+
+            if (!Monitor.TryEnter(_gate, wait ? Timeout.Infinite : 0))
+                return CultCommitOutcome.Contended;
+            try
+            {
+                var upserts = batch.Operations.Values.Where(op => op.Stored != null).Select(op => op.Stored!).ToArray();
+                var deletes = batch.Operations.Values
+                    .Where(op => op.Stored == null && _entries.ContainsKey(op.Key.Value))
+                    .Select(op => _entries[op.Key.Value])
                     .ToArray();
-            }
-
-            var upserts = mutations.Where(pair => pair.Value != null).Select(pair => pair.Value!).ToArray();
-            var deleted = mutations
-                .Where(pair => pair.Value == null)
-                .Select(pair => previous.FirstOrDefault(stored => string.Equals(stored.Key.Value, pair.Key, StringComparison.Ordinal)))
-                .Where(stored => stored != null)
-                .Cast<CultStoredDocument>()
-                .ToArray();
-
-            foreach (var store in _backingStores)
-                store.CommitBatch(upserts, deleted);
-
-            var changes = new List<(CultStoredDocument Stored, object? Previous, bool Removed)>();
-            lock (_stateGate)
-            {
-                foreach (var pair in mutations)
+                var request = new CultCommitRequest(upserts, deletes, batch.Expected.ToArray(), batch.ExpectsUnchanged);
+                return Admit(upserts, deletes, null, home =>
                 {
-                    _entries.TryGetValue(pair.Key, out var existing);
-                    if (existing != null)
+                    if (home != null)
                     {
-                        RemoveIndexes(existing);
-                        _documentHandles.Remove(existing.Document);
+                        if (request.HasConditions && home.IsDirty)
+                            throw new InvalidOperationException($"Backing store {home} has staged writes; flush before a conditional commit.");
+                        return home.CommitBatch(request, wait);
                     }
 
-                    if (pair.Value == null)
-                    {
-                        if (existing != null)
-                        {
-                            _entries.TryRemove(pair.Key, out _);
-                            changes.Add((existing, existing.Document, true));
-                        }
-                        continue;
-                    }
+                    if (request.HasConditions && _stores.Count > 0)
+                        throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
+                    var inMemory = _entries.Values
+                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
+                        .ToArray();
+                    return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
+                });
+            }
+            finally
+            {
+                Monitor.Exit(_gate);
+            }
+        }
 
-                    var stored = pair.Value;
-                    _entries[pair.Key] = stored;
-                    _documentHandles.Remove(stored.Document);
-                    _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
-                    AddIndexes(stored);
-                    changes.Add((stored, existing?.Document, false));
-                }
-                _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
+        // Every add and remove passes here: single writes, committed batches, and loads (source set).
+        // Nothing lands unless all of it is admissible; land is the durable step between validation and memory.
+        private CultCommitOutcome Admit(
+            IReadOnlyList<CultStoredDocument> admitted,
+            IReadOnlyList<CultStoredDocument> evicted,
+            CacheBackingStore? source,
+            Func<CacheBackingStore?, CultCommitOutcome> land)
+        {
+            List<Change> changes;
+            lock (_gate)
+            {
+                var outcome = land(Validate(admitted, evicted, source));
+                if (outcome != CultCommitOutcome.Committed)
+                    return outcome;
+                changes = Apply(admitted, evicted, source);
             }
 
+            foreach (var change in changes)
+            {
+                _changes.OnNext(change);
+                if (source != null)
+                    OnUpdate?.Invoke(change.Previous, change.Document);
+            }
+
+            return CultCommitOutcome.Committed;
+        }
+
+        private CacheBackingStore? Validate(
+            IReadOnlyList<CultStoredDocument> admitted,
+            IReadOnlyList<CultStoredDocument> evicted,
+            CacheBackingStore? source)
+        {
+            var homes = new List<CacheBackingStore>();
+            var globals = new Dictionary<Type, string>(_globals);
+            foreach (var stored in evicted)
+            {
+                var type = stored.Descriptor.DocumentType;
+                if (globals.TryGetValue(type, out var key) && key == stored.Key.Value)
+                    globals.Remove(type);
+                if (source == null)
+                    Claim(stored);
+            }
+
+            foreach (var stored in admitted)
+            {
+                var descriptor = stored.Descriptor;
+                if (source == null)
+                    Claim(stored);
+                else if (Home(descriptor.DocumentType) is var home && home != source)
+                    throw new InvalidOperationException(
+                        $"{descriptor.SchemaName} record {stored.Key.Value} was loaded from {source} but its home is {home?.ToString() ?? "no store"}.");
+
+                if (!descriptor.IsGlobal)
+                    continue;
+                if (globals.TryGetValue(descriptor.DocumentType, out var existing) && existing != stored.Key.Value)
+                    throw new InvalidOperationException(
+                        $"{descriptor.SchemaName} is a global and already has record {existing}; {stored.Key.Value} would be a second.");
+                globals[descriptor.DocumentType] = stored.Key.Value;
+            }
+
+            var distinct = homes.Distinct().ToArray();
+            if (distinct.Length > 1)
+                throw new InvalidOperationException(
+                    $"The batch spans {distinct[0]} and {distinct[1]}; a commit lands in one home store.");
+            return distinct.FirstOrDefault();
+
+            void Claim(CultStoredDocument stored)
+            {
+                var home = Home(stored.Descriptor.DocumentType);
+                if (home == null)
+                {
+                    if (_stores.Count > 0)
+                        throw new InvalidOperationException($"No backing store is home to {stored.Descriptor.SchemaName}.");
+                    return;
+                }
+
+                if (home.IsReadOnly)
+                    throw new InvalidOperationException(
+                        $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
+                homes.Add(home);
+            }
+        }
+
+        private List<Change> Apply(
+            IReadOnlyList<CultStoredDocument> admitted,
+            IReadOnlyList<CultStoredDocument> evicted,
+            CacheBackingStore? source)
+        {
+            var changes = new List<Change>(admitted.Count + evicted.Count);
+            foreach (var stored in evicted)
+            {
+                if (!_entries.TryGetValue(stored.Key.Value, out var existing))
+                    continue;
+                Unindex(existing);
+                _entries.Remove(stored.Key.Value);
+                _handles.Remove(existing.Document);
+                changes.Add(new Change(CultCacheDocumentChangeKind.Removed, existing, null, existing.Document));
+            }
+
+            foreach (var stored in admitted)
+            {
+                _entries.TryGetValue(stored.Key.Value, out var previous);
+                if (previous != null)
+                {
+                    Unindex(previous);
+                    _handles.Remove(previous.Document);
+                }
+
+                _entries[stored.Key.Value] = stored;
+                _handles.AddOrUpdate(stored.Document, new KeyBox(stored.Key));
+                Index(stored);
+                changes.Add(new Change(
+                    previous == null ? CultCacheDocumentChangeKind.Added : CultCacheDocumentChangeKind.Updated,
+                    stored,
+                    stored.Document,
+                    previous?.Document));
+            }
+
+            if (source == null && _stores.Count == 0)
+                _dirtyInMemory = true;
             return changes;
         }
 
-        private sealed class CultCacheTransaction
+        // The most derived routed home type assignable from the document type, else the untyped store.
+        private CacheBackingStore? Home(Type documentType)
         {
-            private readonly object _gate = new();
-            private readonly Dictionary<string, CultStoredDocument?> _mutations = new(StringComparer.Ordinal);
-            private bool _sealed;
-
-            public IReadOnlyDictionary<string, CultStoredDocument?> Mutations
+            CacheBackingStore? untyped = null;
+            CacheBackingStore? routed = null;
+            Type? best = null;
+            foreach (var (store, homes) in _stores)
             {
-                get
+                if (homes.Length == 0)
                 {
-                    lock (_gate)
+                    untyped = store;
+                    continue;
+                }
+
+                foreach (var home in homes)
+                {
+                    if (home.IsAssignableFrom(documentType) && (best == null || best.IsAssignableFrom(home)))
                     {
-                        ThrowIfSealedForAmbientAccess();
-                        return new Dictionary<string, CultStoredDocument?>(_mutations, StringComparer.Ordinal);
+                        best = home;
+                        routed = store;
                     }
                 }
             }
 
-            public void Stage(CultStoredDocument stored)
-            {
-                lock (_gate)
-                {
-                    ThrowIfSealedForAmbientAccess();
-                    _mutations[stored.Key.Value] = stored;
-                }
-            }
+            return routed ?? untyped;
+        }
 
-            public void Delete(CultRecordKey key)
+        private T? Single<T>(string lookup, Func<IEnumerable<string>> keys) where T : class
+        {
+            lock (_gate)
             {
-                lock (_gate)
-                {
-                    ThrowIfSealedForAmbientAccess();
-                    _mutations[key.Value] = null;
-                }
-            }
-
-            public bool TryGet(CultRecordKey key, out CultStoredDocument? stored)
-            {
-                lock (_gate)
-                {
-                    ThrowIfSealedForAmbientAccess();
-                    return _mutations.TryGetValue(key.Value, out stored);
-                }
-            }
-
-            public void Seal()
-            {
-                lock (_gate)
-                    _sealed = true;
-            }
-
-            public IReadOnlyDictionary<string, CultStoredDocument?> SnapshotForCommit()
-            {
-                lock (_gate)
-                {
-                    if (!_sealed)
-                        throw new InvalidOperationException("A CultCache transaction must be sealed before commit.");
-                    return new Dictionary<string, CultStoredDocument?>(_mutations, StringComparer.Ordinal);
-                }
-            }
-
-            private void ThrowIfSealedForAmbientAccess()
-            {
-                if (_sealed)
+                var found = keys().Distinct().ToArray();
+                if (found.Length > 1)
                     throw new InvalidOperationException(
-                        "This CultCache transaction has already completed; escaped async work cannot read or mutate it.");
+                        $"{typeof(T).Name} {lookup} matches records {string.Join(", ", found)}; look it up by its concrete type.");
+                return found.Length == 1 && _entries.TryGetValue(found[0], out var stored) ? stored.Document as T : null;
             }
         }
 
-        internal CultStoredDocument CreateStoredDocument(Type documentType, object document, CultRecordKey? key = null, string? storedAt = null)
+        private void Index(CultStoredDocument stored)
         {
-            var descriptor = _registry.GetRequired(documentType);
-            var resolvedKey = key ?? ResolveKey(document, descriptor);
-            return new CultStoredDocument(
-                resolvedKey,
-                storedAt ?? DateTimeOffset.UtcNow.ToString("O"),
-                descriptor,
-                document);
-        }
-
-        private void AddStoredDocumentInternal(
-            CultStoredDocument stored,
-            CacheBackingStore? source,
-            bool raiseUpdate)
-        {
-            CultStoredDocument? existing = null;
-            lock (_stateGate)
-            {
-                _entries.TryGetValue(stored.Key.Value, out existing);
-                if (existing != null)
-                    RemoveIndexes(existing);
-
-                _entries[stored.Key.Value] = stored;
-                _documentHandles.Remove(stored.Document);
-                _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
-                AddIndexes(stored);
-
-                foreach (var store in _backingStores)
-                {
-                    if (store != source)
-                        store.Push(stored);
-                }
-
-                if (source == null)
-                    _hasUnflushedMutations = true;
-                else
-                    RecomputeDirtyState();
-            }
-
-            PublishChange(stored, existing?.Document);
-
-            if (raiseUpdate)
-            {
-                OnUpdate?.Invoke(existing?.Document, stored.Document);
-            }
-        }
-
-        private void RemoveStoredDocumentInternal(
-            CultStoredDocument stored,
-            CacheBackingStore? source,
-            bool raiseUpdate)
-        {
-            CultStoredDocument? existing;
-            lock (_stateGate)
-            {
-                if (!_entries.TryRemove(stored.Key.Value, out existing))
-                    return;
-
-                RemoveIndexes(existing);
-                _documentHandles.Remove(existing.Document);
-
-                foreach (var store in _backingStores)
-                {
-                    if (store != source)
-                        store.Delete(existing);
-                }
-
-                if (source == null)
-                    _hasUnflushedMutations = true;
-                else
-                    RecomputeDirtyState();
-            }
-
-            PublishChange(existing, existing.Document, removed: true);
-
-            if (raiseUpdate)
-            {
-                OnUpdate?.Invoke(existing.Document, null);
-            }
-        }
-
-        private void InitializeGlobals()
-        {
-            foreach (var descriptor in _registry.AllDescriptors.Where(candidate => candidate.IsGlobal))
-            {
-                var key = new CultRecordKey($"global:{descriptor.SchemaId}");
-                if (_entries.ContainsKey(key.Value) ||
-                    _backingStores.Any(store => store.ContainsDurableRecord(key)))
-                {
-                    continue;
-                }
-
-                if (descriptor.DocumentType.GetConstructor(Type.EmptyTypes) == null)
-                {
-                    continue;
-                }
-
-                var instance = Activator.CreateInstance(descriptor.DocumentType);
-                if (instance == null)
-                {
-                    continue;
-                }
-
-                AddStoredDocumentInternal(
-                    new CultStoredDocument(
-                        key,
-                        DateTimeOffset.UtcNow.ToString("O"),
-                        descriptor,
-                        instance),
-                    source: null,
-                    raiseUpdate: false);
-            }
-        }
-
-        private CultRecordKey ResolveKey(object document, CultDocumentDescriptor descriptor)
-        {
-            if (_documentHandles.TryGetValue(document, out var existing))
-            {
-                return existing.Key;
-            }
-
-            if (descriptor.IsGlobal)
-            {
-                return new CultRecordKey($"global:{descriptor.SchemaId}");
-            }
-
-            return new CultRecordKey(Guid.NewGuid().ToString("N"));
-        }
-
-        private void AddIndexes(CultStoredDocument stored)
-        {
-            var typeMap = _typeMaps.GetOrAdd(
-                stored.Descriptor.DocumentType,
-                _ => new ConcurrentDictionary<string, CultStoredDocument>(StringComparer.Ordinal));
-            typeMap[stored.Key.Value] = stored;
-
+            var type = stored.Descriptor.DocumentType;
             if (stored.Descriptor.IsGlobal)
-            {
-                _globalKeys[stored.Descriptor.DocumentType] = stored.Key.Value;
-            }
-
+                _globals[type] = stored.Key.Value;
             if (stored.Descriptor.NameAccessor?.Invoke(stored.Document) is { Length: > 0 } name)
-            {
-                var map = _nameMaps.GetOrAdd(
-                    stored.Descriptor.DocumentType,
-                    _ => new ConcurrentDictionary<string, string>(StringComparer.Ordinal));
-                map[name] = stored.Key.Value;
-            }
-
+                MapOf(_names, type)[name] = stored.Key.Value;
             foreach (var pair in stored.Descriptor.IndexAccessors)
             {
                 var value = pair.Value(stored.Document);
-                if (string.IsNullOrWhiteSpace(value))
-                {
-                    continue;
-                }
-
-                var map = _indexMaps.GetOrAdd(
-                    (stored.Descriptor.DocumentType, pair.Key),
-                    _ => new ConcurrentDictionary<string, string>(StringComparer.Ordinal));
-                map[value] = stored.Key.Value;
+                if (!string.IsNullOrWhiteSpace(value))
+                    MapOf(_indexes, (type, pair.Key))[value] = stored.Key.Value;
             }
         }
 
-        private void RemoveIndexes(CultStoredDocument stored)
+        // Documents are mutable, so a name or index value may have changed since it was indexed: drop by key.
+        private void Unindex(CultStoredDocument stored)
         {
-            if (_typeMaps.TryGetValue(stored.Descriptor.DocumentType, out var typeMap))
-                typeMap.TryRemove(stored.Key.Value, out _);
-
-            if (stored.Descriptor.IsGlobal)
-            {
-                _globalKeys.TryRemove(stored.Descriptor.DocumentType, out _);
-            }
-
-            if (stored.Descriptor.NameAccessor?.Invoke(stored.Document) is { Length: > 0 } name &&
-                _nameMaps.TryGetValue(stored.Descriptor.DocumentType, out var nameMap))
-            {
-                nameMap.TryRemove(name, out _);
-            }
-
-            foreach (var pair in stored.Descriptor.IndexAccessors)
-            {
-                var value = pair.Value(stored.Document);
-                if (string.IsNullOrWhiteSpace(value))
-                {
-                    continue;
-                }
-
-                if (_indexMaps.TryGetValue((stored.Descriptor.DocumentType, pair.Key), out var map))
-                {
-                    map.TryRemove(value, out _);
-                }
-            }
+            var type = stored.Descriptor.DocumentType;
+            if (_globals.TryGetValue(type, out var globalKey) && globalKey == stored.Key.Value)
+                _globals.Remove(type);
+            if (_names.TryGetValue(type, out var names))
+                RemoveKey(names, stored.Key.Value);
+            foreach (var pair in _indexes.Where(pair => pair.Key.Type == type))
+                RemoveKey(pair.Value, stored.Key.Value);
         }
 
-        private sealed class DocumentHandleBox
+        private static Dictionary<string, string> MapOf<TKey>(Dictionary<TKey, Dictionary<string, string>> maps, TKey key)
+            where TKey : notnull
         {
-            public DocumentHandleBox(CultRecordKey key)
+            if (!maps.TryGetValue(key, out var map))
+                maps[key] = map = new Dictionary<string, string>(StringComparer.Ordinal);
+            return map;
+        }
+
+        private static void RemoveKey(Dictionary<string, string> map, string key)
+        {
+            foreach (var stale in map.Where(pair => pair.Value == key).Select(pair => pair.Key).ToArray())
+                map.Remove(stale);
+        }
+
+        private sealed class KeyBox
+        {
+            public KeyBox(CultRecordKey key)
             {
                 Key = key;
             }
@@ -1800,36 +1751,32 @@ namespace GameCult.Caching
             public CultRecordKey Key { get; }
         }
 
-        private void RecomputeDirtyState()
+        private sealed class Change
         {
-            _hasUnflushedMutations = _backingStores.Count == 0
-                ? _hasUnflushedMutations
-                : _backingStores.Any(store => store.IsDirty);
-        }
-
-        private void PublishChange(CultStoredDocument stored, object? previousDocument, bool removed = false)
-        {
-            var changeType = typeof(CultCacheDocumentChange<>).MakeGenericType(stored.Descriptor.DocumentType);
-            var change = Activator.CreateInstance(
-                changeType,
-                removed ? CultCacheDocumentChangeKind.Removed :
-                previousDocument == null ? CultCacheDocumentChangeKind.Added :
-                CultCacheDocumentChangeKind.Updated,
-                stored.Key,
-                removed ? null : stored.Document,
-                previousDocument);
-            if (change != null)
+            public Change(CultCacheDocumentChangeKind kind, CultStoredDocument stored, object? document, object? previous)
             {
-                _changes.OnNext(change);
+                Kind = kind;
+                Stored = stored;
+                Document = document;
+                Previous = previous;
             }
+
+            public CultCacheDocumentChangeKind Kind { get; }
+            public CultStoredDocument Stored { get; }
+            public object? Document { get; }
+            public object? Previous { get; }
         }
     }
 
     public abstract class CacheBackingStore : IDisposable
     {
         private CultDocumentRegistry? _registry;
-        private bool _isDirty;
         private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
+
+        protected CacheBackingStore(bool readOnly = false)
+        {
+            IsReadOnly = readOnly;
+        }
 
         protected CultDocumentRegistry Registry =>
             _registry ?? throw new InvalidOperationException("Backing store is not attached to a CultDocumentRegistry.");
@@ -1837,19 +1784,17 @@ namespace GameCult.Caching
         protected ConcurrentDictionary<string, CultStoredDocument> Entries { get; } =
             new(StringComparer.Ordinal);
 
-        public bool IsDirty
-        {
-            get => _isDirty;
-            protected set => _isDirty = value;
-        }
+        public bool IsReadOnly { get; }
+
+        public bool IsDirty { get; protected set; }
 
         public bool FlushOnDispose { get; set; }
 
         public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
 
-        // Set by the cache at attach; a store calls them for records it loads or drops.
-        protected internal Action<CultStoredDocument>? Loaded;
-        protected internal Action<CultStoredDocument>? Unloaded;
+        // Set by the cache at attach. A pull hands over everything it loaded and dropped in one call before it adopts
+        // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
+        protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
         internal void AttachRegistry(CultDocumentRegistry registry)
         {
@@ -1857,44 +1802,26 @@ namespace GameCult.Caching
         }
 
         public abstract void PullAll();
-        public virtual bool ContainsDurableRecord(CultRecordKey key)
-        {
-            return Entries.ContainsKey(key.Value);
-        }
         public abstract void Push(CultStoredDocument entry);
         public abstract void Delete(CultStoredDocument entry);
-        // Stages and durably commits a batch as one step. Implementations must restore their prior
-        // staged view when finality fails.
-        public virtual void CommitBatch(
-            IReadOnlyCollection<CultStoredDocument> upserts,
-            IReadOnlyCollection<CultStoredDocument> deletes)
-        {
-            var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            var wasDirty = IsDirty;
-            try
-            {
-                foreach (var entry in deletes)
-                    Delete(entry);
-                foreach (var entry in upserts)
-                    Push(entry);
-                PushAll();
-            }
-            catch
-            {
-                Entries.Clear();
-                foreach (var pair in previousEntries)
-                    Entries[pair.Key] = pair.Value;
-                IsDirty = wasDirty;
-                throw;
-            }
-        }
         public abstract void PushAll();
+
+        // One durable step under the store's exclusive lock; conditions are evaluated against what is on disk then.
+        // A failure restores the store's staged view.
+        public abstract CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait);
+
         public virtual void Dispose()
         {
-            if (FlushOnDispose && IsDirty)
+            if (FlushOnDispose && IsDirty && !IsReadOnly)
             {
                 PushAll();
             }
+        }
+
+        protected void ThrowIfReadOnly()
+        {
+            if (IsReadOnly)
+                throw new InvalidOperationException($"Backing store {this} is read-only.");
         }
 
         protected CultPersistedRecord ToPersistedRecord(CultStoredDocument entry, Func<object, byte[]> serializePayload)
@@ -1935,7 +1862,8 @@ namespace GameCult.Caching
 
     public abstract class SingleFileBackingStore : CacheBackingStore
     {
-        protected SingleFileBackingStore(string filePath)
+        protected SingleFileBackingStore(string filePath, bool readOnly = false)
+            : base(readOnly)
         {
             FileInfo = new FileInfo(filePath);
         }
@@ -1946,93 +1874,164 @@ namespace GameCult.Caching
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
+        public override string ToString() => FileInfo.FullName;
+
         public override void PullAll()
         {
-            FileInfo.Refresh();
-            if (!FileInfo.Exists)
-            {
-                SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
-                IsDirty = false;
-                return;
-            }
-
-            // A single-file snapshot cannot distinguish local dirty keys from clean keys.
-            // Pulling while local mutations are staged would let an older disk snapshot
-            // erase those mutations before the next flush. Flush first; clean readers can
-            // still poll external snapshots incrementally.
+            // A single-file snapshot cannot distinguish local dirty keys from clean keys. Pulling while local mutations
+            // are staged would let an older disk snapshot erase them before the next flush. Flush first.
             if (IsDirty)
                 return;
 
-            CultPersistedStoreSnapshot snapshot;
-            try
+            var snapshot = ReadSnapshot();
+            if (snapshot == null)
             {
-                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+                SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
+                return;
             }
-            catch (FileNotFoundException)
-            {
-                FileInfo.Refresh();
-                if (!FileInfo.Exists)
-                    return;
-                snapshot = DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
-            }
+
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
-            var persistedKeys = new HashSet<string>(StringComparer.Ordinal);
+            var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
-                persistedKeys.Add(record.Key);
                 reports.Add(Registry.ResolvePersistedSchemaReport(record.SchemaId, snapshot.SchemaCatalog));
                 var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload);
-                if (Entries.TryGetValue(stored.Key.Value, out var existing) &&
-                    string.Equals(existing.StoredAt, stored.StoredAt, StringComparison.Ordinal) &&
-                    string.Equals(existing.Descriptor.SchemaId, stored.Descriptor.SchemaId, StringComparison.Ordinal))
-                {
-                    continue;
-                }
+                persisted[stored.Key.Value] = stored;
+            }
+
+            var loaded = persisted.Values
+                .Where(stored => !Entries.TryGetValue(stored.Key.Value, out var existing) ||
+                                 existing.StoredAt != stored.StoredAt ||
+                                 existing.Descriptor.SchemaId != stored.Descriptor.SchemaId)
+                .ToArray();
+            var dropped = Entries.Values.Where(existing => !persisted.ContainsKey(existing.Key.Value)).ToArray();
+            if (loaded.Length > 0 || dropped.Length > 0)
+                Loaded?.Invoke(loaded, dropped);
+
+            foreach (var stored in dropped)
+                Entries.TryRemove(stored.Key.Value, out _);
+            foreach (var stored in loaded)
                 Entries[stored.Key.Value] = stored;
-                Loaded?.Invoke(stored);
-            }
-
-            foreach (var removedKey in Entries.Keys.Where(key => !persistedKeys.Contains(key)).ToArray())
-            {
-                if (Entries.TryRemove(removedKey, out var removed))
-                    Unloaded?.Invoke(removed);
-            }
-
             SetLastSchemaMigrationReports(reports);
-            IsDirty = false;
         }
 
         public override void Push(CultStoredDocument entry)
         {
+            ThrowIfReadOnly();
             Entries[entry.Key.Value] = entry;
             IsDirty = true;
         }
 
         public override void Delete(CultStoredDocument entry)
         {
+            ThrowIfReadOnly();
             Entries.TryRemove(entry.Key.Value, out _);
             IsDirty = true;
         }
 
+        // A plain flush writes this store's whole view under the lock: two writers never interleave bytes, but the last
+        // one wins. Processes sharing a store must use conditional commit.
         public override void PushAll()
         {
+            ThrowIfReadOnly();
+            using (AcquireLock(wait: true))
+            {
+                WriteSnapshot(
+                    Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
+                    Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
+            }
+
+            MarkFlushSucceeded();
+        }
+
+        public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
+        {
+            ThrowIfReadOnly();
+            using var fileLock = AcquireLock(wait);
+            if (fileLock == null)
+                return CultCommitOutcome.Contended;
+
+            var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
+            if (!request.ConditionsHold(disk.Records, Entries.Values))
+                return CultCommitOutcome.Mismatch;
+
+            // A clean store commits onto the file as it is now, so records this store never loaded survive. A dirty
+            // store's staged view is the snapshot its flush would write, so the batch lands on that.
+            var records = IsDirty
+                ? Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)).ToDictionary(record => record.Key, StringComparer.Ordinal)
+                : disk.Records.ToDictionary(record => record.Key, StringComparer.Ordinal);
+            var catalog = IsDirty
+                ? Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())
+                : disk.SchemaCatalog;
+            foreach (var entry in request.Deletes)
+                records.Remove(entry.Key.Value);
+            foreach (var entry in request.Upserts)
+                records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
+
+            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())));
+            foreach (var entry in request.Deletes)
+                Entries.TryRemove(entry.Key.Value, out _);
+            foreach (var entry in request.Upserts)
+                Entries[entry.Key.Value] = entry;
+            MarkFlushSucceeded();
+            return CultCommitOutcome.Committed;
+        }
+
+        private CultPersistedStoreSnapshot? ReadSnapshot()
+        {
+            FileInfo.Refresh();
+            if (!FileInfo.Exists)
+                return null;
+            try
+            {
+                return DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+        }
+
+        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog)
+        {
+            var ordered = records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
+            var used = new HashSet<string>(ordered.Select(record => record.SchemaId), StringComparer.Ordinal);
             var snapshot = new CultPersistedStoreSnapshot
             {
-                SchemaCatalog = Entries.Values
-                    .Select(entry => entry.Descriptor.ToCatalogEntry())
+                SchemaCatalog = catalog
                     .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .Select(group => group.First())
+                    .Where(entry => used.Contains(entry.SchemaId))
                     .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
                     .ToArray(),
-                Records = Entries.Values
-                    .OrderBy(entry => entry.Key.Value, StringComparer.Ordinal)
-                    .Select(entry => ToPersistedRecord(entry, SerializePayload))
-                    .ToArray()
+                Records = ordered
             };
 
             Directory.CreateDirectory(FileInfo.DirectoryName!);
             WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
-            MarkFlushSucceeded();
+        }
+
+        // The lock is a sidecar opened exclusively, which excludes other handles in this process and in others alike.
+        private FileStream? AcquireLock(bool wait)
+        {
+            Directory.CreateDirectory(FileInfo.DirectoryName!);
+            var lockPath = FileInfo.FullName + ".lock";
+            var started = Stopwatch.StartNew();
+            while (true)
+            {
+                try
+                {
+                    return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, bufferSize: 1);
+                }
+                catch (IOException) when (!wait)
+                {
+                    return null;
+                }
+                catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
+                {
+                    Thread.Sleep(10);
+                }
+            }
         }
 
         private static void WriteSnapshotAtomically(string path, byte[] payload)

@@ -24,7 +24,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private Dictionary<string, CultPersistedRecord> _durableIndex = new(StringComparer.Ordinal);
     private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
 
-    public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null)
+    public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null, bool readOnly = false)
+        : base(readOnly)
     {
         if (string.IsNullOrWhiteSpace(manifestPath))
         {
@@ -36,6 +37,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     public static string DefaultRecordDirectoryPath(string manifestPath) => manifestPath + ".records";
+
+    public override string ToString() => _manifestFile.FullName;
 
     public override void PullAll()
     {
@@ -59,7 +62,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-        using (AcquireCommitLease())
+        using (AcquireCommitLease(wait: true))
         {
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded.
             var manifest = ReadManifest();
@@ -78,32 +81,26 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Trace($"indexed-pages loaded={loaded.Count}");
         }
 
-        foreach (var pair in loaded)
-        {
-            if (_dirtyKeys.ContainsKey(pair.Key) || _deletedKeys.ContainsKey(pair.Key))
-                continue;
+        bool Staged(string key) => _dirtyKeys.ContainsKey(key) || _deletedKeys.ContainsKey(key);
+        var arrived = loaded
+            .Where(pair => !Staged(pair.Key) &&
+                           (!Entries.TryGetValue(pair.Key, out var existing) ||
+                            existing.StoredAt != pair.Value.StoredAt ||
+                            existing.Descriptor.SchemaId != pair.Value.Descriptor.SchemaId))
+            .Select(pair => pair.Value)
+            .ToArray();
+        var departed = _hydratedKeys
+            .Where(key => !loaded.ContainsKey(key) && !Staged(key) && Entries.ContainsKey(key))
+            .Select(key => Entries[key])
+            .ToArray();
+        if (arrived.Length > 0 || departed.Length > 0)
+            Loaded?.Invoke(arrived, departed);
 
-            if (Entries.TryGetValue(pair.Key, out var existing) &&
-                string.Equals(existing.StoredAt, pair.Value.StoredAt, StringComparison.Ordinal) &&
-                string.Equals(existing.Descriptor.SchemaId, pair.Value.Descriptor.SchemaId, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            Entries[pair.Key] = pair.Value;
-            Loaded?.Invoke(pair.Value);
-        }
-
-        foreach (var removedKey in _hydratedKeys.Where(key => !loaded.ContainsKey(key)).ToArray())
-        {
-            if (_dirtyKeys.ContainsKey(removedKey) || _deletedKeys.ContainsKey(removedKey))
-                continue;
-
-            if (Entries.TryRemove(removedKey, out var removed))
-                Unloaded?.Invoke(removed);
-            _hydratedKeys.Remove(removedKey);
-        }
-
+        foreach (var stored in departed)
+            Entries.TryRemove(stored.Key.Value, out _);
+        _hydratedKeys.RemoveWhere(key => !loaded.ContainsKey(key) && !Staged(key));
+        foreach (var stored in arrived)
+            Entries[stored.Key.Value] = stored;
         foreach (var key in loaded.Keys)
             _hydratedKeys.Add(key);
 
@@ -112,14 +109,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Trace("publish");
     }
 
-    public override bool ContainsDurableRecord(CultRecordKey key)
-    {
-        lock (_mutationGate)
-            return _durableIndex.ContainsKey(key.Value) || base.ContainsDurableRecord(key);
-    }
-
     public override void Push(CultStoredDocument entry)
     {
+        ThrowIfReadOnly();
         lock (_mutationGate)
         {
             Entries[entry.Key.Value] = entry;
@@ -131,6 +123,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     public override void Delete(CultStoredDocument entry)
     {
+        ThrowIfReadOnly();
         lock (_mutationGate)
         {
             Entries.TryRemove(entry.Key.Value, out _);
@@ -140,32 +133,40 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
     }
 
-    public override void CommitBatch(
-        IReadOnlyCollection<CultStoredDocument> upserts,
-        IReadOnlyCollection<CultStoredDocument> deletes)
+    public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
     {
+        ThrowIfReadOnly();
         lock (_mutationGate)
         {
+            Directory.CreateDirectory(_manifestFile.DirectoryName!);
+            using var commitLease = AcquireCommitLease(wait);
+            if (commitLease == null)
+                return CultCommitOutcome.Contended;
+            var manifest = ReadManifest();
+            if (!request.ConditionsHold(manifest.Records, Entries.Values))
+                return CultCommitOutcome.Mismatch;
+
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
             var previousDeletedKeys = _deletedKeys.Keys.ToArray();
             var wasDirty = IsDirty;
             try
             {
-                foreach (var entry in deletes)
+                foreach (var entry in request.Deletes)
                 {
                     Entries.TryRemove(entry.Key.Value, out _);
                     _dirtyKeys.TryRemove(entry.Key.Value, out _);
                     _deletedKeys[entry.Key.Value] = true;
                 }
-                foreach (var entry in upserts)
+                foreach (var entry in request.Upserts)
                 {
                     Entries[entry.Key.Value] = entry;
                     _dirtyKeys[entry.Key.Value] = true;
                     _deletedKeys.TryRemove(entry.Key.Value, out _);
                 }
                 IsDirty = true;
-                PushAllCore();
+                WriteGeneration(manifest);
+                return CultCommitOutcome.Committed;
             }
             catch
             {
@@ -186,22 +187,22 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     public override void PushAll()
     {
+        ThrowIfReadOnly();
         lock (_mutationGate)
-            PushAllCore();
+        {
+            if (!IsDirty)
+                return;
+
+            Directory.CreateDirectory(_manifestFile.DirectoryName!);
+            using var commitLease = AcquireCommitLease(wait: true);
+            WriteGeneration(ReadManifest());
+        }
     }
 
-    private void PushAllCore()
+    // Runs under the commit lease: pages first, then the manifest that names them.
+    private void WriteGeneration(CultPersistedStoreSnapshot currentManifest)
     {
-        if (!IsDirty)
-        {
-            return;
-        }
-
-        Directory.CreateDirectory(_manifestFile.DirectoryName!);
         Directory.CreateDirectory(_recordDirectory.FullName);
-        using var commitLease = AcquireCommitLease();
-
-        var currentManifest = ReadManifest();
         var currentIndex = currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal);
         foreach (var key in _deletedKeys.Keys)
             currentIndex.Remove(key);
@@ -292,11 +293,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var record = ReadPersistedRecordPage(metadata, out var pagePayload);
-                var catalog = ResolveLegacyUncataloguedRecordCatalog(record, catalogEntries);
-                recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalog);
+                recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalogEntries);
                 storedRecords[index] = ToStoredDocument(
                     record,
-                    catalog,
+                    catalogEntries,
                     (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry));
                 if (tracePages)
                 {
@@ -379,80 +379,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         return snapshot;
-    }
-
-    // Explicit compatibility path for records written before catalog precommit existed.
-    private IReadOnlyCollection<CultSchemaCatalogEntry> ResolveLegacyUncataloguedRecordCatalog(
-        CultPersistedRecord record,
-        IReadOnlyCollection<CultSchemaCatalogEntry> manifestCatalog)
-    {
-        if (manifestCatalog.Any(entry => string.Equals(entry.SchemaId, record.SchemaId, StringComparison.Ordinal)))
-        {
-            return manifestCatalog;
-        }
-
-        var schemaVersion = TryReadPayloadSchemaVersion(record.Payload);
-        if (string.IsNullOrWhiteSpace(schemaVersion))
-        {
-            return manifestCatalog;
-        }
-
-        var schemaName = InferSchemaName(schemaVersion);
-        if (string.IsNullOrWhiteSpace(schemaName))
-        {
-            return manifestCatalog;
-        }
-
-        return manifestCatalog
-            .Append(new CultSchemaCatalogEntry
-            {
-                SchemaId = record.SchemaId,
-                SchemaName = schemaName,
-                SchemaVersion = schemaVersion,
-                ContentHash = record.SchemaId,
-                CanonicalSchemaJson = "",
-                CompatibleSchemaIds = Array.Empty<string>(),
-                Members = Array.Empty<CultSchemaMemberCatalogEntry>()
-            })
-            .ToArray();
-    }
-
-    private static string TryReadPayloadSchemaVersion(byte[] payload)
-    {
-        if (payload == null || payload.Length == 0)
-        {
-            return "";
-        }
-
-        try
-        {
-            var reader = new MessagePackReader(payload);
-            if (reader.NextMessagePackType != MessagePackType.Array)
-            {
-                return "";
-            }
-
-            if (reader.ReadArrayHeader() <= 0)
-            {
-                return "";
-            }
-
-            return reader.NextMessagePackType == MessagePackType.String
-                ? reader.ReadString() ?? ""
-                : "";
-        }
-        catch
-        {
-            return "";
-        }
-    }
-
-    private static string InferSchemaName(string schemaVersion)
-    {
-        var versionMarker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-        return versionMarker > 0 && versionMarker + 2 < schemaVersion.Length && char.IsDigit(schemaVersion[versionMarker + 2])
-            ? schemaVersion.Substring(0, versionMarker)
-            : "";
     }
 
     private string ContentAddressedRecordPath(CultPersistedRecord metadata)
@@ -553,7 +479,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         return buffer.ToArray();
     }
 
-    private FileStream AcquireCommitLease()
+    private FileStream? AcquireCommitLease(bool wait)
     {
         Directory.CreateDirectory(_recordDirectory.FullName);
         var lockPath = Path.Combine(_recordDirectory.FullName, ".commit.lock");
@@ -569,6 +495,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     FileShare.None,
                     bufferSize: 1,
                     FileOptions.WriteThrough);
+            }
+            catch (IOException) when (!wait)
+            {
+                return null;
             }
             catch (IOException) when (started.Elapsed < TimeSpan.FromSeconds(30))
             {

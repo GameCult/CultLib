@@ -8,7 +8,7 @@ namespace GameCult.Caching.MessagePack
     {
         public CultDocumentRegistry? Registry { get; set; }
 
-        public bool PullOnOpen { get; set; } = true;
+        public bool ReadOnly { get; set; }
 
         public bool FlushOnDispose { get; set; }
 
@@ -19,57 +19,32 @@ namespace GameCult.Caching.MessagePack
 
     public static class CultCacheMessagePack
     {
+        // Opening hydrates. A consumer that wants a fresh store removes the records it does not keep, upserts, and
+        // flushes; the atomic replace does the rest.
         public static CultCache Create(string filePath, CultCacheOpenOptions? options = null)
-        {
-            options ??= new CultCacheOpenOptions();
-            return CreateCore(filePath, options, initializeGlobals: true);
-        }
-
-        public static async Task<CultCache> OpenAsync(string filePath, CultCacheOpenOptions? options = null)
-        {
-            options ??= new CultCacheOpenOptions();
-            var cache = CreateCore(filePath, options, initializeGlobals: false);
-            if (options.PullOnOpen)
-            {
-                await cache.PullAllBackingStoresAsync().ConfigureAwait(false);
-            }
-
-            cache.MaterializeMissingGlobals();
-
-            return cache;
-        }
-
-        private static CultCache CreateCore(
-            string filePath,
-            CultCacheOpenOptions options,
-            bool initializeGlobals)
         {
             if (string.IsNullOrWhiteSpace(filePath))
             {
                 throw new ArgumentException("File path must be non-empty.", nameof(filePath));
             }
 
-            var cache = new CultCache(options.Registry, initializeGlobals)
+            options ??= new CultCacheOpenOptions();
+            var cache = new CultCache(options.Registry)
             {
                 FlushAttachedStoresOnDispose = options.FlushOnDispose
             };
 
-            if (options.UseDirectoryStore || Directory.Exists(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath)))
-            {
-                cache.AddBackingStore(new DirectoryMessagePackBackingStore(filePath)
-                {
-                    FlushOnDispose = options.StoreFlushOnDispose
-                });
-            }
-            else
-            {
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(filePath)
-                {
-                    FlushOnDispose = options.StoreFlushOnDispose
-                });
-            }
-
+            CacheBackingStore store = options.UseDirectoryStore || Directory.Exists(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath))
+                ? new DirectoryMessagePackBackingStore(filePath, readOnly: options.ReadOnly)
+                : new SingleFileMessagePackBackingStore(filePath, options.ReadOnly);
+            store.FlushOnDispose = options.StoreFlushOnDispose;
+            cache.AddBackingStore(store);
             return cache;
+        }
+
+        public static Task<CultCache> OpenAsync(string filePath, CultCacheOpenOptions? options = null)
+        {
+            return Task.FromResult(Create(filePath, options));
         }
     }
 }

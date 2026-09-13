@@ -353,7 +353,7 @@ public static class CultDocumentMessagePackSerialization
 
 public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 {
-    public SingleFileMessagePackBackingStore(string filePath) : base(filePath)
+    public SingleFileMessagePackBackingStore(string filePath, bool readOnly = false) : base(filePath, readOnly)
     {
     }
 

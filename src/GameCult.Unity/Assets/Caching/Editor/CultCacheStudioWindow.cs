@@ -517,7 +517,7 @@ namespace GameCult.Unity.Caching.Editor
             if (!string.IsNullOrEmpty(selected))
             {
                 _path = selected;
-                OpenPath(true);
+                OpenPath();
             }
         }
 
@@ -528,16 +528,16 @@ namespace GameCult.Unity.Caching.Editor
             if (!string.IsNullOrEmpty(selected))
             {
                 _path = selected;
-                OpenPath(false);
+                OpenPath();
                 SaveCurrent();
             }
         }
 
-        private void OpenPath(bool pullOnOpen)
+        private void OpenPath()
         {
             try
             {
-                _cache = CultCacheBridge.Open(_path, pullOnOpen);
+                _cache = CultCacheBridge.Open(_path);
                 _selectedType = CultCacheBridge.GetDescriptors(_cache).FirstOrDefault()?.DocumentType;
                 _selectedKey = string.Empty;
                 EditorPrefs.SetString(LastPathKey, _path);
@@ -680,11 +680,10 @@ namespace GameCult.Unity.Caching.Editor
 
             public static bool IsAvailable => CacheType != null && OpenOptionsType != null && MessagePackType != null && RecordKeyType != null;
 
-            public static object Open(string path, bool pullOnOpen)
+            public static object Open(string path)
             {
                 EnsureAvailable();
                 var options = Activator.CreateInstance(OpenOptionsType);
-                OpenOptionsType.GetProperty("PullOnOpen").SetValue(options, pullOnOpen, null);
                 var method = MessagePackType.GetMethod("OpenAsync", new[] { typeof(string), OpenOptionsType });
                 var task = (Task)method.Invoke(null, new[] { path, options });
                 task.GetAwaiter().GetResult();

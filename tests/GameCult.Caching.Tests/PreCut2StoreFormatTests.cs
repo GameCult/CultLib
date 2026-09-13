@@ -104,11 +104,10 @@ namespace GameCult.Caching.Tests
                 File.WriteAllBytes(manifest, bytes);
 
                 using var cache = new CultCache();
-                var store = new DirectoryMessagePackBackingStore(manifest);
-                cache.AddBackingStore(store);
 
-                Assert.That(() => store.PullAll(),
+                Assert.That(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)),
                     Throws.TypeOf<InvalidOperationException>().With.Message.Contains(formatVersion));
+                Assert.That(cache.BackingStores, Is.Empty);
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(bytes));
             }
             finally

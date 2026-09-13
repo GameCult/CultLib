@@ -1761,8 +1761,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -1820,8 +1819,7 @@ public sealed class CultMeshStreamingTests
                        StartServer = false,
                        CacheOptions = new CultCacheOpenOptions
                        {
-                           Registry = sourceCache.Registry,
-                           PullOnOpen = false
+                           Registry = sourceCache.Registry
                        },
                        DatabaseOptions = new CultNetDatabaseOptions
                        {
@@ -1846,8 +1844,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -1899,8 +1896,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2760,8 +2756,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2835,8 +2830,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = targetCache.Registry,
-                    PullOnOpen = false
+                    Registry = targetCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2993,8 +2987,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = cacheRegistry,
-                    PullOnOpen = false
+                    Registry = cacheRegistry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -3030,8 +3023,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -3170,8 +3162,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
