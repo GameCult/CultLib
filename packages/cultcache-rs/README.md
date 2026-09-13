@@ -230,15 +230,17 @@ cache.add_backing_store(
 );
 ```
 
-When writing a `PlayerData`, the cache checks type-specific stores first. If none
-match, it writes to the first generic store. Later matching stores are mirrors.
+The contract, shared with every runtime, is one home store per document type
+(`src/GameCult.Caching/Contracts/cultcache-store-composition.md` in CultLib):
 
-This mirrors the C# behavior:
+- a type-specific store owns its types; otherwise the generic store is the home
+- at most one generic store, and no type claimed by two stores
+- a write touches exactly one store; there are no mirrors
 
-- specific domain stores own their domain
-- the first generic store is the primary generic write target
-- later generic stores mirror writes
-- this is not multi-master
+This crate does not yet enforce it: `add_backing_store` accepts overlapping
+routes and a second generic store, and writes are pushed to every matching
+store after the first. Attach one generic store, or type-specific stores whose
+types do not overlap.
 
 ## Persistence Semantics
 

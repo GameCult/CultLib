@@ -1,73 +1,52 @@
 # GameCult.Caching.MessagePack.Generator
 
-`GameCult.Caching.MessagePack.Generator` is a Roslyn incremental source generator that emits MessagePack formatters for concrete `DatabaseEntry` subclasses.
+A Roslyn incremental source generator that emits CultCache document metadata,
+and MessagePack payload codecs where it can, for classes marked
+`[CultDocument]`.
 
 ## Scope
 
-This project is infrastructure for the caching stack. Application code usually does not reference it directly.
-
-Its job is to:
-
-- find non-abstract subclasses of `DatabaseEntry`
-- generate concrete `IMessagePackFormatter<T>` implementations
-- generate resolver mappings consumed by `DatabaseEntryResolver`
+Infrastructure for the caching stack. Application code does not reference it
+directly; it arrives through `GameCult.Caching.MessagePack.Analyzers`. Without
+it, `CultDocumentRegistry` builds the same descriptors by reflection.
 
 ## What It Generates
 
-For each discovered concrete `DatabaseEntry` subtype, the generator emits:
+One `GeneratedCultDocumentMetadataProvider_<Assembly>` per assembly, registered
+with `[assembly: CultGeneratedDocumentMetadataProvider]`, holding for each
+`[CultDocument]` class:
 
-- a formatter type
-- a resolver mapping entry
+- schema name, schema version, and whether the type is `[CultGlobal]`
+- member definitions (name, slot, persisted type name, reference and
+  cardinality, `[CultName]`, `[CultIndex]`)
+- name and index accessors
+- a payload serializer, and a deserializer when the type has a public or
+  internal parameterless constructor
 
-Member slot assignment is:
+Members are the public, non-static, non-`[IgnoreMember]` fields and settable
+properties **declared on the class itself**; inherited members are not
+discovered. Members with `[Key(n)]` take slot `n`; unkeyed members follow the
+highest key in ordinal name order. Annotate every persisted member: source
+order is not a schema.
 
-1. `ID` in slot `0`
-2. members with `[Key(...)]` in their exact key slot
-3. remaining non-ignored instance fields and properties appended after the
-   highest occupied slot as legacy convenience
+Payload codecs are emitted only when slots are dense (`0..n-1`) and the
+compilation references MessagePack and `GameCult.Caching.MessagePack`.
+Otherwise the definition carries no codec and serialization falls back to the
+reflective path. A generated payload is an array of the members in slot order;
+the deserializer leaves missing trailing slots at their initializer values and
+skips unknown extra slots. Generated codecs read
+`CultDocumentMessagePackSerialization.Options` at call time.
 
-The generated formatter writes a MessagePack array sized to the highest occupied
-slot and writes nil for unused gaps. Deserialization tolerates shorter older
-arrays by leaving missing members at their constructor/field-initializer values,
-and skips unknown extra slots. That makes `[Key(n)]` a durable wire contract:
-deleted fields can leave their slot reserved and new fields can use new keys
-without a store migration.
-
-For schema-stable cache entries, annotate every persisted member. Unkeyed
-members are supported for older code, but they are not a good long-term wire
-contract because source member order is not a schema.
-
-## Example
-
-Given:
-
-```csharp
-[MessagePackObject]
-public class PlayerData : DatabaseEntry, INamedEntry
-{
-    [Key(1)] public string Email = string.Empty;
-    [Key(2)] public string PasswordHash = string.Empty;
-    [Key(3)] public string Username = string.Empty;
-
-    [IgnoreMember]
-    public string EntryName
-    {
-        get => Username;
-        set => Username = value;
-    }
-}
-```
-
-the generator emits the formatter plumbing needed for MessagePack serialization of `PlayerData` without manually implementing an `IMessagePackFormatter<PlayerData>`.
+The generator has no `[Union]` handling.
 
 ## When You Need To Think About This Package
 
-Usually only when:
-
-- formatter generation is not happening
-- a cache-entry type is not serializing as expected
-- you are debugging build-time source generation behavior
+- a document's descriptor or schema id differs between generated and
+  reflective builds
+- a document serializes through the reflective path when you expected a codec
+- you are debugging build-time source generation
 
 ## Distribution
 
-The generator is packaged for consumers through [../GameCult.Caching.MessagePack.Analyzers/README.md](../GameCult.Caching.MessagePack.Analyzers/README.md).
+Packaged for consumers through
+[../GameCult.Caching.MessagePack.Analyzers/README.md](../GameCult.Caching.MessagePack.Analyzers/README.md).

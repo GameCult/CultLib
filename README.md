@@ -237,41 +237,23 @@ public class ItemData : DatabaseEntry, INamedEntry
 - backing stores are persistence adapters
 - indexes and name maps are maintained inside the cache, not inside the store
 
-### Important: Multiple Backing Stores
+### Multiple Backing Stores
 
-When multiple backing stores are added, behavior depends on how they are registered.
-
-If a store is added with domain types:
+Every document type has exactly one home store. There are no mirrors.
 
 ```csharp
-cache.AddBackingStore(playerStore, typeof(PlayerData));
-cache.AddBackingStore(settingsStore, typeof(AppSettings));
+cache.AddBackingStore(catalogStore, typeof(ItemData), typeof(Faction));
+cache.AddBackingStore(runStore, typeof(SavedGame));
 ```
 
-then that store becomes the direct persistence target for those types.
+- the home is chosen by the document's runtime type: the most derived routed type wins, otherwise the untyped store
+- at most one untyped store; a type claimed by two stores is an error
+- a write with no home is an error once any store is attached
+- attaching a store reads it; attach routed stores first and the untyped store (if any) last, because a record's home cannot move after it is loaded
+- loading never writes: opening and flushing without a mutation leaves every file byte-identical
+- a read-only store refuses writes and is skipped by flush
 
-If a store is added without domain types:
-
-```csharp
-cache.AddBackingStore(primaryStore);
-cache.AddBackingStore(mirrorStore);
-```
-
-then the first generic store acts as the primary writable store for non-domain-specific entries. Additional generic stores subscribe to the existing stores and mirror their change events.
-
-Implications:
-
-- order matters for generic stores
-- `AddAsync` writes to the type-specific store when one exists
-- otherwise `AddAsync` writes to the first generic store
-- later generic stores do not become co-primaries; they mirror earlier stores
-- `PullAllBackingStoresAsync` pulls from every registered store
-
-Recommended patterns:
-
-- use one generic primary store if you want simple persistence
-- use domain-specific stores when different entry types belong in different persistence layers
-- treat additional generic stores as mirrors or downstream replicas, not independent write targets
+The contract is `src/GameCult.Caching/Contracts/cultcache-store-composition.md`. Until the C# cache implements it, `AddBackingStore` takes no home types and every attached store receives every record; attach one store per cache.
 
 ## Example: Cache + Networking
 
