@@ -16,6 +16,8 @@ namespace GameCult.Caching.Tests
     public class DocumentShapeTests
     {
         private const string NonPublicSetter = "has a non-public set accessor; MessagePack writes it but never reads it back without AllowPrivate, so make the setter public or add [MessagePackObject(AllowPrivate = true)].";
+        private const string Unkeyed = "has no [Key]; MessagePack requires [Key(n)] or [IgnoreMember] on every public member, so mark it one or the other.";
+        private const string ReadonlyUnfilled = "is a readonly field that no constructor fills; MessagePack writes it but never reads it back, so give the constructor MessagePack calls a parameter at position {0}, drop readonly, or add [MessagePackObject(AllowPrivate = true)].";
         private const string DivergentOverride ="overrides {0} with a different [Key] or [IgnoreMember]; MessagePack reads the base declaration's, so an override must repeat or omit them.";
 
         private static readonly ModuleBuilder Rejected = AssemblyBuilder
@@ -104,7 +106,7 @@ namespace GameCult.Caching.Tests
             var type = Document("Unkeyed");
             Field(type, "Name", typeof(string), Key(0));
             Field(type, "Count", typeof(int));
-            Reject(type.CreateType()!, "Cult document Unkeyed member Count has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].");
+            Reject(type.CreateType()!, "Cult document Unkeyed member Count " + Unkeyed);
         }
 
         // MessagePack's DynamicObjectResolver reads the base declaration: it throws "key is duplicated" for this shape.
@@ -218,6 +220,81 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(Accept(new InternalSetterNote { Name = "n" })), Is.EqualTo("91A16E"));
         }
 
+        // MessagePack fills a get-only property through the longest constructor whose parameters take the keyed members by position.
+        [Test]
+        public void GetOnlyPropertyFilledByConstructor()
+        {
+            Assert.That(Convert.ToHexString(Accept(new GetOnlyNote("n", 2))), Is.EqualTo("92A16E02"));
+            AssertSlots<GetOnlyNote>("0:Name", "1:Count");
+        }
+
+        // The three-parameter constructor has no member at position 2, so MessagePack falls back to the one-parameter constructor.
+        [Test]
+        public void ReadonlyFieldFilledByConstructor()
+        {
+            Assert.That(Convert.ToHexString(Accept(new ReadonlyNote("n") { Count = 3 })), Is.EqualTo("92A16E03"));
+            AssertSlots<ReadonlyNote>("0:Name", "1:Count");
+        }
+
+        // Under AllowPrivate MessagePack writes a readonly field directly; no constructor has to fill it.
+        [Test]
+        public void ReadonlyFieldUnderAllowPrivate()
+        {
+            var sample = new ReadonlyPrivateNote();
+            typeof(ReadonlyPrivateNote).GetField(nameof(ReadonlyPrivateNote.Name))!.SetValue(sample, "n");
+            Assert.That(Convert.ToHexString(Accept(sample)), Is.EqualTo("91A16E"));
+            Assert.That(((ReadonlyPrivateNote)CultDocumentMessagePackSerialization.DeserializeUntyped(
+                typeof(ReadonlyPrivateNote), Accept(sample), CultDocumentRegistry.ForTypes(new[] { typeof(ReadonlyPrivateNote) }))).Name, Is.EqualTo("n"));
+            AssertSlots<ReadonlyPrivateNote>("0:Name");
+        }
+
+        // MessagePack throws "all public members must mark KeyAttribute or IgnoreMemberAttribute" for this shape.
+        [Test]
+        public void UnkeyedGetOnlyProperty()
+        {
+            var type = Document("UnkeyedGetter");
+            Field(type, "Name", typeof(string), Key(0));
+            GetOnlyProperty(type, "Upper");
+            Reject(type.CreateType()!, "Cult document UnkeyedGetter member Upper " + Unkeyed);
+        }
+
+        // MessagePack writes Label and loads it back as the default: only the parameterless constructor exists.
+        [Test]
+        public void GetOnlyPropertyNoConstructorFills()
+        {
+            var type = Document("GetterUnfilled");
+            Field(type, "Name", typeof(string), Key(0));
+            GetOnlyProperty(type, "Label", Key(1));
+            Reject(type.CreateType()!, "Cult document GetterUnfilled member Label is a get-only property that no constructor fills; MessagePack writes it but never reads it back, so give the constructor MessagePack calls a parameter at position 1, add a setter, or mark it [IgnoreMember].");
+        }
+
+        // Without AllowPrivate MessagePack writes Name and loads it back as the field initializer's value.
+        [Test]
+        public void ReadonlyFieldNoConstructorFills()
+        {
+            var type = Document("ReadonlyUnfilled");
+            type.DefineField("Name", typeof(string), FieldAttributes.Public | FieldAttributes.InitOnly).SetCustomAttribute(Key(0));
+            Reject(type.CreateType()!, "Cult document ReadonlyUnfilled member Name " + string.Format(ReadonlyUnfilled, 0));
+        }
+
+        // MessagePack picks the one-parameter constructor, which fills Name but not Other; Other loads back as its default.
+        [Test]
+        public void ReadonlyFieldBeyondPickedConstructor()
+        {
+            var type = Document("ReadonlyBeyond");
+            var name = type.DefineField("Name", typeof(string), FieldAttributes.Public | FieldAttributes.InitOnly);
+            name.SetCustomAttribute(Key(0));
+            type.DefineField("Other", typeof(string), FieldAttributes.Public | FieldAttributes.InitOnly).SetCustomAttribute(Key(1));
+            var il = type.DefineConstructor(MethodAttributes.Public, CallingConventions.HasThis, new[] { typeof(string) }).GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Call, typeof(object).GetConstructor(Type.EmptyTypes)!);
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Stfld, name);
+            il.Emit(OpCodes.Ret);
+            Reject(type.CreateType()!, "Cult document ReadonlyBeyond member Other " + string.Format(ReadonlyUnfilled, 1));
+        }
+
         [Test]
         public void StringKey()
         {
@@ -236,6 +313,23 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(payload), Is.EqualTo(Convert.ToHexString(expected)), $"{type.Name}: payload");
             Assert.That(Convert.ToHexString(CultDocumentMessagePackSerialization.SerializeUntyped(decoded, type, registry)), Is.EqualTo(Convert.ToHexString(payload)), $"{type.Name}: round trip");
             return payload;
+        }
+
+        private static void AssertSlots<T>(params string[] expected) where T : class =>
+            Assert.That(CultDocumentRegistry.ForTypes(new[] { typeof(T) }).GetRequired<T>().ToCatalogEntry().Members.Select(member => $"{member.Slot}:{member.MemberName}"), Is.EqualTo(expected));
+
+        private static void GetOnlyProperty(TypeBuilder type, string name, params CustomAttributeBuilder[] attributes)
+        {
+            var backing = type.DefineField("_" + name, typeof(string), FieldAttributes.Private);
+            backing.SetCustomAttribute(new CustomAttributeBuilder(typeof(IgnoreMemberAttribute).GetConstructor(Type.EmptyTypes)!, Array.Empty<object>()));
+            var getter = type.DefineMethod("get_" + name, MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.HideBySig, typeof(string), Type.EmptyTypes);
+            var il = getter.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldfld, backing);
+            il.Emit(OpCodes.Ret);
+            var property = type.DefineProperty(name, PropertyAttributes.None, typeof(string), null);
+            property.SetGetMethod(getter);
+            foreach (var attribute in attributes) property.SetCustomAttribute(attribute);
         }
 
         private static void Reject(Type type, string expected) =>
@@ -339,6 +433,39 @@ namespace GameCult.Caching.Tests
         internal sealed class InternalSetterNote
         {
             [Key(0)] public string Name { get; internal set; } = "";
+        }
+
+        [CultDocument("shape.get_only", "shape.get_only.v1")]
+        [MessagePackObject]
+        public sealed class GetOnlyNote
+        {
+            public GetOnlyNote(string name, int count)
+            {
+                Name = name;
+                Count = count;
+            }
+
+            [Key(0)] public string Name { get; }
+            [Key(1)] public int Count { get; set; }
+        }
+
+        [CultDocument("shape.readonly", "shape.readonly.v1")]
+        [MessagePackObject]
+        public sealed class ReadonlyNote
+        {
+            public ReadonlyNote() => Name = "";
+            public ReadonlyNote(string name) => Name = name;
+            public ReadonlyNote(string name, int count, string extra) => Name = name;
+
+            [Key(0)] public readonly string Name;
+            [Key(1)] public int Count { get; set; }
+        }
+
+        [CultDocument("shape.readonly_private", "shape.readonly_private.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class ReadonlyPrivateNote
+        {
+            [Key(0)] public readonly string Name = "init";
         }
 
         [MessagePackObject]

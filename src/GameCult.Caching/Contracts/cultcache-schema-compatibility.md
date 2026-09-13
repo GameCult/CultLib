@@ -34,23 +34,32 @@ A member's slot is its MessagePack `[Key(n)]` integer. MessagePack's `[Key]` and
 the registry refuses a document type without `[MessagePackObject]` and a
 non-public document type without `[MessagePackObject(AllowPrivate = true)]`.
 A member's type name is the CLR full name; a nested type is written `Outer+Inner`.
-The registry also refuses a persisted member without `[Key]`, a string
-`[Key]`, two members sharing a slot (including `new`-hidden members), a hidden
-persisted member, an override whose `[Key]` or `[IgnoreMember]` differs from its
-base declaration's (MessagePack reads the base declaration), and a readonly
-persisted field.
+The registry also refuses a public member without `[Key]` or `[IgnoreMember]`
+(get-only properties included; MessagePack throws on them), a string `[Key]`,
+two members sharing a slot (including `new`-hidden members), a hidden persisted
+member, and an override whose `[Key]` or `[IgnoreMember]` differs from its base
+declaration's (MessagePack reads the base declaration).
 
 Visibility follows MessagePack's rule: the registry accepts what MessagePack
 round-trips and refuses what it would silently lose. The registry persists
-public fields and properties only. Without `AllowPrivate`, a persisted property
-needs a public setter, and a `[Key]` on a non-public member is refused because
-MessagePack skips that member. With `AllowPrivate`, private, internal and
-init-only setters are all writable. But MessagePack then also reads non-public
-members, so every non-public instance field or property must be
-`[IgnoreMember]`. A class also needs a constructor MessagePack can call. That
-is a parameterless one (public unless `AllowPrivate`), or one whose parameters
-take the members at `[Key(0)]`, `[Key(1)]`, ... in order. A primary constructor
-usually has neither.
+every keyed public field and property, get-only ones included, because
+MessagePack writes them all. A `[Key]` on a non-public member without
+`AllowPrivate` is refused because MessagePack skips that member. With
+`AllowPrivate`, MessagePack also reads non-public members, so every non-public
+instance field or property must be `[IgnoreMember]`.
+
+A class needs a constructor MessagePack can call: the `[SerializationConstructor]`
+if one is marked, otherwise the longest constructor (public unless
+`AllowPrivate`) whose every parameter takes the keyed member at its position
+(`[Key(0)]`, `[Key(1)]`, ...). A parameterless constructor always qualifies; a
+primary constructor usually does not. MessagePack reads a member back through
+its setter, or through that constructor when the member's slot is below the
+constructor's parameter count. A setter counts when it is public, or any setter
+(private, internal, init-only) under `AllowPrivate`; a readonly field counts as
+writable under `AllowPrivate` only. A keyed member MessagePack cannot read back
+either way is refused: a get-only property, a readonly field without
+`AllowPrivate`, or a property whose setter is non-public without
+`AllowPrivate`, when the constructor does not fill it.
 
 ## Which schema a record carries
 

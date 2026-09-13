@@ -833,24 +833,24 @@ namespace GameCult.Caching
             public int[] DefaultedMissingSlots { get; }
         }
 
-        // Public instance fields and get/set properties, most-derived declaration first; GetCustomAttributes inherits a property's
-        // attributes up its override chain, as MessagePack's own resolver reads them.
+        // Public instance fields and properties (get-only included: MessagePack writes every keyed public member), most-derived
+        // declaration first; GetCustomAttributes inherits a property's attributes up its override chain, as MessagePack's resolver reads them.
         private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
         {
             const BindingFlags declared = BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.Public;
             var messagePackObject = type.GetCustomAttribute<MessagePackObjectAttribute>(true);
             var allowPrivate = messagePackObject?.AllowPrivate == true;
+            // Writable: MessagePack can assign the member after construction. A member that is not must be filled by the constructor.
             var candidates = new List<(MemberInfo Member, Type MemberType, int Depth, bool Writable, PropertyInfo? DivergentRoot)>();
-            // Keyed get-only properties: MessagePack writes them and fills them through a constructor parameter only.
-            var constructorOnly = new List<(Type MemberType, int Slot)>();
             var seenRoots = new HashSet<(Type, string)>();
             var depth = 0;
             for (var current = type; current != null && current != typeof(object); current = current.BaseType, depth++)
             {
                 foreach (var field in current.GetFields(declared))
                 {
+                    // MessagePack's rule: a readonly field is writable under AllowPrivate only.
                     if (!IsIgnored(field))
-                        candidates.Add((field, field.FieldType, depth, !field.IsInitOnly, null));
+                        candidates.Add((field, field.FieldType, depth, !field.IsInitOnly || allowPrivate, null));
                 }
 
                 foreach (var property in current.GetProperties(declared))
@@ -861,12 +861,6 @@ namespace GameCult.Caching
                     var setter = chain.Select(declaration => declaration.SetMethod).FirstOrDefault(method => method != null);
                     if (chain.All(declaration => declaration.GetMethod == null))
                         continue;
-                    if (setter == null)
-                    {
-                        if (!IsIgnored(property) && GetKeyValue(property) is int constructorSlot)
-                            constructorOnly.Add((property.PropertyType, constructorSlot));
-                        continue;
-                    }
                     // MessagePack's resolver reads the base declaration's [Key]/[IgnoreMember]; an override that changes them is refused.
                     var root = chain[chain.Length - 1];
                     var divergentRoot = chain.Any(declaration =>
@@ -876,7 +870,7 @@ namespace GameCult.Caching
                     if (divergentRoot == null && IsIgnored(property))
                         continue;
                     // MessagePack's own rule: it calls a setter that is public, or any setter (init-only included) under AllowPrivate.
-                    candidates.Add((property, property.PropertyType, depth, setter.IsPublic || allowPrivate, divergentRoot));
+                    candidates.Add((property, property.PropertyType, depth, setter != null && (setter.IsPublic || allowPrivate), divergentRoot));
                 }
             }
 
@@ -901,7 +895,7 @@ namespace GameCult.Caching
                     }
                 }
             }
-            var keyed = new List<(MemberInfo Member, Type MemberType, int Slot)>();
+            var keyed = new List<(MemberInfo Member, Type MemberType, int Slot, bool Writable)>();
             foreach (var candidate in candidates.OrderBy(candidate => candidate.Depth).ThenBy(candidate => candidate.Member.Name, StringComparer.Ordinal))
             {
                 var key = GetKeyValue(candidate.Member);
@@ -912,17 +906,29 @@ namespace GameCult.Caching
                 else if (key is not int slot)
                     rejections.Add(UnkeyedMemberMessage(type.Name, candidate.Member.Name));
                 else
-                {
-                    if (!candidate.Writable)
-                        rejections.Add(candidate.Member is FieldInfo
-                            ? NotWritableMessage(type.Name, candidate.Member.Name)
-                            : NonPublicSetterMessage(type.Name, candidate.Member.Name));
-                    keyed.Add((candidate.Member, candidate.MemberType, slot));
-                }
+                    keyed.Add((candidate.Member, candidate.MemberType, slot, candidate.Writable));
             }
 
-            if (messagePackObject != null && !type.IsValueType && !HasMessagePackConstructor(type, allowPrivate, keyed.Select(entry => (entry.MemberType, entry.Slot)).Concat(constructorOnly)))
-                rejections.Add(NoConstructorMessage(type.Name));
+            if (messagePackObject != null)
+            {
+                // A member MessagePack cannot assign is read back only through the picked constructor's parameter at its slot.
+                var arity = ConstructorArity(type, allowPrivate, keyed.Select(entry => (entry.MemberType, entry.Slot)));
+                if (arity == null)
+                    rejections.Add(NoConstructorMessage(type.Name));
+                else
+                {
+                    foreach (var entry in keyed.Where(entry => !entry.Writable && entry.Slot >= arity))
+                    {
+                        rejections.Add(entry.Member switch
+                        {
+                            FieldInfo => ReadonlyUnfilledMessage(type.Name, entry.Member.Name, entry.Slot),
+                            PropertyInfo property when property.SetMethod == null && OverrideChain(property).All(declaration => declaration.SetMethod == null) =>
+                                GetOnlyUnfilledMessage(type.Name, entry.Member.Name, entry.Slot),
+                            _ => NonPublicSetterMessage(type.Name, entry.Member.Name)
+                        });
+                    }
+                }
+            }
 
             foreach (var group in keyed.GroupBy(entry => entry.Slot).Where(group => group.Count() > 1).OrderBy(group => group.Key))
             {
@@ -965,18 +971,23 @@ namespace GameCult.Caching
             }
         }
 
-        // MessagePack's DynamicObjectResolver: the [SerializationConstructor] if one is marked, otherwise any public constructor (any
-        // constructor under AllowPrivate) whose every parameter takes the keyed member at its position (slot == parameter index).
-        private static bool HasMessagePackConstructor(Type type, bool allowPrivate, IEnumerable<(Type MemberType, int Slot)> members)
+        // MessagePack's DynamicObjectResolver picks the [SerializationConstructor] if one is marked, otherwise the longest public constructor
+        // (any constructor under AllowPrivate) whose every parameter takes the keyed member at its position (slot == parameter index).
+        // Returns that constructor's parameter count, 0 for a struct with none, or null when MessagePack finds no constructor.
+        private static int? ConstructorArity(Type type, bool allowPrivate, IEnumerable<(Type MemberType, int Slot)> members)
         {
             var slots = new Dictionary<int, Type>();
             foreach (var member in members)
                 slots.TryAdd(member.Slot, member.MemberType);
             var constructors = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             var marked = constructors.Where(constructor => constructor.IsDefined(typeof(SerializationConstructorAttribute))).ToArray();
-            return (marked.Length > 0 ? marked : constructors.Where(constructor => allowPrivate || constructor.IsPublic)).Any(constructor =>
-                constructor.GetParameters().All(parameter =>
-                    slots.TryGetValue(parameter.Position, out var memberType) && parameter.ParameterType.IsAssignableFrom(memberType)));
+            var arities = (marked.Length > 0 ? marked : constructors.Where(constructor => allowPrivate || constructor.IsPublic))
+                .Select(constructor => constructor.GetParameters())
+                .Where(parameters => parameters.All(parameter =>
+                    slots.TryGetValue(parameter.Position, out var memberType) && parameter.ParameterType.IsAssignableFrom(memberType)))
+                .Select(parameters => (int?)parameters.Length)
+                .ToArray();
+            return arities.Length > 0 ? arities.Max() : type.IsValueType && marked.Length == 0 ? 0 : null;
         }
 
         private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
@@ -991,13 +1002,16 @@ namespace GameCult.Caching
             $"Cult document {documentTypeName} member {memberName} is non-public; [MessagePackObject(AllowPrivate = true)] makes MessagePack read it, so mark it [IgnoreMember].";
 
         internal static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
-            $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
+            $"Cult document {documentTypeName} member {memberName} has no [Key]; MessagePack requires [Key(n)] or [IgnoreMember] on every public member, so mark it one or the other.";
 
         private static string StringKeyMessage(string documentTypeName, string memberName) =>
             $"Cult document {documentTypeName} member {memberName} has a string [Key]; string keys are not supported; use integer [Key(n)].";
 
-        private static string NotWritableMessage(string documentTypeName, string memberName) =>
-            $"Cult document {documentTypeName} member {memberName} is a readonly field; a persisted field must not be readonly.";
+        private static string ReadonlyUnfilledMessage(string documentTypeName, string memberName, int slot) =>
+            $"Cult document {documentTypeName} member {memberName} is a readonly field that no constructor fills; MessagePack writes it but never reads it back, so give the constructor MessagePack calls a parameter at position {slot}, drop readonly, or add [MessagePackObject(AllowPrivate = true)].";
+
+        private static string GetOnlyUnfilledMessage(string documentTypeName, string memberName, int slot) =>
+            $"Cult document {documentTypeName} member {memberName} is a get-only property that no constructor fills; MessagePack writes it but never reads it back, so give the constructor MessagePack calls a parameter at position {slot}, add a setter, or mark it [IgnoreMember].";
 
         private static string NonPublicSetterMessage(string documentTypeName, string memberName) =>
             $"Cult document {documentTypeName} member {memberName} has a non-public set accessor; MessagePack writes it but never reads it back without AllowPrivate, so make the setter public or add [MessagePackObject(AllowPrivate = true)].";
