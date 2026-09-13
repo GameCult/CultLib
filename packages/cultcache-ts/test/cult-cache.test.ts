@@ -589,6 +589,65 @@ test("CultCache routes each type to its home store", async () => {
   assert.equal(reloaded.get(settingsDocument, "app"), undefined);
 });
 
+test("CultCache refuses an attach that would move a held record's home", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ theme: z.string() }) });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-home-move-"));
+  const genericPath = join(tempDir, "generic.cc");
+  const settingsPath = join(tempDir, "settings.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+  await cache.put(settingsDocument, "app", { theme: "v1-generic" });
+
+  assert.throws(
+    () => cache.addBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument),
+    /would move "settings" from the generic store to the store routed to settings/u,
+  );
+  // Nothing attached: the next write still lands in the generic store, and the refused store stays untouched.
+  await cache.put(settingsDocument, "app", { theme: "v2-generic" });
+  const keysIn = async (path: string) =>
+    (await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => `${entry.type}:${entry.key}`);
+  assert.deepEqual(await keysIn(genericPath), ["settings:app"]);
+  assert.equal(existsSync(settingsPath), false);
+});
+
+test("CultCache refuses at load a record delivered by a store that is not its home", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ theme: z.string() }) });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-load-home-"));
+  const genericPath = join(tempDir, "generic.cc");
+  const settingsPath = join(tempDir, "settings.cc");
+  const writer = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+  await writer.put(settingsDocument, "app", { theme: "stray" });
+  const genericBytes = await readFile(genericPath);
+
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+  await assert.rejects(
+    cache.pullAllBackingStores(),
+    /"settings" record "app" was loaded from the generic store, but its home is the store routed to settings/u,
+  );
+  assert.equal(cache.get(settingsDocument, "app"), undefined);
+  assert.deepEqual(cache.snapshot(), []);
+  assert.deepEqual(await readFile(genericPath), genericBytes);
+  assert.equal(existsSync(settingsPath), false);
+});
+
+test("CultCache with zero stores writes and deletes in memory", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ theme: z.string() }) });
+  const cache = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();
+  await cache.put(settingsDocument, "x", { theme: "mem" });
+  assert.deepEqual(cache.getRequired(settingsDocument, "x"), { theme: "mem" });
+  assert.equal(await cache.delete(settingsDocument, "x"), true);
+  assert.equal(cache.get(settingsDocument, "x"), undefined);
+});
+
 test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Python", async () => {
   await buildInteropPeers();
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));

@@ -185,15 +185,30 @@ export class CultCache {
         throw new Error(`CultCache type "${type}" is already routed to another backing store; it cannot also route to this one.`);
       }
     }
-    this.#stores.push({ store, types: claimed });
+    const candidate: CultCacheStoreRegistration = { store, types: claimed };
+    for (const type of this.#typeEntryIds.keys()) {
+      const before = this.#resolveRegistration(type);
+      this.#stores.push(candidate);
+      const after = this.#resolveRegistration(type);
+      this.#stores.pop();
+      if (before !== after) {
+        throw new Error(
+          `Attaching this backing store would move "${type}" from ${this.#describe(before)} to ${this.#describe(after)}; ` +
+            "attach routed stores before the generic store.",
+        );
+      }
+    }
+    this.#stores.push(candidate);
   }
 
   addGenericBackingStore(store: CacheBackingStore): void {
     this.addBackingStore(store);
   }
 
+  // Every store is read and every record resolved, decoded and checked against its home before
+  // the cache's view is replaced, so a refused load admits nothing.
   async pullAllBackingStores(): Promise<void> {
-    this.#resetHydratedState();
+    const loaded: Array<{ registered: RegisteredDefinition; entry: CultCacheEnvelope; value: unknown }> = [];
 
     for (const registration of this.#stores) {
       const entries = await registration.store.pullAll();
@@ -208,14 +223,24 @@ export class CultCache {
           );
         }
 
+        const type = registered.definition.type;
+        const home = this.#resolveRegistration(type);
+        if (home?.store !== registration.store) {
+          throw new Error(
+            `CultCache "${type}" record "${entry.key}" was loaded from ${this.#describe(registration)}, ` +
+              `but its home is ${this.#describe(home)}.`,
+          );
+        }
+
         const payload = this.#cloneBytes(entry.payload);
         const value = registered.formatter.decode(payload);
-        this.#applyHydratedEntry(registered, {
-          ...entry,
-          type: registered.definition.type,
-          payload,
-        }, value, "pull");
+        loaded.push({ registered, entry: { ...entry, type, payload }, value });
       }
+    }
+
+    this.#resetHydratedState();
+    for (const { registered, entry, value } of loaded) {
+      this.#applyHydratedEntry(registered, entry, value, "pull");
     }
   }
 
@@ -387,10 +412,7 @@ export class CultCache {
       catalogEntry: registered.catalogEntry,
     };
 
-    const home = this.#resolveRoute(definition.type);
-    if (!home) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
+    const home = this.#homeStore(definition.type);
 
     if (registered.global) {
       const existingGlobalKey = this.#globalKeys.get(definition.type);
@@ -399,7 +421,7 @@ export class CultCache {
       }
     }
 
-    await home.push(entry);
+    await home?.push(entry);
     this.#applyHydratedEntry(registered, entry, parsed, "put");
     return parsed;
   }
@@ -432,10 +454,7 @@ export class CultCache {
       catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
     };
 
-    const home = this.#resolveRoute(definition.type);
-    if (!home) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
+    const home = this.#homeStore(definition.type);
 
     if (registered.global) {
       const existingGlobalKey = this.#globalKeys.get(definition.type);
@@ -444,7 +463,7 @@ export class CultCache {
       }
     }
 
-    await home.push(entry);
+    await home?.push(entry);
     this.#applyHydratedEntry(registered, entry, parsed, "put");
     return parsed;
   }
@@ -492,13 +511,10 @@ export class CultCache {
       return false;
     }
 
-    const home = this.#resolveRoute(definition.type);
-    if (!home) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
+    const home = this.#homeStore(definition.type);
 
     const envelope = this.#toEnvelope(entry);
-    await home.delete(envelope);
+    await home?.delete(envelope);
     this.#removeHydratedEntry(registered, entry);
     return true;
   }
@@ -658,10 +674,31 @@ export class CultCache {
     return this.#schemaNameDefinitions.get(entry.type) ?? this.#definitions.get(entry.type);
   }
 
-  // The store that claims the type, else the generic store. Registration guarantees at most one of each.
-  #resolveRoute(type: string): CacheBackingStore | undefined {
-    return (this.#stores.find((registration) => registration.types.includes(type))
-      ?? this.#stores.find((registration) => registration.types.length === 0))?.store;
+  // The registration that claims the type, else the generic one. Registration guarantees at most one of each.
+  #resolveRegistration(type: string): CultCacheStoreRegistration | undefined {
+    return this.#stores.find((registration) => registration.types.includes(type))
+      ?? this.#stores.find((registration) => registration.types.length === 0);
+  }
+
+  // A cache with no stores is in memory: undefined. Once any store is attached, a type with no home is an error.
+  #homeStore(type: string): CacheBackingStore | undefined {
+    if (this.#stores.length === 0) {
+      return undefined;
+    }
+    const home = this.#resolveRegistration(type);
+    if (!home) {
+      throw new Error(`No backing store is registered for document type "${type}".`);
+    }
+    return home.store;
+  }
+
+  #describe(registration: CultCacheStoreRegistration | undefined): string {
+    if (!registration) {
+      return "memory";
+    }
+    return registration.types.length === 0
+      ? "the generic store"
+      : `the store routed to ${registration.types.join(", ")}`;
   }
 
   #applyHydratedEntry(
