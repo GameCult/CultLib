@@ -9,7 +9,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using GameCult.Logging;
 using R3;
 
 namespace GameCult.Caching
@@ -1281,7 +1280,6 @@ namespace GameCult.Caching
         private readonly SemaphoreSlim _transactionGate = new(1, 1);
         private readonly AsyncLocal<CultCacheTransaction?> _ambientTransaction = new();
         private readonly object _stateGate = new();
-        private ILogger _logger = new NullLogger();
         private bool _hasUnflushedMutations;
 
         /// <summary>
@@ -1315,23 +1313,9 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Gets or sets the cache logger.
-        /// </summary>
-        public ILogger Logger
-        {
-            get => _logger;
-            set => _logger = value ?? new NullLogger();
-        }
-
-        /// <summary>
         /// Gets whether the cache currently holds unflushed mutations in any attached backing store or only in memory.
         /// </summary>
         public bool IsDirty => _hasUnflushedMutations || _backingStores.Any(store => store.IsDirty);
-
-        /// <summary>
-        /// Gets the UTC timestamp of the last successful flush across all attached backing stores.
-        /// </summary>
-        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; private set; }
 
         /// <summary>
         /// Gets or sets whether disposing the cache should flush attached dirty backing stores first.
@@ -1405,10 +1389,8 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             store.AttachRegistry(_registry);
-            store.Logger = Logger;
-            store.EntryAdded.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
-            store.EntryUpdated.Subscribe(entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true).GetAwaiter().GetResult());
-            store.EntryDeleted.Subscribe(entry => RemoveStoredDocumentInternal(entry, store, raiseUpdate: true));
+            store.Loaded = entry => AddStoredDocumentInternal(entry, store, raiseUpdate: true);
+            store.Unloaded = entry => RemoveStoredDocumentInternal(entry, store, raiseUpdate: true);
 
             foreach (var entry in _entries.Values.OrderBy(entry => entry.Key.Value, StringComparer.Ordinal))
             {
@@ -1442,34 +1424,9 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Pulls persisted records selected by durable metadata from every attached backing store.
-        /// Stores without indexed selection support preserve correctness by performing a full pull.
-        /// </summary>
-        public async Task PullBackingStoreRecordsAsync(Func<CultPersistedRecordMetadata, bool> selector)
-        {
-            if (selector == null) throw new ArgumentNullException(nameof(selector));
-            if (_ambientTransaction.Value != null)
-                throw new InvalidOperationException(
-                    "CultCache hydration cannot run inside a mutation transaction; hydrate before opening the commit scope.");
-
-            await _transactionGate.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                foreach (var store in _backingStores)
-                    store.PullSelected(selector);
-
-                _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
-        }
-
-        /// <summary>
         /// Flushes all attached backing stores.
         /// </summary>
-        public void FlushAllBackingStores(bool soft = false)
+        public void FlushAllBackingStores()
         {
             if (_ambientTransaction.Value != null)
                 throw new InvalidOperationException("A CultCache transaction owns durable commit; do not flush inside its stage callback.");
@@ -1478,11 +1435,10 @@ namespace GameCult.Caching
             try
             {
                 foreach (var store in _backingStores)
-                    FlushBackingStoreCore(store, soft);
-
-                RecomputeDirtyState();
-                if (!IsDirty)
-                    LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
+                {
+                    store.PushAll();
+                    RecomputeDirtyState();
+                }
             }
             finally
             {
@@ -1490,64 +1446,10 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Flushes all attached backing stores.
-        /// </summary>
+        // soft is dead. CultCacheStudioWindow reflects on FlushAsync(bool) until Cut 6 rewrites it.
         public Task FlushAsync(bool soft = false)
         {
-            FlushAllBackingStores(soft);
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// Flushes one attached backing store.
-        /// </summary>
-        public void FlushBackingStore(CacheBackingStore store, bool soft = false)
-        {
-            if (store == null) throw new ArgumentNullException(nameof(store));
-            if (!_backingStores.Contains(store))
-            {
-                throw new InvalidOperationException("Backing store is not attached to this cache.");
-            }
-
-            if (_ambientTransaction.Value != null)
-                throw new InvalidOperationException("A CultCache transaction owns durable commit; do not flush inside its stage callback.");
-
-            _transactionGate.Wait();
-            try
-            {
-                FlushBackingStoreCore(store, soft);
-            }
-            finally
-            {
-                _transactionGate.Release();
-            }
-        }
-
-        private void FlushBackingStoreCore(CacheBackingStore store, bool soft)
-        {
-            store.PushAll(soft);
-            RecomputeDirtyState();
-            if (!store.IsDirty)
-            {
-                LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
-            }
-        }
-
-        /// <summary>
-        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
-        /// </summary>
-        public void PrepareForReloadOrShutdown(bool soft = false)
-        {
-            FlushAllBackingStores(soft);
-        }
-
-        /// <summary>
-        /// Flushes attached backing stores at a lifecycle boundary such as shutdown or assembly reload.
-        /// </summary>
-        public Task PrepareForReloadOrShutdownAsync(bool soft = false)
-        {
-            PrepareForReloadOrShutdown(soft);
+            FlushAllBackingStores();
             return Task.CompletedTask;
         }
 
@@ -1556,7 +1458,7 @@ namespace GameCult.Caching
         /// async flow. The durable backing store is committed before the live cache and its
         /// observers advance; an exception discards the entire staged batch.
         /// </summary>
-        public async Task ExecuteTransactionAsync(Func<Task> stageAsync, bool soft = false)
+        public async Task ExecuteTransactionAsync(Func<Task> stageAsync)
         {
             if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
             if (_ambientTransaction.Value != null)
@@ -1573,7 +1475,7 @@ namespace GameCult.Caching
             {
                 await stageAsync().ConfigureAwait(false);
                 transaction.Seal();
-                changes = CommitTransaction(transaction, soft);
+                changes = CommitTransaction(transaction);
             }
             finally
             {
@@ -1587,14 +1489,14 @@ namespace GameCult.Caching
         }
 
         /// <summary>Runs a value-producing buffered cache mutation.</summary>
-        public async Task<T> ExecuteTransactionAsync<T>(Func<Task<T>> stageAsync, bool soft = false)
+        public async Task<T> ExecuteTransactionAsync<T>(Func<Task<T>> stageAsync)
         {
             if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
             T result = default!;
             await ExecuteTransactionAsync(async () =>
             {
                 result = await stageAsync().ConfigureAwait(false);
-            }, soft).ConfigureAwait(false);
+            }).ConfigureAwait(false);
             return result;
         }
 
@@ -1614,10 +1516,8 @@ namespace GameCult.Caching
             await _transactionGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                var stored = await AddStoredDocumentInternal(
-                    CreateStoredDocument(typeof(T), document, handle?.Key),
-                    source: null,
-                    raiseUpdate: false).ConfigureAwait(false);
+                var stored = CreateStoredDocument(typeof(T), document, handle?.Key);
+                AddStoredDocumentInternal(stored, source: null, raiseUpdate: false);
                 return new CultRecordHandle<T>(stored.Key);
             }
             finally
@@ -1658,10 +1558,8 @@ namespace GameCult.Caching
             await _transactionGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                var stored = await AddStoredDocumentInternal(
-                    CreateStoredDocument(documentType, document, key),
-                    source: null,
-                    raiseUpdate: false).ConfigureAwait(false);
+                var stored = CreateStoredDocument(documentType, document, key);
+                AddStoredDocumentInternal(stored, source: null, raiseUpdate: false);
                 return stored.Key;
             }
             finally
@@ -1706,32 +1604,16 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Tries to get a typed document by record key.
-        /// </summary>
-        public bool TryGet<T>(CultRecordKey key, out T? document) where T : class
-        {
-            document = Get<T>(key);
-            return document != null;
-        }
-
-        /// <summary>
         /// Gets all cached documents assignable to the requested type.
         /// </summary>
         public IEnumerable<T> GetAll<T>() where T : class
-        {
-            return GetStoredDocuments<T>().Select(entry => (T)entry.Document);
-        }
-
-        /// <summary>
-        /// Gets typed cached records with their stable CultCache identities without scanning unrelated documents.
-        /// </summary>
-        public IEnumerable<CultStoredDocument> GetStoredDocuments<T>() where T : class
         {
             lock (_stateGate)
             {
                 var type = typeof(T);
                 return VisibleStoredDocuments()
                     .Where(entry => type.IsAssignableFrom(entry.Descriptor.DocumentType))
+                    .Select(entry => (T)entry.Document)
                     .ToArray();
             }
         }
@@ -1762,15 +1644,6 @@ namespace GameCult.Caching
         }
 
         /// <summary>
-        /// Tries to get a typed document by its CultName value.
-        /// </summary>
-        public bool TryGetByName<T>(string name, out T? document) where T : class
-        {
-            document = GetByName<T>(name);
-            return document != null;
-        }
-
-        /// <summary>
         /// Gets a typed document by an indexed value.
         /// </summary>
         public T? GetByIndex<T>(string alias, string value) where T : class
@@ -1782,23 +1655,6 @@ namespace GameCult.Caching
             }
 
             return null;
-        }
-
-        /// <summary>
-        /// Tries to get a typed document by an indexed value.
-        /// </summary>
-        public bool TryGetByIndex<T>(string alias, string value, out T? document) where T : class
-        {
-            document = GetByIndex<T>(alias, value);
-            return document != null;
-        }
-
-        /// <summary>
-        /// Resolves a typed document reference against this cache.
-        /// </summary>
-        public T? Resolve<T>(CultRecordRef<T> reference) where T : class
-        {
-            return Get<T>(reference.Key);
         }
 
         /// <summary>
@@ -1898,8 +1754,7 @@ namespace GameCult.Caching
         }
 
         private IReadOnlyList<(CultStoredDocument Stored, object? Previous, bool Removed)> CommitTransaction(
-            CultCacheTransaction transaction,
-            bool soft)
+            CultCacheTransaction transaction)
         {
             var mutations = transaction.SnapshotForCommit()
                 .OrderBy(pair => pair.Key, StringComparer.Ordinal)
@@ -1932,7 +1787,7 @@ namespace GameCult.Caching
                 .ToArray();
 
             foreach (var store in _backingStores)
-                store.CommitBatch(upserts, deleted, soft);
+                store.CommitBatch(upserts, deleted);
 
             var changes = new List<(CultStoredDocument Stored, object? Previous, bool Removed)>();
             lock (_stateGate)
@@ -1964,8 +1819,6 @@ namespace GameCult.Caching
                     changes.Add((stored, existing?.Document, false));
                 }
                 _hasUnflushedMutations = _backingStores.Any(store => store.IsDirty);
-                if (!IsDirty)
-                    LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
             }
 
             return changes;
@@ -2051,7 +1904,7 @@ namespace GameCult.Caching
                 document);
         }
 
-        private async Task<CultStoredDocument> AddStoredDocumentInternal(
+        private void AddStoredDocumentInternal(
             CultStoredDocument stored,
             CacheBackingStore? source,
             bool raiseUpdate)
@@ -2086,9 +1939,6 @@ namespace GameCult.Caching
             {
                 OnUpdate?.Invoke(existing?.Document, stored.Document);
             }
-
-            await Task.CompletedTask;
-            return stored;
         }
 
         private void RemoveStoredDocumentInternal(
@@ -2154,7 +2004,7 @@ namespace GameCult.Caching
                         descriptor,
                         instance),
                     source: null,
-                    raiseUpdate: false).GetAwaiter().GetResult();
+                    raiseUpdate: false);
             }
         }
 
@@ -2301,7 +2151,6 @@ namespace GameCult.Caching
     public abstract class CacheBackingStore : IDisposable
     {
         private CultDocumentRegistry? _registry;
-        private ILogger _logger = new NullLogger();
         private bool _isDirty;
         private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
 
@@ -2318,15 +2167,6 @@ namespace GameCult.Caching
             new(StringComparer.Ordinal);
 
         /// <summary>
-        /// Gets or sets the backing store logger.
-        /// </summary>
-        public ILogger Logger
-        {
-            get => _logger;
-            set => _logger = value ?? new NullLogger();
-        }
-
-        /// <summary>
         /// Gets whether the backing store holds staged mutations not yet durably flushed.
         /// </summary>
         public bool IsDirty
@@ -2334,11 +2174,6 @@ namespace GameCult.Caching
             get => _isDirty;
             protected set => _isDirty = value;
         }
-
-        /// <summary>
-        /// Gets the UTC timestamp of the last successful durable flush.
-        /// </summary>
-        public DateTimeOffset? LastSuccessfulFlushAtUtc { get; protected set; }
 
         /// <summary>
         /// Gets or sets whether disposing the backing store should flush staged mutations first.
@@ -2350,18 +2185,9 @@ namespace GameCult.Caching
         /// </summary>
         public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
 
-        /// <summary>
-        /// Publishes documents added by the backing store.
-        /// </summary>
-        public Subject<CultStoredDocument> EntryAdded { get; } = new();
-        /// <summary>
-        /// Publishes documents updated by the backing store.
-        /// </summary>
-        public Subject<CultStoredDocument> EntryUpdated { get; } = new();
-        /// <summary>
-        /// Publishes documents deleted by the backing store.
-        /// </summary>
-        public Subject<CultStoredDocument> EntryDeleted { get; } = new();
+        // Set by the cache at attach; a store calls them for records it loads or drops.
+        protected internal Action<CultStoredDocument>? Loaded;
+        protected internal Action<CultStoredDocument>? Unloaded;
 
         internal void AttachRegistry(CultDocumentRegistry registry)
         {
@@ -2401,8 +2227,7 @@ namespace GameCult.Caching
         /// </summary>
         public virtual void CommitBatch(
             IReadOnlyCollection<CultStoredDocument> upserts,
-            IReadOnlyCollection<CultStoredDocument> deletes,
-            bool soft)
+            IReadOnlyCollection<CultStoredDocument> deletes)
         {
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var wasDirty = IsDirty;
@@ -2412,7 +2237,7 @@ namespace GameCult.Caching
                     Delete(entry);
                 foreach (var entry in upserts)
                     Push(entry);
-                PushAll(soft);
+                PushAll();
             }
             catch
             {
@@ -2426,9 +2251,9 @@ namespace GameCult.Caching
         /// <summary>
         /// Persists all current backing store entries.
         /// </summary>
-        public abstract void PushAll(bool soft = false);
+        public abstract void PushAll();
         /// <summary>
-        /// Releases backing store event subjects.
+        /// Flushes staged mutations first when FlushOnDispose is set.
         /// </summary>
         public virtual void Dispose()
         {
@@ -2436,10 +2261,6 @@ namespace GameCult.Caching
             {
                 PushAll();
             }
-
-            EntryAdded.Dispose();
-            EntryUpdated.Dispose();
-            EntryDeleted.Dispose();
         }
 
         /// <summary>
@@ -2487,7 +2308,6 @@ namespace GameCult.Caching
         protected void MarkFlushSucceeded()
         {
             IsDirty = false;
-            LastSuccessfulFlushAtUtc = DateTimeOffset.UtcNow;
         }
     }
 
@@ -2571,16 +2391,13 @@ namespace GameCult.Caching
                     continue;
                 }
                 Entries[stored.Key.Value] = stored;
-                if (existing == null)
-                    EntryAdded.OnNext(stored);
-                else
-                    EntryUpdated.OnNext(stored);
+                Loaded?.Invoke(stored);
             }
 
             foreach (var removedKey in Entries.Keys.Where(key => !persistedKeys.Contains(key)).ToArray())
             {
                 if (Entries.TryRemove(removedKey, out var removed))
-                    EntryDeleted.OnNext(removed);
+                    Unloaded?.Invoke(removed);
             }
 
             SetLastSchemaMigrationReports(reports);
@@ -2608,7 +2425,7 @@ namespace GameCult.Caching
         /// <summary>
         /// Writes the staged snapshot to disk.
         /// </summary>
-        public override void PushAll(bool soft = false)
+        public override void PushAll()
         {
             var snapshot = new CultPersistedStoreSnapshot
             {

@@ -432,7 +432,7 @@ namespace GameCult.Mesh
         /// </summary>
         public Task FlushAsync(bool soft = false)
         {
-            return _host.FlushAsync(soft);
+            return _host.FlushAsync();
         }
 
         /// <summary>

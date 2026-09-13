@@ -178,14 +178,11 @@ namespace GameCult.Caching.Tests
 
                 Assert.That(cache.IsDirty, Is.True);
                 Assert.That(store.IsDirty, Is.True);
-                Assert.That(cache.LastSuccessfulFlushAtUtc, Is.Null);
 
                 cache.FlushAllBackingStores();
 
                 Assert.That(cache.IsDirty, Is.False);
                 Assert.That(store.IsDirty, Is.False);
-                Assert.That(cache.LastSuccessfulFlushAtUtc, Is.Not.Null);
-                Assert.That(store.LastSuccessfulFlushAtUtc, Is.Not.Null);
             }
             finally
             {
@@ -213,8 +210,7 @@ namespace GameCult.Caching.Tests
                 cache.Dispose();
 
                 var reopened = await CultCacheMessagePack.OpenAsync(filePath);
-                Assert.That(reopened.TryGet(handle.Key, out NamedTestEntry? loaded), Is.True);
-                Assert.That(loaded!.Value, Is.EqualTo("magic"));
+                Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("magic"));
             }
             finally
             {
@@ -310,21 +306,11 @@ namespace GameCult.Caching.Tests
 
                 using var reopened = await CultCacheMessagePack.OpenAsync(
                     filePath,
-                    new CultCacheOpenOptions
-                    {
-                        Registry = registry,
-                        UseDirectoryStore = true,
-                        DirectoryStoreHydrationFilter = _ => false
-                    });
+                    new CultCacheOpenOptions { Registry = registry, UseDirectoryStore = true });
 
-                Assert.That(reopened.GetGlobal<GlobalTestEntry>(), Is.Null,
-                    "the hydration filter owns whether the durable global becomes hot");
-                Assert.That(reopened.IsDirty, Is.False,
-                    "a cold durable global must not stage its schema default as a write");
-
-                var globalKey = "global:" + registry.GetRequired<GlobalTestEntry>().SchemaId;
-                await reopened.PullBackingStoreRecordsAsync(metadata => metadata.Key == globalKey);
                 Assert.That(reopened.GetGlobal<GlobalTestEntry>()?.Value, Is.EqualTo("durable authority"));
+                Assert.That(reopened.IsDirty, Is.False,
+                    "a hydrated durable global must not stage its schema default as a write");
             }
             finally
             {
@@ -434,63 +420,6 @@ namespace GameCult.Caching.Tests
                 Assert.That(finalManifest.Records, Has.Length.EqualTo(3));
                 Assert.That(finalManifest.Records.Any(record => record.Key == cold.Key.Value), Is.True);
                 Assert.That(finalManifest.Records.All(record => record.Payload.Length == 32), Is.True);
-            }
-            finally
-            {
-                if (File.Exists(filePath))
-                    File.Delete(filePath);
-                if (Directory.Exists(recordsPath))
-                    Directory.Delete(recordsPath, recursive: true);
-            }
-        }
-
-        [Test]
-        public async Task DirectoryMessagePackBackingStore_PullSelected_HydratesMatchingColdPagesOnly()
-        {
-            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
-            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
-
-            try
-            {
-                CultRecordHandle<NamedTestEntry> hot;
-                CultRecordHandle<NamedTestEntry> requested;
-                CultRecordHandle<NamedTestEntry> unrelated;
-                using (var seed = await CultCacheMessagePack.OpenAsync(
-                           filePath,
-                           new CultCacheOpenOptions { UseDirectoryStore = true }))
-                {
-                    hot = await seed.UpsertAsync(new NamedTestEntry { Name = "hot", Value = "already-loaded" });
-                    requested = await seed.UpsertAsync(new NamedTestEntry { Name = "requested", Value = "load-later" });
-                    unrelated = await seed.UpsertAsync(new NamedTestEntry
-                    {
-                        Name = "unrelated",
-                        Value = new string('u', 1024 * 1024)
-                    });
-                    await seed.FlushAsync();
-                }
-
-                string PageFor(CultRecordHandle<NamedTestEntry> handle) =>
-                    Directory.GetFiles(recordsPath, "*.msgpack").Single(path => string.Equals(
-                        CultDocumentMessagePackSerialization.DeserializePersistedRecord(File.ReadAllBytes(path)).Key,
-                        handle.Key.Value,
-                        StringComparison.Ordinal));
-
-                using var selected = await CultCacheMessagePack.OpenAsync(
-                    filePath,
-                    new CultCacheOpenOptions
-                    {
-                        UseDirectoryStore = true,
-                        DirectoryStoreHydrationFilter = metadata => metadata.Key == hot.Key.Value
-                    });
-                Assert.That(selected.Get<NamedTestEntry>(requested.Key), Is.Null);
-
-                using (new FileStream(PageFor(unrelated), FileMode.Open, FileAccess.Read, FileShare.None))
-                {
-                    await selected.PullBackingStoreRecordsAsync(metadata => metadata.Key == requested.Key.Value);
-                    Assert.That(selected.Get<NamedTestEntry>(requested.Key)?.Value, Is.EqualTo("load-later"));
-                    Assert.That(selected.Get<NamedTestEntry>(hot.Key)?.Value, Is.EqualTo("already-loaded"));
-                    Assert.That(selected.Get<NamedTestEntry>(unrelated.Key), Is.Null);
-                }
             }
             finally
             {
@@ -876,7 +805,7 @@ namespace GameCult.Caching.Tests
                 var readerCache = new CultCache();
                 readerCache.AddBackingStore(readerStore);
                 var observerRan = false;
-                using var subscription = readerStore.EntryAdded.Subscribe(_ =>
+                using var subscription = readerCache.Watch<NamedTestEntry>().Subscribe(_ =>
                 {
                     if (observerRan)
                         return;
@@ -1059,7 +988,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task CultCache_TypedStoredDocumentIndex_Tracks_Upsert_Replacement_And_Removal()
+        public async Task CultCache_GetAll_Tracks_Upsert_Replacement_And_Removal()
         {
             var cache = new CultCache();
             var key = new CultRecordKey("typed-index:named");
@@ -1073,20 +1002,20 @@ namespace GameCult.Caching.Tests
                 Name = "unrelated"
             }, new CultRecordKey("typed-index:unrelated"));
 
-            var initial = cache.GetStoredDocuments<NamedTestEntry>().Single();
-            Assert.That(initial.Key, Is.EqualTo(key));
-            Assert.That(((NamedTestEntry)initial.Document).Value, Is.EqualTo("first"));
+            var initial = cache.GetAll<NamedTestEntry>().Single();
+            Assert.That(cache.TryGetHandle(initial)?.Key, Is.EqualTo(key));
+            Assert.That(initial.Value, Is.EqualTo("first"));
 
             await cache.UpsertAsync(typeof(NamedTestEntry), new NamedTestEntry
             {
                 Name = "indexed",
                 Value = "second"
             }, key);
-            var replaced = cache.GetStoredDocuments<NamedTestEntry>().Single();
-            Assert.That(((NamedTestEntry)replaced.Document).Value, Is.EqualTo("second"));
+            var replaced = cache.GetAll<NamedTestEntry>().Single();
+            Assert.That(replaced.Value, Is.EqualTo("second"));
 
             Assert.That(cache.Remove(key), Is.True);
-            Assert.That(cache.GetStoredDocuments<NamedTestEntry>(), Is.Empty);
+            Assert.That(cache.GetAll<NamedTestEntry>(), Is.Empty);
         }
 
         [Test]

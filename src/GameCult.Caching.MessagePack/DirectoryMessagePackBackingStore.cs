@@ -201,10 +201,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             }
 
             Entries[pair.Key] = pair.Value;
-            if (existing == null)
-                EntryAdded.OnNext(pair.Value);
-            else
-                EntryUpdated.OnNext(pair.Value);
+            Loaded?.Invoke(pair.Value);
         }
 
         foreach (var removedKey in _hydratedKeys.Where(key => !loaded.ContainsKey(key)).ToArray())
@@ -213,7 +210,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 continue;
 
             if (Entries.TryRemove(removedKey, out var removed))
-                EntryDeleted.OnNext(removed);
+                Unloaded?.Invoke(removed);
             _hydratedKeys.Remove(removedKey);
         }
 
@@ -307,8 +304,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     /// <inheritdoc />
     public override void CommitBatch(
         IReadOnlyCollection<CultStoredDocument> upserts,
-        IReadOnlyCollection<CultStoredDocument> deletes,
-        bool soft)
+        IReadOnlyCollection<CultStoredDocument> deletes)
     {
         lock (_mutationGate)
         {
@@ -331,7 +327,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     _deletedKeys.TryRemove(entry.Key.Value, out _);
                 }
                 IsDirty = true;
-                PushAllCore(soft);
+                PushAllCore();
             }
             catch
             {
@@ -351,13 +347,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     /// <inheritdoc />
-    public override void PushAll(bool soft = false)
+    public override void PushAll()
     {
         lock (_mutationGate)
-            PushAllCore(soft);
+            PushAllCore();
     }
 
-    private void PushAllCore(bool soft)
+    private void PushAllCore()
     {
         if (!IsDirty && !_needsIndexUpgrade)
         {
@@ -652,10 +648,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 continue;
 
             Entries[pair.Key] = pair.Value;
-            if (existing == null)
-                EntryAdded.OnNext(pair.Value);
-            else
-                EntryUpdated.OnNext(pair.Value);
+            Loaded?.Invoke(pair.Value);
         }
 
         foreach (var missingKey in selectedKeys.Where(key => !loaded.ContainsKey(key)).ToArray())
@@ -663,7 +656,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             if (_dirtyKeys.ContainsKey(missingKey) || _deletedKeys.ContainsKey(missingKey))
                 continue;
             if (Entries.TryRemove(missingKey, out var removed))
-                EntryDeleted.OnNext(removed);
+                Unloaded?.Invoke(removed);
             _hydratedKeys.Remove(missingKey);
         }
 
