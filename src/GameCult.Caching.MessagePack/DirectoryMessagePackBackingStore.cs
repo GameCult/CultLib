@@ -38,13 +38,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     public override string ToString() => _manifestFile.FullName;
 
-    public override void PullAll()
-    {
-        lock (Gate)
-            PullAllCore();
-        // Outside the gate, an empty hand-over lets the cache publish what this pull admitted.
-        Loaded?.Invoke(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
-    }
+    public override void PullAll() => Held(PullAllCore);
 
     private void PullAllCore()
     {
@@ -110,31 +104,31 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override void Push(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
-        lock (Gate)
+        Held(() =>
         {
             Entries[entry.Key.Value] = entry;
             _dirtyKeys[entry.Key.Value] = true;
             _deletedKeys.TryRemove(entry.Key.Value, out _);
             IsDirty = true;
-        }
+        });
     }
 
     public override void Delete(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
-        lock (Gate)
+        Held(() =>
         {
             Entries.TryRemove(entry.Key.Value, out _);
             _dirtyKeys.TryRemove(entry.Key.Value, out _);
             _deletedKeys[entry.Key.Value] = true;
             IsDirty = true;
-        }
+        });
     }
 
     public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
     {
         ThrowIfReadOnly();
-        lock (Gate)
+        return Held(() =>
         {
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait);
@@ -180,13 +174,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 IsDirty = wasDirty;
                 throw;
             }
-        }
+        });
     }
 
     public override void PushAll()
     {
         ThrowIfReadOnly();
-        lock (Gate)
+        Held(() =>
         {
             if (!IsDirty)
                 return;
@@ -194,7 +188,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true);
             WriteGeneration(ReadManifest());
-        }
+        });
     }
 
     // Runs under the commit lease: pages first, then the manifest that names them.

@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -352,10 +353,12 @@ namespace GameCult.Caching.Tests
                 {
                     var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
                     Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
-                    var writer = StartWriter(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)), () => store.Pushed.IsSet);
+                    var writing = Task.Run(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)));
+                    writing.Wait(200);
+                    Assert.That(store.PushedWhilePaused, Is.False, "a write reached the store while the pull held the gate");
                     store.Pause = null;
                     release.Set();
-                    Assert.That(pulling.Wait(TimeSpan.FromSeconds(10)) && writer(), Is.True);
+                    Assert.That(Task.WaitAll(new Task[] { pulling, writing }, TimeSpan.FromSeconds(10)), Is.True);
                 }
                 finally
                 {
@@ -383,15 +386,19 @@ namespace GameCult.Caching.Tests
             using (var release = new ManualResetEventSlim())
             {
                 Slow.Entered.Reset();
+                Slow.ReadWhilePaused = false;
                 Slow.Pause = release;
                 try
                 {
                     var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
                     Assert.That(Slow.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never loaded a page");
-                    var writer = StartWriter(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)), () => false);
+                    // Admitting the write indexes its name under the gate, so a write that gets past the gate reads it while paused.
+                    var writing = Task.Run(() => cache.UpsertAsync(new Slow { Name = "staged" }, new CultRecordHandle<Slow>(staged)));
+                    writing.Wait(200);
+                    Assert.That(Slow.ReadWhilePaused, Is.False, "a write was admitted while the pull held the gate");
                     Slow.Pause = null;
                     release.Set();
-                    Assert.That(pulling.Wait(TimeSpan.FromSeconds(10)) && writer(), Is.True);
+                    Assert.That(Task.WaitAll(new Task[] { pulling, writing }, TimeSpan.FromSeconds(10)), Is.True);
                 }
                 finally
                 {
@@ -496,24 +503,92 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.Get(doomed), Is.Null, "a throwing observer left the store holding a record the cache dropped");
         }
 
-        // Runs write on its own thread and returns once it has reached the store or is blocked waiting; the result joins it.
-        private static Func<bool> StartWriter(Action write, Func<bool> reachedStore)
+        [Test]
+        public void OwnChangeIsPublishedBeforeWriteReturns()
         {
-            Exception? failure = null;
-            var thread = new Thread(() =>
+            using var cache = SingleFile(PathOf("own.cc")).Open();
+            var published = new ConcurrentDictionary<string, int>();
+            using var subscription = cache.Watch<Counter>().Subscribe(change => published[change.Key.Value] = Environment.CurrentManagedThreadId);
+            var late = 0;
+            var writers = Enumerable.Range(0, 4).Select(t => Task.Run(() =>
             {
-                try { write(); }
-                catch (Exception exception) { failure = exception; }
+                for (var i = 0; i < 3000; i++)
+                {
+                    var key = $"{t}:{i}";
+                    cache.UpsertAsync(new Counter { Name = key }, new CultRecordHandle<Counter>(new CultRecordKey(key)));
+                    if (!published.TryGetValue(key, out var thread) || thread != Environment.CurrentManagedThreadId)
+                        Interlocked.Increment(ref late);
+                }
+            })).ToArray();
+
+            Assert.That(Task.WaitAll(writers, TimeSpan.FromSeconds(60)), Is.True);
+            Assert.That(late, Is.Zero, "a write returned before its own change was published on its thread");
+            Assert.That(published.Count, Is.EqualTo(12000));
+        }
+
+        [Test]
+        public void ThrowingObserverDoesNotLoseOtherChanges()
+        {
+            var store = DirectoryStore(PathOf("throwing.cc"));
+            using var a = store.Open();
+            using var other = store.Open();
+            var loads = 0;
+            var armed = 0;
+            a.OnUpdate += (_, _) =>
+            {
+                Interlocked.Increment(ref loads);
+                if (Interlocked.Exchange(ref armed, 0) == 1)
+                    throw new InvalidOperationException("observer failed");
+            };
+            var published = new ConcurrentDictionary<string, int>();
+            using var subscription = a.Watch<Counter>().Subscribe(change => published[change.Key.Value] = Environment.CurrentManagedThreadId);
+
+            var failed = 0;
+            var late = 0;
+            using var stop = new CancellationTokenSource();
+            var writing = Task.Run(() =>
+            {
+                for (var i = 0; !stop.IsCancellationRequested; i++)
+                {
+                    var key = $"w:{i}";
+                    try
+                    {
+                        a.UpsertAsync(new Counter { Name = key }, new CultRecordHandle<Counter>(new CultRecordKey(key)));
+                        if (!published.TryGetValue(key, out var thread) || thread != Environment.CurrentManagedThreadId)
+                            Interlocked.Increment(ref late);
+                    }
+                    catch (Exception)
+                    {
+                        Interlocked.Increment(ref failed);
+                    }
+                }
             });
-            thread.Start();
-            var waited = System.Diagnostics.Stopwatch.StartNew();
-            while (!reachedStore() && thread.IsAlive && (thread.ThreadState & ThreadState.WaitSleepJoin) == 0)
+
+            try
             {
-                Assert.That(waited.Elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), "the write neither reached the store nor blocked");
-                Thread.Yield();
+                for (var pull = 0; pull < 50; pull++)
+                {
+                    var first = new CultRecordKey($"first:{pull}");
+                    var second = new CultRecordKey($"second:{pull}");
+                    Assert.That(other.Commit(batch =>
+                    {
+                        batch.Upsert(new Counter { Name = first.Value }, new CultRecordHandle<Counter>(first));
+                        batch.Upsert(new Counter { Name = second.Value }, new CultRecordHandle<Counter>(second));
+                    }), Is.True);
+                    Interlocked.Exchange(ref armed, 1);
+                    Assert.That(() => a.PullAllBackingStoresAsync(), Throws.InvalidOperationException.With.Message.EqualTo("observer failed"), $"pull {pull}");
+                    Assert.That(loads, Is.EqualTo(2 * (pull + 1)), $"pull {pull} lost a change after its observer threw");
+                    Assert.That(published.ContainsKey(second.Value), Is.True, $"pull {pull} never published its second record");
+                }
+            }
+            finally
+            {
+                stop.Cancel();
+                Assert.That(writing.Wait(TimeSpan.FromSeconds(10)), Is.True);
             }
 
-            return () => thread.Join(TimeSpan.FromSeconds(10)) && failure == null;
+            Assert.That(failed, Is.Zero, "an unrelated write threw another call's observer exception");
+            Assert.That(late, Is.Zero, "an unrelated write returned before its change was published");
         }
 
         [Test]
@@ -687,12 +762,14 @@ namespace GameCult.Caching.Tests
 
             public ManualResetEventSlim? Pause;
             public readonly ManualResetEventSlim Entered = new();
-            public readonly ManualResetEventSlim Pushed = new();
+            public volatile bool Paused;
+            public volatile bool PushedWhilePaused;
 
             public override void Push(CultStoredDocument entry)
             {
+                if (Paused)
+                    PushedWhilePaused = true;
                 base.Push(entry);
-                Pushed.Set();
             }
 
             protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
@@ -700,8 +777,10 @@ namespace GameCult.Caching.Tests
                 var snapshot = base.DeserializeSnapshot(data);
                 if (Pause is { } pause)
                 {
+                    Paused = true;
                     Entered.Set();
                     pause.Wait();
+                    Paused = false;
                 }
 
                 return snapshot;
@@ -753,11 +832,23 @@ namespace GameCult.Caching.Tests
         {
             internal static volatile ManualResetEventSlim? Pause;
             internal static readonly ManualResetEventSlim Entered = new();
+            internal static volatile bool Paused;
+            internal static volatile bool ReadWhilePaused;
             private bool _blocks;
+            private string _name = string.Empty;
 
             [Key(0)]
             [CultName]
-            public string Name = string.Empty;
+            public string Name
+            {
+                get
+                {
+                    if (Paused)
+                        ReadWhilePaused = true;
+                    return _name;
+                }
+                set => _name = value;
+            }
 
             [Key(1)]
             public bool Blocks
@@ -768,8 +859,10 @@ namespace GameCult.Caching.Tests
                     _blocks = value;
                     if (value && Pause is { } pause)
                     {
+                        Paused = true;
                         Entered.Set();
                         pause.Wait();
+                        Paused = false;
                     }
                 }
             }

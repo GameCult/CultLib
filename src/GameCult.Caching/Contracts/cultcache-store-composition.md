@@ -45,9 +45,15 @@ which route wrote it.
 - A load publishes changes to `Watch` subscribers and fires `OnUpdate`. A local
   write or commit publishes to `Watch` only; `OnUpdate` fires for loads alone.
 - Observers and `OnUpdate` run after the cache releases its gate, never under
-  it: an observer may read or write the cache from any thread. A throwing
-  observer cannot undo the store's adoption of a load; the store and cache
-  already agree when publication starts.
+  it: an observer may read or write the cache from any thread. A change is
+  published after the cache releases its gate and before the call that made it
+  returns, on that caller's thread; no call publishes another call's changes. A
+  direct `PullAll` on an attached store is such a call.
+- An observer exception is rethrown to that caller after all of that call's
+  changes are delivered (an `AggregateException` if several threw). If the call
+  itself failed, its own exception is rethrown and observer exceptions are
+  dropped. A throwing observer cannot undo the store's adoption of a load; the
+  store and cache already agree when publication starts.
 - Hydration failure on open is loud: a corrupt store file, or a record whose
   schema the registry cannot resolve, makes the open throw and leaves the file
   byte-identical. Consumers never delete and rewrite a store they failed to
