@@ -237,8 +237,11 @@ no serialization; a CultMath encoding, if added, uses this shape.
 
 | Rule | C# | Rust | TypeScript | Python |
 |---|---|---|---|---|
-| One home store, no mirrors | implemented | implemented (exact type ids; `add_backing_store` returns `Err` on a second generic store or a claimed type) | implemented (exact type ids; `addBackingStore` throws on a second generic store or a claimed type) | implemented (exact type ids; `add_backing_store`/`add_generic_store` raise on a claimed type or a second generic store) |
-| Attach hydrates; loading never writes | implemented | attach does not read; pull loads without writing | attach does not read; pull loads without writing | attach does not read; pull loads without writing |
+| One home store, no mirrors | implemented | implemented (exact type ids; `add_backing_store` returns `Err` on a second generic store or a claimed type; an empty type list is the generic store) | implemented (exact type ids; `addBackingStore` throws on a second generic store or a claimed type; no types is the generic store) | implemented (exact type ids; `add_backing_store`/`add_generic_store` raise on a claimed type or a second generic store; an empty type list is the generic store) |
+| Zero stores is in memory | implemented | implemented | implemented | implemented |
+| Home cannot move after admission | implemented | implemented (`add_backing_store` returns `Err` and attaches nothing) | implemented (`addBackingStore` throws and attaches nothing) | implemented (`add_backing_store`/`add_generic_store` raise and attach nothing) |
+| Refused at load when not home | implemented | implemented (`pull_all_backing_stores` returns `Err` naming key and both stores; admits nothing) | implemented (`pullAllBackingStores` throws naming key and both stores; admits nothing) | implemented (`pull_all_backing_stores` raises naming key and both stores; admits nothing) |
+| Attach hydrates; loading never writes | implemented | attach does not read (call `pull_all_backing_stores`); pull loads without writing | attach does not read (call `pullAllBackingStores`); pull loads without writing | attach does not read (call `pull_all_backing_stores`); pull loads without writing |
 | Runtime type decides schema | implemented | n/a (explicit type ids) | n/a | n/a |
 | Assignable lookups and watches | implemented | exact type ids | exact type ids | exact type ids |
 | Globals never invented, singleton | implemented | no globals | single `__global__`; a write with a new key replaces it; refused only on pull; invents nothing | single `__global__`, invents nothing |
