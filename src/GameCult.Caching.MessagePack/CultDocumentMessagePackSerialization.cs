@@ -142,39 +142,6 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
-    /// Serializes a schema catalog.
-    /// </summary>
-    public static byte[] SerializeSchemaCatalog(CultSchemaCatalogEntry[] catalog)
-    {
-        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
-        var writer = new MessagePackWriter(buffer);
-        writer.WriteArrayHeader(catalog.Length);
-        foreach (var entry in catalog)
-        {
-            WriteSchemaCatalogEntry(ref writer, entry);
-        }
-
-        writer.Flush();
-        return buffer.WrittenSpan.ToArray();
-    }
-
-    /// <summary>
-    /// Deserializes a schema catalog.
-    /// </summary>
-    public static CultSchemaCatalogEntry[] DeserializeSchemaCatalog(byte[] payload)
-    {
-        var reader = new MessagePackReader(payload);
-        var count = reader.ReadArrayHeader();
-        var catalog = new CultSchemaCatalogEntry[count];
-        for (var index = 0; index < count; index++)
-        {
-            catalog[index] = ReadSchemaCatalogEntry(ref reader);
-        }
-
-        return catalog;
-    }
-
-    /// <summary>
     /// Serializes a complete persisted store snapshot.
     /// </summary>
     public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)

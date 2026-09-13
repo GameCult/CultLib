@@ -805,8 +805,6 @@ namespace GameCult.Caching.Tests
 
             var roundTripRecord = CultDocumentMessagePackSerialization.DeserializePersistedRecord(
                 CultDocumentMessagePackSerialization.SerializePersistedRecord(record));
-            var roundTripCatalog = CultDocumentMessagePackSerialization.DeserializeSchemaCatalog(
-                CultDocumentMessagePackSerialization.SerializeSchemaCatalog(catalog));
             var roundTripSnapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(
                 CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
 
@@ -814,7 +812,7 @@ namespace GameCult.Caching.Tests
             Assert.That(roundTripRecord.SchemaId, Is.EqualTo("schema-1"));
             Assert.That(roundTripRecord.StoredAt, Is.EqualTo("2026-05-08T12:00:00Z"));
             Assert.That(roundTripRecord.Payload, Is.EqualTo(record.Payload));
-            Assert.That(roundTripCatalog.Single().CompatibleSchemaIds, Is.EqualTo(catalog.Single().CompatibleSchemaIds));
+            Assert.That(roundTripSnapshot.SchemaCatalog.Single().CompatibleSchemaIds, Is.EqualTo(catalog.Single().CompatibleSchemaIds));
             Assert.That(roundTripSnapshot.FormatVersion, Is.EqualTo("cultcache.store.v1"));
             Assert.That(roundTripSnapshot.SchemaCatalog.Single().SchemaName, Is.EqualTo("tests.named_entry"));
             Assert.That(roundTripSnapshot.Records.Single().Key, Is.EqualTo("record-1"));
