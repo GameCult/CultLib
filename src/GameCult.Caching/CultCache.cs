@@ -2125,27 +2125,6 @@ namespace GameCult.Caching
     }
 
     /// <summary>
-    /// Durable metadata available before a backing store hydrates a record payload.
-    /// </summary>
-    public sealed class CultPersistedRecordMetadata
-    {
-        /// <summary>Creates durable record metadata.</summary>
-        public CultPersistedRecordMetadata(string key, string schemaId, string storedAt)
-        {
-            Key = key;
-            SchemaId = schemaId;
-            StoredAt = storedAt;
-        }
-
-        /// <summary>Gets the durable record key.</summary>
-        public string Key { get; }
-        /// <summary>Gets the durable schema identity.</summary>
-        public string SchemaId { get; }
-        /// <summary>Gets the record commit timestamp.</summary>
-        public string StoredAt { get; }
-    }
-
-    /// <summary>
     /// Base class for CultCache persistence adapters.
     /// </summary>
     public abstract class CacheBackingStore : IDisposable
@@ -2198,14 +2177,6 @@ namespace GameCult.Caching
         /// Pulls all persisted records into the backing store.
         /// </summary>
         public abstract void PullAll();
-        /// <summary>
-        /// Pulls records selected by durable metadata. Non-indexed stores fall back to a full pull.
-        /// </summary>
-        public virtual void PullSelected(Func<CultPersistedRecordMetadata, bool> selector)
-        {
-            if (selector == null) throw new ArgumentNullException(nameof(selector));
-            PullAll();
-        }
         /// <summary>
         /// Returns whether the backing store knows a record is durable, including records left cold by selective hydration.
         /// </summary>
