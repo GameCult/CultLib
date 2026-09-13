@@ -1,3 +1,4 @@
+#nullable enable
 using GameCult.Caching.MessagePack;
 using GameCult.Caching.Tests;
 using MessagePack;

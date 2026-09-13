@@ -142,7 +142,9 @@ public sealed class CultDocumentRegistryTests
             new object[] { schemaName, schemaVersion }));
         if (addStringField)
         {
-            type.DefineField("Value", typeof(string), FieldAttributes.Public);
+            type.DefineField("Value", typeof(string), FieldAttributes.Public).SetCustomAttribute(new CustomAttributeBuilder(
+                typeof(global::MessagePack.KeyAttribute).GetConstructor(new[] { typeof(int) })!,
+                new object[] { 0 }));
         }
 
         return type.CreateType()!;

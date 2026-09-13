@@ -481,7 +481,7 @@ namespace GameCult.Caching
                 : BuildDescriptor(definition);
         }
 
-        private static CultDocumentDescriptor BuildDescriptor(Type type)
+        internal static CultDocumentDescriptor BuildDescriptor(Type type)
         {
             var attribute = type.GetCustomAttribute<CultDocumentAttribute>()
                             ?? throw new InvalidOperationException(
@@ -906,43 +906,25 @@ namespace GameCult.Caching
 
             foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
             {
-                if (IsIgnored(field))
-                {
-                    continue;
-                }
-
-                members.Add(PersistedMember.FromMember(field, field.FieldType, value => field.GetValue(value), GetKeyValue(field)));
+                if (!IsIgnored(field))
+                    members.Add(PersistedMember.FromMember(field, field.FieldType, value => field.GetValue(value), RequireKey(type, field)));
             }
 
             foreach (var property in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
             {
-                if (property.GetMethod == null || property.SetMethod == null || IsIgnored(property))
-                {
-                    continue;
-                }
-
-                members.Add(PersistedMember.FromMember(property, property.PropertyType, value => property.GetValue(value), GetKeyValue(property)));
+                if (property.GetMethod != null && property.SetMethod != null && !IsIgnored(property))
+                    members.Add(PersistedMember.FromMember(property, property.PropertyType, value => property.GetValue(value), RequireKey(type, property)));
             }
 
-            var explicitMembers = members.Where(member => member.ExplicitSlot.HasValue).OrderBy(member => member.ExplicitSlot.GetValueOrDefault()).ToArray();
-            var implicitMembers = members.Where(member => !member.ExplicitSlot.HasValue).OrderBy(member => member.MetadataToken).ToArray();
-            var assigned = new List<PersistedMember>(members.Count);
-            var nextSlot = explicitMembers.Length == 0 ? 0 : explicitMembers.Max(member => member.ExplicitSlot.GetValueOrDefault()) + 1;
-
-            foreach (var member in explicitMembers)
-            {
-                member.Slot = member.ExplicitSlot.GetValueOrDefault();
-                assigned.Add(member);
-            }
-
-            foreach (var member in implicitMembers)
-            {
-                member.Slot = nextSlot++;
-                assigned.Add(member);
-            }
-
-            return assigned.OrderBy(member => member.Slot).ToArray();
+            return members.OrderBy(member => member.Slot).ToArray();
         }
+
+        // The generator reports the same text as diagnostic GCC001.
+        internal static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
+
+        private static int RequireKey(Type documentType, MemberInfo member) =>
+            GetKeyValue(member) ?? throw new InvalidOperationException(UnkeyedMemberMessage(documentType.Name, member.Name));
 
         private static bool IsIgnored(MemberInfo member)
         {
@@ -988,8 +970,6 @@ namespace GameCult.Caching
         {
             public MemberInfo Member { get; set; } = default!;
             public Type MemberType { get; set; } = default!;
-            public int MetadataToken { get; set; }
-            public int? ExplicitSlot { get; set; }
             public int Slot { get; set; }
             public bool IsName { get; set; }
             public string? IndexAlias { get; set; }
@@ -1003,7 +983,7 @@ namespace GameCult.Caching
                 MemberInfo member,
                 Type memberType,
                 Func<object, object?> getValue,
-                int? explicitSlot)
+                int slot)
             {
                 var referenceAttribute = member.GetCustomAttribute<CultReferenceAttribute>();
                 var targetType = ResolveReferenceTarget(memberType, referenceAttribute?.TargetType);
@@ -1012,9 +992,7 @@ namespace GameCult.Caching
                 {
                     Member = member,
                     MemberType = memberType,
-                    MetadataToken = member.MetadataToken,
-                    ExplicitSlot = explicitSlot,
-                    Slot = explicitSlot ?? -1,
+                    Slot = slot,
                     IsName = member.GetCustomAttribute<CultNameAttribute>() != null,
                     IndexAlias = ResolveIndexAlias(member),
                     IsReference = targetType != null || referenceAttribute != null,

@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -49,7 +50,8 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 return null;
             }
 
-            var members = DiscoverMembers(typeSymbol);
+            var unkeyedMembers = new List<string>();
+            var members = DiscoverMembers(typeSymbol, unkeyedMembers);
             var nameMember = members.FirstOrDefault(member => member.IsName);
             var canConstructForDeserialization = typeSymbol.TypeKind == TypeKind.Struct ||
                 typeSymbol.InstanceConstructors.Any(constructor =>
@@ -71,67 +73,49 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                     .ToImmutableArray(),
                 members.ToImmutableArray(),
                 canConstructForDeserialization,
-                hasDenseSlots);
+                hasDenseSlots,
+                unkeyedMembers.Select(name => UnkeyedMemberMessage(typeSymbol.Name, name)).ToImmutableArray(),
+                typeSymbol.Locations.FirstOrDefault());
         }
 
-        private static ImmutableArray<MemberShape> DiscoverMembers(INamedTypeSymbol typeSymbol)
+        // The same members CultDocumentRegistry reflects: public instance fields and get/set properties, inherited included.
+        private static ImmutableArray<MemberShape> DiscoverMembers(INamedTypeSymbol typeSymbol, List<string> unkeyedMembers)
         {
-            var candidates = new List<MemberShapeSeed>();
-            foreach (var member in typeSymbol.GetMembers())
+            var shaped = new List<MemberShape>();
+            for (var type = typeSymbol; type != null && type.SpecialType != SpecialType.System_Object; type = type.BaseType)
             {
-                if (member is IFieldSymbol field)
+                foreach (var member in type.GetMembers())
                 {
-                    if (field.IsStatic || field.DeclaredAccessibility != Accessibility.Public || IsIgnored(field))
-                    {
+                    ITypeSymbol memberType;
+                    if (member is IFieldSymbol field && !field.IsStatic && field.DeclaredAccessibility == Accessibility.Public)
+                        memberType = field.Type;
+                    else if (member is IPropertySymbol property && !property.IsStatic && !property.IsIndexer && !property.IsOverride &&
+                             property.DeclaredAccessibility == Accessibility.Public && property.GetMethod != null && property.SetMethod != null)
+                        memberType = property.Type;
+                    else
                         continue;
-                    }
 
-                    candidates.Add(MemberShapeSeed.From(field, field.Type));
-                    continue;
-                }
-
-                if (member is IPropertySymbol property)
-                {
-                    if (property.IsStatic ||
-                        property.IsIndexer ||
-                        property.DeclaredAccessibility != Accessibility.Public ||
-                        property.GetMethod == null ||
-                        property.SetMethod == null ||
-                        IsIgnored(property))
-                    {
+                    if (IsIgnored(member))
                         continue;
-                    }
-
-                    candidates.Add(MemberShapeSeed.From(property, property.Type));
+                    var slot = GetExplicitSlot(member);
+                    if (slot == null)
+                        unkeyedMembers.Add(member.Name);
+                    else
+                        shaped.Add(MemberShapeSeed.From(member, memberType).WithSlot(slot.Value));
                 }
             }
 
-            var explicitMembers = candidates
-                .Where(member => member.ExplicitSlot.HasValue)
-                .OrderBy(member => member.ExplicitSlot!.Value)
-                .ThenBy(member => member.SortKey, StringComparer.Ordinal)
-                .ToArray();
-            var implicitMembers = candidates
-                .Where(member => !member.ExplicitSlot.HasValue)
-                .OrderBy(member => member.SortKey, StringComparer.Ordinal)
-                .ToArray();
-            var nextSlot = explicitMembers.Length == 0 ? 0 : explicitMembers.Max(member => member.ExplicitSlot!.Value) + 1;
-            var shaped = new List<MemberShape>(candidates.Count);
-
-            foreach (var member in explicitMembers)
-            {
-                shaped.Add(member.WithSlot(member.ExplicitSlot!.Value));
-            }
-
-            foreach (var member in implicitMembers)
-            {
-                shaped.Add(member.WithSlot(nextSlot++));
-            }
-
-            return shaped
-                .OrderBy(member => member.Slot)
-                .ToImmutableArray();
+            return shaped.OrderBy(member => member.Slot).ToImmutableArray();
         }
+
+        // CultDocumentRegistry.UnkeyedMemberMessage throws the same text.
+        private static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
+
+#pragma warning disable RS2008
+        private static readonly DiagnosticDescriptor UnkeyedMember = new(
+            "GCC001", "Cult document member has no [Key]", "{0}", "GameCult.Caching", DiagnosticSeverity.Error, isEnabledByDefault: true);
+#pragma warning restore RS2008
 
         private static bool IsIgnored(ISymbol member)
         {
@@ -160,12 +144,19 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
 
         private static void EmitProvider(SourceProductionContext context, Compilation compilation, ImmutableArray<DocumentShape> shapes)
         {
-            var documents = shapes
+            var shaped = shapes
                 .Where(shape => shape != null)
                 .GroupBy(shape => shape.DocumentTypeName, StringComparer.Ordinal)
                 .Select(group => group.First())
                 .OrderBy(shape => shape.DocumentTypeName, StringComparer.Ordinal)
                 .ToArray();
+            foreach (var shape in shaped)
+            {
+                foreach (var message in shape.UnkeyedMemberMessages)
+                    context.ReportDiagnostic(Diagnostic.Create(UnkeyedMember, shape.Location, message));
+            }
+
+            var documents = shaped.Where(shape => shape.UnkeyedMemberMessages.IsEmpty).ToArray();
 
             if (documents.Length == 0)
             {
@@ -425,7 +416,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 string name,
                 string schemaTypeName,
                 string typeSyntaxName,
-                int? explicitSlot,
                 string sortKey,
                 bool isName,
                 string? indexAlias,
@@ -437,7 +427,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 Name = name;
                 SchemaTypeName = schemaTypeName;
                 TypeSyntaxName = typeSyntaxName;
-                ExplicitSlot = explicitSlot;
                 SortKey = sortKey;
                 IsName = isName;
                 IndexAlias = indexAlias;
@@ -450,7 +439,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public string Name { get; }
             public string SchemaTypeName { get; }
             public string TypeSyntaxName { get; }
-            public int? ExplicitSlot { get; }
             public string SortKey { get; }
             public bool IsName { get; }
             public string? IndexAlias { get; }
@@ -501,7 +489,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                     member.Name,
                     GetSchemaTypeName(memberType),
                     memberType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                    GetExplicitSlot(member),
                     BuildAccessorStem(member),
                     GetAttribute(member, "GameCult.Caching.CultNameAttribute") != null,
                     indexAlias,
@@ -546,8 +533,12 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 ImmutableArray<IndexAccessorShape> indexAccessors,
                 ImmutableArray<MemberShape> members,
                 bool canConstructForDeserialization,
-                bool hasDenseSlots)
+                bool hasDenseSlots,
+                ImmutableArray<string> unkeyedMemberMessages,
+                Location? location)
             {
+                UnkeyedMemberMessages = unkeyedMemberMessages;
+                Location = location;
                 DocumentTypeName = documentTypeName;
                 SchemaName = schemaName;
                 SchemaVersion = schemaVersion;
@@ -575,6 +566,8 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public ImmutableArray<MemberShape> Members { get; }
             public bool CanConstructForDeserialization { get; }
             public bool HasDenseSlots { get; }
+            public ImmutableArray<string> UnkeyedMemberMessages { get; }
+            public Location? Location { get; }
         }
 
         private sealed class IndexAccessorShape
