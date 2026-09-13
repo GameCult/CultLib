@@ -158,14 +158,18 @@ no serialization; a CultMath encoding, if added, uses this shape.
 
 | Rule | C# | Rust | TypeScript | Python |
 |---|---|---|---|---|
-| One home store, no mirrors | contract; implementation replaces replication | routes by type, still pushes to later matching stores | routes by type, still mirrors | routes by type, still writes every matching store |
-| Attach hydrates; loading never writes | contract; attach still pushes existing records | attach does not read; pull loads without writing | attach does not read; pull loads without writing | attach does not read; pull loads without writing |
-| Runtime type decides schema | contract; generic parameter still decides | n/a (explicit type ids) | n/a | n/a |
-| Assignable lookups and watches | `Get<T>`/`GetAll<T>` only | exact type ids | exact type ids | exact type ids |
-| Globals never invented, singleton | contract; constructor still invents defaults | no globals | single `__global__`; a write with a new key replaces it; refused only on pull; invents nothing | single `__global__`, invents nothing |
-| Explicit batch commit | contract; ambient transaction still present | `put_prepared_batch`, one store, all-or-nothing | not implemented | `put_envelopes`, one type per call, not all-or-nothing |
-| Conditional commit | contract | store-level `compare_exchange` family | not implemented | not implemented |
+| One home store, no mirrors | implemented | routes by type, still pushes to later matching stores | routes by type, still mirrors | routes by type, still writes every matching store |
+| Attach hydrates; loading never writes | implemented | attach does not read; pull loads without writing | attach does not read; pull loads without writing | attach does not read; pull loads without writing |
+| Runtime type decides schema | implemented | n/a (explicit type ids) | n/a | n/a |
+| Assignable lookups and watches | implemented | exact type ids | exact type ids | exact type ids |
+| Globals never invented, singleton | implemented | no globals | single `__global__`; a write with a new key replaces it; refused only on pull; invents nothing | single `__global__`, invents nothing |
+| Explicit batch commit | implemented | `put_prepared_batch`, one store, all-or-nothing | not implemented | `put_envelopes`, one type per call, not all-or-nothing |
+| Conditional commit | implemented | store-level `compare_exchange` family | not implemented | not implemented |
 | Per-assembly options, value-type arrays | contract | n/a | n/a | n/a |
 
-A "contract" cell means this document is ahead of the C# code; the C# change
-lands with `StoreRoutingTests` turning green.
+A "contract" cell means this document is ahead of the C# code.
+
+Opening a store always hydrates it. A consumer that wants a store to hold only
+what it writes removes the records it does not keep, upserts, and flushes; the
+flush replaces the file in one atomic step. There is no open-without-reading
+option.

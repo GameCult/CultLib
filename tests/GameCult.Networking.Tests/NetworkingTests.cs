@@ -1490,6 +1490,44 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
         }
 
+        // A batch is a value: nothing staged in it reaches CultNet observers before the store commits it. A put made
+        // while a batch is being staged is its own write, not part of the batch.
+        [Test]
+        public void CultNetPutInsideCommitPublishesOnlyAfterCommit()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultnet-commit-{Guid.NewGuid():N}.cc");
+            try
+            {
+                var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                var database = new CultNetDatabase(cache);
+                var published = new List<CultRecordKey>();
+                using var subscription = database.Watch<NetworkSchemaNote>().Subscribe(change => published.Add(change.Key));
+                var batched = new CultRecordKey("tests:commit:batched");
+                var put = new CultRecordKey("tests:commit:put");
+
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Upsert(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "batched" }, new CultRecordHandle<NetworkSchemaNote>(batched));
+                    database.PutAsync(put, new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "put" }).GetAwaiter().GetResult();
+                    Assert.That(published, Is.EqualTo(new[] { put }), "a record staged in the batch was published before the store committed it");
+                    Assert.That(cache.Get(batched), Is.Null);
+                }), Is.True);
+
+                Assert.That(published, Is.EqualTo(new[] { put }));
+                Assert.That(cache.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
+                var reopened = new CultCache();
+                reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                Assert.That(reopened.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
+                Assert.That(reopened.Get<NetworkSchemaNote>(put)?.Text, Is.EqualTo("put"));
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path + ".lock")) File.Delete(path + ".lock");
+            }
+        }
+
         [Test]
         public async Task DatabaseSubscriptionServer_StreamsRecordChangesOverRudp()
         {

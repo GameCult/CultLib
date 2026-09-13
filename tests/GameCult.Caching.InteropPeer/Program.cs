@@ -16,10 +16,18 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: write | read");
+            throw new InvalidOperationException("Expected mode: write | read | write-routed <catalog.cc> <run.cc>");
         }
 
         var mode = args[0];
+        if (mode == "write-routed")
+        {
+            if (args.Length != 3)
+                throw new InvalidOperationException("Expected: write-routed <catalog.cc> <run.cc>");
+            WriteRouted(args[1], args[2]);
+            return 0;
+        }
+
         var options = ParseArgs(args.Skip(1).ToArray());
         var file = RequireArg(options, "file");
         switch (mode)
@@ -66,6 +74,32 @@ static async Task ReadAsync(string file)
         .OfType<CultCacheInteropNote>()
         .FirstOrDefault()
         ?? throw new InvalidOperationException("No cultcache.interop-note records found.");
+    WriteJsonLine(note);
+}
+
+// Two routed single-file stores: each file is a complete single-store snapshot holding only its own type.
+static void WriteRouted(string catalogFile, string runFile)
+{
+    using var cache = new CultCache();
+    cache.AddBackingStore(new SingleFileMessagePackBackingStore(catalogFile), typeof(CultCacheInteropNote));
+    cache.AddBackingStore(new SingleFileMessagePackBackingStore(runFile), typeof(CultCacheInteropRunNote));
+    var note = new CultCacheInteropNote
+    {
+        DocumentId = "note:csharp-routed",
+        AuthorRuntimeId = "csharp",
+        Title = "csharp wrote a routed catalog note",
+        Body = "One home store per document type.",
+        Tags = ["csharp", "routed"]
+    };
+    var runNote = new CultCacheInteropRunNote
+    {
+        DocumentId = "run-note:csharp-routed",
+        AuthorRuntimeId = "csharp",
+        Body = "The run store holds only run records."
+    };
+    cache.UpsertAsync(note, new CultRecordHandle<CultCacheInteropNote>(new CultRecordKey(note.DocumentId)));
+    cache.UpsertAsync(runNote, new CultRecordHandle<CultCacheInteropRunNote>(new CultRecordKey(runNote.DocumentId)));
+    cache.FlushAllBackingStores();
     WriteJsonLine(note);
 }
 
@@ -131,4 +165,14 @@ public sealed class CultCacheInteropNote
     [Key(3)] public string Title { get; set; } = string.Empty;
     [Key(4)] public string Body { get; set; } = string.Empty;
     [Key(5)] public string[] Tags { get; set; } = Array.Empty<string>();
+}
+
+[CultDocument("cultcache.interop-run-note", "cultcache.interop_run_note.v1")]
+[MessagePackObject]
+public sealed class CultCacheInteropRunNote
+{
+    [Key(0)] public string SchemaVersion { get; set; } = "cultcache.interop_run_note.v1";
+    [Key(1)] [CultName] public string DocumentId { get; set; } = string.Empty;
+    [Key(2)] public string AuthorRuntimeId { get; set; } = string.Empty;
+    [Key(3)] public string Body { get; set; } = string.Empty;
 }

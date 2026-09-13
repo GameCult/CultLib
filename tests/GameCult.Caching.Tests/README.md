@@ -17,12 +17,21 @@ The tests currently cover:
 - `CultCacheMessagePack.OpenAsync`, persisted globals, dirty state, and flush on
   dispose
 - cache lookups (`Get`, `GetAll`, runtime-type upserts)
-- the ambient cache transaction (`ExecuteTransactionAsync`), until Cut 3
-  replaces it with the explicit batch commit
+- `CultCache.Commit` batches on a directory store: visibility after the store
+  commits, abandoned stages, sealed batches, observers committing again
 - explicit Cult document payload codecs, generated metadata, canonical schema
   fixtures, and schema drift reports
 - hand-written MessagePack snapshot and record serialization
-- `StoreRoutingTests`: the Cut 1 store-routing contract, red until Cut 3
+- `StoreRoutingTests`: the store-composition contract (routing, attachment is
+  hydration, read-only stores, global singletons, assignable lookups, batches,
+  all-or-nothing loads)
+- `ConditionalCommitTests`: `Expect`, `ExpectUnchanged`, `TryCommit`, the
+  single-file lock, strictly increasing `storedAt`, and the same conditions on a
+  directory store
+- `DirectoryStoreDurabilityTests`: failed manifest replace, content-addressed
+  pages, the commit lease, orphan pages and tampered pages, with faults from
+  real file locks
+- `PreCut2StoreFormatTests`: stores written before Cut 2 still open
 
 Selective hydration, the directory store's stage probes, pre-v4 directory
 formats, and the SoA table are no longer in the tree; the SoA table is parked

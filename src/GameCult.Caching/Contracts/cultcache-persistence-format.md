@@ -56,10 +56,9 @@ nothing.
 writes the whole snapshot and is last-writer-wins, so processes sharing a store
 must all use conditional commit.
 
-Batch and conditional commit are specified for C# in
-`cultcache-store-composition.md` and not yet implemented there; see its runtime
-status table. Rust implements both. TypeScript and Python implement neither
-yet. Routing, batches and conditions are specified in
+C# implements batch and conditional commit (`CultCache.Commit`, `TryCommit`,
+`CultCacheBatch`). Rust implements both. TypeScript and Python implement
+neither yet. Routing, batches and conditions are specified in
 `cultcache-store-composition.md`.
 
 ## Canonical Store Shape
