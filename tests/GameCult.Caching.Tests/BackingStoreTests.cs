@@ -1184,20 +1184,6 @@ namespace GameCult.Caching.Tests
             public CultRecordRef<NamedTestEntry> Parent = new(new CultRecordKey("parent"));
         }
 
-        [CultDocument("tests.schema_stamped_entry", "tests.schema_stamped_entry.v1")]
-        internal sealed class SchemaStampedTestEntry
-        {
-            [Key(0)]
-            public string SchemaVersion = string.Empty;
-
-            [Key(1)]
-            [CultName]
-            public string Name = string.Empty;
-
-            [Key(2)]
-            public string Value = string.Empty;
-        }
-
         [CultDocument("tests.named_entry", "tests.named_entry.v2")]
         internal sealed class NamedTestEntryAdditive
         {
