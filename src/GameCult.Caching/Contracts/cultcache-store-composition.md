@@ -216,6 +216,9 @@ another runtime need not obey the `storedAt` rule.
   generated and reflective serializers resolve options from the document's
   assembly. There is no mutable static, no registration call, and no load-order
   rule.
+- A generic document's options come from the generic definition's assembly:
+  `Doc<X>` uses the resolvers `Doc`'s assembly declares, never `X`'s. A formatter
+  for `X` that `Doc<X>` needs is declared in `Doc`'s assembly.
 - An assembly that declares nothing, and the store envelope, use the base
   options.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a

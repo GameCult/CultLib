@@ -1021,32 +1021,13 @@ namespace GameCult.Caching
         private static string HiddenMemberMessage(string documentTypeName, string first, string second) =>
             $"Cult document {documentTypeName} member {first} hides persisted member {second}; persisted member names must be unique.";
 
-        private static bool IsIgnored(MemberInfo member)
-        {
-            return member.GetCustomAttributes().Any(attribute =>
-            {
-                var name = attribute.GetType().FullName;
-                return name == "MessagePack.IgnoreMemberAttribute";
-            });
-        }
+        private static bool IsIgnored(MemberInfo member) =>
+            member.GetCustomAttribute<global::MessagePack.IgnoreMemberAttribute>() != null;
 
         private static object? GetKeyValue(MemberInfo member)
         {
-            foreach (var attribute in member.GetCustomAttributes())
-            {
-                var name = attribute.GetType().FullName;
-                if (name == "MessagePack.KeyAttribute")
-                {
-                    if (attribute.GetType().GetProperty("IntKey")?.GetValue(attribute) is int intKey)
-                    {
-                        return intKey;
-                    }
-
-                    return attribute.GetType().GetProperty("StringKey")?.GetValue(attribute) as string;
-                }
-            }
-
-            return null;
+            var key = member.GetCustomAttribute<global::MessagePack.KeyAttribute>();
+            return key?.IntKey is int slot ? slot : key?.StringKey;
         }
 
         private static string Sha256(string input)

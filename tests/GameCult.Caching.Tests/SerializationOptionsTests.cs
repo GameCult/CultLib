@@ -2,10 +2,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using NUnit.Framework;
 
 namespace GameCult.Caching.Tests
@@ -103,6 +107,65 @@ namespace GameCult.Caching.Tests
             Assert.That(CultDocumentMessagePackSerialization.OptionsFor(typeof(Pair).Assembly),
                 Is.SameAs(CultDocumentMessagePackSerialization.OptionsFor(typeof(Pair).Assembly)));
             Assert.That(CultDocumentMessagePackSerialization.OptionsFor(typeof(Pair).Assembly).Resolver.GetFormatter<Pair>(), Is.Not.Null);
+        }
+
+        // GenericHolder<Pair> lives in an assembly that declares a resolver writing Pair as [B, A]; Pair's own assembly writes [A, B].
+        [Test]
+        public void GenericDocumentUsesItsOwnAssemblyResolvers()
+        {
+            const string source = @"
+using GameCult.Caching;
+using GameCult.Caching.MessagePack;
+using GameCult.Caching.Tests;
+using MessagePack;
+using MessagePack.Formatters;
+[assembly: CultCacheFormatterResolver(typeof(ReversedPairResolver))]
+[CultDocument(""tests.generic_holder"", ""tests.generic_holder.v1"")]
+[MessagePackObject]
+public sealed class GenericHolder<T> { [Key(0)] public T Value; }
+public sealed class ReversedPairResolver : IFormatterResolver
+{
+    public static readonly IFormatterResolver Instance = new ReversedPairResolver();
+    public IMessagePackFormatter<T> GetFormatter<T>() => typeof(T) == typeof(Pair) ? (IMessagePackFormatter<T>)(object)new ReversedPairFormatter() : null;
+}
+public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
+{
+    public void Serialize(ref MessagePackWriter writer, Pair value, MessagePackSerializerOptions options) { writer.WriteArrayHeader(2); writer.Write(value.B); writer.Write(value.A); }
+    public Pair Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.ReadArrayHeader(); var b = reader.ReadSingle(); return new Pair { A = reader.ReadSingle(), B = b }; }
+}";
+            var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
+                .Split(Path.PathSeparator)
+                .Append(typeof(CultDocumentAttribute).Assembly.Location)
+                .Append(typeof(CultDocumentMessagePackSerialization).Assembly.Location)
+                .Append(typeof(KeyAttribute).Assembly.Location)
+                .Append(typeof(MessagePackSerializer).Assembly.Location)
+                .Append(typeof(Pair).Assembly.Location)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(path => MetadataReference.CreateFromFile(path));
+            var compilation = CSharpCompilation.Create(
+                "GenericHolders_" + Guid.NewGuid().ToString("N"),
+                new[] { CSharpSyntaxTree.ParseText(source) },
+                references,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            using var stream = new MemoryStream();
+            var emitted = compilation.Emit(stream);
+            Assert.That(emitted.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).Select(diagnostic => diagnostic.ToString()), Is.Empty);
+            var assembly = Assembly.Load(stream.ToArray());
+            var type = assembly.GetType("GenericHolder`1")!.MakeGenericType(typeof(Pair));
+            var registry = CultDocumentRegistry.ForTypes(new[] { type });
+            var holder = Activator.CreateInstance(type)!;
+            type.GetField("Value")!.SetValue(holder, new Pair { A = 1.5f, B = -2f });
+
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(holder, type, registry);
+
+            Assert.That(type.Assembly, Is.SameAs(assembly));
+            var reader = new MessagePackReader(payload);
+            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(1));
+            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
+            Assert.That(reader.ReadSingle(), Is.EqualTo(-2f), "Pair's own assembly resolver was used instead of the document's");
+            Assert.That(reader.ReadSingle(), Is.EqualTo(1.5f));
+            var decoded = CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, registry);
+            Assert.That(type.GetField("Value")!.GetValue(decoded), Is.EqualTo(new Pair { A = 1.5f, B = -2f }));
         }
 
         [CultDocument("tests.pair_holder", "tests.pair_holder.v1")]

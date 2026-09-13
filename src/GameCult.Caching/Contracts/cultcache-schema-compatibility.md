@@ -26,6 +26,17 @@ The canonical fixtures currently exercised in C# are:
 See `GameCult.Caching.Tests/BackingStoreTests.cs` for the canonical fixture
 documents and the expected receipts.
 
+## Slots
+
+A member's slot is its MessagePack `[Key(n)]` integer. MessagePack's `[Key]` and
+`[IgnoreMember]` are the single slot authority, so `GameCult.Caching` depends on
+`MessagePack.Annotations`. The registry and the generator (diagnostic GCC001)
+refuse, with the same message: a persisted member without `[Key]`, a string
+`[Key]`, two members sharing a slot (including `new`-hidden members), a hidden
+persisted member, an override whose `[Key]` or `[IgnoreMember]` differs from its
+base declaration's (MessagePack reads the base declaration), and a persisted
+member without a public or internal setter.
+
 ## Which schema a record carries
 
 A record is written under the schema of its runtime type. Writing a derived
