@@ -87,6 +87,9 @@ jobs:
           if ($stray -or $oldNamespace) {
             throw "CultNet schema contracts drifted out of contracts/cultnet/ (REC-032). See CultLib/contracts/cultnet/ and rewrite any `$id back to https://github.com/GameCult/CultLib/contracts/cultnet/."
           }
+          # git grep exits 1 when nothing matches, and the runner's pwsh wrapper
+          # ends the step with that $LASTEXITCODE; a clean tree must pass.
+          exit 0
 
       - name: Install Node dependencies
         run: npm install --no-package-lock
