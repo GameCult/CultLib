@@ -1322,6 +1322,12 @@ namespace GameCult.Caching
             return Get(key) as T;
         }
 
+        public bool TryGet<T>(CultRecordKey key, out T? document) where T : class
+        {
+            document = Get<T>(key);
+            return document != null;
+        }
+
         public IEnumerable<T> GetAll<T>() where T : class
         {
             lock (_stateGate)
