@@ -2,3 +2,6 @@ node_modules/
 dist/
 dist-test/
 *.tgz
+# Mirrored from CultLib/contracts/cultnet by tools/generate-swarm-contracts.mjs
+# (REC-032). Not tracked: CultLib/contracts/cultnet is the only source.
+contracts/

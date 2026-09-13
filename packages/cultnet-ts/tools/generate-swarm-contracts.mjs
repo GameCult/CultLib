@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,9 +6,23 @@ import { compile } from "json-schema-to-typescript";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const repoRoot = path.resolve(__dirname, "..");
-const manifestPath = path.join(repoRoot, "tools", "swarm-contracts.manifest.json");
-const outputPath = path.join(repoRoot, "src", "generated", "swarm-contracts.generated.ts");
+const packageRoot = path.resolve(__dirname, "..");
+const cultLibRoot = path.resolve(packageRoot, "..", "..");
+const manifestPath = path.join(packageRoot, "tools", "swarm-contracts.manifest.json");
+const outputPath = path.join(packageRoot, "src", "generated", "swarm-contracts.generated.ts");
+
+// CultLib/contracts/cultnet is the single source of CultNet schema contracts
+// (REC-032). cultnet-ts is a standalone npm package (published or vendored by
+// Heimdall independent of the CultLib checkout), so it cannot import schemas
+// that live outside its own package tree. Mirror the canonical contracts into
+// a package-local, gitignored copy every time this generator runs, so `dist`
+// and `contracts` both ship self-contained. Wipe first: a stale local file
+// left behind after a schema is deleted upstream must not survive as drift.
+const sourceContractsDir = path.join(cultLibRoot, "contracts", "cultnet");
+const localContractsDir = path.join(packageRoot, "contracts", "cultnet");
+await rm(localContractsDir, { recursive: true, force: true });
+await mkdir(path.dirname(localContractsDir), { recursive: true });
+await cp(sourceContractsDir, localContractsDir, { recursive: true });
 
 /**
  * @typedef {{

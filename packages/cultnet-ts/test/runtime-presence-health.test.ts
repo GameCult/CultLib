@@ -26,7 +26,7 @@ import {
 // are generated output and must have exactly one home.
 const VECTORS = JSON.parse(
   readFileSync(
-    join(__dirname, "..", "..", "..", "..", "test", "fixtures", "runtime-presence-vectors.json"),
+    join(__dirname, "..", "..", "test", "fixtures", "runtime-presence-vectors.json"),
     "utf8",
   ),
 ) as { proof: string; signed: string };
