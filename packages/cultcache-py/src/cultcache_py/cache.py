@@ -146,7 +146,9 @@ class CultCache:
         return "the store routed to " + ", ".join(sorted(type for type, routed in routes.items() if routed is store))
 
     def pull_all_backing_stores(self) -> None:
-        """Reads every store into a staged image; the cache's view changes only if all of them load."""
+        """Builds the complete next state (values, envelopes, name and index lookups) in local
+        structures, running every check and every user extractor; the cache's state is replaced
+        only once that build finishes, so a refused load admits nothing."""
         loaded_values: dict[str, dict[str, Any]] = {}
         loaded_envelopes: dict[str, dict[str, CultCacheEnvelope]] = {}
         routes, generic = self._state.stores_by_type, self._state.generic_store
@@ -182,9 +184,14 @@ class CultCache:
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
-        self._state.values = loaded_values
-        self._state.envelopes = loaded_envelopes
-        self._rebuild_indexes()
+        loaded_names, loaded_indexes = self._derive_lookups(loaded_values)
+        # Plain attribute assignments: nothing fallible runs once the swap begins.
+        (
+            self._state.values,
+            self._state.envelopes,
+            self._state.names,
+            self._state.indexes,
+        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes)
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
         self._assert_registered(document)
@@ -365,11 +372,27 @@ class CultCache:
         return store
 
     def _rebuild_indexes(self) -> None:
-        self._state.names.clear()
-        self._state.indexes.clear()
-        for type, values in self._state.values.items():
+        self._state.names, self._state.indexes = self._derive_lookups(self._state.values)
+
+    def _derive_lookups(
+        self, values_by_type: dict[str, dict[str, Any]]
+    ) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str, str], str]]:
+        """Builds name and index lookups for the given values in fresh dicts, touching no cache state."""
+        names: dict[tuple[str, str], str] = {}
+        indexes: dict[tuple[str, str, str], str] = {}
+        for type, values in values_by_type.items():
+            name_extractor = self._state.name_extractors.get(type)
+            index_extractors = self._state.index_extractors.get(type, {})
             for key, value in values.items():
-                self._add_value_indexes(type, key, value)
+                if name_extractor is not None:
+                    name = extract_value(value, name_extractor)
+                    if name is not None:
+                        names[(type, str(name))] = key
+                for index, extractor in index_extractors.items():
+                    index_value = extract_value(value, extractor)
+                    if index_value is not None:
+                        indexes[(type, index, str(index_value))] = key
+        return names, indexes
 
     def _add_value_indexes(self, type: str, key: str, value: Any) -> None:
         name_extractor = self._state.name_extractors.get(type)

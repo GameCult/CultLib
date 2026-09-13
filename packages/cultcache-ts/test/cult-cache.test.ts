@@ -666,6 +666,53 @@ test("pullWithDuplicateGlobalLeavesCacheUnchanged", async () => {
   assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { theme: "ash" });
 });
 
+test("pullWithThrowingIndexAccessorLeavesCacheUnchanged", async () => {
+  const itemDocument = defineDocumentType({
+    type: "item",
+    schema: z.object({ name: z.string(), category: z.string() }),
+    name: "name",
+    indexes: {
+      category: (item: { name: string; category: string }) => {
+        if (item.name === "Bomb") {
+          throw new Error("category accessor refuses Bomb");
+        }
+        return item.category;
+      },
+    },
+  });
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ theme: z.string() }),
+    global: true,
+  });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-throwing-accessor-"));
+  const storePath = join(tempDir, "generic.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument, settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await cache.put(itemDocument, "potion", { name: "Potion", category: "consumable" });
+  await cache.putGlobal(settingsDocument, { theme: "ash" });
+  const before = cache.snapshot();
+
+  // A record whose index accessor throws lands in the store file behind the cache's back.
+  const potion = cache.getRequiredEnvelope(itemDocument, "potion");
+  await new SingleFileMessagePackBackingStore(storePath).push({
+    ...potion,
+    key: "bomb",
+    payload: encode({ name: "Bomb", category: "explosive" }),
+  });
+
+  await assert.rejects(cache.pullAllBackingStores(), /category accessor refuses Bomb/u);
+  assert.deepEqual(cache.snapshot(), before);
+  assert.deepEqual(cache.getRequired(itemDocument, "potion"), { name: "Potion", category: "consumable" });
+  assert.equal(cache.get(itemDocument, "bomb"), undefined);
+  assert.equal(cache.getKeyByName(itemDocument, "Potion"), "potion");
+  assert.equal(cache.getKeyByName(itemDocument, "Bomb"), undefined);
+  assert.equal(cache.getKeyByIndex(itemDocument, "category", "consumable"), "potion");
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { theme: "ash" });
+});
+
 test("CultCache with zero stores writes and deletes in memory", async () => {
   const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ theme: z.string() }) });
   const cache = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();

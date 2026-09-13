@@ -368,6 +368,53 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(cache.get_key_by_name(item, "Potion"), "item:potion")
             self.assertEqual(cache.get_required_global(settings)["theme"], "ash")
 
+    def test_pull_with_throwing_index_accessor_leaves_cache_unchanged(self) -> None:
+        def category(item: Item) -> str:
+            if item.name == "Bomb":
+                raise ValueError("category accessor refuses Bomb")
+            return item.category
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = define_document_type(
+                "item",
+                encode=lambda value: asdict(value),
+                decode=lambda raw: Item(**raw),
+                name="name",
+                indexes={"category": category},
+            )
+            settings = define_document_type("settings", global_document=True)
+            store_path = Path(tmp) / "generic.cc"
+            cache = (
+                CultCache.builder()
+                .register_document_type(item)
+                .register_document_type(settings)
+                .add_generic_store(SingleFileMessagePackBackingStore(store_path))
+                .build()
+            )
+            cache.put(item, "item:potion", Item(name="Potion", category="Consumable", value=50))
+            cache.put_global(settings, {"theme": "ash"})
+            before_envelopes = cache.snapshot_envelopes()
+            before_values = cache.snapshot()
+
+            # A record whose index accessor throws lands in the store file behind the cache's back.
+            bomb = replace(
+                cache.get_required_envelope(item, "item:potion"),
+                key="item:bomb",
+                payload=item.encode_payload(Item(name="Bomb", category="Explosive", value=1)),
+            )
+            SingleFileMessagePackBackingStore(store_path).push(bomb)
+
+            with self.assertRaisesRegex(ValueError, "category accessor refuses Bomb"):
+                cache.pull_all_backing_stores()
+            self.assertEqual(cache.snapshot_envelopes(), before_envelopes)
+            self.assertEqual(cache.snapshot(), before_values)
+            self.assertEqual(cache.get_required(item, "item:potion").value, 50)
+            self.assertIsNone(cache.get(item, "item:bomb"))
+            self.assertEqual(cache.get_key_by_name(item, "Potion"), "item:potion")
+            self.assertIsNone(cache.get_key_by_name(item, "Bomb"))
+            self.assertEqual(cache.get_key_by_index(item, "category", "Consumable"), "item:potion")
+            self.assertEqual(cache.get_required_global(settings)["theme"], "ash")
+
     def test_attach_with_empty_type_list_is_the_generic_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = define_database_entry_type("settings", [("theme", 0)])
