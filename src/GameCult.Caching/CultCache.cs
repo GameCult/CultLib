@@ -1505,9 +1505,8 @@ namespace GameCult.Caching
                 batch.Sealed = true;
             }
 
-            if (!Monitor.TryEnter(_gate, wait ? Timeout.Infinite : 0))
-                return CultCommitOutcome.Contended;
-            try
+            // The in-process gate is always entered; only the store lock attempt honors wait, so Contended means another writer holds the store.
+            lock (_gate)
             {
                 var upserts = batch.Operations.Values.Where(op => op.Stored != null).Select(op => op.Stored!).ToArray();
                 var deletes = batch.Operations.Values
@@ -1531,10 +1530,6 @@ namespace GameCult.Caching
                         .ToArray();
                     return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
-            }
-            finally
-            {
-                Monitor.Exit(_gate);
             }
         }
 
@@ -1589,6 +1584,15 @@ namespace GameCult.Caching
                 else if (Home(descriptor.DocumentType) is var home && home != source)
                     throw new InvalidOperationException(
                         $"{descriptor.SchemaName} record {stored.Key.Value} was loaded from {source} but its home is {home?.ToString() ?? "no store"}.");
+
+                // One key, one store: a key never moves between homes, and two stores never both deliver it.
+                if (_entries.TryGetValue(stored.Key.Value, out var present) &&
+                    Home(present.Descriptor.DocumentType) is var held &&
+                    Home(descriptor.DocumentType) is var incoming &&
+                    held != incoming)
+                    throw new InvalidOperationException(
+                        $"Record {stored.Key.Value} is held by {held?.ToString() ?? "memory"}; " +
+                        $"{(source == null ? "writing" : "loading")} it as {descriptor.SchemaName} from {incoming?.ToString() ?? "memory"} would give the key a second store.");
 
                 if (!descriptor.IsGlobal)
                     continue;

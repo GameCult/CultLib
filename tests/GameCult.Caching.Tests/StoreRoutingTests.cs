@@ -259,6 +259,61 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task KeyCannotMoveToAnotherStoreOnWrite()
+        {
+            var registry = Registry();
+            var catalogPath = PathOf("catalog.cc");
+            var runPath = PathOf("run.cc");
+            var key = new CultRecordKey("shared-key");
+            using var cache = new CultCache(registry);
+            var run = new SingleFileMessagePackBackingStore(runPath);
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(catalogPath), typeof(RoutingNote));
+            cache.AddBackingStore(run, typeof(RoutingOther));
+            await cache.UpsertAsync(typeof(RoutingNote), new RoutingNote { Name = "n", Text = "catalog" }, key);
+            await cache.FlushAsync();
+            var before = File.ReadAllBytes(catalogPath);
+
+            var single = Assert.Throws<InvalidOperationException>(() =>
+                cache.UpsertAsync(typeof(RoutingOther), new RoutingOther { Name = "o", Text = "run" }, key));
+            var batched = Assert.Throws<InvalidOperationException>(() =>
+                cache.Commit(batch => batch.Upsert(typeof(RoutingOther), new RoutingOther { Name = "o", Text = "run" }, key)));
+            await cache.FlushAsync();
+
+            Assert.That(single!.Message, Does.Contain(key.Value).And.Contain(catalogPath).And.Contain(runPath));
+            Assert.That(batched!.Message, Is.EqualTo(single.Message));
+            Assert.That(run.IsDirty, Is.False);
+            Assert.That(File.Exists(runPath), Is.False);
+            Assert.That(File.ReadAllBytes(catalogPath), Is.EqualTo(before));
+            Assert.That(cache.Get<RoutingNote>(key)?.Text, Is.EqualTo("catalog"));
+        }
+
+        [Test]
+        public void KeyLoadedFromTwoStoresIsRefused()
+        {
+            var registry = Registry();
+            var catalogPath = PathOf("catalog.cc");
+            var runPath = PathOf("run.cc");
+            var key = new CultRecordKey("shared-key");
+            WriteRecords(catalogPath, registry, (key.Value, FixedStoredAt, new RoutingNote { Name = "n", Text = "catalog" }));
+            WriteRecords(runPath, registry, (key.Value, FixedStoredAt, new RoutingOther { Name = "o", Text = "run" }));
+            var runBefore = File.ReadAllBytes(runPath);
+            using var cache = new CultCache(registry);
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(catalogPath), typeof(RoutingNote));
+            var changes = 0;
+            using var subscription = cache.Watch<object>().Subscribe(_ => changes++);
+
+            var refusal = Assert.Throws<InvalidOperationException>(() =>
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(runPath), typeof(RoutingOther)));
+
+            Assert.That(refusal!.Message, Does.Contain(key.Value).And.Contain(catalogPath).And.Contain(runPath));
+            Assert.That(cache.BackingStores, Has.Count.EqualTo(1));
+            Assert.That(cache.AllEntries.Count(), Is.EqualTo(1));
+            Assert.That(cache.Get<RoutingNote>(key)?.Text, Is.EqualTo("catalog"));
+            Assert.That(changes, Is.Zero);
+            Assert.That(File.ReadAllBytes(runPath), Is.EqualTo(runBefore));
+        }
+
+        [Test]
         public async Task LateRouteOverAdmittedTypeThrows()
         {
             var registry = Registry();

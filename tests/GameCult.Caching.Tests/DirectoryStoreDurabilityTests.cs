@@ -2,6 +2,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -76,6 +77,36 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(PagePath(secondIdentity)), Is.True);
             using var reader = Open(out _);
             Assert.That(reader.Get<Page>(key)?.Text, Is.EqualTo("second"));
+        }
+
+        [Test]
+        public void FlushWritesPagesBeforeManifest()
+        {
+            using var cache = Open(out var store);
+            var key = new CultRecordKey("page");
+            var descriptor = Registry.GetRequired<Page>();
+            store.Push(new CultStoredDocument(key, FixedStoredAt, descriptor, new Page { Name = "p", Text = "first" }));
+            store.PushAll();
+            var before = File.ReadAllBytes(_manifest);
+
+            const string nextStoredAt = "2026-09-13T00:00:01.0000000+00:00";
+            var next = new Page { Name = "p", Text = "second" };
+            var page = CultDocumentMessagePackSerialization.SerializePersistedRecord(new CultPersistedRecord
+            {
+                Key = key.Value,
+                SchemaId = descriptor.SchemaId,
+                StoredAt = nextStoredAt,
+                Payload = CultDocumentMessagePackSerialization.SerializeUntyped(next, typeof(Page), Registry)
+            });
+            using (var sha = SHA256.Create())
+                Directory.CreateDirectory(PagePath(sha.ComputeHash(page)));
+
+            store.Push(new CultStoredDocument(key, nextStoredAt, descriptor, next));
+            Assert.That(() => store.PushAll(), Throws.InstanceOf<IOException>().Or.InstanceOf<UnauthorizedAccessException>());
+
+            Assert.That(File.ReadAllBytes(_manifest), Is.EqualTo(before), "the manifest was written although its page was not");
+            using var reader = Open(out _);
+            Assert.That(reader.Get<Page>(key)?.Text, Is.EqualTo("first"));
         }
 
         [Test]

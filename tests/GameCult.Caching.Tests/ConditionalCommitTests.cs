@@ -72,18 +72,22 @@ namespace GameCult.Caching.Tests
             var racers = new[] { a, b }.Select(cache => Task.Run(() =>
             {
                 var wins = 0;
+                var mismatches = 0;
                 for (var attempt = 0; wins < n && attempt < 50 * n; attempt++)
                 {
                     cache.PullAllBackingStoresAsync();
                     if (Increment(cache))
                         wins++;
+                    else
+                        mismatches++;
                 }
 
-                return wins;
+                return (Wins: wins, Mismatches: mismatches);
             })).ToArray();
-            Task.WaitAll(racers, TimeSpan.FromMinutes(2));
+            Assert.That(Task.WaitAll(racers, TimeSpan.FromMinutes(2)), Is.True, "the racers did not finish");
 
-            Assert.That(racers.Select(racer => racer.Result), Is.All.EqualTo(n));
+            Assert.That(racers.Select(racer => racer.Result.Wins), Is.All.EqualTo(n));
+            Assert.That(racers.Sum(racer => racer.Result.Mismatches), Is.GreaterThan(0), "the writers never actually raced");
             using var reader = store.Open();
             Assert.That(reader.Get<Counter>(Key)!.Value, Is.EqualTo(2 + 2 * n));
         }
@@ -111,6 +115,86 @@ namespace GameCult.Caching.Tests
 
             Assert.That(waiting.Wait(TimeSpan.FromSeconds(10)) && waiting.Result, Is.True);
             Assert.That(cache.Get(new CultRecordKey("y")), Is.Not.Null);
+        }
+
+        [Test]
+        public void TryCommitIsNotContendedByAConcurrentReader()
+        {
+            var path = PathOf("reader.cc");
+            var store = SingleFile(path);
+            Create(store, 0);
+            using var cache = store.Open();
+            var handle = new CultRecordHandle<Counter>(new CultRecordKey("read-under"));
+            var running = true;
+            var reads = 0;
+            using var started = new ManualResetEventSlim();
+            var reading = Task.Run(() =>
+            {
+                started.Set();
+                while (Volatile.Read(ref running))
+                {
+                    _ = cache.AllStoredDocuments.Count();
+                    Interlocked.Increment(ref reads);
+                }
+            });
+
+            try
+            {
+                Assert.That(started.Wait(TimeSpan.FromSeconds(10)), Is.True);
+                for (var i = 0; i < 200; i++)
+                    Assert.That(cache.TryCommit(batch => batch.Upsert(new Counter { Name = "read-under", Value = i }, handle)),
+                        Is.EqualTo(CultCommitOutcome.Committed), $"attempt {i} lost to a reader, not a writer");
+            }
+            finally
+            {
+                Volatile.Write(ref running, false);
+                Assert.That(reading.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            }
+
+            Assert.That(reads, Is.GreaterThan(0));
+            using (new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                Assert.That(cache.TryCommit(batch => batch.Upsert(new Counter { Name = "read-under" }, handle)),
+                    Is.EqualTo(CultCommitOutcome.Contended));
+        }
+
+        [Test]
+        public void PushAllWaitsForHeldStoreLock()
+        {
+            var path = PathOf("push-wait.cc");
+            using var cache = SingleFile(path).Open();
+            cache.UpsertAsync(new Counter { Name = "pushed" }, new CultRecordHandle<Counter>(Key));
+            Task flush;
+
+            using (new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                flush = Task.Run(() => cache.FlushAllBackingStores());
+                Assert.That(flush.Wait(150), Is.False, "PushAll did not wait for the held store lock");
+                Assert.That(File.Exists(path), Is.False);
+            }
+
+            Assert.That(flush.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            using var reader = SingleFile(path).Open();
+            Assert.That(reader.Get(Key), Is.Not.Null);
+        }
+
+        [Test]
+        public void CommitWaitsForHeldStoreLock()
+        {
+            var path = PathOf("commit-wait.cc");
+            using var cache = SingleFile(path).Open();
+            Task<bool> commit;
+
+            using (new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                commit = Task.Run(() => CreateCommit(cache, 7));
+                Assert.That(commit.Wait(150), Is.False, "Commit did not wait for the held store lock");
+                Assert.That(File.Exists(path), Is.False);
+            }
+
+            Assert.That(commit.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            Assert.That(commit.Result, Is.True);
+            using var reader = SingleFile(path).Open();
+            Assert.That(reader.Get<Counter>(Key)!.Value, Is.EqualTo(7));
         }
 
         [Test]
@@ -167,7 +251,7 @@ namespace GameCult.Caching.Tests
                 }
             });
 
-            Task.WaitAll(new[] { flushing, committing }, TimeSpan.FromMinutes(2));
+            Assert.That(Task.WaitAll(new[] { flushing, committing }, TimeSpan.FromMinutes(2)), Is.True, "the writers did not finish");
             Volatile.Write(ref running, false);
             Assert.That(() => reading.Wait(TimeSpan.FromSeconds(10)), Throws.Nothing);
             Assert.That(reads, Is.GreaterThan(0));
