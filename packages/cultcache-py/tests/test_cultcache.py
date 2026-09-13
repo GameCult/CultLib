@@ -290,6 +290,79 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(reloaded.get_required(item, "item:potion").value, 50)
             self.assertIsNone(reloaded.get(settings, "app"))
 
+    def test_attach_that_would_move_a_held_record_home_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_database_entry_type("settings", [("theme", 0)])
+            generic_path = Path(tmp) / "generic.cc"
+            settings_path = Path(tmp) / "settings.cc"
+            cache = (
+                CultCache.builder()
+                .register_document_type(settings)
+                .add_generic_store(SingleFileMessagePackBackingStore(generic_path))
+                .build()
+            )
+            cache.put(settings, "app", {"theme": "v1-generic"})
+
+            with self.assertRaisesRegex(
+                CultCacheError, "would move settings from the generic store to the store routed to settings"
+            ):
+                cache.add_backing_store(SingleFileMessagePackBackingStore(settings_path), ["settings"])
+            # Nothing attached: the next write still lands in the generic store.
+            cache.put(settings, "app", {"theme": "v2-generic"})
+            generic = SingleFileMessagePackBackingStore(generic_path).pull_all()
+            self.assertEqual([(e.key, e.type) for e in generic], [("app", "settings")])
+            self.assertFalse(settings_path.exists())
+
+    def test_load_from_a_store_that_is_not_the_record_home_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_database_entry_type("settings", [("theme", 0)])
+            generic_path = Path(tmp) / "generic.cc"
+            settings_path = Path(tmp) / "settings.cc"
+            writer = CultCache.builder().register_document_type(settings).add_generic_store(
+                SingleFileMessagePackBackingStore(generic_path)
+            ).build()
+            writer.put(settings, "app", {"theme": "stray"})
+            generic_bytes = generic_path.read_bytes()
+
+            cache = (
+                CultCache.builder()
+                .register_document_type(settings)
+                .add_backing_store(SingleFileMessagePackBackingStore(settings_path), ["settings"])
+                .add_generic_store(SingleFileMessagePackBackingStore(generic_path))
+                .build()
+            )
+            with self.assertRaisesRegex(
+                CultCacheError,
+                "settings record app was loaded from the generic store, but its home is the store routed to settings",
+            ):
+                cache.pull_all_backing_stores()
+            self.assertIsNone(cache.get(settings, "app"))
+            self.assertEqual(cache.snapshot_envelopes(), [])
+            self.assertEqual(generic_path.read_bytes(), generic_bytes)
+            self.assertFalse(settings_path.exists())
+
+    def test_attach_with_empty_type_list_is_the_generic_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_database_entry_type("settings", [("theme", 0)])
+            store_path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(settings).build()
+            cache.add_backing_store(SingleFileMessagePackBackingStore(store_path), [])
+            cache.put(settings, "y", {"theme": "t"})
+            self.assertEqual(
+                [(e.key, e.type) for e in SingleFileMessagePackBackingStore(store_path).pull_all()],
+                [("y", "settings")],
+            )
+            with self.assertRaisesRegex(CultCacheError, "second generic store"):
+                cache.add_backing_store(SingleFileMessagePackBackingStore(Path(tmp) / "b.cc"), [])
+
+    def test_zero_store_cache_writes_and_deletes_in_memory(self) -> None:
+        settings = define_database_entry_type("settings", [("theme", 0)])
+        cache = CultCache.builder().register_document_type(settings).build()
+        cache.put(settings, "x", {"theme": "mem"})
+        self.assertEqual(cache.get_required(settings, "x"), {"theme": "mem"})
+        cache.delete(settings, "x")
+        self.assertIsNone(cache.get(settings, "x"))
+
     def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
         document = define_database_entry_type(
             "bench.memory_item",

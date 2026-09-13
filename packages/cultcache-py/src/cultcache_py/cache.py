@@ -98,14 +98,23 @@ class CultCache:
         self._rebuild_indexes()
 
     def add_backing_store(self, store: BackingStore, types: list[str] | tuple[str, ...] | set[str]) -> None:
-        """Makes the store home to the given types. A type has exactly one home store."""
+        """Makes the store home to the given types, or the generic store when there are none.
+
+        A type has exactly one home store, and attaching cannot move the home of a record the cache holds.
+        """
+        types = list(types)
+        if not types:
+            self.add_generic_store(store)
+            return
         for type in types:
             if type in self._state.stores_by_type:
                 raise CultCacheError(
                     f"Document type {type} is already routed to another backing store; it cannot also route to this one"
                 )
-        for type in types:
-            self._state.stores_by_type[type] = store
+        routes = dict(self._state.stores_by_type)
+        routes.update({type: store for type in types})
+        self._refuse_home_moves(routes, self._state.generic_store)
+        self._state.stores_by_type = routes
 
     def add_generic_store(self, store: BackingStore) -> None:
         """Makes the store home to every type no other store claims. A cache has at most one."""
@@ -113,11 +122,34 @@ class CultCache:
             raise CultCacheError(
                 "Backing store would be a second generic store; name the types it is home to"
             )
+        self._refuse_home_moves(self._state.stores_by_type, store)
         self._state.generic_store = store
 
+    def _refuse_home_moves(self, routes: dict[str, BackingStore], generic: BackingStore | None) -> None:
+        for type, values in self._state.values.items():
+            if not values:
+                continue
+            before = self._state.stores_by_type.get(type, self._state.generic_store)
+            after = routes.get(type, generic)
+            if before is not after:
+                raise CultCacheError(
+                    f"Attaching this backing store would move {type} from {self._describe(before, routes, generic)} "
+                    f"to {self._describe(after, routes, generic)}; attach routed stores before the generic store"
+                )
+
+    @staticmethod
+    def _describe(store: BackingStore | None, routes: dict[str, BackingStore], generic: BackingStore | None) -> str:
+        if store is None:
+            return "memory"
+        if store is generic:
+            return "the generic store"
+        return "the store routed to " + ", ".join(sorted(type for type, routed in routes.items() if routed is store))
+
     def pull_all_backing_stores(self) -> None:
-        self._state.values.clear()
-        self._state.envelopes.clear()
+        """Reads every store into a staged image; the cache's view changes only if all of them load."""
+        loaded_values: dict[str, dict[str, Any]] = {}
+        loaded_envelopes: dict[str, dict[str, CultCacheEnvelope]] = {}
+        routes, generic = self._state.stores_by_type, self._state.generic_store
         seen_globals: set[str] = set()
         stores: list[BackingStore] = []
         for candidate in [*self._state.stores_by_type.values(), self._state.generic_store]:
@@ -137,13 +169,21 @@ class CultCache:
                         schema_id=envelope.schema_id,
                         catalog_entry=envelope.catalog_entry,
                     )
+                home = routes.get(envelope.type, generic)
+                if home is not store:
+                    raise CultCacheError(
+                        f"{envelope.type} record {envelope.key} was loaded from {self._describe(store, routes, generic)}, "
+                        f"but its home is {self._describe(home, routes, generic)}"
+                    )
                 if document.global_document:
                     if envelope.type in seen_globals and envelope.key == GLOBAL_KEY:
                         raise CultCacheError(f"Duplicate global document for type: {envelope.type}")
                     seen_globals.add(envelope.type)
                 value = document.decode_payload(envelope.payload)
-                self._state.values.setdefault(envelope.type, {})[envelope.key] = value
-                self._state.envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
+                loaded_values.setdefault(envelope.type, {})[envelope.key] = value
+                loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
+        self._state.values = loaded_values
+        self._state.envelopes = loaded_envelopes
         self._rebuild_indexes()
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
