@@ -7,9 +7,6 @@
     <ProjectReference Include="..\GameCult.Logging\GameCult.Logging.csproj" />
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
     <ProjectReference Include="..\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
-    <ProjectReference Include="..\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
-                      OutputItemType="Analyzer"
-                      ReferenceOutputAssembly="false" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="MessagePackAnalyzer" Version="3.1.7" PrivateAssets="all" />
     <PackageReference Include="System.Text.Json" Version="9.0.10" />

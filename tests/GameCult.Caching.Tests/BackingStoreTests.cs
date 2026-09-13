@@ -726,47 +726,30 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void GeneratedMetadataProvider_Emits_AttributedDocuments_And_References()
+        public void Registry_Describes_AttributedDocuments_And_References()
         {
-            var providers = typeof(NamedTestEntry).Assembly
-                .GetCustomAttributes(typeof(CultGeneratedDocumentMetadataProviderAttribute), false)
-                .Cast<CultGeneratedDocumentMetadataProviderAttribute>()
-                .ToArray();
-
-            Assert.That(providers, Is.Not.Empty);
-
-            var definitions = providers
-                .SelectMany(provider =>
-                    ((ICultGeneratedDocumentMetadataProvider)Activator.CreateInstance(provider.ProviderType)!)
-                    .GetDocumentDefinitions())
-                .ToArray();
-
-            var named = definitions.Single(definition => definition.DocumentType == typeof(NamedTestEntry));
+            var named = CultDocumentRegistry.Shared.GetRequired<NamedTestEntry>();
             Assert.That(named.SchemaName, Is.EqualTo("tests.named_entry"));
             Assert.That(named.NameMember, Is.EqualTo(nameof(NamedTestEntry.Name)));
 
-            var referenceHolder = definitions.Single(definition => definition.DocumentType == typeof(ReferenceHolderEntry));
-            var parentMember = referenceHolder.Members.Single(member => member.MemberName == nameof(ReferenceHolderEntry.Parent));
+            var parentMember = CultDocumentRegistry.Shared.GetRequired<ReferenceHolderEntry>().ToCatalogEntry().Members
+                .Single(member => member.MemberName == nameof(ReferenceHolderEntry.Parent));
             Assert.That(parentMember.IsReference, Is.True);
             Assert.That(parentMember.TargetSchemaName, Is.EqualTo("tests.named_entry"));
             Assert.That(parentMember.TypeName, Does.Contain("CultRecordRef"));
         }
 
         [Test]
-        public void GeneratedMetadataProvider_Emits_Payload_Codecs_For_Plain_CultDocuments()
+        public void Plain_CultDocument_Payload_RoundTrips()
         {
-            var descriptor = CultDocumentRegistry.Shared.GetRequired<NamedTestEntry>();
             var original = new NamedTestEntry
             {
                 Name = "Teeth",
                 Value = "slot-array"
             };
 
-            Assert.That(descriptor.GeneratedPayloadSerializer, Is.Not.Null);
-            Assert.That(descriptor.GeneratedPayloadDeserializer, Is.Not.Null);
-
-            var payload = descriptor.GeneratedPayloadSerializer!(original);
-            var roundTrip = (NamedTestEntry)descriptor.GeneratedPayloadDeserializer!(payload);
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(original, typeof(NamedTestEntry));
+            var roundTrip = (NamedTestEntry)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(NamedTestEntry), payload);
 
             Assert.That(roundTrip.Name, Is.EqualTo("Teeth"));
             Assert.That(roundTrip.Value, Is.EqualTo("slot-array"));
@@ -1036,9 +1019,10 @@ namespace GameCult.Caching.Tests
             "{\"schemaName\":\"tests.named_entry\",\"schemaVersion\":\"tests.named_entry.v1\",\"members\":[{\"slot\":0,\"name\":\"Name\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":true},{\"slot\":1,\"name\":\"Value\",\"type\":\"System.String\",\"isReference\":false,\"many\":false,\"targetSchemaName\":null,\"indexAlias\":null,\"isName\":false}]}";
         private const string NamedFixtureSchemaId = "sha256:e7b97801b94190f3159012ede45b0069bb09ebf7920f7432c971bc86a0e08de8";
         private const string NamedFixtureContentHash = "sha256:23150930afcc1d84f0cb3012ccc2debcb9b4685f62083033bbaab0083f1e832e";
-        private const string ReferenceFixtureSchemaId = "sha256:bd85064961cc74565fb73e3ccbc4217cfba4dc4869e365a08bea4f704739bd8f";
+        private const string ReferenceFixtureSchemaId = "sha256:4ec0c52c7581c04777525af72f805b10705212ffd0138f3bff1eb4bcd1d0f23c";
 
         [CultDocument("tests.named_entry", "tests.named_entry.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntry
         {
             [Key(0)]
@@ -1050,6 +1034,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.global_entry", "tests.global_entry.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         [CultGlobal]
         internal sealed class GlobalTestEntry
         {
@@ -1058,6 +1043,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.reference_holder", "tests.reference_holder.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class ReferenceHolderEntry
         {
             [Key(0)]
@@ -1069,6 +1055,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.named_entry", "tests.named_entry.v2")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntryAdditive
         {
             [Key(0)]
@@ -1083,6 +1070,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.named_entry", "tests.named_entry.v3")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntryRemoved
         {
             [Key(0)]
@@ -1091,6 +1079,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.named_entry", "tests.named_entry.v4")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class NamedTestEntryTypeMismatch
         {
             [Key(0)]
@@ -1102,6 +1091,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.alt_named_entry", "tests.alt_named_entry.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class AlternateNamedTestEntry
         {
             [Key(0)]
@@ -1110,6 +1100,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.reference_holder", "tests.reference_holder.v2")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class ReferenceHolderRetargetedEntry
         {
             [Key(0)]

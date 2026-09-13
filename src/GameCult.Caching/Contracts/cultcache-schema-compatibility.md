@@ -30,8 +30,14 @@ documents and the expected receipts.
 
 A member's slot is its MessagePack `[Key(n)]` integer. MessagePack's `[Key]` and
 `[IgnoreMember]` are the single slot authority, so `GameCult.Caching` depends on
-`MessagePack.Annotations`. The registry and the generator (diagnostic GCC001)
-refuse, with the same message: a persisted member without `[Key]`, a string
+`MessagePack.Annotations`. Payloads are written by `MessagePackSerializer`, so
+the registry refuses a document type without `[MessagePackObject]` and a
+non-public document type without `[MessagePackObject(AllowPrivate = true)]`.
+`AllowPrivate` makes MessagePack read non-public members too, so every
+non-public instance field or property of such a type must be `[IgnoreMember]`;
+the registry persists public members only. A
+member's type name is the CLR full name; a nested type is written `Outer+Inner`.
+The registry also refuses a persisted member without `[Key]`, a string
 `[Key]`, two members sharing a slot (including `new`-hidden members), a hidden
 persisted member, an override whose `[Key]` or `[IgnoreMember]` differs from its
 base declaration's (MessagePack reads the base declaration), and a persisted

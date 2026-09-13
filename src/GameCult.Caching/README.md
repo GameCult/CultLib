@@ -37,11 +37,9 @@ Available cache attributes:
 - `CultGlobal`
 - `CultReference(targetType?, many: false)`
 
-If you want compile-time document metadata instead of runtime assembly
-spelunking, add the `GameCult.Caching.MessagePack.Generator` analyzer to the
-project that declares your `[CultDocument]` types. It emits a metadata provider
-the cache registry can load directly, while reflection stays behind as fallback
-for projects that have not taken the hint yet.
+`CultDocumentRegistry` builds every document descriptor by reflection over
+these attributes and MessagePack's `[Key]`/`[IgnoreMember]`; it is the only
+descriptor authority.
 
 ## Main Concepts
 

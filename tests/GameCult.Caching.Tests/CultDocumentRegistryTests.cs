@@ -140,6 +140,9 @@ public sealed class CultDocumentRegistryTests
         type.SetCustomAttribute(new CustomAttributeBuilder(
             attributeConstructor,
             new object[] { schemaName, schemaVersion }));
+        type.SetCustomAttribute(new CustomAttributeBuilder(
+            typeof(global::MessagePack.MessagePackObjectAttribute).GetConstructor(new[] { typeof(bool) })!,
+            new object[] { false }));
         if (addStringField)
         {
             type.DefineField("Value", typeof(string), FieldAttributes.Public).SetCustomAttribute(new CustomAttributeBuilder(

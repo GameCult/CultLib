@@ -98,8 +98,6 @@ The solution includes:
 - `GameCult.Caching`: `DatabaseEntry`-based cache, indexes, global entries, and backing-store abstractions
 - `GameCult.Caching.MessagePack`: MessagePack-backed persistence for the cache
 - `GameCult.Caching.NewtonsoftJson`: Newtonsoft.Json-backed persistence for the cache
-- `GameCult.Caching.MessagePack.Generator`: source generator for MessagePack formatters for cache models
-- `GameCult.Caching.MessagePack.Analyzers`: packaging project that delivers the generator to consuming projects
 - `GameCult.Math` / CultMath: portable numeric primitives, deterministic random, noise, and shader-parity helpers
 - `GameCult.Geometry` / CultGeometry: engine-neutral geometry algorithms plus CultCache-native domain, selected-cut, and mesh artifact documents
 - `GameCult.Networking`: encrypted login/register/verify flows, schema-v0 contracts, transport adapters, and native RUDP sessions
@@ -128,8 +126,6 @@ src/
   GameCult.Caching/
   GameCult.Caching.MessagePack/
   GameCult.Caching.NewtonsoftJson/
-  GameCult.Caching.MessagePack.Generator/
-  GameCult.Caching.MessagePack.Analyzers/
   GameCult.Geometry/
   GameCult.Networking/
   GameCult.Networking.WebSockets/
@@ -349,8 +345,6 @@ Each subproject has a local README with package-specific detail:
 - [GameCult.Caching](src/GameCult.Caching/README.md)
 - [GameCult.Caching.MessagePack](src/GameCult.Caching.MessagePack/README.md)
 - [GameCult.Caching.NewtonsoftJson](src/GameCult.Caching.NewtonsoftJson/README.md)
-- [GameCult.Caching.MessagePack.Generator](src/GameCult.Caching.MessagePack.Generator/README.md)
-- [GameCult.Caching.MessagePack.Analyzers](src/GameCult.Caching.MessagePack.Analyzers/README.md)
 - [GameCult.Geometry](src/GameCult.Geometry/README.md)
 - [GameCult.Networking](src/GameCult.Networking/README.md)
 - [GameCult.Mesh](src/GameCult.Mesh/README.md)

@@ -213,8 +213,7 @@ another runtime need not obey the `storedAt` rule.
 
 - Options belong to the assembly that declares a document. That assembly names
   its formatter resolvers with `[assembly: CultCacheFormatterResolver(typeof(R))]`;
-  generated and reflective serializers resolve options from the document's
-  assembly. There is no mutable static, no registration call, and no load-order
+  the payload serializer resolves options from the document's assembly. There is no mutable static, no registration call, and no load-order
   rule.
 - A generic document's options come from the generic definition's assembly:
   `Doc<X>` uses the resolvers `Doc`'s assembly declares, never `X`'s. A formatter

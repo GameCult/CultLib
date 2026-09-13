@@ -77,15 +77,7 @@ public static class CultDocumentMessagePackSerialization
     public static byte[] SerializeUntyped(object value, Type type, CultDocumentRegistry registry)
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
-        if (value != null)
-        {
-            var descriptor = registry.GetRequired(type);
-            if (descriptor.GeneratedPayloadSerializer != null)
-            {
-                return descriptor.GeneratedPayloadSerializer(value);
-            }
-        }
-
+        if (value != null) registry.GetRequired(type);
         return MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
     }
 
@@ -97,12 +89,7 @@ public static class CultDocumentMessagePackSerialization
     public static object DeserializeUntyped(Type type, byte[] payload, CultDocumentRegistry registry)
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
-        var descriptor = registry.GetRequired(type);
-        if (descriptor.GeneratedPayloadDeserializer != null)
-        {
-            return descriptor.GeneratedPayloadDeserializer(payload);
-        }
-
+        registry.GetRequired(type);
         return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }

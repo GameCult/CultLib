@@ -4,12 +4,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+using MessagePack.Formatters;
 using NUnit.Framework;
 
 namespace GameCult.Caching.Tests
@@ -76,26 +76,17 @@ namespace GameCult.Caching.Tests
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(PairHolder) });
             var holder = new PairHolder { Name = "pair", Value = new Pair { A = 1.5f, B = -2f } };
-            Assert.That(registry.GetRequired<PairHolder>().GeneratedPayloadSerializer, Is.Not.Null, "no generated codec");
 
-            var generated = CultDocumentMessagePackSerialization.SerializeUntyped(holder, typeof(PairHolder), registry);
-            // SerializeUntyped's reflective fallback, which a document without a generated codec takes.
-            var reflective = MessagePackSerializer.Serialize(
-                typeof(PairHolder), holder, CultDocumentMessagePackSerialization.OptionsFor(typeof(PairHolder).Assembly));
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(holder, typeof(PairHolder), registry);
 
-            Assert.That(reflective, Is.EqualTo(generated));
-            var reader = new MessagePackReader(generated);
+            var reader = new MessagePackReader(payload);
             Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
             reader.Skip();
             Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
             Assert.That(reader.ReadSingle(), Is.EqualTo(1.5f));
             Assert.That(reader.ReadSingle(), Is.EqualTo(-2f));
-
-            var fromGenerated = (PairHolder)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(PairHolder), generated, registry);
-            var fromReflective = (PairHolder)MessagePackSerializer.Deserialize(
-                typeof(PairHolder), reflective, CultDocumentMessagePackSerialization.OptionsFor(typeof(PairHolder).Assembly))!;
-            Assert.That(fromGenerated.Value, Is.EqualTo(holder.Value));
-            Assert.That(fromReflective.Value, Is.EqualTo(holder.Value));
+            var decoded = (PairHolder)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(PairHolder), payload, registry);
+            Assert.That(decoded.Value, Is.EqualTo(holder.Value));
         }
 
         [Test]
@@ -113,52 +104,25 @@ namespace GameCult.Caching.Tests
         [Test]
         public void GenericDocumentUsesItsOwnAssemblyResolvers()
         {
-            const string source = @"
-using GameCult.Caching;
-using GameCult.Caching.MessagePack;
-using GameCult.Caching.Tests;
-using MessagePack;
-using MessagePack.Formatters;
-[assembly: CultCacheFormatterResolver(typeof(ReversedPairResolver))]
-[CultDocument(""tests.generic_holder"", ""tests.generic_holder.v1"")]
-[MessagePackObject]
-public sealed class GenericHolder<T> { [Key(0)] public T Value; }
-public sealed class ReversedPairResolver : IFormatterResolver
-{
-    public static readonly IFormatterResolver Instance = new ReversedPairResolver();
-    public IMessagePackFormatter<T> GetFormatter<T>() => typeof(T) == typeof(Pair) ? (IMessagePackFormatter<T>)(object)new ReversedPairFormatter() : null;
-}
-public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
-{
-    public void Serialize(ref MessagePackWriter writer, Pair value, MessagePackSerializerOptions options) { writer.WriteArrayHeader(2); writer.Write(value.B); writer.Write(value.A); }
-    public Pair Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.ReadArrayHeader(); var b = reader.ReadSingle(); return new Pair { A = reader.ReadSingle(), B = b }; }
-}";
-            var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
-                .Split(Path.PathSeparator)
-                .Append(typeof(CultDocumentAttribute).Assembly.Location)
-                .Append(typeof(CultDocumentMessagePackSerialization).Assembly.Location)
-                .Append(typeof(KeyAttribute).Assembly.Location)
-                .Append(typeof(MessagePackSerializer).Assembly.Location)
-                .Append(typeof(Pair).Assembly.Location)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Select(path => MetadataReference.CreateFromFile(path));
-            var compilation = CSharpCompilation.Create(
-                "GenericHolders_" + Guid.NewGuid().ToString("N"),
-                new[] { CSharpSyntaxTree.ParseText(source) },
-                references,
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-            using var stream = new MemoryStream();
-            var emitted = compilation.Emit(stream);
-            Assert.That(emitted.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).Select(diagnostic => diagnostic.ToString()), Is.Empty);
-            var assembly = Assembly.Load(stream.ToArray());
-            var type = assembly.GetType("GenericHolder`1")!.MakeGenericType(typeof(Pair));
+            var assembly = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("GenericHolders"), AssemblyBuilderAccess.Run, new[]
+            {
+                new CustomAttributeBuilder(typeof(CultCacheFormatterResolverAttribute).GetConstructor(new[] { typeof(Type) })!, new object[] { typeof(ReversedPairResolver) })
+            });
+            var builder = assembly.DefineDynamicModule("GenericHolders").DefineType("GenericHolder`1", TypeAttributes.Public | TypeAttributes.Sealed);
+            var parameter = builder.DefineGenericParameters("T")[0];
+            builder.SetCustomAttribute(new CustomAttributeBuilder(
+                typeof(CultDocumentAttribute).GetConstructor(new[] { typeof(string), typeof(string) })!, new object[] { "tests.generic_holder", "tests.generic_holder.v1" }));
+            builder.SetCustomAttribute(new CustomAttributeBuilder(typeof(MessagePackObjectAttribute).GetConstructor(new[] { typeof(bool) })!, new object[] { false }));
+            builder.DefineField("Value", parameter, FieldAttributes.Public)
+                .SetCustomAttribute(new CustomAttributeBuilder(typeof(KeyAttribute).GetConstructor(new[] { typeof(int) })!, new object[] { 0 }));
+            var type = builder.CreateType()!.MakeGenericType(typeof(Pair));
             var registry = CultDocumentRegistry.ForTypes(new[] { type });
             var holder = Activator.CreateInstance(type)!;
             type.GetField("Value")!.SetValue(holder, new Pair { A = 1.5f, B = -2f });
 
             var payload = CultDocumentMessagePackSerialization.SerializeUntyped(holder, type, registry);
 
-            Assert.That(type.Assembly, Is.SameAs(assembly));
+            Assert.That(type.Assembly, Is.Not.SameAs(typeof(Pair).Assembly));
             var reader = new MessagePackReader(payload);
             Assert.That(reader.ReadArrayHeader(), Is.EqualTo(1));
             Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
@@ -166,6 +130,18 @@ public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
             Assert.That(reader.ReadSingle(), Is.EqualTo(1.5f));
             var decoded = CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, registry);
             Assert.That(type.GetField("Value")!.GetValue(decoded), Is.EqualTo(new Pair { A = 1.5f, B = -2f }));
+        }
+
+        public sealed class ReversedPairResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ReversedPairResolver();
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(Pair) ? (IMessagePackFormatter<T>)(object)new ReversedPairFormatter() : null;
+        }
+
+        public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
+        {
+            public void Serialize(ref MessagePackWriter writer, Pair value, MessagePackSerializerOptions options) { writer.WriteArrayHeader(2); writer.Write(value.B); writer.Write(value.A); }
+            public Pair Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.ReadArrayHeader(); var b = reader.ReadSingle(); return new Pair { A = reader.ReadSingle(), B = b }; }
         }
 
         [CultDocument("tests.pair_holder", "tests.pair_holder.v1")]
@@ -177,6 +153,7 @@ public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
         }
 
         [CultDocument("cultcache.interop-note", "cultcache.interop_note.v1")]
+        [MessagePackObject]
         public sealed class OptionsInteropNote
         {
             [Key(0)] public string SchemaVersion { get; set; } = "cultcache.interop_note.v1";
@@ -188,6 +165,7 @@ public sealed class ReversedPairFormatter : IMessagePackFormatter<Pair>
         }
 
         [CultDocument("tests.ref_keyed_holder", "tests.ref_keyed_holder.v1")]
+        [MessagePackObject]
         public sealed class RefKeyedHolder
         {
             [Key(0)] [CultName] public string Name = string.Empty;

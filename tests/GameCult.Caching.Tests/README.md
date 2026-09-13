@@ -19,8 +19,8 @@ The tests currently cover:
 - cache lookups (`Get`, `GetAll`, runtime-type upserts)
 - `CultCache.Commit` batches on a directory store: visibility after the store
   commits, abandoned stages, sealed batches, observers committing again
-- explicit Cult document payload codecs, generated metadata, canonical schema
-  fixtures, and schema drift reports
+- Cult document payloads, registry shape rejections, canonical schema fixtures,
+  and schema drift reports
 - hand-written MessagePack snapshot and record serialization
 - `StoreRoutingTests`: the store-composition contract (routing, attachment is
   hydration, read-only stores, global singletons, assignable lookups, batches,

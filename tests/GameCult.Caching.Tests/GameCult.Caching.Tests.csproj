@@ -4,18 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <RootNamespace>GameCult.Caching.Tests</RootNamespace>
-    <!-- The generator source is compiled in so UnkeyedDocumentMemberIsRejected can drive it. -->
-    <NoWarn>$(NoWarn);RS1036;RS1041</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Caching\GameCult.Caching.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
-    <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
-                      OutputItemType="Analyzer"
-                      ReferenceOutputAssembly="false" />
-    <Compile Include="..\..\src\GameCult.Caching.MessagePack.Generator\CultDocumentMessagePackGenerator.cs" Link="Generator\CultDocumentMessagePackGenerator.cs" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
   </ItemGroup>
 
   <ItemGroup>

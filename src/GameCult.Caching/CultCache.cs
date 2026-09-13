@@ -12,6 +12,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using MessagePack;
 using R3;
 
 namespace GameCult.Caching
@@ -120,8 +121,6 @@ namespace GameCult.Caching
             bool isGlobal,
             string? nameMember,
             Func<object, string?>? nameAccessor,
-            Func<object, byte[]>? generatedPayloadSerializer,
-            Func<byte[], object>? generatedPayloadDeserializer,
             IReadOnlyDictionary<string, Func<object, string>> indexAccessors,
             IReadOnlyList<CultDocumentMemberDescriptor> members)
         {
@@ -134,8 +133,6 @@ namespace GameCult.Caching
             IsGlobal = isGlobal;
             NameMember = nameMember;
             NameAccessor = nameAccessor;
-            GeneratedPayloadSerializer = generatedPayloadSerializer;
-            GeneratedPayloadDeserializer = generatedPayloadDeserializer;
             IndexAccessors = indexAccessors;
             Members = members;
         }
@@ -149,8 +146,6 @@ namespace GameCult.Caching
         public bool IsGlobal { get; }
         public string? NameMember { get; }
         internal Func<object, string?>? NameAccessor { get; }
-        public Func<object, byte[]>? GeneratedPayloadSerializer { get; }
-        public Func<byte[], object>? GeneratedPayloadDeserializer { get; }
         internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
         internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
 
@@ -264,15 +259,7 @@ namespace GameCult.Caching
             lock (_registrationGate)
             {
                 var rebuilt = new RegistryIndexes();
-                var generatedTypes = new HashSet<Type>();
-                foreach (var definition in CultGeneratedDocumentMetadataLoader.LoadDefinitions())
-                {
-                    var descriptor = BuildDescriptor(definition);
-                    RegisterDescriptor(rebuilt, descriptor);
-                    generatedTypes.Add(descriptor.DocumentType);
-                }
-
-                foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes().Where(type => !generatedTypes.Contains(type)))
+                foreach (var type in ReflectionExtensions.GetAttributedDocumentTypes())
                 {
                     RegisterDescriptor(rebuilt, BuildDescriptor(type));
                 }
@@ -286,12 +273,6 @@ namespace GameCult.Caching
             if (_indexes.ByType.TryGetValue(type, out var descriptor))
             {
                 return descriptor;
-            }
-
-            descriptor = TryBuildGeneratedDescriptor(type);
-            if (descriptor != null)
-            {
-                return RegisterDescriptor(descriptor);
             }
 
             var attribute = type.GetCustomAttribute<CultDocumentAttribute>();
@@ -472,16 +453,7 @@ namespace GameCult.Caching
             public Dictionary<string, CultDocumentDescriptor[]> BySchemaName { get; }
         }
 
-        private static CultDocumentDescriptor? TryBuildGeneratedDescriptor(Type type)
-        {
-            var definition = CultGeneratedDocumentMetadataLoader.LoadDefinitions(type.Assembly)
-                .FirstOrDefault(candidate => candidate.DocumentType == type);
-            return definition == null
-                ? null
-                : BuildDescriptor(definition);
-        }
-
-        internal static CultDocumentDescriptor BuildDescriptor(Type type)
+        private static CultDocumentDescriptor BuildDescriptor(Type type)
         {
             var attribute = type.GetCustomAttribute<CultDocumentAttribute>()
                             ?? throw new InvalidOperationException(
@@ -522,46 +494,7 @@ namespace GameCult.Caching
                 type.GetCustomAttribute<CultGlobalAttribute>() != null,
                 nameMember?.Member.Name,
                 nameMember?.GetterNullable,
-                null,
-                null,
                 indexAccessors,
-                descriptorMembers);
-        }
-
-        private static CultDocumentDescriptor BuildDescriptor(CultGeneratedDocumentDefinition definition)
-        {
-            var descriptorMembers = definition.Members
-                .OrderBy(member => member.Slot)
-                .Select(member => new CultDocumentMemberDescriptor
-                {
-                    MemberName = member.MemberName,
-                    Slot = member.Slot,
-                    TypeName = member.TypeName,
-                    IsReference = member.IsReference,
-                    IsMany = member.IsMany,
-                    TargetSchemaName = member.TargetSchemaName,
-                    IsName = member.IsName,
-                    IndexAlias = member.IndexAlias
-                })
-                .ToArray();
-            var schemaJson = BuildCanonicalSchemaJson(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
-            var contentHash = Sha256(schemaJson);
-            var semanticFingerprint = BuildSemanticFingerprint(definition.SchemaName, definition.SchemaVersion, descriptorMembers);
-            var schemaId = Sha256(semanticFingerprint);
-
-            return new CultDocumentDescriptor(
-                definition.DocumentType,
-                definition.SchemaName,
-                definition.SchemaVersion,
-                schemaId,
-                contentHash,
-                schemaJson,
-                definition.IsGlobal,
-                definition.NameMember,
-                definition.NameAccessor,
-                definition.SerializePayload,
-                definition.DeserializePayload,
-                definition.IndexAccessors.ToDictionary(accessor => accessor.Alias, accessor => accessor.Accessor, StringComparer.Ordinal),
                 descriptorMembers);
         }
 
@@ -900,7 +833,6 @@ namespace GameCult.Caching
             public int[] DefaultedMissingSlots { get; }
         }
 
-        // CultDocumentMessagePackGenerator.DiscoverMembers mirrors this step for step and reports the same rejections as GCC001.
         // Public instance fields and get/set properties, most-derived declaration first; GetCustomAttributes inherits a property's
         // attributes up its override chain, as MessagePack's own resolver reads them.
         private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
@@ -938,7 +870,25 @@ namespace GameCult.Caching
             }
 
             var rejections = new List<string>();
-            var keyed = new List<(MemberInfo Member, Type MemberType, int Slot)>();
+            var messagePackObject = type.GetCustomAttribute<MessagePackObjectAttribute>(true);
+            if (messagePackObject == null)
+                rejections.Add(NotMessagePackObjectMessage(type.Name));
+            else if (!type.IsVisible && !messagePackObject.AllowPrivate)
+                rejections.Add(NotVisibleMessage(type.Name));
+            else if (messagePackObject.AllowPrivate)
+            {
+                // AllowPrivate makes MessagePack read non-public members; the registry persists public members only.
+                const BindingFlags nonPublic = BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.NonPublic;
+                for (var current = type; current != null && current != typeof(object); current = current.BaseType)
+                {
+                    foreach (var member in current.GetFields(nonPublic).Cast<MemberInfo>().Concat(current.GetProperties(nonPublic)))
+                    {
+                        if (!member.IsDefined(typeof(CompilerGeneratedAttribute)) && !IsIgnored(member))
+                            rejections.Add(UnmarkedNonPublicMemberMessage(type.Name, Qualified(member)));
+                    }
+                }
+            }
+            var keyed =new List<(MemberInfo Member, Type MemberType, int Slot)>();
             foreach (var candidate in candidates.OrderBy(candidate => candidate.Depth).ThenBy(candidate => candidate.Member.Name, StringComparer.Ordinal))
             {
                 var key = GetKeyValue(candidate.Member);
@@ -1002,6 +952,15 @@ namespace GameCult.Caching
             !setter.ReturnParameter.GetRequiredCustomModifiers().Any(modifier => modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit");
 
         private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
+
+        private static string NotMessagePackObjectMessage(string documentTypeName) =>
+            $"Cult document {documentTypeName} is not a MessagePack object; add [MessagePackObject] so MessagePack serializes its [Key(n)] members.";
+
+        private static string NotVisibleMessage(string documentTypeName) =>
+            $"Cult document {documentTypeName} is not public; MessagePack serializes a non-public type only with [MessagePackObject(AllowPrivate = true)], so make it public or set AllowPrivate.";
+
+        private static string UnmarkedNonPublicMemberMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} is non-public; [MessagePackObject(AllowPrivate = true)] makes MessagePack read it, so mark it [IgnoreMember].";
 
         internal static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
             $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
