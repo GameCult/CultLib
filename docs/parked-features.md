@@ -15,7 +15,14 @@ can be restored instead of reinvented.
   `_soa` field with its upsert/remove hooks in `CultCache.cs`; the SoA tests in
   `tests/GameCult.Caching.Tests/BackingStoreTests.cs` and
   `tests/GameCult.Mesh.Tests/CultMeshStreamingTests.cs`.
+- Managed document: `CultManagedDocument<T>` (`CultManagedDocument.cs:72-131` at
+  the tag) with `CultCache.Document<T>` and `CultNetDatabase.Document<T>`, the
+  reactive POCO handle added with the SoA storage in 5428870 "Make SoA
+  cache-managed document storage". Same tag, same intent: the document stays a
+  POCO while the cache owns its columnar storage.
 - Consumers when parked: none outside tests.
 - Restore: `git show parked/cultcache-soa:src/GameCult.Caching/CultManagedDocument.cs`,
-  take the SoA types, and re-hook a `CultCacheSoaStore` into the cache's single
+  take the SoA types and `CultManagedDocument<T>`, restore both `Document<T>`
+  openers from `CultCache.cs` and `CultNetDatabase.cs` at the tag, and re-hook a
+  `CultCacheSoaStore` into the cache's single
   admission and eviction paths (`Admit`/`Evict`).
