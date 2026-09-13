@@ -8,7 +8,11 @@ and MessagePack payload codecs where it can, for classes marked
 
 Infrastructure for the caching stack. Application code does not reference it
 directly; it arrives through `GameCult.Caching.MessagePack.Analyzers`. Without
-it, `CultDocumentRegistry` builds the same descriptors by reflection.
+it, `CultDocumentRegistry` builds descriptors by reflection, and the two differ:
+reflective descriptors include inherited members and order unkeyed members by
+declaration token; generated descriptors include only declared members and
+order unkeyed members by name. For derived documents or unkeyed members the two
+produce different schema ids. This is scheduled to be fixed in Cut 4.
 
 ## What It Generates
 

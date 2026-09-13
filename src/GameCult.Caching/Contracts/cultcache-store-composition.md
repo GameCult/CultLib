@@ -21,10 +21,13 @@ which route wrote it.
 - C# routes by assignable CLR type. TypeScript, Rust and Python route by the
   exact type string they already use.
 - A second untyped store is a registration error. A home type already claimed by
-  another store is a registration error.
+  another store, by exact type equality, is a registration error. Routes to a
+  base type and a derived type may coexist; the most derived wins.
 - A write whose document has no home, once any store is attached, is an error.
   A cache with zero stores is an in-memory cache and needs no home.
 - Nothing is mirrored or replicated. A write touches exactly one store.
+- This is the contract in every runtime. A runtime that still mirrors is
+  non-conforming until it deletes its mirrors.
 
 ## Attachment is hydration
 
@@ -102,7 +105,8 @@ against what is durably on disk at that moment:
 
 - `Expect(key, current)`: the record at `key` must still be the one this cache
   observed, or, with `current` null, must be absent. Only named keys are
-  constrained; unrelated concurrent writes do not fail the commit.
+  constrained; unrelated concurrent writes do not fail the commit. Passing any
+  instance other than the one the cache holds throws.
 - `ExpectUnchanged()`: the store's persisted record set must equal what this
   cache last loaded from it, compared as the ordered list of
   `(key, schemaId, storedAt)`. Any insert, delete or replace fails it.
@@ -142,22 +146,23 @@ another runtime need not obey the `storedAt` rule.
 
 ## Value-type encoding
 
-Vector-like value types (Unity.Mathematics, CultMath, consumer structs) encode
-as **fixed-length positional arrays of primitive components**: a two-component
+Vector-like value types (Unity.Mathematics, consumer structs) encode as
+**fixed-length positional arrays of primitive components**: a two-component
 float vector is `[f32, f32]`, a three-component one `[f32, f32, f32]`, an
 integer pair `[int, int]`. No ext types, no maps, no names. The persisted member
 type name is the CLR full name, the same rule as `System.Int32`. A reader in
-another runtime needs only the component count and primitive type.
+another runtime needs only the component count and primitive type. CultMath has
+no serialization; a CultMath encoding, if added, uses this shape.
 
 ## Runtime status
 
 | Rule | C# | Rust | TypeScript | Python |
 |---|---|---|---|---|
 | One home store, no mirrors | contract; implementation replaces replication | routes by type, still pushes to later matching stores | routes by type, still mirrors | routes by type, still writes every matching store |
-| Attach hydrates; loading never writes | contract; attach still pushes existing records | hydrates without writing | hydrates without writing | hydrates without writing |
+| Attach hydrates; loading never writes | contract; attach still pushes existing records | attach does not read; pull loads without writing | attach does not read; pull loads without writing | attach does not read; pull loads without writing |
 | Runtime type decides schema | contract; generic parameter still decides | n/a (explicit type ids) | n/a | n/a |
 | Assignable lookups and watches | `Get<T>`/`GetAll<T>` only | exact type ids | exact type ids | exact type ids |
-| Globals never invented, singleton | contract; constructor still invents defaults | no globals | single `__global__`, invents nothing | single `__global__`, invents nothing |
+| Globals never invented, singleton | contract; constructor still invents defaults | no globals | single `__global__`; a write with a new key replaces it; refused only on pull; invents nothing | single `__global__`, invents nothing |
 | Explicit batch commit | contract; ambient transaction still present | `put_prepared_batch`, one store, all-or-nothing | not implemented | `put_envelopes`, one type per call, not all-or-nothing |
 | Conditional commit | contract | store-level `compare_exchange` family | not implemented | not implemented |
 | Per-assembly options, value-type arrays | contract | n/a | n/a | n/a |

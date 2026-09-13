@@ -69,6 +69,7 @@ namespace GameCult.Caching.Tests
 
             Assert.That(loaded, Is.InstanceOf<RoutingWeapon>(), "the handle's type parameter chose the schema");
             Assert.That(((RoutingWeapon)loaded!).Damage, Is.EqualTo(12));
+            Assert.That(((RoutingWeapon)loaded!).Name, Is.EqualTo("lance"), "the inherited member did not round-trip");
         }
 
         [Test]
@@ -137,11 +138,14 @@ namespace GameCult.Caching.Tests
             using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(RoutingNote) }));
             cache.AddBackingStore(new RefusingStore(PathOf("refusing.cc")));
             var key = new CultRecordKey("refused");
+            var changes = 0;
+            using var subscription = cache.Watch<RoutingNote>().Subscribe(_ => changes++);
 
             Assert.That(
                 async () => await cache.UpsertAsync(typeof(RoutingNote), new RoutingNote { Name = "refused" }, key),
                 Throws.InvalidOperationException);
             Assert.That(cache.Get(key), Is.Null, "the store refused the write but the cache kept the document");
+            Assert.That(changes, Is.Zero, "the store refused the write but the cache published a change");
         }
 
         private string PathOf(string fileName) => Path.Combine(_directory, fileName);
@@ -163,6 +167,7 @@ namespace GameCult.Caching.Tests
             typeof(CultDocumentDescriptor)
                 .GetField("<IsGlobal>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .SetValue(registry.GetRequired<RoutingGlobal>(), true);
+            Assert.That(registry.GetRequired<RoutingGlobal>().IsGlobal, Is.True, "precondition: the global flag did not take");
             return registry;
         }
 

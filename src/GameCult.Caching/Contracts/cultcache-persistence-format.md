@@ -56,8 +56,10 @@ nothing.
 writes the whole snapshot and is last-writer-wins, so processes sharing a store
 must all use conditional commit.
 
-C# and Rust implement batch and conditional commit. TypeScript and Python
-implement neither yet. Routing, batches and conditions are specified in
+Batch and conditional commit are specified for C# in
+`cultcache-store-composition.md` and not yet implemented there; see its runtime
+status table. Rust implements both. TypeScript and Python implement neither
+yet. Routing, batches and conditions are specified in
 `cultcache-store-composition.md`.
 
 ## Canonical Store Shape
@@ -356,12 +358,14 @@ The v1 concurrent single-file policy is:
    lock.
 2. Writers take an exclusive sidecar lock derived from the `.cc` path.
 3. Writers re-read the current snapshot after taking the lock.
-4. Writers merge or reject local staged changes against the latest generation.
+4. Writers using conditional commit evaluate their conditions against the
+   latest snapshot and write nothing if one fails. A plain flush compares
+   nothing and is last-writer-wins.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 
-This preserves the key invariant: every reader sees a complete snapshot, and no
-writer commits over unseen data without passing through the merge/reject point.
+This preserves the key invariant: every reader sees a complete snapshot. Only a
+conditional commit is protected against committing over unseen data.
 
 ## Live Change Observation
 
