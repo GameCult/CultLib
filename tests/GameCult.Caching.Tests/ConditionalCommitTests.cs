@@ -353,7 +353,13 @@ namespace GameCult.Caching.Tests
                 {
                     var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
                     Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
-                    var writing = Task.Run(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)));
+                    using var started = new ManualResetEventSlim();
+                    var writing = Task.Run(() =>
+                    {
+                        started.Set();
+                        return cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged));
+                    });
+                    Assert.That(started.Wait(TimeSpan.FromSeconds(10)), Is.True, "the writer never started");
                     writing.Wait(200);
                     Assert.That(store.PushedWhilePaused, Is.False, "a write reached the store while the pull held the gate");
                     store.Pause = null;
@@ -393,7 +399,13 @@ namespace GameCult.Caching.Tests
                     var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
                     Assert.That(Slow.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never loaded a page");
                     // Admitting the write indexes its name under the gate, so a write that gets past the gate reads it while paused.
-                    var writing = Task.Run(() => cache.UpsertAsync(new Slow { Name = "staged" }, new CultRecordHandle<Slow>(staged)));
+                    using var started = new ManualResetEventSlim();
+                    var writing = Task.Run(() =>
+                    {
+                        started.Set();
+                        return cache.UpsertAsync(new Slow { Name = "staged" }, new CultRecordHandle<Slow>(staged));
+                    });
+                    Assert.That(started.Wait(TimeSpan.FromSeconds(10)), Is.True, "the writer never started");
                     writing.Wait(200);
                     Assert.That(Slow.ReadWhilePaused, Is.False, "a write was admitted while the pull held the gate");
                     Slow.Pause = null;

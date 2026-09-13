@@ -49,11 +49,14 @@ which route wrote it.
   published after the cache releases its gate and before the call that made it
   returns, on that caller's thread; no call publishes another call's changes. A
   direct `PullAll` on an attached store is such a call.
-- An observer exception is rethrown to that caller after all of that call's
-  changes are delivered (an `AggregateException` if several threw). If the call
-  itself failed, its own exception is rethrown and observer exceptions are
-  dropped. A throwing observer cannot undo the store's adoption of a load; the
-  store and cache already agree when publication starts.
+- An `OnUpdate` handler exception is rethrown to that caller after all of that
+  call's changes are delivered (an `AggregateException` if several threw). If
+  the call itself failed, its own exception is rethrown and handler exceptions
+  are dropped. A `Watch` subscriber exception is not rethrown; it follows R3's
+  unhandled-exception handling. A throwing handler cannot undo the store's
+  adoption of a load; the store and cache already agree when publication starts.
+- Pulling all stores pulls every attached store even if a handler throws during
+  one store's load, then rethrows.
 - Hydration failure on open is loud: a corrupt store file, or a record whose
   schema the registry cannot resolve, makes the open throw and leaves the file
   byte-identical. Consumers never delete and rewrite a store they failed to
@@ -63,7 +66,10 @@ which route wrote it.
 
 - One lock order: the cache's gate, then the store's lock. A store attached to a
   cache takes that cache's gate as its own lock, so a store's load callback into
-  the cache cannot take the two out of order.
+  the cache cannot take the two out of order. A store must not call `Loaded`
+  while holding its own lock outside the cache's hold.
+- A thread holds one cache's gate at a time: entering a cache's hold inside
+  another cache's hold throws.
 - A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,
   so that cache's readers wait for the I/O. The file lock (`<path>.lock` or the
   directory commit lease) is always taken inside the gate and released before a

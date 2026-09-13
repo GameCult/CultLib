@@ -576,6 +576,45 @@ namespace GameCult.Caching.Tests
             Assert.That(second.BackingStores, Is.Empty);
         }
 
+        [Test]
+        public void PullAllPullsEveryStoreWhenAHandlerThrows()
+        {
+            var registry = Registry();
+            var notes = PathOf("notes.cc");
+            var others = PathOf("others.cc");
+            const string before = "2026-01-01T00:00:00.0000000+00:00";
+            const string after = "2026-01-02T00:00:00.0000000+00:00";
+            WriteRecords(notes, registry, ("note", before, new RoutingNote { Name = "note", Text = "old" }));
+            WriteRecords(others, registry, ("other", before, new RoutingOther { Name = "other", Text = "old" }));
+            using var cache = new CultCache(registry);
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(notes), typeof(RoutingNote));
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(others), typeof(RoutingOther));
+
+            WriteRecords(notes, registry, ("note", after, new RoutingNote { Name = "note", Text = "new" }));
+            WriteRecords(others, registry, ("other", after, new RoutingOther { Name = "other", Text = "new" }));
+            cache.OnUpdate += (_, document) =>
+            {
+                if (document is RoutingNote)
+                    throw new InvalidOperationException("handler refuses notes");
+            };
+
+            Assert.That(() => cache.PullAllBackingStoresAsync(), Throws.InvalidOperationException.With.Message.Contains("handler refuses notes"));
+            Assert.That(cache.Get<RoutingOther>(new CultRecordKey("other"))?.Text, Is.EqualTo("new"), "the second store was not pulled");
+        }
+
+        [Test]
+        public async Task NestedHoldOnAnotherCacheThrows()
+        {
+            var registry = Registry();
+            using var second = new CultCache(registry);
+            using var first = new CultCache(registry);
+            first.AddBackingStore(new NestingStore(PathOf("nesting.cc"), () => second.UpsertAsync(new RoutingOther { Name = "other" })));
+            await first.UpsertAsync(new RoutingNote { Name = "note" });
+
+            Assert.That(() => first.FlushAllBackingStores(), Throws.InvalidOperationException.With.Message.Contains("another cache's hold"));
+            Assert.That(second.AllEntries, Is.Empty);
+        }
+
         private const string FixedStoredAt = "2026-09-13T00:00:00.0000000+00:00";
 
         private string PathOf(string fileName) => Path.Combine(_directory, fileName);
@@ -632,6 +671,22 @@ namespace GameCult.Caching.Tests
 
             public override void Push(CultStoredDocument entry) =>
                 throw new InvalidOperationException("RefusingStore refuses every write.");
+        }
+
+        private sealed class NestingStore : SingleFileMessagePackBackingStore
+        {
+            private readonly Action _nested;
+
+            public NestingStore(string filePath, Action nested) : base(filePath)
+            {
+                _nested = nested;
+            }
+
+            public override void PushAll()
+            {
+                _nested();
+                base.PushAll();
+            }
         }
 
         private sealed class ObservingStore : SingleFileMessagePackBackingStore

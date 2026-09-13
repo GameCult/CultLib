@@ -1306,22 +1306,36 @@ namespace GameCult.Caching
         public Task PullAllBackingStoresAsync()
         {
             // Our stores take the gate themselves; a third-party store might not, so the cache takes it here.
+            // One store's throwing OnUpdate handler does not stop the others from loading.
+            var failures = new List<Exception>();
             foreach (var store in BackingStores)
-                Held(() => { store.PullAll(); return true; });
+            {
+                try
+                {
+                    Held(() => { store.PullAll(); return true; });
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+
+            if (failures.Count == 1)
+                ExceptionDispatchInfo.Capture(failures[0]).Throw();
+            if (failures.Count > 1)
+                throw new AggregateException(failures);
             return Task.CompletedTask;
         }
 
-        public void FlushAllBackingStores()
+        public void FlushAllBackingStores() => Held(() =>
         {
-            lock (_gate)
+            foreach (var (store, _) in _stores)
             {
-                foreach (var (store, _) in _stores)
-                {
-                    if (!store.IsReadOnly && store.IsDirty)
-                        store.PushAll();
-                }
+                if (!store.IsReadOnly && store.IsDirty)
+                    store.PushAll();
             }
-        }
+            return true;
+        });
 
         // soft is dead. CultCacheStudioWindow reflects on FlushAsync(bool) until Cut 6 rewrites it.
         public Task FlushAsync(bool soft = false)
@@ -1428,11 +1442,12 @@ namespace GameCult.Caching
 
         public void Dispose()
         {
-            lock (_gate)
+            Held(() =>
             {
                 if (FlushAttachedStoresOnDispose && IsDirty)
                     FlushAllBackingStores();
-            }
+                return true;
+            });
 
             foreach (var store in BackingStores)
                 store.Dispose();
@@ -1553,6 +1568,8 @@ namespace GameCult.Caching
             CacheBackingStore? source,
             Func<CacheBackingStore?, CultCommitOutcome> land) => Held(() =>
         {
+            if (_held == null)
+                throw new InvalidOperationException("An admission reached the cache under a plain lock on its gate; every admission runs in a hold.");
             var outcome = land(Validate(admitted, evicted, source));
             if (outcome != CultCommitOutcome.Committed)
                 return outcome;
@@ -1569,6 +1586,9 @@ namespace GameCult.Caching
         {
             if (Monitor.IsEntered(_gate))
                 return body();
+            if (_held != null)
+                throw new InvalidOperationException(
+                    "A cache hold was entered inside another cache's hold; a thread holds one cache's gate at a time.");
             var outer = _held;
             var mine = _held = new List<(CultCache Cache, Change Change, bool Loaded)>();
             T result;
@@ -1596,17 +1616,20 @@ namespace GameCult.Caching
         private static List<Exception> Deliver(List<(CultCache Cache, Change Change, bool Loaded)> changes)
         {
             var failures = new List<Exception>();
-            void Try(Action observe)
-            {
-                try { observe(); }
-                catch (Exception exception) { failures.Add(exception); }
-            }
-
             foreach (var (cache, change, loaded) in changes)
             {
-                Try(() => cache._changes.OnNext(change));
-                if (loaded)
-                    Try(() => cache.OnUpdate?.Invoke(change.Previous, change.Document));
+                // R3 routes a throwing subscriber to its unhandled-exception handler; OnNext does not throw.
+                cache._changes.OnNext(change);
+                if (!loaded)
+                    continue;
+                try
+                {
+                    cache.OnUpdate?.Invoke(change.Previous, change.Document);
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
             }
 
             return failures;
