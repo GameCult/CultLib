@@ -1180,13 +1180,9 @@ namespace GameCult.Caching
         private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
         private readonly Subject<Change> _changes = new();
         private readonly object _gate = new();
-        private readonly object _deliveryGate = new();
-        private long _admitted;
-        private long _delivered;
+        private long _sequence;
         // The changes admitted by this thread's outermost hold, published by that hold when it exits.
         [ThreadStatic] private static List<(Change Change, bool Loaded)>? _held;
-        // Non-null while this thread delivers: tickets it has yet to deliver, in the order its holds closed.
-        [ThreadStatic] private static List<(CultCache Cache, long Ticket, List<(Change Change, bool Loaded)> Changes)>? _delivering;
         private bool _dirtyInMemory;
 
         public CultCache(CultDocumentRegistry? registry = null)
@@ -1247,7 +1243,8 @@ namespace GameCult.Caching
                     change.Kind,
                     change.Stored.Key,
                     change.Document as T,
-                    change.Previous as T));
+                    change.Previous as T,
+                    change.Sequence));
         }
 
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
@@ -1583,11 +1580,12 @@ namespace GameCult.Caching
             return CultCommitOutcome.Committed;
         });
 
-        // Every admission runs in a hold. A nested hold on the same cache adds to the outermost one, which takes a ticket
-        // under the gate and, after leaving it, publishes exactly its own changes in ticket order, on its caller's thread:
-        // observers never run under the gate and see changes in save order. A hold closed while its thread is delivering
-        // queues its ticket behind that delivery. Every change is delivered even if an OnUpdate handler throws; then the
-        // first handler exception (an AggregateException for several) is rethrown. If the body threw, its exception wins.
+        // Every admission runs in a hold. A nested hold on the same cache adds to the outermost one, which publishes
+        // exactly its own changes after it leaves the gate, before it returns, on its caller's thread: observers never
+        // run under the gate, and a write an observer makes is a new outermost hold. Cross-thread delivery order is not
+        // guaranteed; each change carries the Sequence it was admitted with. Every change is delivered even if an
+        // OnUpdate handler throws; then the first handler exception (an AggregateException for several) is rethrown.
+        // If the body threw, its exception wins.
         internal T Held<T>(Func<T> body)
         {
             if (Monitor.IsEntered(_gate))
@@ -1596,27 +1594,21 @@ namespace GameCult.Caching
                 throw new InvalidOperationException(
                     "A cache hold was entered inside another cache's hold; a thread holds one cache's gate at a time.");
             var mine = _held = new List<(Change Change, bool Loaded)>();
-            var ticket = -1L;
-            T result = default!;
-            ExceptionDispatchInfo? thrown = null;
-            lock (_gate)
+            T result;
+            try
             {
-                try
-                {
+                lock (_gate)
                     result = body();
-                }
-                catch (Exception exception)
-                {
-                    thrown = ExceptionDispatchInfo.Capture(exception);
-                }
-
+            }
+            catch
+            {
                 _held = null;
-                if (mine.Count > 0)
-                    ticket = _admitted++;
+                Publish(mine);
+                throw;
             }
 
-            var failures = ticket < 0 ? new List<Exception>() : Publish(ticket, mine);
-            thrown?.Throw();
+            _held = null;
+            var failures = Publish(mine);
             if (failures.Count == 1)
                 ExceptionDispatchInfo.Capture(failures[0]).Throw();
             if (failures.Count > 1)
@@ -1624,78 +1616,26 @@ namespace GameCult.Caching
             return result;
         }
 
-        private List<Exception> Publish(long ticket, List<(Change Change, bool Loaded)> changes)
+        private List<Exception> Publish(List<(Change Change, bool Loaded)> changes)
         {
             var failures = new List<Exception>();
-            if (_delivering != null)
+            foreach (var (change, loaded) in changes)
             {
-                _delivering.Add((this, ticket, changes));
-                return failures;
-            }
-
-            var queue = _delivering = new List<(CultCache Cache, long Ticket, List<(Change Change, bool Loaded)> Changes)>
-            {
-                (this, ticket, changes)
-            };
-            try
-            {
-                // A queued ticket that is never delivered would stall every later writer of its cache, so none is skipped.
-                for (var i = 0; i < queue.Count; i++)
+                // R3 routes a throwing subscriber to its unhandled-exception handler; OnNext does not throw.
+                _changes.OnNext(change);
+                if (!loaded)
+                    continue;
+                try
                 {
-                    try
-                    {
-                        queue[i].Cache.Deliver(queue[i].Ticket, queue[i].Changes, failures);
-                    }
-                    catch (Exception exception)
-                    {
-                        failures.Add(exception);
-                    }
+                    OnUpdate?.Invoke(change.Previous, change.Document);
                 }
-            }
-            finally
-            {
-                _delivering = null;
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
             }
 
             return failures;
-        }
-
-        // A thread waits for its turn holding no gate and no turn, and holds a turn only while delivering, which never
-        // waits: every wait is for a lower ticket, so deliveries cannot deadlock one another.
-        private void Deliver(long ticket, List<(Change Change, bool Loaded)> changes, List<Exception> failures)
-        {
-            lock (_deliveryGate)
-            {
-                while (_delivered != ticket)
-                    Monitor.Wait(_deliveryGate);
-            }
-
-            try
-            {
-                foreach (var (change, loaded) in changes)
-                {
-                    // R3 routes a throwing subscriber to its unhandled-exception handler; OnNext does not throw.
-                    _changes.OnNext(change);
-                    if (!loaded)
-                        continue;
-                    try
-                    {
-                        OnUpdate?.Invoke(change.Previous, change.Document);
-                    }
-                    catch (Exception exception)
-                    {
-                        failures.Add(exception);
-                    }
-                }
-            }
-            finally
-            {
-                lock (_deliveryGate)
-                {
-                    _delivered++;
-                    Monitor.PulseAll(_deliveryGate);
-                }
-            }
         }
 
         private CacheBackingStore? Validate(
@@ -1776,7 +1716,7 @@ namespace GameCult.Caching
                 Unindex(existing);
                 _entries.Remove(stored.Key.Value);
                 _handles.Remove(existing.Document);
-                changes.Add(new Change(CultCacheDocumentChangeKind.Removed, existing, null, existing.Document));
+                changes.Add(new Change(CultCacheDocumentChangeKind.Removed, existing, null, existing.Document, ++_sequence));
             }
 
             foreach (var stored in admitted)
@@ -1795,7 +1735,8 @@ namespace GameCult.Caching
                     previous == null ? CultCacheDocumentChangeKind.Added : CultCacheDocumentChangeKind.Updated,
                     stored,
                     stored.Document,
-                    previous?.Document));
+                    previous?.Document,
+                    ++_sequence));
             }
 
             if (source == null && _stores.Count == 0)
@@ -1895,18 +1836,20 @@ namespace GameCult.Caching
 
         private sealed class Change
         {
-            public Change(CultCacheDocumentChangeKind kind, CultStoredDocument stored, object? document, object? previous)
+            public Change(CultCacheDocumentChangeKind kind, CultStoredDocument stored, object? document, object? previous, long sequence)
             {
                 Kind = kind;
                 Stored = stored;
                 Document = document;
                 Previous = previous;
+                Sequence = sequence;
             }
 
             public CultCacheDocumentChangeKind Kind { get; }
             public CultStoredDocument Stored { get; }
             public object? Document { get; }
             public object? Previous { get; }
+            public long Sequence { get; }
         }
     }
 

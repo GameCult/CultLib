@@ -22,13 +22,18 @@ namespace GameCult.Caching
             CultCacheDocumentChangeKind kind,
             CultRecordKey key,
             T? document,
-            T? previousDocument)
+            T? previousDocument,
+            long sequence = 0)
         {
             Kind = kind;
             Key = key;
             Document = document;
             PreviousDocument = previousDocument;
+            Sequence = sequence;
         }
+
+        // Per-cache, in memory, assigned at admission. A consumer keeping a latest value ignores a lower one.
+        public long Sequence { get; }
 
         public CultCacheDocumentChangeKind Kind { get; }
 

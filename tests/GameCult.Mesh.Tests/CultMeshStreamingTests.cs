@@ -1387,6 +1387,38 @@ public sealed class CultMeshStreamingTests
         observed.Current.Revision.Should().Be(2);
     }
 
+    // The older of two racing writes is parked in an earlier observer until the newer one has been applied.
+    [Test]
+    public async Task WatchRecordIgnoresStaleSequence()
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:stale-sequence");
+        var handle = new CultRecordHandle<MeshNoteDocument>(key);
+        MeshNoteDocument Note(string text, int revision) =>
+            new() { Schema = "tests.mesh_note.v1", Text = text, Revision = revision };
+        await cache.UpsertAsync(Note("initial", 1), handle);
+        using var release = new System.Threading.ManualResetEventSlim();
+        using var parked = new System.Threading.ManualResetEventSlim();
+        using var park = cache.WatchRecord<MeshNoteDocument>(key).Subscribe(change =>
+        {
+            if (change.Document?.Revision != 2) return;
+            parked.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        using var observed = await CultMesh.Document<MeshNoteDocument>(cache, key).ObserveAsync();
+
+        var older = Task.Run(() => cache.UpsertAsync(Note("older", 2), handle));
+        parked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        var newer = Task.Run(() => cache.UpsertAsync(Note("newer", 3), handle));
+        var newerFinished = newer.Wait(TimeSpan.FromSeconds(10));
+        release.Set();
+
+        newerFinished.Should().BeTrue("a writer waited on another thread's delivery");
+        older.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        observed.Current.Text.Should().Be("newer");
+        cache.Dispose();
+    }
+
     [Test]
     public async Task ReactiveDocument_DisposeSuppressesScheduledFlush()
     {

@@ -757,65 +757,60 @@ namespace GameCult.Caching.Tests
             batch.Upsert(new Counter { Name = "counter", Value = value }, new CultRecordHandle<Counter>(Key));
         });
 
-        // Delivered in save order: each change replaces the document the previously delivered change installed.
+        // One writer's delivery is parked in an observer; other writers, whose observers write the same cache, finish.
+        // The cache is not disposed on failure because a stuck delivery would hang disposal too.
         [Test]
-        public void ConcurrentWritersDeliverInSaveOrder()
+        public void ObserverWritingTheSameCacheDoesNotWaitOnOtherDeliveries()
+        {
+            var cache = new CultCache(Registry);
+            using var release = new ManualResetEventSlim();
+            using var parked = new ManualResetEventSlim();
+            using var park = cache.Watch<Counter>().Subscribe(change =>
+            {
+                if (change.Key.Value != "parked") return;
+                parked.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            });
+            using var tallies = cache.Watch<Counter>().Subscribe(change =>
+                cache.UpsertAsync(new Tally { Name = $"t:{change.Key.Value}" }, new CultRecordHandle<Tally>(new CultRecordKey($"t:{change.Key.Value}"))));
+
+            var parkedWriter = Task.Run(() => cache.UpsertAsync(new Counter { Name = "parked" }, new CultRecordHandle<Counter>(new CultRecordKey("parked"))));
+            Assert.That(parked.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            var writers = Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+            {
+                for (var i = 0; i < 100; i++)
+                    cache.UpsertAsync(new Counter { Name = $"c:{thread}", Value = i }, new CultRecordHandle<Counter>(new CultRecordKey($"c:{thread}")));
+            })).ToArray();
+            var finished = Task.WaitAll(writers, TimeSpan.FromSeconds(10));
+            release.Set();
+
+            Assert.That(finished, Is.True, "a writer waited on another thread's delivery");
+            Assert.That(parkedWriter.Wait(TimeSpan.FromSeconds(10)), Is.True);
+            cache.Dispose();
+        }
+
+        // Ordered by Sequence, each change replaces the document installed by the change before it.
+        [Test]
+        public void SequenceIncreasesInAdmissionOrder()
         {
             using var cache = new CultCache(Registry);
             var key = new CultRecordKey("ordered");
-            var observed = new System.Collections.Generic.List<(object? Document, object? Previous)>();
-            using var subscription = cache.Watch<Counter>().Subscribe(change =>
-            {
-                lock (observed)
-                    observed.Add((change.Document, change.PreviousDocument));
-            });
+            var observed = new ConcurrentBag<CultCacheDocumentChange<Counter>>();
+            using var subscription = cache.Watch<Counter>().Subscribe(observed.Add);
 
-            var writers = Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+            var writers = Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
             {
                 for (var i = 0; i < 2000; i++)
                     cache.UpsertAsync(new Counter { Name = "ordered", Value = i }, new CultRecordHandle<Counter>(key));
             })).ToArray();
 
             Assert.That(Task.WaitAll(writers, TimeSpan.FromSeconds(60)), Is.True);
-            Assert.That(observed, Has.Count.EqualTo(16000));
-            Assert.That(FirstOutOfOrder(observed), Is.EqualTo(-1), "a change was delivered out of save order");
-        }
-
-        // The cache is not disposed on failure because a deadlocked delivery would hang the test thread too.
-        [Test]
-        public void ObserverWritingTheSameCacheDuringConcurrentDeliveryDoesNotDeadlock()
-        {
-            var cache = new CultCache(Registry);
-            var tally = new CultRecordKey("tally");
-            var observed = new System.Collections.Generic.List<(object? Document, object? Previous)>();
-            using var counters = cache.Watch<Counter>().Subscribe(_ =>
-                cache.UpsertAsync(new Tally { Name = "tally" }, new CultRecordHandle<Tally>(tally)));
-            using var tallies = cache.Watch<Tally>().Subscribe(change =>
-            {
-                lock (observed)
-                    observed.Add((change.Document, change.PreviousDocument));
-            });
-
-            var writers = Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
-            {
-                for (var i = 0; i < 500; i++)
-                    cache.UpsertAsync(new Counter { Name = $"c:{thread}", Value = i }, new CultRecordHandle<Counter>(new CultRecordKey($"c:{thread}")));
-            })).ToArray();
-
-            Assert.That(Task.WaitAll(writers, TimeSpan.FromSeconds(60)), Is.True, "an observer writing the cache during delivery deadlocked");
-            Assert.That(observed, Has.Count.EqualTo(4000));
-            Assert.That(FirstOutOfOrder(observed), Is.EqualTo(-1), "an observer's write was delivered out of save order");
-            cache.Dispose();
-        }
-
-        private static int FirstOutOfOrder(System.Collections.Generic.List<(object? Document, object? Previous)> observed)
-        {
-            for (var i = 1; i < observed.Count; i++)
-            {
-                if (!ReferenceEquals(observed[i].Previous, observed[i - 1].Document))
-                    return i;
-            }
-            return -1;
+            var ordered = observed.OrderBy(change => change.Sequence).ToArray();
+            Assert.That(ordered, Has.Length.EqualTo(16000));
+            Assert.That(ordered.Select(change => change.Sequence).Distinct().Count(), Is.EqualTo(16000), "a Sequence repeated");
+            var broken = Enumerable.Range(1, ordered.Length - 1)
+                .FirstOrDefault(i => !ReferenceEquals(ordered[i].PreviousDocument, ordered[i - 1].Document));
+            Assert.That(broken, Is.EqualTo(0), "a change's previous document is not the one installed by the next-lower Sequence");
         }
 
         private string PathOf(string fileName) => System.IO.Path.Combine(_directory, fileName);

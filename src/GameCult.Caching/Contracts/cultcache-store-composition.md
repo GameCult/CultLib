@@ -44,21 +44,19 @@ which route wrote it.
   single file keeps staged writes dirty and does not drop loaded records.
 - A load publishes changes to `Watch` subscribers and fires `OnUpdate`. A local
   write or commit publishes to `Watch` only; `OnUpdate` fires for loads alone.
+- Every change carries a `Sequence`: a per-cache, in-memory number assigned
+  when the cache admits the change, under its gate. It increases in admission
+  order and is not persisted.
 - Observers and `OnUpdate` run after the cache releases its gate, never under
-  it: an observer may read or write the cache from any thread. A change is
-  published after the cache releases its gate and before the call that made it
-  returns, on that caller's thread; no call publishes another call's changes. A
-  direct `PullAll` on an attached store is such a call.
-- Changes are delivered in save order. Across threads, a cache delivers changes
-  in the order it admitted them, so a later change to a key never reaches an
-  observer before an earlier one. A call whose changes were admitted after
-  another call's waits, outside the gate, until that delivery finishes.
-- A write made by an observer during delivery is not delivered before that
-  write returns. It is queued behind the delivery in progress, in save order,
-  and delivered on the same thread before the outermost call returns; its
-  `OnUpdate` exceptions are rethrown to that outermost caller.
-- An observer must not block waiting on another thread's write to a cache:
-  that thread's delivery may be waiting for this one to finish.
+  it: an observer may read or write the cache from any thread. Each call
+  publishes exactly its own changes, on its own thread, after releasing the gate
+  and before it returns; no call publishes another call's changes or waits on
+  another call's delivery. A write made by an observer is its own call and
+  publishes its own changes before that write returns. A direct `PullAll` on an
+  attached store is such a call.
+- Cross-thread delivery order is not guaranteed. A consumer that keeps a latest
+  value per record ignores a change whose `Sequence` is lower than the one it
+  already applied for that record.
 - An `OnUpdate` handler exception is rethrown to that caller after all of that
   call's changes are delivered (an `AggregateException` if several threw). If
   the call itself failed, its own exception is rethrown and handler exceptions

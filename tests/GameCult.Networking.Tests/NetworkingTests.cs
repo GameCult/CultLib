@@ -1820,6 +1820,78 @@ namespace GameCult.Networking.Tests
             Assert.That(removed.Active, Is.False);
         }
 
+        // A load's delivery reaches a subscription observer that needs the lifecycle gate while a subscribe's demand
+        // handler, holding that gate, writes the same cache. Nothing is disposed on failure: disposal would hang too.
+        [Test]
+        public async Task SubscriptionDemandHandlerWritingCacheDuringDeliveryDoesNotDeadlock()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultlib-demand-{Guid.NewGuid():N}.cc");
+            using (var seed = new CultCache())
+            {
+                seed.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                await seed.UpsertAsync(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "loaded" },
+                    new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("demand:loaded")));
+                seed.FlushAllBackingStores();
+            }
+
+            var cache = new CultCache();
+            var delivering = new ManualResetEventSlim();
+            cache.OnUpdate += (_, _) => delivering.Set();
+            var database = new CultNetDatabase(cache);
+            var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "demand-write-server",
+                Socket = BindUdpSocket()
+            });
+            var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var written = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (!demand.Active) return;
+                _ = Task.Run(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(path)));
+                if (!delivering.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    written.TrySetException(new TimeoutException("the load never started delivering"));
+                    return;
+                }
+                cache.UpsertAsync(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "demanded" },
+                    new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("demand:written"))).GetAwaiter().GetResult();
+                written.TrySetResult(true);
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("demand-write-client");
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-demand-write",
+                SubscriptionId = "demand-write",
+                RecordKeys = ["demand:other"],
+                IncludeSnapshot = false
+            });
+
+            var finished = await Task.WhenAny(written.Task, Task.Delay(TimeSpan.FromSeconds(10))) == written.Task;
+            cancellation.Cancel();
+            Assert.That(finished, Is.True, "the demand handler's cache write deadlocked with the load's delivery");
+            await written.Task;
+            serverThread.Join();
+            subscriptions.Dispose();
+            server.Dispose();
+            database.Dispose();
+            cache.Dispose();
+            File.Delete(path);
+        }
+
         [Test]
         public async Task DatabaseSubscriptionServer_ClassifiesLoopbackTcpDemandAsSameMachine()
         {

@@ -927,6 +927,8 @@ namespace GameCult.Mesh
         private readonly CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> _feed;
         private readonly Func<TDocument, Task>? _replace;
         private readonly Func<TDocument, Task>? _submitPrediction;
+        // Set only over a CultCache record, whose changes carry the cache's Sequence.
+        private readonly Func<Observable<CultCacheDocumentChange<TDocument>>>? _recordChanges;
 
         /// <summary>Creates a document handle from a Verse-bound live feed.</summary>
         public CultMeshDocumentHandle(
@@ -937,6 +939,15 @@ namespace GameCult.Mesh
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
             _replace = replace;
             _submitPrediction = submitPrediction;
+        }
+
+        internal CultMeshDocumentHandle(
+            CultMeshBoundLiveFeed<CultMeshDocumentQueryParameters, TDocument> feed,
+            Func<TDocument, Task> replace,
+            Func<Observable<CultCacheDocumentChange<TDocument>>> recordChanges)
+            : this(feed, replace)
+        {
+            _recordChanges = recordChanges;
         }
 
         /// <summary>Gets the semantic document id.</summary>
@@ -996,6 +1007,13 @@ namespace GameCult.Mesh
             if (onNext == null) throw new ArgumentNullException(nameof(onNext));
             return Watch().Subscribe(onNext);
         }
+
+        // Latest-value mirrors: a cache-backed handle passes each snapshot's Sequence; other sources pass null.
+        internal IDisposable WatchSequenced(Action<TDocument, long?> onNext) => _recordChanges == null
+            ? Watch(document => onNext(document, null))
+            : _recordChanges()
+                .Where(change => change.Document != null)
+                .Subscribe(change => onNext(change.Document!, change.Sequence));
 
         /// <summary>
         /// Projects one typed document field into a stable reactive state pointer. The expression is
@@ -1203,6 +1221,7 @@ namespace GameCult.Mesh
         private readonly object _gate = new();
         private IDisposable? _subscription;
         private TDocument _current;
+        private long _appliedSequence;
         private bool _disposed;
 
         internal CultMeshObservedDocument(
@@ -1234,7 +1253,7 @@ namespace GameCult.Mesh
 
         internal void Start()
         {
-            _subscription = Document.Watch(ApplyCanonicalSnapshot);
+            _subscription = Document.WatchSequenced(ApplyCanonicalSnapshot);
         }
 
         /// <summary>Reads and adopts a fresh canonical snapshot.</summary>
@@ -1264,15 +1283,17 @@ namespace GameCult.Mesh
             _subscription?.Dispose();
         }
 
-        private void ApplyCanonicalSnapshot(TDocument canonical)
+        private void ApplyCanonicalSnapshot(TDocument canonical, long? sequence)
         {
             if (canonical == null)
                 return;
             var next = CultMeshDocumentHandle<TDocument>.CloneDocument(canonical);
             lock (_gate)
             {
-                if (!_disposed)
-                    _current = next;
+                if (_disposed || sequence <= _appliedSequence)
+                    return;
+                _appliedSequence = sequence ?? _appliedSequence;
+                _current = next;
             }
         }
 
@@ -1439,6 +1460,7 @@ namespace GameCult.Mesh
         private bool _flushQueued;
         private bool _flushing;
         private bool _disposed;
+        private long _appliedSequence;
         private int _reconciliationVersion;
 
         internal CultMeshReactiveDocument(
@@ -1489,7 +1511,7 @@ namespace GameCult.Mesh
 
         internal void Start()
         {
-            _subscription = _document.Watch(ApplyCanonicalSnapshot);
+            _subscription = _document.WatchSequenced(ApplyCanonicalSnapshot);
         }
 
         /// <summary>Mutates the current value and schedules a coalesced prediction or replacement.</summary>
@@ -1596,15 +1618,16 @@ namespace GameCult.Mesh
             _subscription?.Dispose();
         }
 
-        private void ApplyCanonicalSnapshot(TDocument canonical)
+        private void ApplyCanonicalSnapshot(TDocument canonical, long? sequence)
         {
             if (canonical == null)
                 return;
 
             lock (_gate)
             {
-                if (_disposed)
+                if (_disposed || sequence <= _appliedSequence)
                     return;
+                _appliedSequence = sequence ?? _appliedSequence;
 
                 TDocument? replacement = null;
                 if (_dirty || _flushing)

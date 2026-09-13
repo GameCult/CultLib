@@ -1520,19 +1520,18 @@ namespace GameCult.Mesh
             var sourceList = sources?.ToArray()
                 ?? new[] { ProjectionSource(key.Value, descriptor.SchemaId, "CultCache record") };
             var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache document");
-            return Document<TDocument>(
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
                 ResolveDocumentId(documentId, key),
-                context,
-                _ => Task.FromResult(ReadRequired<TDocument>(cache, key)),
-                _ => cache.WatchRecord<TDocument>(key)
+                (_parameters, _context) => Task.FromResult(ReadRequired<TDocument>(cache, key)),
+                (_parameters, _context) => cache.WatchRecord<TDocument>(key)
                     .Where(change => change.Document != null)
                     .Select(change => change.Document!),
-                async value =>
-                {
-                    await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false);
-                },
                 sourceList,
                 route);
+            return new CultMeshDocumentHandle<TDocument>(
+                BindLiveFeed(context, feed),
+                async value => await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false),
+                () => cache.WatchRecord<TDocument>(key));
         }
 
         /// <summary>
