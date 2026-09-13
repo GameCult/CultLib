@@ -210,7 +210,10 @@ namespace GameCult.Caching.Tests
                 cache.Dispose();
 
                 var reopened = await CultCacheMessagePack.OpenAsync(filePath);
-                Assert.That(reopened.Get<NamedTestEntry>(handle.Key)?.Value, Is.EqualTo("magic"));
+                Assert.That(reopened.TryGet<NamedTestEntry>(handle.Key, out var loaded), Is.True);
+                Assert.That(loaded?.Value, Is.EqualTo("magic"));
+                Assert.That(reopened.TryGet<NamedTestEntry>(new CultRecordKey("absent"), out var missing), Is.False);
+                Assert.That(missing, Is.Null);
             }
             finally
             {
