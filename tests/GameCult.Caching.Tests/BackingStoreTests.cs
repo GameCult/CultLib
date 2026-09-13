@@ -226,44 +226,6 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task CultCacheManagedDocument_Keeps_Poco_Surface_And_Updates_Soa_Storage()
-        {
-            var cache = new CultCache();
-            var aliceKey = new CultRecordKey("entity:alice");
-            var managed = cache.Document<TransformEntry>(aliceKey);
-            TransformEntry? observed = null;
-            using var subscription = managed.Watch().Subscribe(value => observed = value);
-
-            await managed.ReplaceAsync(new TransformEntry
-            {
-                Name = "alice",
-                PositionX = 1.5f,
-                PositionY = 2.5f,
-                Health = 90
-            });
-            await cache.UpsertAsync(new TransformEntry
-            {
-                Name = "bob",
-                PositionX = 3.5f,
-                PositionY = 4.5f,
-                Health = 80
-            }, new CultRecordHandle<TransformEntry>(new CultRecordKey("entity:bob")));
-
-            managed.Value!.Health = 70;
-            await managed.CommitAsync();
-
-            var table = cache.Soa<TransformEntry>();
-
-            Assert.That(table.Count, Is.EqualTo(2));
-            Assert.That(table.Keys.Select(key => key.Value).ToArray(), Is.EqualTo(new[] { "entity:alice", "entity:bob" }));
-            Assert.That(table.Column<float>(nameof(TransformEntry.PositionX)).Span.ToArray(), Is.EqualTo(new[] { 1.5f, 3.5f }));
-            Assert.That(table.Column<float>(nameof(TransformEntry.PositionY)).Span.ToArray(), Is.EqualTo(new[] { 2.5f, 4.5f }));
-            Assert.That(table.Column<int>(nameof(TransformEntry.Health)).Span.ToArray(), Is.EqualTo(new[] { 70, 80 }));
-            Assert.That(observed, Is.Not.Null);
-            Assert.That(observed!.Health, Is.EqualTo(70));
-        }
-
-        [Test]
         public async Task DirectoryMessagePackBackingStore_Writes_Record_Pages_Without_Rewriting_Cold_Records()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
@@ -1643,23 +1605,6 @@ namespace GameCult.Caching.Tests
 
             [Key(1)]
             public CultRecordRef<NamedTestEntry> Parent = new(new CultRecordKey("parent"));
-        }
-
-        [CultDocument("tests.transform_entry", "tests.transform_entry.v1")]
-        internal sealed class TransformEntry
-        {
-            [Key(0)]
-            [CultName]
-            public string Name = string.Empty;
-
-            [Key(1)]
-            public float PositionX;
-
-            [Key(2)]
-            public float PositionY;
-
-            [Key(3)]
-            public int Health;
         }
 
         [CultDocument("tests.schema_stamped_entry", "tests.schema_stamped_entry.v1")]

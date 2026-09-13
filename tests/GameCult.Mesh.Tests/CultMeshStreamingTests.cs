@@ -3522,51 +3522,6 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ManagedDocument_Commits_Through_MeshDatabase_And_Watches_Networked_Updates()
-    {
-        var filePath = Path.Combine(Path.GetTempPath(), $"cultmesh-managed-{Guid.NewGuid():N}.ccmp");
-
-        try
-        {
-            using var node = await CultMesh.CreateNodeAsync(
-                filePath,
-                new CultMeshNodeOptions { StartServer = false });
-            var key = new CultRecordKey("player:alice");
-            var document = node.Database.Document<MeshManagedPlayer>(key);
-            MeshManagedPlayer observed = null!;
-            using var subscription = document.Watch().Subscribe(value => observed = value);
-
-            await document.ReplaceAsync(new MeshManagedPlayer
-            {
-                Name = "alice",
-                PositionX = 4,
-                Health = 100
-            });
-            await node.Database.PutAsync(key, new MeshManagedPlayer
-            {
-                Name = "alice",
-                PositionX = 8,
-                Health = 75
-            });
-
-            document.Value.Should().NotBeNull();
-            document.Value!.Health.Should().Be(75);
-            observed.Should().NotBeNull();
-            observed!.PositionX.Should().Be(8);
-            node.Cache.Soa<MeshManagedPlayer>().Column<int>(nameof(MeshManagedPlayer.Health)).Span.ToArray()
-                .Should()
-                .Equal(75);
-        }
-        finally
-        {
-            if (File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-        }
-    }
-
-    [Test]
     public void NegotiatesGpuTextureStreamsWithoutForcingCopies()
     {
         var catalog = CultMesh.CreateStreamCatalog();
@@ -3798,19 +3753,6 @@ public sealed class CultMeshStreamingTests
                 Directory.Delete(Path, recursive: true);
             }
         }
-    }
-
-    [CultDocument("tests.mesh_managed_player", "tests.mesh_managed_player.v1")]
-    private sealed class MeshManagedPlayer
-    {
-        [MessagePack.Key(0)]
-        public string Name = string.Empty;
-
-        [MessagePack.Key(1)]
-        public float PositionX;
-
-        [MessagePack.Key(2)]
-        public int Health;
     }
 
     [CultDocument("tests.mesh_indexed_player", "tests.mesh_indexed_player.v1")]

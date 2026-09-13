@@ -1278,7 +1278,6 @@ namespace GameCult.Caching
         private readonly ConcurrentDictionary<Type, string> _globalKeys = new();
         private readonly ConditionalWeakTable<object, DocumentHandleBox> _documentHandles = new();
         private readonly Subject<object> _changes = new();
-        private readonly CultCacheSoaStore _soa = new();
         private readonly SemaphoreSlim _transactionGate = new(1, 1);
         private readonly AsyncLocal<CultCacheTransaction?> _ambientTransaction = new();
         private readonly object _stateGate = new();
@@ -1411,14 +1410,6 @@ namespace GameCult.Caching
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
         {
             return Watch<T>().Where(change => change.Key.Equals(key));
-        }
-
-        /// <summary>
-        /// Gets the cache-owned structure-of-arrays table for a document type.
-        /// </summary>
-        public CultSoaTable<T> Soa<T>() where T : class
-        {
-            return _soa.Snapshot<T>();
         }
 
         /// <summary>
@@ -1967,7 +1958,6 @@ namespace GameCult.Caching
                     {
                         RemoveIndexes(existing);
                         _documentHandles.Remove(existing.Document);
-                        _soa.Remove(existing);
                     }
 
                     if (pair.Value == null)
@@ -1984,7 +1974,6 @@ namespace GameCult.Caching
                     _entries[pair.Key] = stored;
                     _documentHandles.Remove(stored.Document);
                     _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
-                    _soa.Upsert(stored);
                     AddIndexes(stored);
                     changes.Add((stored, existing?.Document, false));
                 }
@@ -2091,7 +2080,6 @@ namespace GameCult.Caching
                 _entries[stored.Key.Value] = stored;
                 _documentHandles.Remove(stored.Document);
                 _documentHandles.Add(stored.Document, new DocumentHandleBox(stored.Key));
-                _soa.Upsert(stored);
                 AddIndexes(stored);
 
                 foreach (var store in _backingStores)
@@ -2130,7 +2118,6 @@ namespace GameCult.Caching
 
                 RemoveIndexes(existing);
                 _documentHandles.Remove(existing.Document);
-                _soa.Remove(existing);
 
                 foreach (var store in _backingStores)
                 {
