@@ -20,8 +20,8 @@ class _State:
     documents_by_schema_name: dict[str, DocumentDefinition[Any]] = field(default_factory=dict)
     values: dict[str, dict[str, Any]] = field(default_factory=dict)
     envelopes: dict[str, dict[str, CultCacheEnvelope]] = field(default_factory=dict)
-    stores_by_type: dict[str, list[BackingStore]] = field(default_factory=dict)
-    generic_stores: list[BackingStore] = field(default_factory=list)
+    stores_by_type: dict[str, BackingStore] = field(default_factory=dict)
+    generic_store: BackingStore | None = None
     name_extractors: dict[str, str | Any] = field(default_factory=dict)
     index_extractors: dict[str, dict[str, str | Any]] = field(default_factory=dict)
     names: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -98,17 +98,32 @@ class CultCache:
         self._rebuild_indexes()
 
     def add_backing_store(self, store: BackingStore, types: list[str] | tuple[str, ...] | set[str]) -> None:
+        """Makes the store home to the given types. A type has exactly one home store."""
         for type in types:
-            self._state.stores_by_type.setdefault(type, []).append(store)
+            if type in self._state.stores_by_type:
+                raise CultCacheError(
+                    f"Document type {type} is already routed to another backing store; it cannot also route to this one"
+                )
+        for type in types:
+            self._state.stores_by_type[type] = store
 
     def add_generic_store(self, store: BackingStore) -> None:
-        self._state.generic_stores.append(store)
+        """Makes the store home to every type no other store claims. A cache has at most one."""
+        if self._state.generic_store is not None:
+            raise CultCacheError(
+                "Backing store would be a second generic store; name the types it is home to"
+            )
+        self._state.generic_store = store
 
     def pull_all_backing_stores(self) -> None:
         self._state.values.clear()
         self._state.envelopes.clear()
         seen_globals: set[str] = set()
-        for store in [*self._all_specific_stores(), *self._state.generic_stores]:
+        stores: list[BackingStore] = []
+        for candidate in [*self._state.stores_by_type.values(), self._state.generic_store]:
+            if candidate is not None and all(candidate is not store for store in stores):
+                stores.append(candidate)
+        for store in stores:
             for envelope in store.pull_all():
                 document = self._resolve_document_for_envelope(envelope)
                 if document is None:
@@ -196,8 +211,8 @@ class CultCache:
             schema_id=catalog_entry.schema_id,
             catalog_entry=catalog_entry,
         )
-        stores = self._stores_for_type(document.type)
-        for store in stores:
+        store = self._store_for_type(document.type)
+        if store is not None:
             store.push(envelope)
         if old_value is not None:
             self._remove_value_indexes(document.type, key, old_value)
@@ -215,7 +230,8 @@ class CultCache:
         envelopes = self._state.envelopes.setdefault(document.type, {})
         old_value = values.get(envelope.key)
         value = document.decode_payload(envelope.payload)
-        for store in self._stores_for_type(document.type):
+        store = self._store_for_type(document.type)
+        if store is not None:
             store.push(envelope)
         if old_value is not None:
             self._remove_value_indexes(document.type, envelope.key, old_value)
@@ -236,8 +252,8 @@ class CultCache:
                 raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
             values.append(document.decode_payload(envelope.payload))
 
-        stores = self._stores_for_type(document.type)
-        for store in stores:
+        store = self._store_for_type(document.type)
+        if store is not None:
             store.push_all(envelopes)
         values_by_key = self._state.values.setdefault(document.type, {})
         envelopes_by_key = self._state.envelopes.setdefault(document.type, {})
@@ -266,7 +282,8 @@ class CultCache:
 
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
-        for store in self._stores_for_type(document.type):
+        store = self._store_for_type(document.type)
+        if store is not None:
             store.delete(document.type, key)
         values = self._state.values.get(document.type)
         old_value = None if values is None else values.pop(key, None)
@@ -297,20 +314,15 @@ class CultCache:
             for envelope in envelopes.values()
         ]
 
-    def _stores_for_type(self, type: str) -> list[BackingStore]:
-        specific = self._state.stores_by_type.get(type)
-        return specific if specific else self._state.generic_stores
+    def _store_for_type(self, type: str) -> BackingStore | None:
+        """The store that claims the type, else the generic store.
 
-    def _all_specific_stores(self) -> list[BackingStore]:
-        stores: list[BackingStore] = []
-        seen: set[int] = set()
-        for routed in self._state.stores_by_type.values():
-            for store in routed:
-                marker = id(store)
-                if marker not in seen:
-                    stores.append(store)
-                    seen.add(marker)
-        return stores
+        Returns None only for a cache with no stores, which is an in-memory cache.
+        """
+        store = self._state.stores_by_type.get(type, self._state.generic_store)
+        if store is None and self._state.stores_by_type:
+            raise CultCacheError(f"No backing store is home to document type: {type}")
+        return store
 
     def _rebuild_indexes(self) -> None:
         self._state.names.clear()

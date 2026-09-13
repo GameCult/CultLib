@@ -21,7 +21,11 @@ discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
 - payloads decode only through the registered document definition for that type
 - unknown persisted types fail closed
 - global documents are singleton-style per type
-- type-specific backing stores beat generic backing stores
+- one home store per document type: a store added with `add_backing_store`
+  owns its types, otherwise the generic store is the home; a type claimed by a
+  second store, or a second generic store, raises `CultCacheError`; a write
+  touches exactly one store and nothing is mirrored; once any store is
+  attached, a write whose type has no home raises
 - the JSONL store uses only the Python standard library for bootstrap consumers
 - `define_database_entry_type(...)` emits Rust/C#-style slot-indexed
   MessagePack array payloads for cross-runtime `DatabaseEntry` contracts

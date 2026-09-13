@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from cultcache_py.cache import CultCacheError
 from cultcache_py import (
     CultCache,
     JsonLinesBackingStore,
@@ -237,6 +238,57 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(loaded["documentId"], written["documentId"])
             self.assertEqual(loaded["authorRuntimeId"], "python-test")
             self.assertIn("interop", loaded["tags"])
+
+    def test_second_generic_store_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CultCache()
+            cache.add_generic_store(SingleFileMessagePackBackingStore(Path(tmp) / "a.cc"))
+            with self.assertRaisesRegex(CultCacheError, "second generic store"):
+                cache.add_generic_store(SingleFileMessagePackBackingStore(Path(tmp) / "b.cc"))
+
+    def test_type_claimed_twice_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CultCache()
+            cache.add_backing_store(SingleFileMessagePackBackingStore(Path(tmp) / "a.cc"), ["item"])
+            with self.assertRaisesRegex(CultCacheError, "already routed"):
+                cache.add_backing_store(SingleFileMessagePackBackingStore(Path(tmp) / "b.cc"), ["settings", "item"])
+            # A refused registration claims nothing, so "settings" is still free.
+            cache.add_backing_store(SingleFileMessagePackBackingStore(Path(tmp) / "c.cc"), ["settings"])
+
+    def test_types_route_to_home_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item = item_doc()
+            settings = define_database_entry_type("settings", [("theme", 0)])
+            generic_path = Path(tmp) / "generic.cc"
+            settings_path = Path(tmp) / "settings.cc"
+
+            def build() -> CultCache:
+                return (
+                    CultCache.builder()
+                    .register_document_type(item)
+                    .register_document_type(settings)
+                    .add_backing_store(SingleFileMessagePackBackingStore(settings_path), ["settings"])
+                    .add_generic_store(SingleFileMessagePackBackingStore(generic_path))
+                    .build()
+                )
+
+            cache = build()
+            cache.put(item, "item:potion", Item(name="Potion", category="Consumable", value=50))
+            cache.put(settings, "app", {"theme": "ash"})
+
+            generic = SingleFileMessagePackBackingStore(generic_path).pull_all()
+            routed = SingleFileMessagePackBackingStore(settings_path).pull_all()
+            self.assertEqual([(e.key, e.type) for e in generic], [("item:potion", "item")])
+            self.assertEqual([(e.key, e.type) for e in routed], [("app", "settings")])
+
+            cache.delete(settings, "app")
+            self.assertEqual(SingleFileMessagePackBackingStore(settings_path).pull_all(), [])
+            self.assertEqual(len(SingleFileMessagePackBackingStore(generic_path).pull_all()), 1)
+
+            reloaded = build()
+            reloaded.pull_all_backing_stores()
+            self.assertEqual(reloaded.get_required(item, "item:potion").value, 50)
+            self.assertIsNone(reloaded.get(settings, "app"))
 
     def test_cache_put_without_backing_store_keeps_in_memory_value(self) -> None:
         document = define_database_entry_type(
