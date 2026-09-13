@@ -13,205 +13,82 @@ using R3;
 
 namespace GameCult.Caching
 {
-    /// <summary>
-    /// Persisted schema metadata embedded in a CultCache backing store.
-    /// </summary>
     public sealed class CultSchemaCatalogEntry
     {
-        /// <summary>
-        /// Gets or sets the content-derived schema identifier.
-        /// </summary>
         public string SchemaId { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the stable schema name.
-        /// </summary>
         public string SchemaName { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the schema version string.
-        /// </summary>
         public string SchemaVersion { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the canonical schema content hash.
-        /// </summary>
         public string ContentHash { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the canonical schema description.
-        /// </summary>
         public string CanonicalSchemaJson { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets schema identifiers compatible with this entry.
-        /// </summary>
         public string[] CompatibleSchemaIds { get; set; } = Array.Empty<string>();
 
-        /// <summary>
-        /// Gets or sets the persisted member descriptors used for compatibility checks.
-        /// </summary>
         public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
     }
 
-    /// <summary>
-    /// Persisted catalog entry describing one schema member.
-    /// </summary>
     public sealed class CultSchemaMemberCatalogEntry
     {
-        /// <summary>
-        /// Gets or sets the persisted slot number.
-        /// </summary>
         public int Slot { get; set; }
 
-        /// <summary>
-        /// Gets or sets the member name.
-        /// </summary>
         public string MemberName { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets the persisted type name.
-        /// </summary>
         public string TypeName { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets whether the member is a reference.
-        /// </summary>
         public bool IsReference { get; set; }
 
-        /// <summary>
-        /// Gets or sets whether the member stores many values.
-        /// </summary>
         public bool IsMany { get; set; }
 
-        /// <summary>
-        /// Gets or sets the referenced schema name, when the member is a reference.
-        /// </summary>
         public string? TargetSchemaName { get; set; }
 
-        /// <summary>
-        /// Gets or sets whether the member provides the name lookup.
-        /// </summary>
         public bool IsName { get; set; }
 
-        /// <summary>
-        /// Gets or sets the index alias, when the member participates in lookups.
-        /// </summary>
         public string? IndexAlias { get; set; }
     }
 
-    /// <summary>
-    /// Persisted serialized document record.
-    /// </summary>
     public sealed class CultPersistedRecord
     {
-        /// <summary>
-        /// Gets or sets the persisted record key.
-        /// </summary>
         public string Key { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the schema identifier used to deserialize the payload.
-        /// </summary>
         public string SchemaId { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the storage timestamp.
-        /// </summary>
         public string StoredAt { get; set; } = string.Empty;
-        /// <summary>
-        /// Gets or sets the serialized document payload.
-        /// </summary>
         public byte[] Payload { get; set; } = Array.Empty<byte>();
     }
 
-    /// <summary>
-    /// Complete snapshot persisted by a single-file CultCache backing store.
-    /// </summary>
     public sealed class CultPersistedStoreSnapshot
     {
-        /// <summary>
-        /// Gets or sets the backing store format version.
-        /// </summary>
         public string FormatVersion { get; set; } = "cultcache.store.v1";
-        /// <summary>
-        /// Gets or sets the embedded schema catalog.
-        /// </summary>
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
-        /// <summary>
-        /// Gets or sets the persisted records.
-        /// </summary>
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
     }
 
-    /// <summary>
-    /// Classifies how a persisted schema mapped onto the local document registry.
-    /// </summary>
     public enum CultSchemaMigrationKind
     {
-        /// <summary>
-        /// The persisted schema matched the local schema exactly.
-        /// </summary>
         Exact,
 
-        /// <summary>
-        /// The persisted schema required a compatible soft-migration path.
-        /// </summary>
         CompatibleDrift
     }
 
-    /// <summary>
-    /// Describes one schema-resolution warning emitted during load.
-    /// </summary>
     public sealed class CultSchemaMigrationWarning
     {
-        /// <summary>
-        /// Gets or sets the stable warning code.
-        /// </summary>
         public string Code { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets the human-readable warning text.
-        /// </summary>
         public string Message { get; set; } = string.Empty;
     }
 
-    /// <summary>
-    /// Reports how one persisted schema entry resolved against the local schema catalog.
-    /// </summary>
     public sealed class CultSchemaMigrationReport
     {
-        /// <summary>
-        /// Gets or sets the persisted schema identifier.
-        /// </summary>
         public string PersistedSchemaId { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets the local schema identifier selected for reading.
-        /// </summary>
         public string LocalSchemaId { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets the persisted schema name.
-        /// </summary>
         public string PersistedSchemaName { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets the local schema name.
-        /// </summary>
         public string LocalSchemaName { get; set; } = string.Empty;
 
-        /// <summary>
-        /// Gets or sets how the persisted schema matched locally.
-        /// </summary>
         public CultSchemaMigrationKind Kind { get; set; }
 
-        /// <summary>
-        /// Gets or sets the persisted member slots ignored by the local reader.
-        /// </summary>
         public int[] IgnoredExtraSlots { get; set; } = Array.Empty<int>();
 
-        /// <summary>
-        /// Gets or sets the local member slots defaulted because the persisted record did not contain them.
-        /// </summary>
         public int[] DefaultedMissingSlots { get; set; } = Array.Empty<int>();
 
-        /// <summary>
-        /// Gets or sets emitted migration warnings.
-        /// </summary>
         public CultSchemaMigrationWarning[] Warnings { get; set; } = Array.Empty<CultSchemaMigrationWarning>();
     }
 
@@ -228,9 +105,6 @@ namespace GameCult.Caching
         public CultSchemaMigrationReport Report { get; }
     }
 
-    /// <summary>
-    /// Runtime descriptor for a CultCache document type.
-    /// </summary>
     public sealed class CultDocumentDescriptor
     {
         internal CultDocumentDescriptor(
@@ -263,53 +137,20 @@ namespace GameCult.Caching
             Members = members;
         }
 
-        /// <summary>
-        /// Gets the CLR document type.
-        /// </summary>
         public Type DocumentType { get; }
-        /// <summary>
-        /// Gets the stable schema name.
-        /// </summary>
         public string SchemaName { get; }
-        /// <summary>
-        /// Gets the schema version string.
-        /// </summary>
         public string SchemaVersion { get; }
-        /// <summary>
-        /// Gets the content-derived schema identifier.
-        /// </summary>
         public string SchemaId { get; }
-        /// <summary>
-        /// Gets the canonical schema content hash.
-        /// </summary>
         public string ContentHash { get; }
-        /// <summary>
-        /// Gets the canonical schema description.
-        /// </summary>
         public string CanonicalSchemaJson { get; }
-        /// <summary>
-        /// Gets whether this document type stores one global record.
-        /// </summary>
         public bool IsGlobal { get; }
-        /// <summary>
-        /// Gets the document name member, if any.
-        /// </summary>
         public string? NameMember { get; }
         internal Func<object, string?>? NameAccessor { get; }
-        /// <summary>
-        /// Gets the generated payload serializer, if one is available.
-        /// </summary>
         public Func<object, byte[]>? GeneratedPayloadSerializer { get; }
-        /// <summary>
-        /// Gets the generated payload deserializer, if one is available.
-        /// </summary>
         public Func<byte[], object>? GeneratedPayloadDeserializer { get; }
         internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
         internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
 
-        /// <summary>
-        /// Converts this descriptor into a persisted schema catalog entry.
-        /// </summary>
         public CultSchemaCatalogEntry ToCatalogEntry()
         {
             return new CultSchemaCatalogEntry
@@ -358,14 +199,8 @@ namespace GameCult.Caching
         public string? IndexAlias { get; set; }
     }
 
-    /// <summary>
-    /// Stores a resolved document together with its descriptor and key.
-    /// </summary>
     public sealed class CultStoredDocument
     {
-        /// <summary>
-        /// Creates a stored document wrapper.
-        /// </summary>
         public CultStoredDocument(
             CultRecordKey key,
             string storedAt,
@@ -378,27 +213,12 @@ namespace GameCult.Caching
             Document = document;
         }
 
-        /// <summary>
-        /// Gets the record key.
-        /// </summary>
         public CultRecordKey Key { get; }
-        /// <summary>
-        /// Gets the storage timestamp.
-        /// </summary>
         public string StoredAt { get; }
-        /// <summary>
-        /// Gets the document descriptor.
-        /// </summary>
         public CultDocumentDescriptor Descriptor { get; }
-        /// <summary>
-        /// Gets the document instance.
-        /// </summary>
         public object Document { get; }
     }
 
-    /// <summary>
-    /// Discovers, indexes, and resolves CultCache document descriptors.
-    /// </summary>
     public sealed class CultDocumentRegistry
     {
         private static readonly Lazy<CultDocumentRegistry> SharedRegistry =
@@ -407,14 +227,8 @@ namespace GameCult.Caching
         private volatile RegistryIndexes _indexes = new();
         private readonly object _registrationGate = new();
 
-        /// <summary>
-        /// Gets the shared process-wide document registry.
-        /// </summary>
         public static CultDocumentRegistry Shared => SharedRegistry.Value;
 
-        /// <summary>
-        /// Creates a registry and discovers currently loaded document metadata.
-        /// </summary>
         public CultDocumentRegistry()
         {
             Refresh();
@@ -426,9 +240,6 @@ namespace GameCult.Caching
                 Refresh();
         }
 
-        /// <summary>
-        /// Creates a registry containing exactly the requested document types without scanning loaded assemblies.
-        /// </summary>
         public static CultDocumentRegistry ForTypes(IEnumerable<Type> documentTypes)
         {
             if (documentTypes == null) throw new ArgumentNullException(nameof(documentTypes));
@@ -442,15 +253,9 @@ namespace GameCult.Caching
             return registry;
         }
 
-        /// <summary>
-        /// Gets all known document descriptors.
-        /// </summary>
         public IEnumerable<CultDocumentDescriptor> AllDescriptors =>
             _indexes.ByType.Values.OrderBy(d => d.SchemaName, StringComparer.Ordinal);
 
-        /// <summary>
-        /// Rebuilds the registry from generated metadata and reflected document attributes.
-        /// </summary>
         public void Refresh()
         {
             lock (_registrationGate)
@@ -473,9 +278,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets the descriptor for a document type, building it when needed.
-        /// </summary>
         public CultDocumentDescriptor GetRequired(Type type)
         {
             if (_indexes.ByType.TryGetValue(type, out var descriptor))
@@ -500,17 +302,11 @@ namespace GameCult.Caching
             return RegisterDescriptor(descriptor);
         }
 
-        /// <summary>
-        /// Gets the descriptor for a document type.
-        /// </summary>
         public CultDocumentDescriptor GetRequired<T>() where T : class
         {
             return GetRequired(typeof(T));
         }
 
-        /// <summary>
-        /// Gets a descriptor by its schema identifier.
-        /// </summary>
         public CultDocumentDescriptor GetRequiredBySchemaId(string schemaId)
         {
             if (_indexes.BySchemaId.TryGetValue(schemaId, out var descriptor))
@@ -521,17 +317,11 @@ namespace GameCult.Caching
             throw new InvalidOperationException($"Unknown CultCache schema id '{schemaId}'.");
         }
 
-        /// <summary>
-        /// Resolves a persisted schema identifier against the local registry and embedded catalog.
-        /// </summary>
         public CultDocumentDescriptor ResolvePersistedSchema(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
             return ResolvePersistedSchemaDetailed(schemaId, catalog).Descriptor;
         }
 
-        /// <summary>
-        /// Resolves a persisted schema identifier and returns the selected descriptor with migration diagnostics.
-        /// </summary>
         public CultSchemaMigrationReport ResolvePersistedSchemaReport(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
             return ResolvePersistedSchemaDetailed(schemaId, catalog).Report;
@@ -1263,9 +1053,6 @@ namespace GameCult.Caching
         }
     }
 
-    /// <summary>
-    /// In-memory document cache with pluggable persisted backing stores.
-    /// </summary>
     public sealed class CultCache : IDisposable
     {
         private readonly CultDocumentRegistry _registry;
@@ -1282,18 +1069,11 @@ namespace GameCult.Caching
         private readonly object _stateGate = new();
         private bool _hasUnflushedMutations;
 
-        /// <summary>
-        /// Creates a cache using the supplied document registry or the shared registry.
-        /// </summary>
         public CultCache(CultDocumentRegistry? registry = null)
             : this(registry, initializeGlobals: true)
         {
         }
 
-        /// <summary>
-        /// Creates a cache using the supplied document registry, optionally deferring global defaults
-        /// until a durable backing store has been hydrated.
-        /// </summary>
         public CultCache(CultDocumentRegistry? registry, bool initializeGlobals)
         {
             _registry = registry ?? CultDocumentRegistry.Shared;
@@ -1303,38 +1083,20 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Creates default instances for global document types that do not already have a record.
-        /// Durable open paths call this after hydration so persisted globals remain authoritative.
-        /// </summary>
+        // Durable open paths call this after hydration so persisted globals remain authoritative.
         public void MaterializeMissingGlobals()
         {
             InitializeGlobals();
         }
 
-        /// <summary>
-        /// Gets whether the cache currently holds unflushed mutations in any attached backing store or only in memory.
-        /// </summary>
         public bool IsDirty => _hasUnflushedMutations || _backingStores.Any(store => store.IsDirty);
 
-        /// <summary>
-        /// Gets or sets whether disposing the cache should flush attached dirty backing stores first.
-        /// </summary>
         public bool FlushAttachedStoresOnDispose { get; set; }
 
-        /// <summary>
-        /// Raised when a backing store adds, updates, or removes a document.
-        /// </summary>
         public event Action<object?, object?>? OnUpdate;
 
-        /// <summary>
-        /// Gets attached backing stores in registration order.
-        /// </summary>
         public IReadOnlyList<CacheBackingStore> BackingStores => _backingStores;
 
-        /// <summary>
-        /// Gets all document instances currently held by the cache.
-        /// </summary>
         public IEnumerable<object> AllEntries
         {
             get
@@ -1344,9 +1106,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets all stored document records currently held by the cache.
-        /// </summary>
         public IEnumerable<CultStoredDocument> AllStoredDocuments
         {
             get
@@ -1359,14 +1118,8 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets the document registry used by this cache.
-        /// </summary>
         public CultDocumentRegistry Registry => _registry;
 
-        /// <summary>
-        /// Watches all local cache changes assignable to the requested document type.
-        /// </summary>
         public Observable<CultCacheDocumentChange<T>> Watch<T>() where T : class
         {
             return _changes
@@ -1374,17 +1127,11 @@ namespace GameCult.Caching
                 .Select(change => (CultCacheDocumentChange<T>)change);
         }
 
-        /// <summary>
-        /// Watches one local cache record.
-        /// </summary>
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
         {
             return Watch<T>().Where(change => change.Key.Equals(key));
         }
 
-        /// <summary>
-        /// Attaches a backing store to this cache.
-        /// </summary>
         public void AddBackingStore(CacheBackingStore store)
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
@@ -1400,9 +1147,6 @@ namespace GameCult.Caching
             _backingStores.Add(store);
         }
 
-        /// <summary>
-        /// Pulls all documents from every attached backing store.
-        /// </summary>
         public async Task PullAllBackingStoresAsync()
         {
             if (_ambientTransaction.Value != null)
@@ -1423,9 +1167,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Flushes all attached backing stores.
-        /// </summary>
         public void FlushAllBackingStores()
         {
             if (_ambientTransaction.Value != null)
@@ -1453,11 +1194,8 @@ namespace GameCult.Caching
             return Task.CompletedTask;
         }
 
-        /// <summary>
-        /// Runs a buffered cache mutation. Staged records are visible only to the executing
-        /// async flow. The durable backing store is committed before the live cache and its
-        /// observers advance; an exception discards the entire staged batch.
-        /// </summary>
+        // Staged records are visible only to the executing async flow. The durable backing store
+        // commits before the live cache and its observers advance; an exception discards the whole batch.
         public async Task ExecuteTransactionAsync(Func<Task> stageAsync)
         {
             if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
@@ -1488,7 +1226,6 @@ namespace GameCult.Caching
                 PublishChange(change.Stored, change.Previous, change.Removed);
         }
 
-        /// <summary>Runs a value-producing buffered cache mutation.</summary>
         public async Task<T> ExecuteTransactionAsync<T>(Func<Task<T>> stageAsync)
         {
             if (stageAsync == null) throw new ArgumentNullException(nameof(stageAsync));
@@ -1500,9 +1237,6 @@ namespace GameCult.Caching
             return result;
         }
 
-        /// <summary>
-        /// Adds or replaces a typed document and returns its record handle.
-        /// </summary>
         public async Task<CultRecordHandle<T>> AddAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
@@ -1526,17 +1260,11 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Adds or replaces a typed document and returns its record handle.
-        /// </summary>
         public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
             return AddAsync(document, handle);
         }
 
-        /// <summary>
-        /// Adds or replaces a document whose concrete type is known at runtime.
-        /// </summary>
         public async Task<CultRecordKey> UpsertAsync(Type documentType, object document, CultRecordKey? key = null)
         {
             if (documentType == null) throw new ArgumentNullException(nameof(documentType));
@@ -1568,9 +1296,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets the record handle for a document instance, if it is tracked.
-        /// </summary>
         public CultRecordHandle<T>? TryGetHandle<T>(T document)
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
@@ -1579,9 +1304,6 @@ namespace GameCult.Caching
                 : null;
         }
 
-        /// <summary>
-        /// Gets a document by record key.
-        /// </summary>
         public object? Get(CultRecordKey key)
         {
             lock (_stateGate)
@@ -1595,17 +1317,11 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets a typed document by record key.
-        /// </summary>
         public T? Get<T>(CultRecordKey key) where T : class
         {
             return Get(key) as T;
         }
 
-        /// <summary>
-        /// Gets all cached documents assignable to the requested type.
-        /// </summary>
         public IEnumerable<T> GetAll<T>() where T : class
         {
             lock (_stateGate)
@@ -1618,9 +1334,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Gets the global document for the requested type, if one exists.
-        /// </summary>
         public T? GetGlobal<T>() where T : class
         {
             return _globalKeys.TryGetValue(typeof(T), out var key)
@@ -1628,9 +1341,6 @@ namespace GameCult.Caching
                 : null;
         }
 
-        /// <summary>
-        /// Gets a typed document by its CultName value.
-        /// </summary>
         public T? GetByName<T>(string name) where T : class
         {
             var type = typeof(T);
@@ -1643,9 +1353,6 @@ namespace GameCult.Caching
             return null;
         }
 
-        /// <summary>
-        /// Gets a typed document by an indexed value.
-        /// </summary>
         public T? GetByIndex<T>(string alias, string value) where T : class
         {
             if (_indexMaps.TryGetValue((typeof(T), alias), out var map) &&
@@ -1657,9 +1364,6 @@ namespace GameCult.Caching
             return null;
         }
 
-        /// <summary>
-        /// Removes a document by typed handle.
-        /// </summary>
         public void Remove<T>(CultRecordHandle<T> handle)
         {
             if (_ambientTransaction.Value is { } transaction)
@@ -1680,9 +1384,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Removes a document by cache-owned record key.
-        /// </summary>
         public bool Remove(CultRecordKey key)
         {
             if (Get(key) == null)
@@ -1709,18 +1410,12 @@ namespace GameCult.Caching
             return true;
         }
 
-        /// <summary>
-        /// Removes a document by typed handle.
-        /// </summary>
         public Task DeleteAsync<T>(CultRecordHandle<T> handle)
         {
             Remove(handle);
             return Task.CompletedTask;
         }
 
-        /// <summary>
-        /// Disposes attached disposable backing stores.
-        /// </summary>
         public void Dispose()
         {
             if (FlushAttachedStoresOnDispose && IsDirty)
@@ -2124,44 +1819,26 @@ namespace GameCult.Caching
         }
     }
 
-    /// <summary>
-    /// Base class for CultCache persistence adapters.
-    /// </summary>
     public abstract class CacheBackingStore : IDisposable
     {
         private CultDocumentRegistry? _registry;
         private bool _isDirty;
         private CultSchemaMigrationReport[] _lastSchemaMigrationReports = Array.Empty<CultSchemaMigrationReport>();
 
-        /// <summary>
-        /// Gets the attached document registry.
-        /// </summary>
         protected CultDocumentRegistry Registry =>
             _registry ?? throw new InvalidOperationException("Backing store is not attached to a CultDocumentRegistry.");
 
-        /// <summary>
-        /// Gets the backing store entries by record key.
-        /// </summary>
         protected ConcurrentDictionary<string, CultStoredDocument> Entries { get; } =
             new(StringComparer.Ordinal);
 
-        /// <summary>
-        /// Gets whether the backing store holds staged mutations not yet durably flushed.
-        /// </summary>
         public bool IsDirty
         {
             get => _isDirty;
             protected set => _isDirty = value;
         }
 
-        /// <summary>
-        /// Gets or sets whether disposing the backing store should flush staged mutations first.
-        /// </summary>
         public bool FlushOnDispose { get; set; }
 
-        /// <summary>
-        /// Gets schema migration reports emitted during the most recent pull.
-        /// </summary>
         public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
 
         // Set by the cache at attach; a store calls them for records it loads or drops.
@@ -2173,29 +1850,15 @@ namespace GameCult.Caching
             _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         }
 
-        /// <summary>
-        /// Pulls all persisted records into the backing store.
-        /// </summary>
         public abstract void PullAll();
-        /// <summary>
-        /// Returns whether the backing store knows a record is durable, including records left cold by selective hydration.
-        /// </summary>
         public virtual bool ContainsDurableRecord(CultRecordKey key)
         {
             return Entries.ContainsKey(key.Value);
         }
-        /// <summary>
-        /// Pushes one stored document into the backing store.
-        /// </summary>
         public abstract void Push(CultStoredDocument entry);
-        /// <summary>
-        /// Deletes one stored document from the backing store.
-        /// </summary>
         public abstract void Delete(CultStoredDocument entry);
-        /// <summary>
-        /// Atomically stages and durably commits a buffered record batch for this store.
-        /// Implementations must restore their prior staged view when finality fails.
-        /// </summary>
+        // Stages and durably commits a batch as one step. Implementations must restore their prior
+        // staged view when finality fails.
         public virtual void CommitBatch(
             IReadOnlyCollection<CultStoredDocument> upserts,
             IReadOnlyCollection<CultStoredDocument> deletes)
@@ -2219,13 +1882,7 @@ namespace GameCult.Caching
                 throw;
             }
         }
-        /// <summary>
-        /// Persists all current backing store entries.
-        /// </summary>
         public abstract void PushAll();
-        /// <summary>
-        /// Flushes staged mutations first when FlushOnDispose is set.
-        /// </summary>
         public virtual void Dispose()
         {
             if (FlushOnDispose && IsDirty)
@@ -2234,9 +1891,6 @@ namespace GameCult.Caching
             }
         }
 
-        /// <summary>
-        /// Converts a stored document into a persisted record.
-        /// </summary>
         protected CultPersistedRecord ToPersistedRecord(CultStoredDocument entry, Func<object, byte[]> serializePayload)
         {
             return new CultPersistedRecord
@@ -2248,9 +1902,6 @@ namespace GameCult.Caching
             };
         }
 
-        /// <summary>
-        /// Converts a persisted record into a stored document.
-        /// </summary>
         protected CultStoredDocument ToStoredDocument(
             CultPersistedRecord record,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
@@ -2265,60 +1916,30 @@ namespace GameCult.Caching
                 document);
         }
 
-        /// <summary>
-        /// Records schema migration reports captured during a pull.
-        /// </summary>
         protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
         {
             _lastSchemaMigrationReports = reports?.ToArray() ?? Array.Empty<CultSchemaMigrationReport>();
         }
 
-        /// <summary>
-        /// Marks the backing store as durably flushed.
-        /// </summary>
         protected void MarkFlushSucceeded()
         {
             IsDirty = false;
         }
     }
 
-    /// <summary>
-    /// Base class for backing stores that persist a complete snapshot to one file.
-    /// </summary>
     public abstract class SingleFileBackingStore : CacheBackingStore
     {
-        /// <summary>
-        /// Creates a single-file backing store.
-        /// </summary>
         protected SingleFileBackingStore(string filePath)
         {
             FileInfo = new FileInfo(filePath);
         }
 
-        /// <summary>
-        /// Gets the file used by this backing store.
-        /// </summary>
         protected FileInfo FileInfo { get; }
-        /// <summary>
-        /// Serializes a full store snapshot.
-        /// </summary>
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
-        /// <summary>
-        /// Deserializes a full store snapshot.
-        /// </summary>
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
-        /// <summary>
-        /// Serializes one document payload.
-        /// </summary>
         protected abstract byte[] SerializePayload(object document);
-        /// <summary>
-        /// Deserializes one document payload.
-        /// </summary>
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
-        /// <summary>
-        /// Loads every persisted record from disk.
-        /// </summary>
         public override void PullAll()
         {
             FileInfo.Refresh();
@@ -2375,27 +1996,18 @@ namespace GameCult.Caching
             IsDirty = false;
         }
 
-        /// <summary>
-        /// Stages one stored document in memory.
-        /// </summary>
         public override void Push(CultStoredDocument entry)
         {
             Entries[entry.Key.Value] = entry;
             IsDirty = true;
         }
 
-        /// <summary>
-        /// Removes one staged document.
-        /// </summary>
         public override void Delete(CultStoredDocument entry)
         {
             Entries.TryRemove(entry.Key.Value, out _);
             IsDirty = true;
         }
 
-        /// <summary>
-        /// Writes the staged snapshot to disk.
-        /// </summary>
         public override void PushAll()
         {
             var snapshot = new CultPersistedStoreSnapshot

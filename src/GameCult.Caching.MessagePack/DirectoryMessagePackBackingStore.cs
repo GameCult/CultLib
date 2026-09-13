@@ -11,9 +11,6 @@ using MessagePack;
 
 namespace GameCult.Caching.MessagePack;
 
-/// <summary>
-/// MessagePack backing store that keeps a small schema manifest hot and stores each record as its own cold file.
-/// </summary>
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
@@ -26,9 +23,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private Dictionary<string, CultPersistedRecord> _durableIndex = new(StringComparer.Ordinal);
     private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
 
-    /// <summary>
-    /// Creates a paged MessagePack backing store.
-    /// </summary>
     public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null)
     {
         if (string.IsNullOrWhiteSpace(manifestPath))
@@ -40,12 +34,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         _recordDirectory = new DirectoryInfo(recordDirectoryPath ?? DefaultRecordDirectoryPath(manifestPath));
     }
 
-    /// <summary>
-    /// Gets the default record directory path for a manifest path.
-    /// </summary>
     public static string DefaultRecordDirectoryPath(string manifestPath) => manifestPath + ".records";
 
-    /// <inheritdoc />
     public override void PullAll()
     {
         lock (_mutationGate)
@@ -120,14 +110,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Trace("publish");
     }
 
-    /// <inheritdoc />
     public override bool ContainsDurableRecord(CultRecordKey key)
     {
         lock (_mutationGate)
             return _durableIndex.ContainsKey(key.Value) || base.ContainsDurableRecord(key);
     }
 
-    /// <inheritdoc />
     public override void Push(CultStoredDocument entry)
     {
         lock (_mutationGate)
@@ -139,7 +127,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
     }
 
-    /// <inheritdoc />
     public override void Delete(CultStoredDocument entry)
     {
         lock (_mutationGate)
@@ -151,7 +138,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
     }
 
-    /// <inheritdoc />
     public override void CommitBatch(
         IReadOnlyCollection<CultStoredDocument> upserts,
         IReadOnlyCollection<CultStoredDocument> deletes)
@@ -196,7 +182,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
     }
 
-    /// <inheritdoc />
     public override void PushAll()
     {
         lock (_mutationGate)

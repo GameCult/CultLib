@@ -7,20 +7,11 @@ using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
 
-/// <summary>
-/// MessagePack resolver for CultCache-specific value types.
-/// </summary>
 public sealed class CultDocumentResolver : IFormatterResolver
 {
-    /// <summary>
-    /// Gets the shared resolver instance.
-    /// </summary>
     public static readonly CultDocumentResolver Instance = new();
     private CultDocumentResolver() { }
 
-    /// <summary>
-    /// Gets a formatter for the requested type, when this resolver owns it.
-    /// </summary>
     public IMessagePackFormatter<T>? GetFormatter<T>()
     {
         var type = typeof(T);
@@ -34,9 +25,6 @@ public sealed class CultDocumentResolver : IFormatterResolver
     }
 }
 
-/// <summary>
-/// MessagePack serialization helpers for CultCache documents and backing stores.
-/// </summary>
 public static class CultDocumentMessagePackSerialization
 {
     private const int PersistedRecordFieldCount = 4;
@@ -44,9 +32,6 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
-    /// <summary>
-    /// Gets the shared MessagePack serializer options for CultCache payloads.
-    /// </summary>
     public static readonly MessagePackSerializerOptions Options =
         MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(
@@ -54,33 +39,21 @@ public static class CultDocumentMessagePackSerialization
                 StandardResolver.Instance))
             .WithSecurity(MessagePackSecurity.UntrustedData);
 
-    /// <summary>
-    /// Serializes a typed value with the CultCache MessagePack options.
-    /// </summary>
     public static byte[] Serialize<T>(T value)
     {
         return MessagePackSerializer.Serialize(value, Options);
     }
 
-    /// <summary>
-    /// Deserializes a typed value with the CultCache MessagePack options.
-    /// </summary>
     public static T Deserialize<T>(byte[] payload)
     {
         return MessagePackSerializer.Deserialize<T>(payload, Options);
     }
 
-    /// <summary>
-    /// Serializes a value whose document type is known at runtime.
-    /// </summary>
     public static byte[] SerializeUntyped(object value, Type type)
     {
         return SerializeUntyped(value, type, CultDocumentRegistry.Shared);
     }
 
-    /// <summary>
-    /// Serializes a value through an explicitly owned document registry.
-    /// </summary>
     public static byte[] SerializeUntyped(object value, Type type, CultDocumentRegistry registry)
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
@@ -96,17 +69,11 @@ public static class CultDocumentMessagePackSerialization
         return MessagePackSerializer.Serialize(type, value, Options);
     }
 
-    /// <summary>
-    /// Deserializes a value whose document type is known at runtime.
-    /// </summary>
     public static object DeserializeUntyped(Type type, byte[] payload)
     {
         return DeserializeUntyped(type, payload, CultDocumentRegistry.Shared);
     }
 
-    /// <summary>
-    /// Deserializes a value through an explicitly owned document registry.
-    /// </summary>
     public static object DeserializeUntyped(Type type, byte[] payload, CultDocumentRegistry registry)
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
@@ -120,9 +87,6 @@ public static class CultDocumentMessagePackSerialization
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 
-    /// <summary>
-    /// Serializes one persisted store record.
-    /// </summary>
     public static byte[] SerializePersistedRecord(CultPersistedRecord record)
     {
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
@@ -132,18 +96,12 @@ public static class CultDocumentMessagePackSerialization
         return buffer.WrittenSpan.ToArray();
     }
 
-    /// <summary>
-    /// Deserializes one persisted store record.
-    /// </summary>
     public static CultPersistedRecord DeserializePersistedRecord(byte[] payload)
     {
         var reader = new MessagePackReader(payload);
         return ReadPersistedRecord(ref reader);
     }
 
-    /// <summary>
-    /// Serializes a complete persisted store snapshot.
-    /// </summary>
     public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
     {
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
@@ -166,9 +124,6 @@ public static class CultDocumentMessagePackSerialization
         return buffer.WrittenSpan.ToArray();
     }
 
-    /// <summary>
-    /// Deserializes a complete persisted store snapshot.
-    /// </summary>
     public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
     {
         var reader = new MessagePackReader(payload);
@@ -396,45 +351,27 @@ public static class CultDocumentMessagePackSerialization
     }
 }
 
-/// <summary>
-/// Single-file CultCache backing store that persists snapshots as MessagePack.
-/// </summary>
 public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 {
-    /// <summary>
-    /// Creates a MessagePack single-file backing store.
-    /// </summary>
     public SingleFileMessagePackBackingStore(string filePath) : base(filePath)
     {
     }
 
-    /// <summary>
-    /// Serializes a store snapshot.
-    /// </summary>
     protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
     {
         return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
     }
 
-    /// <summary>
-    /// Deserializes a store snapshot.
-    /// </summary>
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
         return CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
     }
 
-    /// <summary>
-    /// Serializes one document payload.
-    /// </summary>
     protected override byte[] SerializePayload(object document)
     {
         return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);
     }
 
-    /// <summary>
-    /// Deserializes one document payload.
-    /// </summary>
     protected override object DeserializePayload(Type documentType, byte[] payload)
     {
         return CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, Registry);

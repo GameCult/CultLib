@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <Description>File-based MessagePack backing store for CultCache</Description>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
   
   <ItemGroup>

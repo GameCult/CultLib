@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <Description>CultCache: Concurrent polymorphic cache with modular backing stores for .NET</Description>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
   
   <ItemGroup>
