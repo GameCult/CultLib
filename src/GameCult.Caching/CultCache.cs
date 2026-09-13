@@ -1179,6 +1179,7 @@ namespace GameCult.Caching
         private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
         private readonly Subject<Change> _changes = new();
         private readonly object _gate = new();
+        private List<(Change Change, bool Loaded)> _unpublished = new();
         private bool _dirtyInMemory;
 
         public CultCache(CultDocumentRegistry? registry = null)
@@ -1252,50 +1253,57 @@ namespace GameCult.Caching
         {
             if (store == null) throw new ArgumentNullException(nameof(store));
             homes ??= Array.Empty<Type>();
-            lock (_gate)
+            try
             {
-                if (store.Loaded != null)
-                    throw new InvalidOperationException($"Backing store {store} is already attached to a cache.");
-                if (store.IsDirty)
-                    throw new InvalidOperationException($"Backing store {store} has staged writes; attach it clean.");
-                if (homes.Length == 0 && _stores.Any(entry => entry.Homes.Length == 0))
-                    throw new InvalidOperationException(
-                        $"Backing store {store} would be a second untyped store; name the types it is home to.");
-                foreach (var home in homes)
+                lock (_gate)
                 {
-                    var owner = _stores.FirstOrDefault(entry => entry.Homes.Contains(home)).Store;
-                    if (owner != null)
-                        throw new InvalidOperationException($"{home.FullName} is already routed to {owner}; it cannot also route to {store}.");
-                }
-
-                var candidate = (store, homes);
-                foreach (var type in _entries.Values.Select(entry => entry.Descriptor).Distinct())
-                {
-                    var before = Home(type.DocumentType);
-                    _stores.Add(candidate);
-                    var after = Home(type.DocumentType);
-                    _stores.RemoveAt(_stores.Count - 1);
-                    if (before != after)
+                    if (store.Loaded != null)
+                        throw new InvalidOperationException($"Backing store {store} is already attached to a cache.");
+                    if (store.IsDirty)
+                        throw new InvalidOperationException($"Backing store {store} has staged writes; attach it clean.");
+                    if (homes.Length == 0 && _stores.Any(entry => entry.Homes.Length == 0))
                         throw new InvalidOperationException(
-                            $"Attaching {store} would move {type.SchemaName} from {before?.ToString() ?? "memory"} to {after}; " +
-                            "attach routed stores before the untyped store.");
-                }
+                            $"Backing store {store} would be a second untyped store; name the types it is home to.");
+                    foreach (var home in homes)
+                    {
+                        var owner = _stores.FirstOrDefault(entry => entry.Homes.Contains(home)).Store;
+                        if (owner != null)
+                            throw new InvalidOperationException($"{home.FullName} is already routed to {owner}; it cannot also route to {store}.");
+                    }
 
-                store.AttachRegistry(_registry);
-                store.Gate = _gate;
-                store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, _ => CultCommitOutcome.Committed);
-                _stores.Add(candidate);
-                try
-                {
-                    store.PullAll();
+                    var candidate = (store, homes);
+                    foreach (var type in _entries.Values.Select(entry => entry.Descriptor).Distinct())
+                    {
+                        var before = Home(type.DocumentType);
+                        _stores.Add(candidate);
+                        var after = Home(type.DocumentType);
+                        _stores.RemoveAt(_stores.Count - 1);
+                        if (before != after)
+                            throw new InvalidOperationException(
+                                $"Attaching {store} would move {type.SchemaName} from {before?.ToString() ?? "memory"} to {after}; " +
+                                "attach routed stores before the untyped store.");
+                    }
+
+                    store.AttachRegistry(_registry);
+                    store.Gate = _gate;
+                    store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, _ => CultCommitOutcome.Committed);
+                    _stores.Add(candidate);
+                    try
+                    {
+                        store.PullAll();
+                    }
+                    catch
+                    {
+                        _stores.Remove(candidate);
+                        store.Loaded = null;
+                        store.Gate = new object();
+                        throw;
+                    }
                 }
-                catch
-                {
-                    _stores.Remove(candidate);
-                    store.Loaded = null;
-                    store.Gate = new object();
-                    throw;
-                }
+            }
+            finally
+            {
+                Publish();
             }
         }
 
@@ -1303,8 +1311,16 @@ namespace GameCult.Caching
         {
             foreach (var store in BackingStores)
             {
-                lock (_gate)
-                    store.PullAll();
+                try
+                {
+                    // Our stores take the gate themselves; a third-party store might not, so the cache takes it here.
+                    lock (_gate)
+                        store.PullAll();
+                }
+                finally
+                {
+                    Publish();
+                }
             }
 
             return Task.CompletedTask;
@@ -1348,18 +1364,24 @@ namespace GameCult.Caching
 
         public bool Remove(CultRecordKey key)
         {
-            CultStoredDocument? existing;
-            lock (_gate)
-                _entries.TryGetValue(key.Value, out existing);
-            if (existing == null)
-                return false;
-
-            Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, home =>
+            try
             {
-                home?.Delete(existing);
-                return CultCommitOutcome.Committed;
-            });
-            return true;
+                lock (_gate)
+                {
+                    if (!_entries.TryGetValue(key.Value, out var existing))
+                        return false;
+                    Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, home =>
+                    {
+                        home?.Delete(existing);
+                        return CultCommitOutcome.Committed;
+                    });
+                    return true;
+                }
+            }
+            finally
+            {
+                Publish();
+            }
         }
 
         public void Remove<T>(CultRecordHandle<T> handle)
@@ -1431,8 +1453,11 @@ namespace GameCult.Caching
 
         public void Dispose()
         {
-            if (FlushAttachedStoresOnDispose && IsDirty)
-                FlushAllBackingStores();
+            lock (_gate)
+            {
+                if (FlushAttachedStoresOnDispose && IsDirty)
+                    FlushAllBackingStores();
+            }
 
             foreach (var store in BackingStores)
                 store.Dispose();
@@ -1453,15 +1478,17 @@ namespace GameCult.Caching
         {
             var descriptor = _registry.GetRequired(document.GetType());
             lock (_gate)
-            {
-                var resolved = key
-                               ?? (_handles.TryGetValue(document, out var box) ? box.Key
-                                   : descriptor.IsGlobal ? new CultRecordKey($"global:{descriptor.SchemaId}")
-                                   : new CultRecordKey(Guid.NewGuid().ToString("N")));
-                _entries.TryGetValue(resolved.Value, out var previous);
-                return new CultStoredDocument(resolved, MintStoredAt(previous?.StoredAt), descriptor, document);
-            }
+                return Stamp(
+                    key ?? (_handles.TryGetValue(document, out var box) ? box.Key
+                        : descriptor.IsGlobal ? new CultRecordKey($"global:{descriptor.SchemaId}")
+                        : new CultRecordKey(Guid.NewGuid().ToString("N"))),
+                    descriptor,
+                    document);
         }
+
+        // Call under the gate that admits the result, so no load can land a later storedAt in between.
+        private CultStoredDocument Stamp(CultRecordKey key, CultDocumentDescriptor descriptor, object document) =>
+            new(key, MintStoredAt(_entries.TryGetValue(key.Value, out var previous) ? previous.StoredAt : null), descriptor, document);
 
         internal CultStoredDocument? Observe(CultRecordKey key, object? current)
         {
@@ -1489,13 +1516,23 @@ namespace GameCult.Caching
 
         private CultRecordKey Write(object document, CultRecordKey? key)
         {
-            var stored = CreateStoredDocument(document, key);
-            Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, home =>
+            try
             {
-                home?.Push(stored);
-                return CultCommitOutcome.Committed;
-            });
-            return stored.Key;
+                lock (_gate)
+                {
+                    var stored = CreateStoredDocument(document, key);
+                    Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, home =>
+                    {
+                        home?.Push(stored);
+                        return CultCommitOutcome.Committed;
+                    });
+                    return stored.Key;
+                }
+            }
+            finally
+            {
+                Publish();
+            }
         }
 
         private CultCommitOutcome Land(Action<CultCacheBatch> stage, bool wait)
@@ -1512,30 +1549,41 @@ namespace GameCult.Caching
             }
 
             // The in-process gate is always entered; only the store lock attempt honors wait, so Contended means another writer holds the store.
-            lock (_gate)
+            try
             {
-                var upserts = batch.Operations.Values.Where(op => op.Stored != null).Select(op => op.Stored!).ToArray();
-                var deletes = batch.Operations.Values
-                    .Where(op => op.Stored == null && _entries.ContainsKey(op.Key.Value))
-                    .Select(op => _entries[op.Key.Value])
-                    .ToArray();
-                var request = new CultCommitRequest(upserts, deletes, batch.Expected.ToArray(), batch.ExpectsUnchanged);
-                return Admit(upserts, deletes, null, home =>
+                lock (_gate)
                 {
-                    if (home != null)
-                    {
-                        if (request.HasConditions && home.IsDirty)
-                            throw new InvalidOperationException($"Backing store {home} has staged writes; flush before a conditional commit.");
-                        return home.CommitBatch(request, wait);
-                    }
-
-                    if (request.HasConditions && _stores.Count > 0)
-                        throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
-                    var inMemory = _entries.Values
-                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
+                    // Staging stamped outside this gate; a pull since then may hold a later storedAt, so stamp again.
+                    var upserts = batch.Operations.Values
+                        .Where(op => op.Stored != null)
+                        .Select(op => Stamp(op.Key, op.Stored!.Descriptor, op.Stored.Document))
                         .ToArray();
-                    return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
-                });
+                    var deletes = batch.Operations.Values
+                        .Where(op => op.Stored == null && _entries.ContainsKey(op.Key.Value))
+                        .Select(op => _entries[op.Key.Value])
+                        .ToArray();
+                    var request = new CultCommitRequest(upserts, deletes, batch.Expected.ToArray(), batch.ExpectsUnchanged);
+                    return Admit(upserts, deletes, null, home =>
+                    {
+                        if (home != null)
+                        {
+                            if (request.HasConditions && home.IsDirty)
+                                throw new InvalidOperationException($"Backing store {home} has staged writes; flush before a conditional commit.");
+                            return home.CommitBatch(request, wait);
+                        }
+
+                        if (request.HasConditions && _stores.Count > 0)
+                            throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
+                        var inMemory = _entries.Values
+                            .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
+                            .ToArray();
+                        return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
+                    });
+                }
+            }
+            finally
+            {
+                Publish();
             }
         }
 
@@ -1547,23 +1595,44 @@ namespace GameCult.Caching
             CacheBackingStore? source,
             Func<CacheBackingStore?, CultCommitOutcome> land)
         {
-            List<Change> changes;
+            try
+            {
+                lock (_gate)
+                {
+                    var outcome = land(Validate(admitted, evicted, source));
+                    if (outcome != CultCommitOutcome.Committed)
+                        return outcome;
+                    foreach (var change in Apply(admitted, evicted, source))
+                        _unpublished.Add((change, source != null));
+                    return CultCommitOutcome.Committed;
+                }
+            }
+            finally
+            {
+                Publish();
+            }
+        }
+
+        // Observers never run under the gate: admitted changes wait until this thread has left its outermost hold.
+        private void Publish()
+        {
+            if (Monitor.IsEntered(_gate))
+                return;
+            List<(Change Change, bool Loaded)> pending;
             lock (_gate)
             {
-                var outcome = land(Validate(admitted, evicted, source));
-                if (outcome != CultCommitOutcome.Committed)
-                    return outcome;
-                changes = Apply(admitted, evicted, source);
+                if (_unpublished.Count == 0)
+                    return;
+                pending = _unpublished;
+                _unpublished = new();
             }
 
-            foreach (var change in changes)
+            foreach (var (change, loaded) in pending)
             {
                 _changes.OnNext(change);
-                if (source != null)
+                if (loaded)
                     OnUpdate?.Invoke(change.Previous, change.Document);
             }
-
-            return CultCommitOutcome.Committed;
         }
 
         private CacheBackingStore? Validate(
@@ -1894,6 +1963,8 @@ namespace GameCult.Caching
         {
             lock (Gate)
                 PullAllCore();
+            // Outside the gate, an empty hand-over lets the cache publish what this pull admitted.
+            Loaded?.Invoke(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
         }
 
         private void PullAllCore()
@@ -1938,15 +2009,21 @@ namespace GameCult.Caching
         public override void Push(CultStoredDocument entry)
         {
             ThrowIfReadOnly();
-            Entries[entry.Key.Value] = entry;
-            IsDirty = true;
+            lock (Gate)
+            {
+                Entries[entry.Key.Value] = entry;
+                IsDirty = true;
+            }
         }
 
         public override void Delete(CultStoredDocument entry)
         {
             ThrowIfReadOnly();
-            Entries.TryRemove(entry.Key.Value, out _);
-            IsDirty = true;
+            lock (Gate)
+            {
+                Entries.TryRemove(entry.Key.Value, out _);
+                IsDirty = true;
+            }
         }
 
         // A plain flush writes this store's whole view under the lock: two writers never interleave bytes, but the last
@@ -1954,19 +2031,28 @@ namespace GameCult.Caching
         public override void PushAll()
         {
             ThrowIfReadOnly();
-            using (AcquireLock(wait: true))
+            lock (Gate)
             {
-                WriteSnapshot(
-                    Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
-                    Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
-            }
+                using (AcquireLock(wait: true))
+                {
+                    WriteSnapshot(
+                        Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
+                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
+                }
 
-            MarkFlushSucceeded();
+                MarkFlushSucceeded();
+            }
         }
 
         public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
         {
             ThrowIfReadOnly();
+            lock (Gate)
+                return CommitBatchCore(request, wait);
+        }
+
+        private CultCommitOutcome CommitBatchCore(CultCommitRequest request, bool wait)
+        {
             using var fileLock = AcquireLock(wait);
             if (fileLock == null)
                 return CultCommitOutcome.Contended;

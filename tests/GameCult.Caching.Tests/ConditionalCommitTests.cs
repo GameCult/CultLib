@@ -344,26 +344,176 @@ namespace GameCult.Caching.Tests
             using var cache = new CultCache(Registry);
             cache.AddBackingStore(store);
             var staged = new CultRecordKey("staged");
-            Task pulling;
-            Task writing;
 
             using (var release = new ManualResetEventSlim())
             {
                 store.Pause = release;
-                pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
-                Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
-                writing = Task.Run(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)));
-                // Before the fix the write lands inside the paused pull; after it, the write waits for the pull.
-                writing.Wait(200);
-                store.Pause = null;
-                release.Set();
-                Assert.That(Task.WaitAll(new[] { pulling, writing }, TimeSpan.FromSeconds(10)), Is.True);
+                try
+                {
+                    var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
+                    Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
+                    var writer = StartWriter(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)), () => store.Pushed.IsSet);
+                    store.Pause = null;
+                    release.Set();
+                    Assert.That(pulling.Wait(TimeSpan.FromSeconds(10)) && writer(), Is.True);
+                }
+                finally
+                {
+                    store.Pause = null;
+                    release.Set();
+                }
             }
 
             Assert.That(cache.Get(staged), Is.Not.Null, "the re-pull erased a staged write from the cache");
             cache.FlushAllBackingStores();
             using var reader = SingleFile(path).Open();
             Assert.That(reader.Get(staged), Is.Not.Null, "the flush after the re-pull lost the staged write");
+        }
+
+        // The pull pauses inside the directory store's own page load, under the commit lease.
+        [Test]
+        public void RepullNeverErasesAStagedWriteOnDirectoryStore()
+        {
+            var store = DirectoryStore(PathOf("repull-dir.cc"));
+            using (var seed = store.Open())
+                Assert.That(seed.Commit(batch => batch.Upsert(new Slow { Name = "slow", Blocks = true })), Is.True);
+            using var cache = store.Open();
+            var staged = new CultRecordKey("staged");
+
+            using (var release = new ManualResetEventSlim())
+            {
+                Slow.Entered.Reset();
+                Slow.Pause = release;
+                try
+                {
+                    var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
+                    Assert.That(Slow.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never loaded a page");
+                    var writer = StartWriter(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)), () => false);
+                    Slow.Pause = null;
+                    release.Set();
+                    Assert.That(pulling.Wait(TimeSpan.FromSeconds(10)) && writer(), Is.True);
+                }
+                finally
+                {
+                    Slow.Pause = null;
+                    release.Set();
+                }
+            }
+
+            Assert.That(cache.Get(staged), Is.Not.Null, "the re-pull erased a staged write from the cache");
+            cache.FlushAllBackingStores();
+            using var reader = store.Open();
+            Assert.That(reader.Get(staged), Is.Not.Null, "the flush after the re-pull lost the staged write");
+        }
+
+        // Gate sharing is what makes a direct store call wait for its cache's I/O instead of interleaving with it.
+        [Test]
+        public void DirectCallsOnAnAttachedStoreShareTheCacheGate()
+        {
+            var path = PathOf("direct.cc");
+            Create(SingleFile(path), 0);
+            var store = new PausingStore(path);
+            using var cache = new CultCache(Registry);
+            cache.AddBackingStore(store);
+
+            using var release = new ManualResetEventSlim();
+            store.Pause = release;
+            try
+            {
+                var pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
+                Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
+                var pushing = Task.Run(() => store.PushAll());
+                Assert.That(pushing.Wait(200), Is.False, "a direct PushAll ran while the cache's pull held the gate");
+                store.Pause = null;
+                release.Set();
+                Assert.That(Task.WaitAll(new[] { pulling, pushing }, TimeSpan.FromSeconds(10)), Is.True);
+            }
+            finally
+            {
+                // A failed assert must not leave the pull parked on the gate that Dispose needs.
+                store.Pause = null;
+                release.Set();
+            }
+        }
+
+        [Test]
+        public void ObserverDoesNotRunUnderTheGate()
+        {
+            var path = PathOf("observer.cc");
+            using var cache = SingleFile(path).Open();
+            var gated = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            var seen = 0;
+            using var subscription = cache.Watch<Counter>().Subscribe(change =>
+            {
+                Interlocked.Increment(ref seen);
+                if (!Task.Run(() => cache.Get(change.Key)).Wait(TimeSpan.FromSeconds(5)))
+                    gated.Enqueue(change.Key.Value);
+            });
+
+            cache.UpsertAsync(new Counter { Name = "upserted" }, new CultRecordHandle<Counter>(new CultRecordKey("upserted")));
+            Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = "committed" }, new CultRecordHandle<Counter>(new CultRecordKey("committed")))), Is.True);
+            using (var other = SingleFile(path).Open())
+                Assert.That(other.Commit(batch => batch.Upsert(new Counter { Name = "pulled" }, new CultRecordHandle<Counter>(new CultRecordKey("pulled")))), Is.True);
+            cache.PullAllBackingStoresAsync();
+
+            Assert.That(seen, Is.EqualTo(3));
+            Assert.That(gated, Is.Empty, "an observer ran while the cache gate was held");
+        }
+
+        [Test]
+        public void ThrowingOnUpdateHandlerDoesNotResurrectDeletedRecord()
+        {
+            var store = SingleFile(PathOf("resurrect.cc"));
+            var doomed = new CultRecordKey("doomed");
+            var later = new CultRecordKey("later");
+            using (var seed = store.Open())
+                Assert.That(seed.Commit(batch =>
+                {
+                    batch.Upsert(new Counter { Name = "doomed" }, new CultRecordHandle<Counter>(doomed));
+                    batch.Upsert(new Counter { Name = "kept" });
+                }), Is.True);
+            using var a = store.Open();
+            using (var b = store.Open())
+            {
+                Assert.That(b.Remove(doomed), Is.True);
+                b.FlushAllBackingStores();
+            }
+
+            var throwing = true;
+            a.OnUpdate += (_, _) =>
+            {
+                if (throwing)
+                    throw new InvalidOperationException("observer failed");
+            };
+            Assert.That(() => a.PullAllBackingStoresAsync(), Throws.InvalidOperationException.With.Message.EqualTo("observer failed"));
+            throwing = false;
+            Assert.That(a.Get(doomed), Is.Null);
+
+            a.UpsertAsync(new Counter { Name = "later" }, new CultRecordHandle<Counter>(later));
+            a.FlushAllBackingStores();
+            using var reader = store.Open();
+            Assert.That(reader.Get(later), Is.Not.Null);
+            Assert.That(reader.Get(doomed), Is.Null, "a throwing observer left the store holding a record the cache dropped");
+        }
+
+        // Runs write on its own thread and returns once it has reached the store or is blocked waiting; the result joins it.
+        private static Func<bool> StartWriter(Action write, Func<bool> reachedStore)
+        {
+            Exception? failure = null;
+            var thread = new Thread(() =>
+            {
+                try { write(); }
+                catch (Exception exception) { failure = exception; }
+            });
+            thread.Start();
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            while (!reachedStore() && thread.IsAlive && (thread.ThreadState & ThreadState.WaitSleepJoin) == 0)
+            {
+                Assert.That(waited.Elapsed, Is.LessThan(TimeSpan.FromSeconds(10)), "the write neither reached the store nor blocked");
+                Thread.Yield();
+            }
+
+            return () => thread.Join(TimeSpan.FromSeconds(10)) && failure == null;
         }
 
         [Test]
@@ -388,6 +538,7 @@ namespace GameCult.Caching.Tests
                 cache.UpsertAsync(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key));
                 cache.FlushAllBackingStores();
             });
+            Assert.That(directoryCommitted, Is.EqualTo(new[] { "a", "c", "x" }), "a directory commit dropped a key another writer added");
             Assert.That(directoryCommitted, Is.EqualTo(directoryFlushed));
         }
 
@@ -521,7 +672,7 @@ namespace GameCult.Caching.Tests
 
         private string PathOf(string fileName) => System.IO.Path.Combine(_directory, fileName);
 
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(Counter), typeof(Tally) });
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(Counter), typeof(Tally), typeof(Slow) });
 
         private static StoreFactory SingleFile(string path) => new(path, () => new SingleFileMessagePackBackingStore(path));
 
@@ -536,6 +687,13 @@ namespace GameCult.Caching.Tests
 
             public ManualResetEventSlim? Pause;
             public readonly ManualResetEventSlim Entered = new();
+            public readonly ManualResetEventSlim Pushed = new();
+
+            public override void Push(CultStoredDocument entry)
+            {
+                base.Push(entry);
+                Pushed.Set();
+            }
 
             protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
             {
@@ -587,6 +745,34 @@ namespace GameCult.Caching.Tests
             [Key(0)]
             [CultName]
             public string Name = string.Empty;
+        }
+
+        // Loading a record with Blocks set waits on Pause, which parks a directory pull inside its page load.
+        [CultDocument("tests.conditional_slow", "tests.conditional_slow.v1")]
+        internal sealed class Slow
+        {
+            internal static volatile ManualResetEventSlim? Pause;
+            internal static readonly ManualResetEventSlim Entered = new();
+            private bool _blocks;
+
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public bool Blocks
+            {
+                get => _blocks;
+                set
+                {
+                    _blocks = value;
+                    if (value && Pause is { } pause)
+                    {
+                        Entered.Set();
+                        pause.Wait();
+                    }
+                }
+            }
         }
     }
 }

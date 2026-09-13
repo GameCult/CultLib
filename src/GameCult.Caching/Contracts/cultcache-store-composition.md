@@ -44,6 +44,10 @@ which route wrote it.
   single file keeps staged writes dirty and does not drop loaded records.
 - A load publishes changes to `Watch` subscribers and fires `OnUpdate`. A local
   write or commit publishes to `Watch` only; `OnUpdate` fires for loads alone.
+- Observers and `OnUpdate` run after the cache releases its gate, never under
+  it: an observer may read or write the cache from any thread. A throwing
+  observer cannot undo the store's adoption of a load; the store and cache
+  already agree when publication starts.
 - Hydration failure on open is loud: a corrupt store file, or a record whose
   schema the registry cannot resolve, makes the open throw and leaves the file
   byte-identical. Consumers never delete and rewrite a store they failed to
@@ -58,6 +62,9 @@ which route wrote it.
   so that cache's readers wait for the I/O. The file lock (`<path>.lock` or the
   directory commit lease) is always taken inside the gate and released before a
   load is handed to the cache.
+- Direct calls on an attached store (`Push`, `Delete`, `PushAll`, `CommitBatch`,
+  `PullAll`) take the same gate, so they wait for that cache's pull, flush or
+  commit, and the cache's flush on dispose runs under it.
 
 ## Dirtiness: loading never writes
 
@@ -134,13 +141,19 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
 
 - A failed condition is a lost race, not an error: `Commit` returns false and
   nothing is written, changed in memory, or published. `TryCommit` makes one
-  non-blocking lock attempt and reports `Contended` instead of waiting.
+  non-blocking lock attempt and reports `Contended` instead of waiting. On a
+  directory store the lock is the commit lease that pulls also take, so
+  `Contended` can mean another cache or process is reading or committing. The
+  attempt itself runs inside the cache gate, so `TryCommit` may first block
+  behind a pull or flush of the same cache, for up to that operation's lease
+  wait bound (30 seconds).
 - A conditional commit on a store with staged single-record writes throws:
   flush first.
 - Single-file stores lock a sidecar `<path>.lock` opened exclusively. Directory
   stores use their existing commit lease.
 
-**A plain flush and an unconditional commit are last-writer-wins.** Both run
+**A plain flush and an unconditional commit are last-writer-wins: per file for
+single-file stores, per key for directory stores.** Both run
 under the same lock, so two writers never interleave bytes, but they compare
 nothing. Only a conditional commit (`Expect` or `ExpectUnchanged`) protects
 against another writer; processes sharing a store must all use it.
@@ -197,6 +210,8 @@ no serialization; a CultMath encoding, if added, uses this shape.
 A "contract" cell means this document is ahead of the C# code.
 
 Opening a store always hydrates it. A consumer that wants a store to hold only
-what it writes removes the records it does not keep, upserts, and flushes; the
-flush replaces the file in one atomic step. There is no open-without-reading
-option.
+what it writes removes the records it does not keep, upserts, and flushes. On a
+single-file store the flush replaces the file in one atomic step. On a directory
+store the flush writes pages, then the manifest, under the commit lease, merging
+its staged keys and removals onto the current manifest; a key another writer
+added since the pull survives. There is no open-without-reading option.

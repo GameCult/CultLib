@@ -20,7 +20,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _deletedKeys = new(StringComparer.Ordinal);
     private readonly HashSet<string> _hydratedKeys = new(StringComparer.Ordinal);
-    private Dictionary<string, CultPersistedRecord> _durableIndex = new(StringComparer.Ordinal);
     private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
 
     public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null, bool readOnly = false)
@@ -43,6 +42,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         lock (Gate)
             PullAllCore();
+        // Outside the gate, an empty hand-over lets the cache publish what this pull admitted.
+        Loaded?.Invoke(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
     }
 
     private void PullAllCore()
@@ -61,17 +62,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+        CultSchemaCatalogEntry[] catalog;
         using (AcquireCommitLease(wait: true))
         {
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded.
             var manifest = ReadManifest();
             Trace($"manifest records={manifest.Records.Length}");
-            _durableCatalog = manifest.SchemaCatalog;
-            _durableIndex = manifest.Records
-                .Where(record => !string.IsNullOrWhiteSpace(record.Key))
-                .GroupBy(record => record.Key, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
-
+            catalog = manifest.SchemaCatalog;
             LoadRecordPages(
                 manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
                 manifest.SchemaCatalog,
@@ -95,6 +92,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         if (arrived.Length > 0 || departed.Length > 0)
             Loaded?.Invoke(arrived, departed);
 
+        // Adopted only once the cache admitted the load; a refused load leaves the store's durable view untouched.
+        _durableCatalog = catalog;
         foreach (var stored in departed)
             Entries.TryRemove(stored.Key.Value, out _);
         _hydratedKeys.RemoveWhere(key => !loaded.ContainsKey(key) && !Staged(key));
@@ -252,7 +251,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
         _durableCatalog = targetCatalog;
-        _durableIndex = currentIndex;
         _dirtyKeys.Clear();
         _deletedKeys.Clear();
         MarkFlushSucceeded();
