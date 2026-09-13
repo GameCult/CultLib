@@ -639,6 +639,33 @@ test("CultCache refuses at load a record delivered by a store that is not its ho
   assert.equal(existsSync(settingsPath), false);
 });
 
+test("pullWithDuplicateGlobalLeavesCacheUnchanged", async () => {
+  const itemDocument = defineDocumentType({ type: "item", schema: z.object({ name: z.string() }) });
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ theme: z.string() }),
+    global: true,
+  });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-duplicate-global-"));
+  const storePath = join(tempDir, "generic.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument, settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await cache.put(itemDocument, "potion", { name: "Potion" });
+  await cache.putGlobal(settingsDocument, { theme: "ash" });
+  const before = cache.snapshot();
+
+  // A second record of the global type lands in the store file behind the cache's back.
+  const stray = cache.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY);
+  await new SingleFileMessagePackBackingStore(storePath).push({ ...stray, key: "stray" });
+
+  await assert.rejects(cache.pullAllBackingStores(), /has multiple persisted entries/u);
+  assert.deepEqual(cache.snapshot(), before);
+  assert.deepEqual(cache.getRequired(itemDocument, "potion"), { name: "Potion" });
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { theme: "ash" });
+});
+
 test("CultCache with zero stores writes and deletes in memory", async () => {
   const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ theme: z.string() }) });
   const cache = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();

@@ -176,7 +176,7 @@ class CultCache:
                         f"but its home is {self._describe(home, routes, generic)}"
                     )
                 if document.global_document:
-                    if envelope.type in seen_globals and envelope.key == GLOBAL_KEY:
+                    if envelope.type in seen_globals:
                         raise CultCacheError(f"Duplicate global document for type: {envelope.type}")
                     seen_globals.add(envelope.type)
                 value = document.decode_payload(envelope.payload)

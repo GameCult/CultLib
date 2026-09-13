@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from cultcache_py.cache import CultCacheError
 from cultcache_py import (
@@ -340,6 +340,33 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(cache.snapshot_envelopes(), [])
             self.assertEqual(generic_path.read_bytes(), generic_bytes)
             self.assertFalse(settings_path.exists())
+
+    def test_pull_with_duplicate_global_leaves_cache_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            item = item_doc()
+            settings = define_document_type("settings", global_document=True)
+            store_path = Path(tmp) / "generic.cc"
+            cache = (
+                CultCache.builder()
+                .register_document_type(item)
+                .register_document_type(settings)
+                .add_generic_store(SingleFileMessagePackBackingStore(store_path))
+                .build()
+            )
+            cache.put(item, "item:potion", Item(name="Potion", category="Consumable", value=50))
+            cache.put_global(settings, {"theme": "ash"})
+            before = cache.snapshot_envelopes()
+
+            # A second record of the global type lands in the store file behind the cache's back.
+            stray = replace(cache.get_required_envelope(settings, CultCache.GLOBAL_KEY), key="stray")
+            SingleFileMessagePackBackingStore(store_path).push(stray)
+
+            with self.assertRaisesRegex(CultCacheError, "Duplicate global document for type: settings"):
+                cache.pull_all_backing_stores()
+            self.assertEqual(cache.snapshot_envelopes(), before)
+            self.assertEqual(cache.get_required(item, "item:potion").value, 50)
+            self.assertEqual(cache.get_key_by_name(item, "Potion"), "item:potion")
+            self.assertEqual(cache.get_required_global(settings)["theme"], "ash")
 
     def test_attach_with_empty_type_list_is_the_generic_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

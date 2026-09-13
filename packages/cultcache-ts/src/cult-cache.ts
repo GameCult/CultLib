@@ -209,6 +209,7 @@ export class CultCache {
   // the cache's view is replaced, so a refused load admits nothing.
   async pullAllBackingStores(): Promise<void> {
     const loaded: Array<{ registered: RegisteredDefinition; entry: CultCacheEnvelope; value: unknown }> = [];
+    const globalKeys = new Map<string, string>();
 
     for (const registration of this.#stores) {
       const entries = await registration.store.pullAll();
@@ -232,6 +233,14 @@ export class CultCache {
           );
         }
 
+        if (registered.global) {
+          const globalKey = globalKeys.get(type);
+          if (globalKey !== undefined && globalKey !== entry.key) {
+            throw new Error(`CultCache global document type "${type}" has multiple persisted entries.`);
+          }
+          globalKeys.set(type, entry.key);
+        }
+
         const payload = this.#cloneBytes(entry.payload);
         const value = registered.formatter.decode(payload);
         loaded.push({ registered, entry: { ...entry, type, payload }, value });
@@ -240,7 +249,7 @@ export class CultCache {
 
     this.#resetHydratedState();
     for (const { registered, entry, value } of loaded) {
-      this.#applyHydratedEntry(registered, entry, value, "pull");
+      this.#applyHydratedEntry(registered, entry, value);
     }
   }
 
@@ -422,7 +431,7 @@ export class CultCache {
     }
 
     await home?.push(entry);
-    this.#applyHydratedEntry(registered, entry, parsed, "put");
+    this.#applyHydratedEntry(registered, entry, parsed);
     return parsed;
   }
 
@@ -464,7 +473,7 @@ export class CultCache {
     }
 
     await home?.push(entry);
-    this.#applyHydratedEntry(registered, entry, parsed, "put");
+    this.#applyHydratedEntry(registered, entry, parsed);
     return parsed;
   }
 
@@ -705,7 +714,6 @@ export class CultCache {
     registered: RegisteredDefinition,
     entry: CultCacheEnvelope,
     value: unknown,
-    source: "pull" | "put",
   ): void {
     const entryId = this.#entryId(entry.type, entry.key);
     const existing = this.#entries.get(entryId);
@@ -717,9 +725,7 @@ export class CultCache {
       const currentGlobalKey = this.#globalKeys.get(entry.type);
       if (currentGlobalKey && currentGlobalKey !== entry.key) {
         throw new Error(
-          source === "pull"
-            ? `CultCache global document type "${entry.type}" has multiple persisted entries.`
-            : `CultCache global document type "${entry.type}" already has a different key "${currentGlobalKey}".`,
+          `CultCache global document type "${entry.type}" already has a different key "${currentGlobalKey}".`,
         );
       }
     }
