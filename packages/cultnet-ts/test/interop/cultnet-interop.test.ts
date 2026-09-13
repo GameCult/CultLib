@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 const cargoCommand = process.env.CARGO ?? (process.platform === "win32" ? join(homedir(), ".cargo", "bin", "cargo.exe") : "cargo");
 const dotnetCommand = process.env.DOTNET ?? (process.platform === "win32" ? join("C:", "Program Files", "dotnet", "dotnet.exe") : "dotnet");
 const pythonCommand = process.env.PYTHON ?? resolvePythonCommand();
-const cultNetTsRoot = resolve(__dirname, "../../..");
+const cultNetTsRoot = resolve(__dirname, "../../../../..");
 const cultLibRoot = findAncestor(cultNetTsRoot, "CultLib.sln") ?? resolve(cultNetTsRoot, "..", "CultLib");
 const cultcachePyRoot = resolve(cultLibRoot, "packages", "cultcache-py");
 const cultcachePySrc = ["cultcache-py", "cultnet-py", "cultmesh-py"]

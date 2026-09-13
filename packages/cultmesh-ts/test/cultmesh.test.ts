@@ -2500,11 +2500,15 @@ test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
 
   const builtIns = CultMesh.createBuiltInSchemaCatalog();
   assert.equal(
-    builtIns.get("cultnet.shard_catalog_request.v0")?.schemaVersion,
+    builtIns.get(
+      "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.shard-catalog-request.schema.json",
+    )?.schemaVersion,
     "cultnet.shard_catalog_request.v0",
   );
   assert.equal(
-    builtIns.get("cultnet.shard_catalog_response.v0")?.kind,
+    builtIns.get(
+      "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.shard-catalog-response.schema.json",
+    )?.kind,
     "wire_message",
   );
   assert.equal(
