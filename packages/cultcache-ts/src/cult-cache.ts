@@ -13,11 +13,6 @@ import type {
   CultCacheStoreRegistration,
 } from "./types";
 
-type StoreRoute = {
-  primary?: CacheBackingStore;
-  mirrors: CacheBackingStore[];
-};
-
 type RegisteredDefinition = {
   readonly definition: AnyCultCacheDocumentDefinition;
   readonly global: boolean;
@@ -181,10 +176,16 @@ export class CultCache {
     store: CacheBackingStore,
     ...types: BackingStoreTypeReference[]
   ): void {
-    this.#stores.push({
-      store,
-      types: [...new Set(types.map((value) => (typeof value === "string" ? value : value.type)))],
-    });
+    const claimed = [...new Set(types.map((value) => (typeof value === "string" ? value : value.type)))];
+    if (claimed.length === 0 && this.#stores.some((registration) => registration.types.length === 0)) {
+      throw new Error("Backing store would be a second generic store; name the types it is home to.");
+    }
+    for (const type of claimed) {
+      if (this.#stores.some((registration) => registration.types.includes(type))) {
+        throw new Error(`CultCache type "${type}" is already routed to another backing store; it cannot also route to this one.`);
+      }
+    }
+    this.#stores.push({ store, types: claimed });
   }
 
   addGenericBackingStore(store: CacheBackingStore): void {
@@ -386,8 +387,8 @@ export class CultCache {
       catalogEntry: registered.catalogEntry,
     };
 
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
+    const home = this.#resolveRoute(definition.type);
+    if (!home) {
       throw new Error(`No backing store is registered for document type "${definition.type}".`);
     }
 
@@ -398,8 +399,7 @@ export class CultCache {
       }
     }
 
-    await route.primary.push(entry);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.push(entry)));
+    await home.push(entry);
     this.#applyHydratedEntry(registered, entry, parsed, "put");
     return parsed;
   }
@@ -432,8 +432,8 @@ export class CultCache {
       catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
     };
 
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
+    const home = this.#resolveRoute(definition.type);
+    if (!home) {
       throw new Error(`No backing store is registered for document type "${definition.type}".`);
     }
 
@@ -444,8 +444,7 @@ export class CultCache {
       }
     }
 
-    await route.primary.push(entry);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.push(entry)));
+    await home.push(entry);
     this.#applyHydratedEntry(registered, entry, parsed, "put");
     return parsed;
   }
@@ -493,14 +492,13 @@ export class CultCache {
       return false;
     }
 
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
+    const home = this.#resolveRoute(definition.type);
+    if (!home) {
       throw new Error(`No backing store is registered for document type "${definition.type}".`);
     }
 
     const envelope = this.#toEnvelope(entry);
-    await route.primary.delete(envelope);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.delete(envelope)));
+    await home.delete(envelope);
     this.#removeHydratedEntry(registered, entry);
     return true;
   }
@@ -660,20 +658,10 @@ export class CultCache {
     return this.#schemaNameDefinitions.get(entry.type) ?? this.#definitions.get(entry.type);
   }
 
-  #resolveRoute(type: string): StoreRoute {
-    const typeSpecific = this.#stores.filter((registration) => registration.types.includes(type));
-    if (typeSpecific.length > 0) {
-      return {
-        primary: typeSpecific[0]?.store,
-        mirrors: typeSpecific.slice(1).map((registration) => registration.store),
-      };
-    }
-
-    const generic = this.#stores.filter((registration) => registration.types.length === 0);
-    return {
-      primary: generic[0]?.store,
-      mirrors: generic.slice(1).map((registration) => registration.store),
-    };
+  // The store that claims the type, else the generic store. Registration guarantees at most one of each.
+  #resolveRoute(type: string): CacheBackingStore | undefined {
+    return (this.#stores.find((registration) => registration.types.includes(type))
+      ?? this.#stores.find((registration) => registration.types.length === 0))?.store;
   }
 
   #applyHydratedEntry(

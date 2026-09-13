@@ -142,6 +142,25 @@ Document definitions may also carry persistence metadata for cross-language
 stores: `schemaId`, `schemaName`, `schemaVersion`, `contentHash`,
 `canonicalSchemaJson`, `compatibleSchemaIds`, and slot `members`.
 
+## Backing Store Routing
+
+```ts
+const cache = CultCache.builder()
+  .withRegistry(registry)
+  .withBackingStore(new SingleFileMessagePackBackingStore("settings.cc"), settingsDocument)
+  .withGenericStore(new SingleFileMessagePackBackingStore("cache.cc"))
+  .build();
+```
+
+A document type has exactly one home store
+(`src/GameCult.Caching/Contracts/cultcache-store-composition.md` in CultLib):
+
+- a store added with types owns those types; otherwise the generic store is the home
+- a second generic store throws, and so does a type claimed by a second store;
+  a refused registration attaches nothing
+- `put`, `putEnvelope` and `delete` touch exactly one store; nothing is mirrored
+- a write whose type has no home store throws
+
 ## Name, Index, and Global Semantics
 
 `name` and `indexes` can be declared on the document definition:

@@ -533,6 +533,62 @@ test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was
   assert.ok(records[0]?.[3] instanceof Uint8Array);
 });
 
+test("CultCache rejects a second generic backing store", () => {
+  const cache = new CultCache();
+  cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")));
+  assert.throws(
+    () => cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc"))),
+    /second generic store/u,
+  );
+});
+
+test("CultCache rejects a type registered to two stores", () => {
+  const cache = new CultCache();
+  cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")), "item");
+  assert.throws(
+    () => cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc")), "settings", "item"),
+    /"item" is already routed/u,
+  );
+  // A refused registration claims nothing, so "settings" is still free.
+  cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-c.cc")), "settings");
+});
+
+test("CultCache routes each type to its home store", async () => {
+  const itemDocument = defineDocumentType({
+    type: "item",
+    schema: z.object({ name: z.string() }),
+  });
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ theme: z.string() }),
+  });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-routes-"));
+  const genericPath = join(tempDir, "generic.cc");
+  const settingsPath = join(tempDir, "settings.cc");
+  const build = () => CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument, settingsDocument))
+    .withBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+  const keysIn = async (path: string) =>
+    (await new SingleFileMessagePackBackingStore(path).pullAll()).map((entry) => `${entry.type}:${entry.key}`);
+
+  const cache = build();
+  await cache.put(itemDocument, "potion", { name: "Potion" });
+  await cache.put(settingsDocument, "app", { theme: "ash" });
+  assert.deepEqual(await keysIn(genericPath), ["item:potion"]);
+  assert.deepEqual(await keysIn(settingsPath), ["settings:app"]);
+
+  await cache.delete(settingsDocument, "app");
+  assert.deepEqual(await keysIn(settingsPath), []);
+  assert.deepEqual(await keysIn(genericPath), ["item:potion"]);
+
+  const reloaded = build();
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.getRequired(itemDocument, "potion"), { name: "Potion" });
+  assert.equal(reloaded.get(settingsDocument, "app"), undefined);
+});
+
 test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Python", async () => {
   await buildInteropPeers();
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
@@ -613,6 +669,32 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
       assert.equal(read.body, "The v1 store format is the contract.");
       assert.ok(read.tags.includes("interop"));
     }
+  }
+
+  // C# write-routed attaches one home store per type: each file is a complete v1 snapshot holding only its own records.
+  const catalogFile = join(tempDir, "catalog.cc");
+  const runFile = join(tempDir, "run.cc");
+  const routed = await runJsonCommand("csharp-write-routed", dotnetCommand, [
+    csharpInteropDll,
+    "write-routed",
+    catalogFile,
+    runFile,
+  ], cultLibRoot);
+  const recordsIn = async (file: string) => {
+    const decoded = decode(await readFile(file)) as unknown[];
+    assert.equal(decoded[0], "cultcache.store.v1");
+    assert.ok(Array.isArray(decoded[1]), `${file} has no schema catalog`);
+    return (decoded[2] as unknown[][]).map((record) => ({ schemaId: record[1], key: record[0] }));
+  };
+  const catalogRecords = await recordsIn(catalogFile);
+  const runRecords = await recordsIn(runFile);
+  assert.deepEqual(catalogRecords.map((record) => record.key), ["note:csharp-routed"]);
+  assert.deepEqual(runRecords.map((record) => record.key), ["run-note:csharp-routed"]);
+  assert.notEqual(catalogRecords[0]?.schemaId, runRecords[0]?.schemaId);
+  for (const reader of readers) {
+    const read = await reader.read(catalogFile);
+    assert.equal(read.documentId, routed.documentId, `${reader.name} failed to read the routed catalog store`);
+    assert.equal(read.body, "One home store per document type.");
   }
 });
 
