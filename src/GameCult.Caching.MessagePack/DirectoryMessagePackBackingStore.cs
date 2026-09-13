@@ -11,6 +11,7 @@ using MessagePack;
 
 namespace GameCult.Caching.MessagePack;
 
+// A small hot manifest indexes the store; each record lives in one cold content-addressed page.
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
@@ -60,6 +61,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         using (AcquireCommitLease())
         {
+            // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded.
             var manifest = ReadManifest();
             Trace($"manifest records={manifest.Records.Length}");
             _durableCatalog = manifest.SchemaCatalog;

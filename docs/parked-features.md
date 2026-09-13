@@ -20,6 +20,10 @@ can be restored instead of reinvented.
   reactive POCO handle added with the SoA storage in 5428870 "Make SoA
   cache-managed document storage". Same tag, same intent: the document stays a
   POCO while the cache owns its columnar storage.
+- Tag message correction: the `parked/cultcache-soa` tag message says
+  `CultManagedDocument<T>` was "deleted separately, not parked". This note
+  supersedes it: `CultManagedDocument<T>` is parked under the same tag and is
+  restored alongside SoA. The tag itself is left as written.
 - Consumers when parked: none outside tests.
 - Restore: `git show parked/cultcache-soa:src/GameCult.Caching/CultManagedDocument.cs`,
   take the SoA types and `CultManagedDocument<T>`, restore both `Document<T>`
