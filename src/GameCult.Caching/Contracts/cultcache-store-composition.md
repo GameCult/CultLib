@@ -44,9 +44,19 @@ which route wrote it.
   single file keeps staged writes dirty and does not drop loaded records.
 - A load publishes changes to `Watch` subscribers and fires `OnUpdate`. A local
   write or commit publishes to `Watch` only; `OnUpdate` fires for loads alone.
-- Every change carries a `Sequence`: a per-cache, in-memory number assigned
-  when the cache admits the change, under its gate. It increases in admission
-  order and is not persisted.
+- Changes published through `Watch`/`WatchRecord` carry a `Sequence`: a
+  per-cache, in-memory number assigned when the cache admits the change, under
+  its gate. It increases in admission order and is not persisted.
+  `OnUpdate(previous, current)` carries none. Streams CultNet derives from
+  `OnUpdate` (`CultNetDatabase.WatchAllChanges`, the subscription server,
+  database-backed Mesh handles) have no ordering guarantee and no stale
+  protection.
+- `GetWithSequence(key)` returns the document and the cache's current
+  `Sequence`, read together under the gate: every change with a `Sequence` at
+  or below it is reflected in the document.
+- Adding the optional `sequence` constructor argument to
+  `CultCacheDocumentChange<T>` changed its binary signature; no external
+  constructor is known.
 - Observers and `OnUpdate` run after the cache releases its gate, never under
   it: an observer may read or write the cache from any thread. Each call
   publishes exactly its own changes, on its own thread, after releasing the gate
@@ -55,8 +65,15 @@ which route wrote it.
   publishes its own changes before that write returns. A direct `PullAll` on an
   attached store is such a call.
 - Cross-thread delivery order is not guaranteed. A consumer that keeps a latest
-  value per record ignores a change whose `Sequence` is lower than the one it
-  already applied for that record.
+  value per record ignores a change whose `Sequence` is not above the one it
+  already applied for that record. It subscribes first, then takes
+  `GetWithSequence` and adopts that `Sequence` as applied; a change delivered
+  after subscribing with a `Sequence` at or below the read is already in the
+  document and is dropped. CultMesh cache-record mirrors (`ObserveAsync`,
+  `ReactiveAsync`, and `RefreshAsync` on both) do this.
+- Not stale-protected: schema-alias handles (`AsSchemaAlias`) get no
+  `Sequence`; removals do not advance a mirror's applied `Sequence`, and the
+  mirrors do not surface removals.
 - An `OnUpdate` handler exception is rethrown to that caller after all of that
   call's changes are delivered (an `AggregateException` if several threw). If
   the call itself failed, its own exception is rethrown and handler exceptions

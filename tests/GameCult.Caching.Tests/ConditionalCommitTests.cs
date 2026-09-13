@@ -813,6 +813,41 @@ namespace GameCult.Caching.Tests
             Assert.That(broken, Is.EqualTo(0), "a change's previous document is not the one installed by the next-lower Sequence");
         }
 
+        // Each read must hold the document of the highest-Sequence change at or below the read's Sequence.
+        [Test]
+        public void SequencedReadReflectsEveryChangeAtOrBelowItsSequence()
+        {
+            using var cache = new CultCache(Registry);
+            var key = new CultRecordKey("sequenced");
+            var handle = new CultRecordHandle<Counter>(key);
+            var changes = new ConcurrentBag<CultCacheDocumentChange<Counter>>();
+            using var subscription = cache.Watch<Counter>().Subscribe(changes.Add);
+            cache.UpsertAsync(new Counter { Name = "sequenced", Value = -1 }, handle);
+
+            var reads = new ConcurrentBag<(object? Document, long Sequence)>();
+            var writers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            {
+                for (var i = 0; i < 2000; i++)
+                    cache.UpsertAsync(new Counter { Name = "sequenced", Value = i }, handle);
+            })).ToArray();
+            var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            {
+                while (!writers.All(writer => writer.IsCompleted))
+                    reads.Add(cache.GetWithSequence(key));
+            })).ToArray();
+
+            Assert.That(Task.WaitAll(writers.Concat(readers).ToArray(), TimeSpan.FromSeconds(60)), Is.True);
+            var ordered = changes.OrderBy(change => change.Sequence).ToArray();
+            var sequences = ordered.Select(change => change.Sequence).ToArray();
+            Assert.That(reads, Is.Not.Empty);
+            foreach (var (document, sequence) in reads)
+            {
+                var index = Array.BinarySearch(sequences, sequence);
+                Assert.That(index, Is.GreaterThanOrEqualTo(0), "a read's Sequence names no admitted change");
+                Assert.That(document, Is.SameAs(ordered[index].Document), $"read at Sequence {sequence} missed a change at or below it");
+            }
+        }
+
         private string PathOf(string fileName) => System.IO.Path.Combine(_directory, fileName);
 
         private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(Counter), typeof(Tally), typeof(Slow) });

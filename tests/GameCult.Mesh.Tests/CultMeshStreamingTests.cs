@@ -1419,6 +1419,103 @@ public sealed class CultMeshStreamingTests
         cache.Dispose();
     }
 
+    // A batch parks in an observer of another key before publishing its (older) target-key change; the mirror is
+    // created after a newer write landed, then the straggler is delivered.
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ObserveAfterNewerSnapshotIgnoresStraggler(bool reactive)
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:straggler");
+        var other = new CultRecordKey("mesh-note:straggler-other");
+        await cache.UpsertAsync(Note("initial", 1), new CultRecordHandle<MeshNoteDocument>(key));
+        using var release = new ManualResetEventSlim();
+        using var parked = new ManualResetEventSlim();
+        using var park = cache.WatchRecord<MeshNoteDocument>(other).Subscribe(_ =>
+        {
+            parked.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+
+        var batch = Task.Run(() => cache.Commit(stage =>
+        {
+            stage.Upsert(Note("other", 1), new CultRecordHandle<MeshNoteDocument>(other));
+            stage.Upsert(Note("older", 2), new CultRecordHandle<MeshNoteDocument>(key));
+        }));
+        parked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        await cache.UpsertAsync(Note("newer", 3), new CultRecordHandle<MeshNoteDocument>(key));
+        var (mirror, text, _) = await Mirror(cache, key, reactive);
+        release.Set();
+
+        batch.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        mirror.Dispose();
+        cache.Dispose();
+    }
+
+    // The mirror's own delivery of the newer write is parked too, so only the refresh saw it before the straggler.
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RefreshIgnoresStragglerOlderThanSnapshot(bool reactive)
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:refresh-straggler");
+        var other = new CultRecordKey("mesh-note:refresh-straggler-other");
+        await cache.UpsertAsync(Note("initial", 1), new CultRecordHandle<MeshNoteDocument>(key));
+        using var releaseOlder = new ManualResetEventSlim();
+        using var olderParked = new ManualResetEventSlim();
+        using var releaseNewer = new ManualResetEventSlim();
+        using var newerParked = new ManualResetEventSlim();
+        using var parkOlder = cache.WatchRecord<MeshNoteDocument>(other).Subscribe(_ =>
+        {
+            olderParked.Set();
+            releaseOlder.Wait(TimeSpan.FromSeconds(30));
+        });
+        using var parkNewer = cache.WatchRecord<MeshNoteDocument>(key).Subscribe(change =>
+        {
+            if (change.Document?.Text != "newer") return;
+            newerParked.Set();
+            releaseNewer.Wait(TimeSpan.FromSeconds(30));
+        });
+        var (mirror, text, refresh) = await Mirror(cache, key, reactive);
+
+        var batch = Task.Run(() => cache.Commit(stage =>
+        {
+            stage.Upsert(Note("other", 1), new CultRecordHandle<MeshNoteDocument>(other));
+            stage.Upsert(Note("older", 2), new CultRecordHandle<MeshNoteDocument>(key));
+        }));
+        olderParked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        var newer = Task.Run(() => cache.UpsertAsync(Note("newer", 3), new CultRecordHandle<MeshNoteDocument>(key)));
+        newerParked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        await refresh();
+        releaseOlder.Set();
+        batch.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        releaseNewer.Set();
+
+        newer.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        mirror.Dispose();
+        cache.Dispose();
+    }
+
+    private static MeshNoteDocument Note(string text, int revision) =>
+        new() { Schema = "tests.mesh_note.v1", Text = text, Revision = revision };
+
+    private static async Task<(IDisposable Mirror, Func<string> Text, Func<Task> Refresh)> Mirror(
+        CultCache cache, CultRecordKey key, bool reactive)
+    {
+        var handle = CultMesh.Document<MeshNoteDocument>(cache, key);
+        if (reactive)
+        {
+            var mirror = await handle.AuthoritativeWriter().ReactiveAsync();
+            return (mirror, () => mirror.Snapshot.Text, () => mirror.RefreshAsync());
+        }
+
+        var observed = await handle.ObserveAsync();
+        return (observed, () => observed.Current.Text, () => observed.RefreshAsync());
+    }
+
     [Test]
     public async Task ReactiveDocument_DisposeSuppressesScheduledFlush()
     {

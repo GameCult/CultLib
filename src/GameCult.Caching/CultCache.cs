@@ -1409,6 +1409,13 @@ namespace GameCult.Caching
             return Get(key) as T;
         }
 
+        // Every change whose Sequence is at or below the returned one is reflected in the returned document.
+        public (object? Document, long Sequence) GetWithSequence(CultRecordKey key)
+        {
+            lock (_gate)
+                return (_entries.TryGetValue(key.Value, out var stored) ? stored.Document : null, _sequence);
+        }
+
         public bool TryGet<T>(CultRecordKey key, out T? document) where T : class
         {
             document = Get<T>(key);

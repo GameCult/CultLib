@@ -1531,7 +1531,12 @@ namespace GameCult.Mesh
             return new CultMeshDocumentHandle<TDocument>(
                 BindLiveFeed(context, feed),
                 async value => await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false),
-                () => cache.WatchRecord<TDocument>(key));
+                () => cache.WatchRecord<TDocument>(key),
+                () =>
+                {
+                    var (document, sequence) = cache.GetWithSequence(key);
+                    return (RequireDocument<TDocument>(document, key), sequence);
+                });
         }
 
         /// <summary>
@@ -3370,13 +3375,15 @@ namespace GameCult.Mesh
         }
 
         private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)
+            where TDocument : class =>
+            RequireDocument<TDocument>(cache.Get(key), key);
+
+        private static TDocument RequireDocument<TDocument>(object? untyped, CultRecordKey key)
             where TDocument : class
         {
-            var document = cache.Get<TDocument>(key);
-            if (document != null)
+            if (untyped is TDocument document)
                 return document;
 
-            var untyped = cache.Get(key);
             if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
                 return ConvertUntypedDocument<TDocument>(untyped);
 
