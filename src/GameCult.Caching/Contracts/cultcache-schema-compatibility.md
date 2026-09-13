@@ -26,6 +26,18 @@ The canonical fixtures currently exercised in C# are:
 See `GameCult.Caching.Tests/BackingStoreTests.cs` for the canonical fixture
 documents and the expected receipts.
 
+## Which schema a record carries
+
+A record is written under the schema of its runtime type. Writing a derived
+document through a base-typed handle or generic parameter (`UpsertAsync<Gear>`
+with a `Weapon`) persists the `Weapon` schema, and the record reloads as a
+`Weapon`. A runtime type without `[CultDocument]` is refused.
+
+Typed lookups and watches (`Get<T>`, `GetAll<T>`, `GetByName<T>`,
+`GetByIndex<T>`, `GetGlobal<T>`, `Watch<T>`) match every record whose runtime
+type is assignable to `T`. A single-result lookup with several candidates
+throws.
+
 ## Soft-migratable drift
 
 CultCache accepts compatible drift only when the local reader can still map the

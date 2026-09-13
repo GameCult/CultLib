@@ -41,18 +41,24 @@ Those belong to the CultCache persistence layer.
 
 ## Transaction Visibility
 
-An authoritative multi-record change uses `CultCache.ExecuteTransactionAsync`.
-The executing async flow sees its buffered overlay while staging; other readers
-and all observers continue to see the prior committed generation. The backing
-store commits the complete batch before the live cache swaps to it. Observer
-notifications run only after the transaction context and commit lock have been
-released, so an observer-triggered write begins a separate transaction.
+A multi-record commit is an explicit batch of records that resolve to one home
+store. The store commits the batch as one durable step. Nothing in the batch is
+visible, to the committing flow or to observers, until the store has accepted
+it; a failed commit changes nothing on disk or in memory.
 
-An exception before durable finality discards the overlay. It cannot become
-visible through a later flush. A transaction currently permits at most one
-durable backing store because independent stores cannot provide one atomic
-commit boundary. Applications that require authoritative writes may configure
-`CultNetDatabase` to reject record-at-a-time writes outside this primitive.
+A batch may carry conditions: per-record `(schemaId, storedAt)` identity, or
+the whole store unchanged since it was last loaded. Conditions are evaluated
+under the store's exclusive lock against what is durably on disk. A failed
+condition is a lost race, not an error: the commit reports it and writes
+nothing.
+
+**Conditional commit is the only safe multi-process write.** A plain flush
+writes the whole snapshot and is last-writer-wins, so processes sharing a store
+must all use conditional commit.
+
+C# and Rust implement batch and conditional commit. TypeScript and Python
+implement neither yet. Routing, batches and conditions are specified in
+`cultcache-store-composition.md`.
 
 ## Canonical Store Shape
 
