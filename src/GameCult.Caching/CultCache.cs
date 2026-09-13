@@ -1381,20 +1381,6 @@ namespace GameCult.Caching
         public CultDocumentRegistry Registry => _registry;
 
         /// <summary>
-        /// Opens a reactive POCO presentation for one cache-managed document.
-        /// </summary>
-        public CultManagedDocument<T> Document<T>(CultRecordKey key) where T : class
-        {
-            return new CultManagedDocument<T>(
-                key,
-                () => Get<T>(key),
-                async value => { await UpsertAsync(value, new CultRecordHandle<T>(key)).ConfigureAwait(false); },
-                WatchRecord<T>(key)
-                    .Where(change => change.Document != null)
-                    .Select(change => change.Document!));
-        }
-
-        /// <summary>
         /// Watches all local cache changes assignable to the requested document type.
         /// </summary>
         public Observable<CultCacheDocumentChange<T>> Watch<T>() where T : class
