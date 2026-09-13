@@ -52,9 +52,17 @@ under the store's exclusive lock against what is durably on disk. A failed
 condition is a lost race, not an error: the commit reports it and writes
 nothing.
 
-**Conditional commit is the only safe multi-process write.** A plain flush
-writes the whole snapshot and is last-writer-wins, so processes sharing a store
-must all use conditional commit.
+**Conditional commit is the only safe multi-process write.** A plain flush and
+an unconditional commit are last-writer-wins and write the same bytes: a single
+file is replaced by the writer's whole view, a directory manifest takes the
+writer's staged keys over the current manifest. An unconditional commit also
+persists writes staged earlier and leaves the store clean. Processes sharing a
+store must all use conditional commit.
+
+A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
+makes the open throw and is left byte-identical; it is never silently
+overwritten. Within one process the lock order is the cache's gate, then the
+store's file lock; a store's I/O blocks its cache's readers.
 
 C# implements batch and conditional commit (`CultCache.Commit`, `TryCommit`,
 `CultCacheBatch`). Rust implements both. TypeScript and Python implement
@@ -358,8 +366,8 @@ The v1 concurrent single-file policy is:
 2. Writers take an exclusive sidecar lock derived from the `.cc` path.
 3. Writers re-read the current snapshot after taking the lock.
 4. Writers using conditional commit evaluate their conditions against the
-   latest snapshot and write nothing if one fails. A plain flush compares
-   nothing and is last-writer-wins.
+   latest snapshot and write nothing if one fails. A plain flush and an
+   unconditional commit compare nothing and are last-writer-wins.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 

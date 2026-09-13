@@ -40,7 +40,24 @@ which route wrote it.
 - A record loaded from a store that is not its home is refused at load, naming
   the key and both stores.
 - Pulling again after attach is a re-pull. It does not erase mutations staged in
-  a dirty store.
+  a dirty store. A dirty single-file store skips the re-pull entirely; a missing
+  single file keeps staged writes dirty and does not drop loaded records.
+- A load publishes changes to `Watch` subscribers and fires `OnUpdate`. A local
+  write or commit publishes to `Watch` only; `OnUpdate` fires for loads alone.
+- Hydration failure on open is loud: a corrupt store file, or a record whose
+  schema the registry cannot resolve, makes the open throw and leaves the file
+  byte-identical. Consumers never delete and rewrite a store they failed to
+  open.
+
+## Locking
+
+- One lock order: the cache's gate, then the store's lock. A store attached to a
+  cache takes that cache's gate as its own lock, so a store's load callback into
+  the cache cannot take the two out of order.
+- A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,
+  so that cache's readers wait for the I/O. The file lock (`<path>.lock` or the
+  directory commit lease) is always taken inside the gate and released before a
+  load is handed to the cache.
 
 ## Dirtiness: loading never writes
 
@@ -123,10 +140,20 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
 - Single-file stores lock a sidecar `<path>.lock` opened exclusively. Directory
   stores use their existing commit lease.
 
-**A plain flush is last-writer-wins.** It writes the whole snapshot under the
-same lock, so two writers never interleave bytes, but it compares nothing and
-overwrites whatever another process committed. Conditional commit is the only
-safe multi-process write: processes sharing a store must all use it.
+**A plain flush and an unconditional commit are last-writer-wins.** Both run
+under the same lock, so two writers never interleave bytes, but they compare
+nothing. Only a conditional commit (`Expect` or `ExpectUnchanged`) protects
+against another writer; processes sharing a store must all use it.
+
+- A single-file store writes this cache's whole view of the file: a record
+  another writer added since this cache last pulled is gone.
+- A directory store writes this cache's staged keys onto the current manifest:
+  another writer's unrelated keys survive, a key both wrote holds the last
+  write.
+- An unconditional commit writes exactly what a flush of the same staged state
+  plus the batch would write. It also persists any single writes staged earlier
+  in that store, and leaves the store clean.
+- A conditional commit lands the batch onto the file as it is under the lock.
 
 A store is written by one runtime at a time. Whether a Rust `fs2` lock and a C#
 exclusive open of the same lock file exclude each other is not established, and

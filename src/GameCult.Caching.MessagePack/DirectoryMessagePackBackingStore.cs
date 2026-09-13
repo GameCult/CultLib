@@ -17,7 +17,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
     private readonly FileInfo _manifestFile;
     private readonly DirectoryInfo _recordDirectory;
-    private readonly object _mutationGate = new();
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _deletedKeys = new(StringComparer.Ordinal);
     private readonly HashSet<string> _hydratedKeys = new(StringComparer.Ordinal);
@@ -42,7 +41,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     public override void PullAll()
     {
-        lock (_mutationGate)
+        lock (Gate)
             PullAllCore();
     }
 
@@ -112,7 +111,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override void Push(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
-        lock (_mutationGate)
+        lock (Gate)
         {
             Entries[entry.Key.Value] = entry;
             _dirtyKeys[entry.Key.Value] = true;
@@ -124,7 +123,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override void Delete(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
-        lock (_mutationGate)
+        lock (Gate)
         {
             Entries.TryRemove(entry.Key.Value, out _);
             _dirtyKeys.TryRemove(entry.Key.Value, out _);
@@ -136,7 +135,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
     {
         ThrowIfReadOnly();
-        lock (_mutationGate)
+        lock (Gate)
         {
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait);
@@ -188,7 +187,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override void PushAll()
     {
         ThrowIfReadOnly();
-        lock (_mutationGate)
+        lock (Gate)
         {
             if (!IsDirty)
                 return;

@@ -1282,6 +1282,7 @@ namespace GameCult.Caching
                 }
 
                 store.AttachRegistry(_registry);
+                store.Gate = _gate;
                 store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, _ => CultCommitOutcome.Committed);
                 _stores.Add(candidate);
                 try
@@ -1292,6 +1293,7 @@ namespace GameCult.Caching
                 {
                     _stores.Remove(candidate);
                     store.Loaded = null;
+                    store.Gate = new object();
                     throw;
                 }
             }
@@ -1300,7 +1302,11 @@ namespace GameCult.Caching
         public Task PullAllBackingStoresAsync()
         {
             foreach (var store in BackingStores)
-                store.PullAll();
+            {
+                lock (_gate)
+                    store.PullAll();
+            }
+
             return Task.CompletedTask;
         }
 
@@ -1800,6 +1806,10 @@ namespace GameCult.Caching
         // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
+        // Once attached, the cache's gate: the store and its cache share one lock, so a load calling back into the cache
+        // can never take the gate after the store lock. File locks are always taken inside it.
+        protected internal object Gate { get; internal set; } = new();
+
         internal void AttachRegistry(CultDocumentRegistry registry)
         {
             _registry = registry ?? throw new ArgumentNullException(nameof(registry));
@@ -1882,6 +1892,12 @@ namespace GameCult.Caching
 
         public override void PullAll()
         {
+            lock (Gate)
+                PullAllCore();
+        }
+
+        private void PullAllCore()
+        {
             // A single-file snapshot cannot distinguish local dirty keys from clean keys. Pulling while local mutations
             // are staged would let an older disk snapshot erase them before the next flush. Flush first.
             if (IsDirty)
@@ -1959,14 +1975,15 @@ namespace GameCult.Caching
             if (!request.ConditionsHold(disk.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
-            // A clean store commits onto the file as it is now, so records this store never loaded survive. A dirty
-            // store's staged view is the snapshot its flush would write, so the batch lands on that.
-            var records = IsDirty
-                ? Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)).ToDictionary(record => record.Key, StringComparer.Ordinal)
-                : disk.Records.ToDictionary(record => record.Key, StringComparer.Ordinal);
-            var catalog = IsDirty
-                ? Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())
-                : disk.SchemaCatalog;
+            // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
+            // and staged single writes land with it. A conditional commit (store clean) lands the batch onto the file as it is.
+            var ontoDisk = request.HasConditions && !IsDirty;
+            var records = ontoDisk
+                ? disk.Records.ToDictionary(record => record.Key, StringComparer.Ordinal)
+                : Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)).ToDictionary(record => record.Key, StringComparer.Ordinal);
+            var catalog = ontoDisk
+                ? disk.SchemaCatalog
+                : Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry());
             foreach (var entry in request.Deletes)
                 records.Remove(entry.Key.Value);
             foreach (var entry in request.Upserts)

@@ -303,6 +303,143 @@ namespace GameCult.Caching.Tests
             Assert.That(System.IO.Directory.GetFiles(_directory), Is.Empty, "a store file or lock file was touched");
         }
 
+        // Cache A pulls and upserts on two threads while cache B commits to the same directory store; the pull's load
+        // callback and the upsert's push must take the cache gate and the store lock in one order. A is not disposed on
+        // failure because a deadlocked gate would hang the test thread too.
+        [Test]
+        public void PullAndUpsertOnDirectoryStoreDoNotDeadlock()
+        {
+            var store = DirectoryStore(PathOf("deadlock.cc"));
+            var a = store.Open();
+            using var b = store.Open();
+            var pulling = Task.Run(() =>
+            {
+                for (var i = 0; i < 300; i++)
+                    a.PullAllBackingStoresAsync();
+            });
+            var upserting = Task.Run(() =>
+            {
+                for (var i = 0; i < 3000; i++)
+                    a.UpsertAsync(new Counter { Name = $"a:{i}" }, new CultRecordHandle<Counter>(new CultRecordKey($"a:{i}")));
+            });
+            var writing = Task.Run(() =>
+            {
+                for (var i = 0; i < 150; i++)
+                {
+                    b.UpsertAsync(new Counter { Name = $"b:{i}" }, new CultRecordHandle<Counter>(new CultRecordKey($"b:{i}")));
+                    b.FlushAllBackingStores();
+                }
+            });
+
+            Assert.That(Task.WaitAll(new[] { pulling, upserting, writing }, TimeSpan.FromSeconds(60)), Is.True, "pull and upsert deadlocked");
+            a.Dispose();
+        }
+
+        [Test]
+        public void RepullNeverErasesAStagedWrite()
+        {
+            var path = PathOf("repull.cc");
+            Create(SingleFile(path), 0);
+            var store = new PausingStore(path);
+            using var cache = new CultCache(Registry);
+            cache.AddBackingStore(store);
+            var staged = new CultRecordKey("staged");
+            Task pulling;
+            Task writing;
+
+            using (var release = new ManualResetEventSlim())
+            {
+                store.Pause = release;
+                pulling = Task.Run(() => cache.PullAllBackingStoresAsync());
+                Assert.That(store.Entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the pull never read the file");
+                writing = Task.Run(() => cache.UpsertAsync(new Counter { Name = "staged" }, new CultRecordHandle<Counter>(staged)));
+                // Before the fix the write lands inside the paused pull; after it, the write waits for the pull.
+                writing.Wait(200);
+                store.Pause = null;
+                release.Set();
+                Assert.That(Task.WaitAll(new[] { pulling, writing }, TimeSpan.FromSeconds(10)), Is.True);
+            }
+
+            Assert.That(cache.Get(staged), Is.Not.Null, "the re-pull erased a staged write from the cache");
+            cache.FlushAllBackingStores();
+            using var reader = SingleFile(path).Open();
+            Assert.That(reader.Get(staged), Is.Not.Null, "the flush after the re-pull lost the staged write");
+        }
+
+        [Test]
+        public void UnconditionalCommitIsLastWriterWinsLikeFlush()
+        {
+            var committed = LastWriter(SingleFile(PathOf("commit.cc")), (cache, key) =>
+                Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
+            var flushed = LastWriter(SingleFile(PathOf("flush.cc")), (cache, key) =>
+            {
+                cache.UpsertAsync(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key));
+                cache.FlushAllBackingStores();
+            });
+
+            Assert.That(committed, Is.EqualTo(new[] { "a", "x" }), "an unconditional commit kept a record its cache never saw");
+            Assert.That(committed, Is.EqualTo(flushed));
+
+            // A directory store's flush lands staged keys onto the current manifest, and its commit does exactly the same.
+            var directoryCommitted = LastWriter(DirectoryStore(PathOf("commit-dir.cc")), (cache, key) =>
+                Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
+            var directoryFlushed = LastWriter(DirectoryStore(PathOf("flush-dir.cc")), (cache, key) =>
+            {
+                cache.UpsertAsync(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key));
+                cache.FlushAllBackingStores();
+            });
+            Assert.That(directoryCommitted, Is.EqualTo(directoryFlushed));
+        }
+
+        [Test]
+        public void UnconditionalCommitPersistsStagedWrites()
+        {
+            var path = PathOf("staged.cc");
+            using var cache = SingleFile(path).Open();
+            cache.UpsertAsync(new Counter { Name = "s" }, new CultRecordHandle<Counter>(new CultRecordKey("s")));
+            Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = "y" }, new CultRecordHandle<Counter>(new CultRecordKey("y")))), Is.True);
+
+            Assert.That(cache.IsDirty, Is.False);
+            using var reader = SingleFile(path).Open();
+            Assert.That(reader.AllStoredDocuments.Select(stored => stored.Key.Value), Is.EqualTo(new[] { "s", "y" }));
+        }
+
+        [Test]
+        public void OpeningACorruptStoreThrowsAndLeavesItUntouched()
+        {
+            foreach (var store in new[] { SingleFile(PathOf("corrupt.cc")), DirectoryStore(PathOf("corrupt-dir.cc")) })
+            {
+                File.WriteAllBytes(store.Path, new byte[] { 0xC1, 0x00, 0xFF, 0x13 });
+                Assert.That(() => store.Open(), Throws.Exception, $"{store.Path}: a corrupt store opened");
+                Assert.That(File.ReadAllBytes(store.Path), Is.EqualTo(new byte[] { 0xC1, 0x00, 0xFF, 0x13 }), $"{store.Path}: opening rewrote a corrupt store");
+            }
+
+            var unknown = PathOf("unknown-schema.cc");
+            using (var writer = SingleFile(unknown).Open())
+            {
+                writer.UpsertAsync(new Tally { Name = "t" });
+                writer.FlushAllBackingStores();
+            }
+
+            var bytes = File.ReadAllBytes(unknown);
+            using var narrow = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Counter) }));
+            Assert.That(() => narrow.AddBackingStore(new SingleFileMessagePackBackingStore(unknown)), Throws.Exception, "a store with an unknown schema opened");
+            Assert.That(File.ReadAllBytes(unknown), Is.EqualTo(bytes), "opening rewrote a store with an unknown schema");
+        }
+
+        // A pulls {a}; B commits c; A writes x. Returns the keys on disk afterwards.
+        private static string[] LastWriter(StoreFactory store, Action<CultCache, CultRecordKey> write)
+        {
+            using (var seed = store.Open())
+                Assert.That(seed.Commit(batch => batch.Upsert(new Counter { Name = "a" }, new CultRecordHandle<Counter>(new CultRecordKey("a")))), Is.True);
+            using var a = store.Open();
+            using (var b = store.Open())
+                Assert.That(b.Commit(batch => batch.Upsert(new Counter { Name = "c" }, new CultRecordHandle<Counter>(new CultRecordKey("c")))), Is.True);
+            write(a, new CultRecordKey("x"));
+            using var reader = store.Open();
+            return reader.AllStoredDocuments.Select(stored => stored.Key.Value).ToArray();
+        }
+
         private static void StaleExpect(StoreFactory store)
         {
             Create(store, 0);
@@ -389,6 +526,29 @@ namespace GameCult.Caching.Tests
         private static StoreFactory SingleFile(string path) => new(path, () => new SingleFileMessagePackBackingStore(path));
 
         private static StoreFactory DirectoryStore(string path) => new(path, () => new DirectoryMessagePackBackingStore(path));
+
+        // Pauses a pull between reading the file and handing the records to the cache.
+        private sealed class PausingStore : SingleFileMessagePackBackingStore
+        {
+            public PausingStore(string path) : base(path)
+            {
+            }
+
+            public ManualResetEventSlim? Pause;
+            public readonly ManualResetEventSlim Entered = new();
+
+            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+            {
+                var snapshot = base.DeserializeSnapshot(data);
+                if (Pause is { } pause)
+                {
+                    Entered.Set();
+                    pause.Wait();
+                }
+
+                return snapshot;
+            }
+        }
 
         private sealed class StoreFactory
         {
