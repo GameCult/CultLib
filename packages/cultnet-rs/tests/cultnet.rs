@@ -1950,7 +1950,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
-    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store))?;
     origin.pull_all_backing_stores()?;
     origin.put("epiphany.persona", &payload)?;
 
@@ -1958,7 +1958,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
 
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateFixture>()?;
-    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
     target.pull_all_backing_stores()?;
     let applied =
         registry.apply_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &snapshot)?;
@@ -2007,7 +2007,7 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
-    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store))?;
     origin.pull_all_backing_stores()?;
     origin.put("epiphany.persona", &payload)?;
 
@@ -2018,7 +2018,7 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
 
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateFixture>()?;
-    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
     target.pull_all_backing_stores()?;
     let applied = registry
         .apply_raw_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &raw_snapshot)?;
@@ -2054,7 +2054,7 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
     ));
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
-    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store))?;
     origin.pull_all_backing_stores()?;
     origin.put("epiphany.persona", &canonical)?;
     let raw_snapshot = origin_registry.create_raw_snapshot_response(
@@ -2073,7 +2073,7 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
     ));
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateUiFixture>()?;
-    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
     target.pull_all_backing_stores()?;
 
     let applied = alias_registry
@@ -2113,7 +2113,7 @@ fn reactive_document_coalesces_direct_same_schema_alias_member_writes() -> Resul
     {
         let mut cache = cache.lock().expect("cache mutex");
         cache.register_entry_type::<GhostlightReactiveNoteUiFixture>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
         cache.pull_all_backing_stores()?;
         cache.put(
             "note:reactive",
@@ -2178,7 +2178,7 @@ fn reactive_document_tracks_canonical_reconciliation_delta() -> Result<()> {
     {
         let mut cache = cache.lock().expect("cache mutex");
         cache.register_entry_type::<GhostlightReactiveNoteFixture>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
         cache.pull_all_backing_stores()?;
         cache.put(
             "note:reconcile",

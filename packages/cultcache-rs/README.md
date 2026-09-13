@@ -218,7 +218,7 @@ not a missing reflection party trick.
 Generic store:
 
 ```rust
-cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"));
+cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"))?;
 ```
 
 Type-specific store:
@@ -227,20 +227,17 @@ Type-specific store:
 cache.add_backing_store(
     SingleFileMessagePackBackingStore::new("players.cc"),
     ["player"],
-);
+)?;
 ```
 
 The contract, shared with every runtime, is one home store per document type
 (`src/GameCult.Caching/Contracts/cultcache-store-composition.md` in CultLib):
 
 - a type-specific store owns its types; otherwise the generic store is the home
-- at most one generic store, and no type claimed by two stores
+- a second generic store is an error, and so is a type claimed by a second
+  store; both registrations return `Err` and attach nothing
 - a write touches exactly one store; there are no mirrors
-
-This crate does not yet enforce it: `add_backing_store` accepts overlapping
-routes and a second generic store, and writes are pushed to every matching
-store after the first. Attach one generic store, or type-specific stores whose
-types do not overlap.
+- a write whose type has no home store is an error
 
 ## Persistence Semantics
 

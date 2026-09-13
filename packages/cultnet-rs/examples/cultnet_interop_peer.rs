@@ -256,7 +256,7 @@ fn serve(config: PeerConfig) -> Result<()> {
     register_capability_entry_types(&mut cache)?;
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(runtime_store_path(
         &config.runtime_id,
-    )));
+    )))?;
     cache.pull_all_backing_stores()?;
     let note = build_note(&config.runtime_id, &config.display_name);
     cache.put(&note.document_id, &note)?;
@@ -380,7 +380,7 @@ fn dial(config: DialConfig) -> Result<()> {
     register_capability_entry_types(&mut cache)?;
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(runtime_store_path(
         &format!("{}-dial", config.runtime_id),
-    )));
+    )))?;
     cache.pull_all_backing_stores()?;
 
     let mut document_registry = CultNetDocumentRegistry::new();

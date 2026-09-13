@@ -237,7 +237,7 @@ no serialization; a CultMath encoding, if added, uses this shape.
 
 | Rule | C# | Rust | TypeScript | Python |
 |---|---|---|---|---|
-| One home store, no mirrors | implemented | routes by type, still pushes to later matching stores | routes by type, still mirrors | routes by type, still writes every matching store |
+| One home store, no mirrors | implemented | implemented (exact type ids; `add_backing_store` returns `Err` on a second generic store or a claimed type) | implemented (exact type ids; `addBackingStore` throws on a second generic store or a claimed type) | implemented (exact type ids; `add_backing_store`/`add_generic_store` raise on a claimed type or a second generic store) |
 | Attach hydrates; loading never writes | implemented | attach does not read; pull loads without writing | attach does not read; pull loads without writing | attach does not read; pull loads without writing |
 | Runtime type decides schema | implemented | n/a (explicit type ids) | n/a | n/a |
 | Assignable lookups and watches | implemented | exact type ids | exact type ids | exact type ids |

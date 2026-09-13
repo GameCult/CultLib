@@ -74,7 +74,7 @@ fn read_note(file: &str) -> Result<()> {
 fn build_cache(file: &str) -> Result<CultCache> {
     let mut cache = CultCache::new();
     cache.register_entry_type::<CultCacheInteropNote>()?;
-    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(file));
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(file))?;
     Ok(cache)
 }
 

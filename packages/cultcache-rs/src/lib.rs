@@ -1947,19 +1947,38 @@ impl CultCache {
         Ok(self)
     }
 
+    /// Makes the store home to `types`, or the generic store when `types` is
+    /// empty. A type has exactly one home store: a second generic store or a
+    /// type already claimed by another store is an error and attaches nothing.
     pub fn add_backing_store(
         &mut self,
         store: impl CacheBackingStore + 'static,
         types: impl IntoIterator<Item = impl Into<String>>,
-    ) {
+    ) -> Result<()> {
+        let types: BTreeSet<String> = types.into_iter().map(Into::into).collect();
+        if types.is_empty() && self.stores.iter().any(|registration| registration.types.is_empty()) {
+            return Err(anyhow!(
+                "Backing store would be a second generic store; name the types it is home to"
+            ));
+        }
+        if let Some(claimed) = types
+            .iter()
+            .find(|type_id| self.stores.iter().any(|registration| registration.types.contains(*type_id)))
+        {
+            return Err(anyhow!(
+                "CultCache type {:?} is already routed to another backing store; it cannot also route to this one",
+                claimed
+            ));
+        }
         self.stores.push(CultCacheStoreRegistration {
             store: Box::new(store),
-            types: types.into_iter().map(Into::into).collect(),
+            types,
         });
+        Ok(())
     }
 
-    pub fn add_generic_backing_store(&mut self, store: impl CacheBackingStore + 'static) {
-        self.add_backing_store(store, Vec::<String>::new());
+    pub fn add_generic_backing_store(&mut self, store: impl CacheBackingStore + 'static) -> Result<()> {
+        self.add_backing_store(store, Vec::<String>::new())
     }
 
     pub fn pull_all_backing_stores(&mut self) -> Result<()> {
@@ -2081,17 +2100,13 @@ impl CultCache {
 
     pub fn put<T: DatabaseEntry>(&mut self, key: impl Into<String>, value: &T) -> Result<T> {
         let (entry, parsed) = self.prepare_entry(key, value)?;
-        let route = self.resolve_route_indices(T::TYPE);
-        let Some(primary_index) = route.first().copied() else {
+        let Some(home) = self.resolve_route_index(T::TYPE) else {
             return Err(anyhow!(
                 "No backing store is registered for entry type {:?}",
                 T::TYPE
             ));
         };
-        self.stores[primary_index].store.push(&entry)?;
-        for mirror_index in route.iter().skip(1).copied() {
-            self.stores[mirror_index].store.push(&entry)?;
-        }
+        self.stores[home].store.push(&entry)?;
         self.entries.insert(entry_id(&entry), entry);
         Ok(parsed)
     }
@@ -2171,19 +2186,17 @@ impl CultCache {
                     entry.r#type
                 ));
             }
-            let route = self.resolve_route_indices(&entry.r#type);
-            if route.len() != 1 {
+            let Some(home) = self.resolve_route_index(&entry.r#type) else {
                 return Err(anyhow!(
-                    "CultCache atomic batch requires exactly one backing-store route for type {:?}, found {}",
-                    entry.r#type,
-                    route.len()
+                    "No backing store is registered for entry type {:?}",
+                    entry.r#type
                 ));
-            }
+            };
             match store_index {
-                Some(expected) if expected != route[0] => {
+                Some(expected) if expected != home => {
                     return Err(anyhow!("CultCache atomic batch cannot span backing stores"));
                 }
-                None => store_index = Some(route[0]),
+                None => store_index = Some(home),
                 _ => {}
             }
         }
@@ -2202,17 +2215,13 @@ impl CultCache {
 
     pub fn put_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
         let parsed = self.validate_envelope::<T>(&entry)?;
-        let route = self.resolve_route_indices(T::TYPE);
-        let Some(primary_index) = route.first().copied() else {
+        let Some(home) = self.resolve_route_index(T::TYPE) else {
             return Err(anyhow!(
                 "No backing store is registered for entry type {:?}",
                 T::TYPE
             ));
         };
-        self.stores[primary_index].store.push(&entry)?;
-        for mirror_index in route.iter().skip(1).copied() {
-            self.stores[mirror_index].store.push(&entry)?;
-        }
+        self.stores[home].store.push(&entry)?;
         self.entries.insert(entry_id(&entry), entry);
         Ok(parsed)
     }
@@ -2241,17 +2250,13 @@ impl CultCache {
                 entry.r#type
             ));
         }
-        let route = self.resolve_route_indices(&entry.r#type);
-        let Some(primary_index) = route.first().copied() else {
+        let Some(home) = self.resolve_route_index(&entry.r#type) else {
             return Err(anyhow!(
                 "No backing store is registered for entry type {:?}",
                 entry.r#type
             ));
         };
-        self.stores[primary_index].store.push(&entry)?;
-        for mirror_index in route.iter().skip(1).copied() {
-            self.stores[mirror_index].store.push(&entry)?;
-        }
+        self.stores[home].store.push(&entry)?;
         self.entries.insert(entry_id(&entry), entry);
         Ok(())
     }
@@ -2312,17 +2317,13 @@ impl CultCache {
         let Some(entry) = self.entries.get(&id).cloned() else {
             return Ok(false);
         };
-        let route = self.resolve_route_indices(T::TYPE);
-        let Some(primary_index) = route.first().copied() else {
+        let Some(home) = self.resolve_route_index(T::TYPE) else {
             return Err(anyhow!(
                 "No backing store is registered for entry type {:?}",
                 T::TYPE
             ));
         };
-        self.stores[primary_index].store.delete(&entry)?;
-        for mirror_index in route.iter().skip(1).copied() {
-            self.stores[mirror_index].store.delete(&entry)?;
-        }
+        self.stores[home].store.delete(&entry)?;
         self.entries.remove(&id);
         Ok(true)
     }
@@ -2360,23 +2361,17 @@ impl CultCache {
         }
     }
 
-    fn resolve_route_indices(&self, type_id: &str) -> Vec<usize> {
-        let type_specific: Vec<usize> = self
-            .stores
-            .iter()
-            .enumerate()
-            .filter_map(|(index, registration)| {
-                registration.types.contains(type_id).then_some(index)
-            })
-            .collect();
-        if !type_specific.is_empty() {
-            return type_specific;
-        }
+    /// The store that claims the type, else the generic store. Registration
+    /// guarantees at most one of each.
+    fn resolve_route_index(&self, type_id: &str) -> Option<usize> {
         self.stores
             .iter()
-            .enumerate()
-            .filter_map(|(index, registration)| registration.types.is_empty().then_some(index))
-            .collect()
+            .position(|registration| registration.types.contains(type_id))
+            .or_else(|| {
+                self.stores
+                    .iter()
+                    .position(|registration| registration.types.is_empty())
+            })
     }
 }
 
@@ -2929,14 +2924,14 @@ mod tests {
 
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.pull_all_backing_stores()?;
         cache.put("app", &settings)?;
         assert_eq!(cache.get_required::<Settings>("app")?, settings);
 
         let mut reloaded = CultCache::new();
         reloaded.register_entry_type::<Settings>()?;
-        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         reloaded.pull_all_backing_stores()?;
         assert_eq!(reloaded.get_required::<Settings>("app")?, settings);
         Ok(())
@@ -2948,7 +2943,7 @@ mod tests {
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
 
         cache.put(
             "shared",
@@ -2977,7 +2972,7 @@ mod tests {
         let store_path = temp.path().join("batch.cc");
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
 
         let (settings, _) = cache.prepare_entry(
             "app",
@@ -2997,7 +2992,7 @@ mod tests {
 
         let mut reloaded = CultCache::new();
         reloaded.register_registry(TestEntries)?;
-        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         reloaded.pull_all_backing_stores()?;
         assert_eq!(reloaded.get_required::<Settings>("app")?.theme, "iron");
         assert_eq!(reloaded.get_required::<Note>("receipt")?.title, "committed");
@@ -3010,7 +3005,7 @@ mod tests {
         let store_path = temp.path().join("named.cc");
         let mut cache = CultCache::new();
         cache.register_entry_type::<NestedNote>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.pull_all_backing_stores()?;
         let note = NestedNote {
             value: NestedOptionalValue {
@@ -3683,7 +3678,7 @@ mod tests {
         cache.add_generic_backing_store(RefusingBatchStore {
             inner: SingleFileMessagePackBackingStore::new(&store_path),
             refuse_batch: refusal.clone(),
-        });
+        })?;
         cache.put(
             "app",
             &Settings {
@@ -3704,7 +3699,7 @@ mod tests {
 
         let mut reloaded = CultCache::new();
         reloaded.register_registry(TestEntries)?;
-        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         reloaded.pull_all_backing_stores()?;
         assert_eq!(reloaded.get_required::<Settings>("app")?.theme, "before");
         assert!(reloaded.get::<Note>("receipt")?.is_none());
@@ -3719,11 +3714,11 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
         cache.register_entry_type::<Note>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path));
         cache.add_backing_store(
             SingleFileMessagePackBackingStore::new(&settings_path),
             ["settings"],
-        );
+        )?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
 
         cache.put(
             "app",
@@ -3748,12 +3743,43 @@ mod tests {
     }
 
     #[test]
+    fn second_generic_store_is_rejected() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut cache = CultCache::new();
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(temp.path().join("a.cc")))?;
+        let error = cache
+            .add_generic_backing_store(SingleFileMessagePackBackingStore::new(temp.path().join("b.cc")))
+            .unwrap_err();
+        assert!(error.to_string().contains("second generic store"), "{error}");
+        assert_eq!(cache.stores.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn type_claimed_twice_is_rejected() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut cache = CultCache::new();
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(temp.path().join("a.cc")), ["settings"])?;
+        let error = cache
+            .add_backing_store(
+                SingleFileMessagePackBackingStore::new(temp.path().join("b.cc")),
+                ["note", "settings"],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("already routed"), "{error}");
+        // A refused registration claims nothing, so "note" is still free.
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(temp.path().join("c.cc")), ["note"])?;
+        assert_eq!(cache.stores.len(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn update_and_delete_follow_the_cache_api() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
 
         let updated = cache.update::<Settings, _>("app", |current| {
             let mut current = current.unwrap_or(Settings {
@@ -3783,7 +3809,7 @@ mod tests {
         })?;
 
         let mut cache = CultCache::new();
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         let error = cache.pull_all_backing_stores().unwrap_err();
         assert!(
             error
@@ -3799,7 +3825,7 @@ mod tests {
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.put(
             "app",
             &Settings {
@@ -3843,7 +3869,7 @@ mod tests {
 
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.pull_all_backing_stores()?;
         let error = cache.get_required::<Settings>("app").unwrap_err();
         assert!(
@@ -3862,7 +3888,7 @@ mod tests {
 
         let mut origin = CultCache::new();
         origin.register_entry_type::<Settings>()?;
-        origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+        origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store))?;
         origin.put(
             "app",
             &Settings {
@@ -3875,7 +3901,7 @@ mod tests {
 
         let mut target = CultCache::new();
         target.register_entry_type::<Settings>()?;
-        target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+        target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
         let applied = target.put_envelope::<Settings>(envelope.clone())?;
 
         assert_eq!(
@@ -3908,7 +3934,7 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
         cache.register_entry_type::<Note>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.put_raw_envelope(envelope.clone())?;
 
         assert_eq!(cache.snapshot(), vec![envelope.clone()]);
@@ -3950,7 +3976,7 @@ mod tests {
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.put(
             "app",
             &Settings {
@@ -3974,7 +4000,7 @@ mod tests {
         restored.register_registry(TestEntries)?;
         restored.add_generic_backing_store(SingleFileMessagePackBackingStore::new(
             temp.path().join("restored.cc"),
-        ));
+        ))?;
         restored.load_soa(soa)?;
         assert_eq!(restored.get_required::<Settings>("app")?.theme, "ash");
         assert_eq!(restored.get_required::<Note>("memo")?.body, "awake");
@@ -3987,7 +4013,7 @@ mod tests {
         let store_path = temp.path().join("cache.cc");
         let mut cache = CultCache::new();
         cache.register_registry(TestEntries)?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.put(
             "settings:a",
             &Settings {
@@ -4057,7 +4083,7 @@ mod tests {
 
         let mut cache = CultCache::new();
         cache.register_entry_type::<SchemaStamped>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.pull_all_backing_stores()?;
 
         assert_eq!(cache.get_required::<SchemaStamped>("record-1")?, expected);
@@ -4076,7 +4102,7 @@ mod tests {
         let store_path = temp.path().join("store.cc");
         let mut cache = CultCache::new();
         cache.register_entry_type::<Settings>()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         cache.put(
             "primary",
             &Settings {
@@ -4115,7 +4141,7 @@ mod tests {
 
         let mut reloaded = CultCache::new();
         reloaded.register_entry_type::<Settings>()?;
-        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path));
+        reloaded.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
         reloaded.pull_all_backing_stores()?;
         assert_eq!(reloaded.get_required::<Settings>("primary")?.theme, "light");
         Ok(())
