@@ -911,6 +911,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.conditional_counter", "tests.conditional_counter.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class Counter
         {
             [Key(0)]
@@ -922,6 +923,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.conditional_tally", "tests.conditional_tally.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class Tally
         {
             [Key(0)]
@@ -931,14 +933,15 @@ namespace GameCult.Caching.Tests
 
         // Loading a record with Blocks set waits on Pause, which parks a directory pull inside its page load.
         [CultDocument("tests.conditional_slow", "tests.conditional_slow.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class Slow
         {
             internal static volatile ManualResetEventSlim? Pause;
             internal static readonly ManualResetEventSlim Entered = new();
             internal static volatile bool Paused;
             internal static volatile bool ReadWhilePaused;
-            private bool _blocks;
-            private string _name = string.Empty;
+            [IgnoreMember] private bool _blocks;
+            [IgnoreMember] private string _name = string.Empty;
 
             [Key(0)]
             [CultName]

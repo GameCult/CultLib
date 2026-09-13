@@ -13,6 +13,7 @@ namespace GameCult.Mesh
     /// Committed simulation fact derived from witness consensus.
     /// </summary>
     [CultDocument("gamecult.mesh.simulation_fact", "gamecult.mesh.simulation_fact.v1")]
+    [MessagePackObject]
     public sealed class CultMeshSimulationFact
     {
         /// <summary>

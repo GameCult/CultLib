@@ -8,6 +8,7 @@ namespace GameCult.Networking
     /// Basic player account document used by the sample networking stack.
     /// </summary>
     [CultDocument("gamecult.player_data", "gamecult.player_data.v2")]
+    [MessagePackObject]
     public class PlayerData
     {
         /// <summary>

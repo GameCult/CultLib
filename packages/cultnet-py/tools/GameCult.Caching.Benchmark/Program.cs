@@ -94,6 +94,7 @@ internal sealed record BenchmarkResult(string Runtime, int Records, IReadOnlyLis
 internal sealed record BenchmarkMetric(string Name, int Operations, double ElapsedMs, double OpsPerSecond);
 
 [CultDocument("bench.item", "bench.item.v1")]
+[MessagePackObject(AllowPrivate = true)]
 internal sealed class BenchItem
 {
     [Key(0)] [CultName]

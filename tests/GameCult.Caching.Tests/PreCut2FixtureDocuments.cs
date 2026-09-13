@@ -4,6 +4,7 @@ using MessagePack;
 namespace GameCult.Caching.Tests
 {
     [CultDocument("fixtures.precut2.item", "fixtures.precut2.item.v1")]
+    [MessagePackObject(AllowPrivate = true)]
     internal sealed class PreCut2FixtureItem
     {
         [Key(0)]
@@ -15,6 +16,7 @@ namespace GameCult.Caching.Tests
     }
 
     [CultDocument("fixtures.precut2.note", "fixtures.precut2.note.v1")]
+    [MessagePackObject(AllowPrivate = true)]
     internal sealed class PreCut2FixtureNote
     {
         [Key(0)]

@@ -707,6 +707,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_note", "tests.routing_note.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class RoutingNote
         {
             [Key(0)]
@@ -718,6 +719,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_other", "tests.routing_other.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class RoutingOther
         {
             [Key(0)]
@@ -729,6 +731,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_gear", "tests.routing_gear.v1")]
+        [MessagePackObject]
         public class RoutingGear
         {
             [Key(0)]
@@ -736,6 +739,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_weapon", "tests.routing_weapon.v1")]
+        [MessagePackObject]
         public sealed class RoutingWeapon : RoutingGear
         {
             [Key(1)]
@@ -747,6 +751,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_leaf", "tests.routing_leaf.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class RoutingLeaf : RoutingBase
         {
             [Key(0)]
@@ -755,6 +760,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_leaf_twin", "tests.routing_leaf_twin.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class RoutingLeafTwin : RoutingBase
         {
             [Key(0)]
@@ -767,6 +773,7 @@ namespace GameCult.Caching.Tests
         }
 
         [CultDocument("tests.routing_global", "tests.routing_global.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         [CultGlobal]
         internal sealed class RoutingGlobal : RoutingGlobalBase
         {

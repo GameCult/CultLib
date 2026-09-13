@@ -228,6 +228,7 @@ namespace GameCult.Caching.Tests
             Path.Combine(_records, BitConverter.ToString(identity).Replace("-", string.Empty).ToLowerInvariant() + ".msgpack");
 
         [CultDocument("tests.durability_page", "tests.durability_page.v1")]
+        [MessagePackObject(AllowPrivate = true)]
         internal sealed class Page
         {
             [Key(0)]
