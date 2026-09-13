@@ -33,15 +33,24 @@ A member's slot is its MessagePack `[Key(n)]` integer. MessagePack's `[Key]` and
 `MessagePack.Annotations`. Payloads are written by `MessagePackSerializer`, so
 the registry refuses a document type without `[MessagePackObject]` and a
 non-public document type without `[MessagePackObject(AllowPrivate = true)]`.
-`AllowPrivate` makes MessagePack read non-public members too, so every
-non-public instance field or property of such a type must be `[IgnoreMember]`;
-the registry persists public members only. A
-member's type name is the CLR full name; a nested type is written `Outer+Inner`.
+A member's type name is the CLR full name; a nested type is written `Outer+Inner`.
 The registry also refuses a persisted member without `[Key]`, a string
 `[Key]`, two members sharing a slot (including `new`-hidden members), a hidden
 persisted member, an override whose `[Key]` or `[IgnoreMember]` differs from its
-base declaration's (MessagePack reads the base declaration), and a persisted
-member without a public or internal setter.
+base declaration's (MessagePack reads the base declaration), and a readonly
+persisted field.
+
+Visibility follows MessagePack's rule: the registry accepts what MessagePack
+round-trips and refuses what it would silently lose. The registry persists
+public fields and properties only. Without `AllowPrivate`, a persisted property
+needs a public setter, and a `[Key]` on a non-public member is refused because
+MessagePack skips that member. With `AllowPrivate`, private, internal and
+init-only setters are all writable. But MessagePack then also reads non-public
+members, so every non-public instance field or property must be
+`[IgnoreMember]`. A class also needs a constructor MessagePack can call. That
+is a parameterless one (public unless `AllowPrivate`), or one whose parameters
+take the members at `[Key(0)]`, `[Key(1)]`, ... in order. A primary constructor
+usually has neither.
 
 ## Which schema a record carries
 

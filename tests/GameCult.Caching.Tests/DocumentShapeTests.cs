@@ -15,7 +15,8 @@ namespace GameCult.Caching.Tests
     // so a refused shape cannot break a registry built from the loaded assemblies.
     public class DocumentShapeTests
     {
-        private const string DivergentOverride = "overrides {0} with a different [Key] or [IgnoreMember]; MessagePack reads the base declaration's, so an override must repeat or omit them.";
+        private const string NonPublicSetter = "has a non-public set accessor; MessagePack writes it but never reads it back without AllowPrivate, so make the setter public or add [MessagePackObject(AllowPrivate = true)].";
+        private const string DivergentOverride ="overrides {0} with a different [Key] or [IgnoreMember]; MessagePack reads the base declaration's, so an override must repeat or omit them.";
 
         private static readonly ModuleBuilder Rejected = AssemblyBuilder
             .DefineDynamicAssembly(new AssemblyName("RejectedShapes"), AssemblyBuilderAccess.Run)
@@ -169,7 +170,52 @@ namespace GameCult.Caching.Tests
             Property(baseType, "Name", 0, MethodAttributes.Private, Key(0));
             var type = Document("PrivSetDerived", baseType.CreateType());
             Property(type, "X", 0, MethodAttributes.Public, Key(1));
-            Reject(type.CreateType()!, "Cult document PrivSetDerived member Name is not writable; a persisted member needs a non-readonly field or a public or internal set accessor.");
+            Reject(type.CreateType()!, "Cult document PrivSetDerived member Name " + NonPublicSetter);
+        }
+
+        // Without AllowPrivate MessagePack writes Name through the public getter and loads it back as null.
+        [Test]
+        public void InternalSetterWithoutAllowPrivate()
+        {
+            var type = Document("InternalSetter");
+            Property(type, "Name", 0, MethodAttributes.Assembly, Key(0));
+            Reject(type.CreateType()!, "Cult document InternalSetter member Name " + NonPublicSetter);
+        }
+
+        // Without AllowPrivate MessagePack neither writes nor reads a non-public member, [Key] or not.
+        [Test]
+        public void KeyedNonPublicMemberWithoutAllowPrivate()
+        {
+            var type = Document("KeyedPrivate");
+            Field(type, "Name", typeof(string), Key(0));
+            type.DefineField("_secret", typeof(int), FieldAttributes.Private).SetCustomAttribute(Key(1));
+            Reject(type.CreateType()!, "Cult document KeyedPrivate member KeyedPrivate._secret is non-public; MessagePack skips it silently, so [Key] on a non-public member requires [MessagePackObject(AllowPrivate = true)].");
+        }
+
+        // The shape of `class PrimaryCtor(int p)`: MessagePack throws "can't find matched constructor" on first serialize.
+        [Test]
+        public void AllowPrivatePrimaryConstructor()
+        {
+            var type = Rejected.DefineType("PrimaryCtor", TypeAttributes.NotPublic);
+            type.SetCustomAttribute(new CustomAttributeBuilder(
+                typeof(CultDocumentAttribute).GetConstructor(new[] { typeof(string), typeof(string) })!, new object[] { "shape.primary_ctor", "shape.primary_ctor.v1" }));
+            type.SetCustomAttribute(new CustomAttributeBuilder(
+                typeof(MessagePackObjectAttribute).GetConstructor(new[] { typeof(bool) })!, new object[] { false },
+                new[] { typeof(MessagePackObjectAttribute).GetProperty(nameof(MessagePackObjectAttribute.AllowPrivate))! }, new object[] { true }));
+            Field(type, "Name", typeof(string), Key(0));
+            var il = type.DefineConstructor(MethodAttributes.Public, CallingConventions.HasThis, new[] { typeof(int) }).GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Call, typeof(object).GetConstructor(Type.EmptyTypes)!);
+            il.Emit(OpCodes.Ret);
+            Reject(type.CreateType()!, "Cult document PrimaryCtor has no constructor MessagePack can call; add a parameterless constructor (public unless AllowPrivate), or one whose parameters take the [Key(0)], [Key(1)], ... members in order.");
+        }
+
+        [Test]
+        public void AllowPrivateSettersRoundTrip()
+        {
+            Assert.That(Convert.ToHexString(Accept(PrivateSetterNote.Make("n"))), Is.EqualTo("91A16E"));
+            Assert.That(Convert.ToHexString(Accept(new InitOnlyNote { Name = "n" })), Is.EqualTo("91A16E"));
+            Assert.That(Convert.ToHexString(Accept(new InternalSetterNote { Name = "n" })), Is.EqualTo("91A16E"));
         }
 
         [Test]
@@ -270,6 +316,29 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] public string Name = "";
             [Key(1)] public int Count;
+        }
+
+        [CultDocument("shape.private_setter", "shape.private_setter.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class PrivateSetterNote
+        {
+            [Key(0)] public string Name { get; private set; } = "";
+
+            public static PrivateSetterNote Make(string name) => new() { Name = name };
+        }
+
+        [CultDocument("shape.init_only", "shape.init_only.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class InitOnlyNote
+        {
+            [Key(0)] public string Name { get; init; } = "";
+        }
+
+        [CultDocument("shape.internal_setter", "shape.internal_setter.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class InternalSetterNote
+        {
+            [Key(0)] public string Name { get; internal set; } = "";
         }
 
         [MessagePackObject]

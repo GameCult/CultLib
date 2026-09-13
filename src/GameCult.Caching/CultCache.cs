@@ -838,7 +838,11 @@ namespace GameCult.Caching
         private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
         {
             const BindingFlags declared = BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.Public;
+            var messagePackObject = type.GetCustomAttribute<MessagePackObjectAttribute>(true);
+            var allowPrivate = messagePackObject?.AllowPrivate == true;
             var candidates = new List<(MemberInfo Member, Type MemberType, int Depth, bool Writable, PropertyInfo? DivergentRoot)>();
+            // Keyed get-only properties: MessagePack writes them and fills them through a constructor parameter only.
+            var constructorOnly = new List<(Type MemberType, int Slot)>();
             var seenRoots = new HashSet<(Type, string)>();
             var depth = 0;
             for (var current = type; current != null && current != typeof(object); current = current.BaseType, depth++)
@@ -855,8 +859,14 @@ namespace GameCult.Caching
                         continue;
                     var chain = OverrideChain(property).ToArray();
                     var setter = chain.Select(declaration => declaration.SetMethod).FirstOrDefault(method => method != null);
-                    if (chain.All(declaration => declaration.GetMethod == null) || setter == null)
+                    if (chain.All(declaration => declaration.GetMethod == null))
                         continue;
+                    if (setter == null)
+                    {
+                        if (!IsIgnored(property) && GetKeyValue(property) is int constructorSlot)
+                            constructorOnly.Add((property.PropertyType, constructorSlot));
+                        continue;
+                    }
                     // MessagePack's resolver reads the base declaration's [Key]/[IgnoreMember]; an override that changes them is refused.
                     var root = chain[chain.Length - 1];
                     var divergentRoot = chain.Any(declaration =>
@@ -865,30 +875,33 @@ namespace GameCult.Caching
                         : null;
                     if (divergentRoot == null && IsIgnored(property))
                         continue;
-                    candidates.Add((property, property.PropertyType, depth, IsWritable(setter), divergentRoot));
+                    // MessagePack's own rule: it calls a setter that is public, or any setter (init-only included) under AllowPrivate.
+                    candidates.Add((property, property.PropertyType, depth, setter.IsPublic || allowPrivate, divergentRoot));
                 }
             }
 
             var rejections = new List<string>();
-            var messagePackObject = type.GetCustomAttribute<MessagePackObjectAttribute>(true);
             if (messagePackObject == null)
                 rejections.Add(NotMessagePackObjectMessage(type.Name));
-            else if (!type.IsVisible && !messagePackObject.AllowPrivate)
+            else if (!type.IsVisible && !allowPrivate)
                 rejections.Add(NotVisibleMessage(type.Name));
-            else if (messagePackObject.AllowPrivate)
+            else
             {
-                // AllowPrivate makes MessagePack read non-public members; the registry persists public members only.
+                // AllowPrivate makes MessagePack read non-public members, which the registry does not persist; without it MessagePack
+                // silently skips a keyed non-public member.
                 const BindingFlags nonPublic = BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.NonPublic;
                 for (var current = type; current != null && current != typeof(object); current = current.BaseType)
                 {
                     foreach (var member in current.GetFields(nonPublic).Cast<MemberInfo>().Concat(current.GetProperties(nonPublic)))
                     {
-                        if (!member.IsDefined(typeof(CompilerGeneratedAttribute)) && !IsIgnored(member))
+                        if (allowPrivate && !member.IsDefined(typeof(CompilerGeneratedAttribute)) && !IsIgnored(member))
                             rejections.Add(UnmarkedNonPublicMemberMessage(type.Name, Qualified(member)));
+                        else if (!allowPrivate && GetKeyValue(member) != null && !IsIgnored(member))
+                            rejections.Add(KeyedNonPublicMemberMessage(type.Name, Qualified(member)));
                     }
                 }
             }
-            var keyed =new List<(MemberInfo Member, Type MemberType, int Slot)>();
+            var keyed = new List<(MemberInfo Member, Type MemberType, int Slot)>();
             foreach (var candidate in candidates.OrderBy(candidate => candidate.Depth).ThenBy(candidate => candidate.Member.Name, StringComparer.Ordinal))
             {
                 var key = GetKeyValue(candidate.Member);
@@ -901,10 +914,15 @@ namespace GameCult.Caching
                 else
                 {
                     if (!candidate.Writable)
-                        rejections.Add(NotWritableMessage(type.Name, candidate.Member.Name));
+                        rejections.Add(candidate.Member is FieldInfo
+                            ? NotWritableMessage(type.Name, candidate.Member.Name)
+                            : NonPublicSetterMessage(type.Name, candidate.Member.Name));
                     keyed.Add((candidate.Member, candidate.MemberType, slot));
                 }
             }
+
+            if (messagePackObject != null && !type.IsValueType && !HasMessagePackConstructor(type, allowPrivate, keyed.Select(entry => (entry.MemberType, entry.Slot)).Concat(constructorOnly)))
+                rejections.Add(NoConstructorMessage(type.Name));
 
             foreach (var group in keyed.GroupBy(entry => entry.Slot).Where(group => group.Count() > 1).OrderBy(group => group.Key))
             {
@@ -947,9 +965,19 @@ namespace GameCult.Caching
             }
         }
 
-        private static bool IsWritable(MethodInfo setter) =>
-            (setter.IsPublic || setter.IsAssembly || setter.IsFamilyOrAssembly) &&
-            !setter.ReturnParameter.GetRequiredCustomModifiers().Any(modifier => modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit");
+        // MessagePack's DynamicObjectResolver: the [SerializationConstructor] if one is marked, otherwise any public constructor (any
+        // constructor under AllowPrivate) whose every parameter takes the keyed member at its position (slot == parameter index).
+        private static bool HasMessagePackConstructor(Type type, bool allowPrivate, IEnumerable<(Type MemberType, int Slot)> members)
+        {
+            var slots = new Dictionary<int, Type>();
+            foreach (var member in members)
+                slots.TryAdd(member.Slot, member.MemberType);
+            var constructors = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var marked = constructors.Where(constructor => constructor.IsDefined(typeof(SerializationConstructorAttribute))).ToArray();
+            return (marked.Length > 0 ? marked : constructors.Where(constructor => allowPrivate || constructor.IsPublic)).Any(constructor =>
+                constructor.GetParameters().All(parameter =>
+                    slots.TryGetValue(parameter.Position, out var memberType) && parameter.ParameterType.IsAssignableFrom(memberType)));
+        }
 
         private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
 
@@ -969,7 +997,16 @@ namespace GameCult.Caching
             $"Cult document {documentTypeName} member {memberName} has a string [Key]; string keys are not supported; use integer [Key(n)].";
 
         private static string NotWritableMessage(string documentTypeName, string memberName) =>
-            $"Cult document {documentTypeName} member {memberName} is not writable; a persisted member needs a non-readonly field or a public or internal set accessor.";
+            $"Cult document {documentTypeName} member {memberName} is a readonly field; a persisted field must not be readonly.";
+
+        private static string NonPublicSetterMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} has a non-public set accessor; MessagePack writes it but never reads it back without AllowPrivate, so make the setter public or add [MessagePackObject(AllowPrivate = true)].";
+
+        private static string KeyedNonPublicMemberMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} is non-public; MessagePack skips it silently, so [Key] on a non-public member requires [MessagePackObject(AllowPrivate = true)].";
+
+        private static string NoConstructorMessage(string documentTypeName) =>
+            $"Cult document {documentTypeName} has no constructor MessagePack can call; add a parameterless constructor (public unless AllowPrivate), or one whose parameters take the [Key(0)], [Key(1)], ... members in order.";
 
         private static string DuplicateSlotMessage(string documentTypeName, string first, string second, int slot) =>
             $"Cult document {documentTypeName} members {first} and {second} share [Key({slot})]; every persisted member needs a distinct [Key(n)].";
