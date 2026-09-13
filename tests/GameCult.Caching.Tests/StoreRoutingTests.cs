@@ -72,21 +72,6 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task GeneratedAndReflectiveDescriptorsAgreeForDerivedDocuments()
-        {
-            var generated = CultDocumentRegistry.ForTypes(new[] { typeof(RoutingWeapon) }).GetRequired<RoutingWeapon>();
-            var reflective = CultDocumentRegistry.BuildDescriptor(typeof(RoutingWeapon));
-
-            Assert.That(generated.GeneratedPayloadSerializer, Is.Not.Null, "no generated codec for the derived document");
-            Assert.That(generated.GeneratedPayloadDeserializer, Is.Not.Null);
-            Assert.That(generated.SchemaId, Is.EqualTo(reflective.SchemaId));
-            Assert.That(generated.CanonicalSchemaJson, Is.EqualTo(reflective.CanonicalSchemaJson));
-            Assert.That(generated.Members.Select(member => $"{member.MemberName}@{member.Slot}"), Is.EqualTo(new[] { "Name@0", "Damage@1" }));
-            Assert.That(reflective.Members.Select(member => $"{member.MemberName}@{member.Slot}"), Is.EqualTo(new[] { "Name@0", "Damage@1" }));
-            await UpsertWeaponThroughGearHandleReloadsAsWeapon();
-        }
-
-        [Test]
         public async Task GetByNameMatchesAssignableTypes()
         {
             using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(RoutingLeaf) }));

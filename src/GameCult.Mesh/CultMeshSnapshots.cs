@@ -1023,7 +1023,7 @@ namespace GameCult.Mesh
                 }
                 else
                 {
-                    documents.Add(CultDocumentMessagePackSerialization.Deserialize<TDocument>(record.Payload));
+                    documents.Add((TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), record.Payload));
                 }
             }
 

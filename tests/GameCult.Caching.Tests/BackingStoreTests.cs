@@ -711,8 +711,8 @@ namespace GameCult.Caching.Tests
         {
             var reference = new CultRecordRef<NamedTestEntry>(new CultRecordKey("record-1"));
 
-            var payload = CultDocumentMessagePackSerialization.Serialize(reference);
-            var roundTrip = CultDocumentMessagePackSerialization.Deserialize<CultRecordRef<NamedTestEntry>>(payload);
+            var payload = MessagePackSerializer.Serialize(reference, CultDocumentMessagePackSerialization.Options);
+            var roundTrip = MessagePackSerializer.Deserialize<CultRecordRef<NamedTestEntry>>(payload, CultDocumentMessagePackSerialization.Options);
 
             Assert.That(roundTrip.Key.Value, Is.EqualTo("record-1"));
         }
@@ -721,7 +721,7 @@ namespace GameCult.Caching.Tests
         public void MessagePackSerialization_Rejects_InvalidPayload()
         {
             Assert.That(
-                () => CultDocumentMessagePackSerialization.Deserialize<CultRecordRef<NamedTestEntry>>(new byte[] { 0xC1 }),
+                () => MessagePackSerializer.Deserialize<CultRecordRef<NamedTestEntry>>(new byte[] { 0xC1 }, CultDocumentMessagePackSerialization.Options),
                 Throws.TypeOf<MessagePackSerializationException>());
         }
 

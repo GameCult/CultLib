@@ -900,31 +900,126 @@ namespace GameCult.Caching
             public int[] DefaultedMissingSlots { get; }
         }
 
+        // CultDocumentMessagePackGenerator.DiscoverMembers mirrors this step for step and reports the same rejections as GCC001.
+        // Public instance fields and get/set properties, most-derived declaration first; GetCustomAttributes inherits a property's
+        // attributes up its override chain, as MessagePack's own resolver reads them.
         private static IReadOnlyList<PersistedMember> DiscoverMembers(Type type)
         {
-            var members = new List<PersistedMember>();
-
-            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            const BindingFlags declared = BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.Public;
+            var candidates = new List<(MemberInfo Member, Type MemberType, int Depth, bool Writable, PropertyInfo? DivergentRoot)>();
+            var seenRoots = new HashSet<(Type, string)>();
+            var depth = 0;
+            for (var current = type; current != null && current != typeof(object); current = current.BaseType, depth++)
             {
-                if (!IsIgnored(field))
-                    members.Add(PersistedMember.FromMember(field, field.FieldType, value => field.GetValue(value), RequireKey(type, field)));
+                foreach (var field in current.GetFields(declared))
+                {
+                    if (!IsIgnored(field))
+                        candidates.Add((field, field.FieldType, depth, !field.IsInitOnly, null));
+                }
+
+                foreach (var property in current.GetProperties(declared))
+                {
+                    if (property.GetIndexParameters().Length > 0 || !seenRoots.Add(RootOf(property)))
+                        continue;
+                    var chain = OverrideChain(property).ToArray();
+                    var setter = chain.Select(declaration => declaration.SetMethod).FirstOrDefault(method => method != null);
+                    if (chain.All(declaration => declaration.GetMethod == null) || setter == null)
+                        continue;
+                    // MessagePack's resolver reads the base declaration's [Key]/[IgnoreMember]; an override that changes them is refused.
+                    var root = chain[chain.Length - 1];
+                    var divergentRoot = chain.Any(declaration =>
+                        !Equals(GetKeyValue(declaration), GetKeyValue(root)) || IsIgnored(declaration) != IsIgnored(root))
+                        ? root
+                        : null;
+                    if (divergentRoot == null && IsIgnored(property))
+                        continue;
+                    candidates.Add((property, property.PropertyType, depth, IsWritable(setter), divergentRoot));
+                }
             }
 
-            foreach (var property in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            var rejections = new List<string>();
+            var keyed = new List<(MemberInfo Member, Type MemberType, int Slot)>();
+            foreach (var candidate in candidates.OrderBy(candidate => candidate.Depth).ThenBy(candidate => candidate.Member.Name, StringComparer.Ordinal))
             {
-                if (property.GetMethod != null && property.SetMethod != null && !IsIgnored(property))
-                    members.Add(PersistedMember.FromMember(property, property.PropertyType, value => property.GetValue(value), RequireKey(type, property)));
+                var key = GetKeyValue(candidate.Member);
+                if (candidate.DivergentRoot != null)
+                    rejections.Add(DivergentOverrideMessage(type.Name, Qualified(candidate.Member), Qualified(candidate.DivergentRoot)));
+                else if (key is string)
+                    rejections.Add(StringKeyMessage(type.Name, candidate.Member.Name));
+                else if (key is not int slot)
+                    rejections.Add(UnkeyedMemberMessage(type.Name, candidate.Member.Name));
+                else
+                {
+                    if (!candidate.Writable)
+                        rejections.Add(NotWritableMessage(type.Name, candidate.Member.Name));
+                    keyed.Add((candidate.Member, candidate.MemberType, slot));
+                }
             }
 
-            return members.OrderBy(member => member.Slot).ToArray();
+            foreach (var group in keyed.GroupBy(entry => entry.Slot).Where(group => group.Count() > 1).OrderBy(group => group.Key))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(DuplicateSlotMessage(type.Name, Qualified(pair[0].Member), Qualified(pair[1].Member), group.Key));
+            }
+
+            foreach (var group in keyed.GroupBy(entry => entry.Member.Name)
+                         .Where(group => group.Select(entry => entry.Slot).Distinct().Count() > 1)
+                         .OrderBy(group => group.Key, StringComparer.Ordinal))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(HiddenMemberMessage(type.Name, Qualified(pair[0].Member), Qualified(pair[1].Member)));
+            }
+
+            if (rejections.Count > 0)
+                throw new InvalidOperationException(rejections[0]);
+
+            return keyed
+                .Select(entry => PersistedMember.FromMember(
+                    entry.Member,
+                    entry.MemberType,
+                    entry.Member is FieldInfo field ? field.GetValue : ((PropertyInfo)entry.Member).GetValue,
+                    entry.Slot))
+                .OrderBy(member => member.Slot)
+                .ToArray();
         }
 
-        // The generator reports the same text as diagnostic GCC001.
+        private static (Type, string) RootOf(PropertyInfo property) =>
+            ((property.GetMethod ?? property.SetMethod)!.GetBaseDefinition().DeclaringType!, property.Name);
+
+        private static IEnumerable<PropertyInfo> OverrideChain(PropertyInfo property)
+        {
+            var root = RootOf(property);
+            for (var current = property.DeclaringType; current != null; current = current.BaseType)
+            {
+                var declaration = current.GetProperty(property.Name, BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (declaration != null && declaration.GetIndexParameters().Length == 0 && RootOf(declaration) == root)
+                    yield return declaration;
+            }
+        }
+
+        private static bool IsWritable(MethodInfo setter) =>
+            (setter.IsPublic || setter.IsAssembly || setter.IsFamilyOrAssembly) &&
+            !setter.ReturnParameter.GetRequiredCustomModifiers().Any(modifier => modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit");
+
+        private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
+
         internal static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
             $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
 
-        private static int RequireKey(Type documentType, MemberInfo member) =>
-            GetKeyValue(member) ?? throw new InvalidOperationException(UnkeyedMemberMessage(documentType.Name, member.Name));
+        private static string StringKeyMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} has a string [Key]; string keys are not supported; use integer [Key(n)].";
+
+        private static string NotWritableMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} is not writable; a persisted member needs a non-readonly field or a public or internal set accessor.";
+
+        private static string DuplicateSlotMessage(string documentTypeName, string first, string second, int slot) =>
+            $"Cult document {documentTypeName} members {first} and {second} share [Key({slot})]; every persisted member needs a distinct [Key(n)].";
+
+        private static string DivergentOverrideMessage(string documentTypeName, string member, string root) =>
+            $"Cult document {documentTypeName} member {member} overrides {root} with a different [Key] or [IgnoreMember]; MessagePack reads the base declaration's, so an override must repeat or omit them.";
+
+        private static string HiddenMemberMessage(string documentTypeName, string first, string second) =>
+            $"Cult document {documentTypeName} member {first} hides persisted member {second}; persisted member names must be unique.";
 
         private static bool IsIgnored(MemberInfo member)
         {
@@ -935,24 +1030,19 @@ namespace GameCult.Caching
             });
         }
 
-        private static int? GetKeyValue(MemberInfo member)
+        private static object? GetKeyValue(MemberInfo member)
         {
             foreach (var attribute in member.GetCustomAttributes())
             {
                 var name = attribute.GetType().FullName;
                 if (name == "MessagePack.KeyAttribute")
                 {
-                    var property = attribute.GetType().GetProperty("IntKey");
-                    if (property?.GetValue(attribute) is int intKey)
+                    if (attribute.GetType().GetProperty("IntKey")?.GetValue(attribute) is int intKey)
                     {
                         return intKey;
                     }
 
-                    var ctorArg = attribute.GetType().GetProperty("StringKey");
-                    if (ctorArg?.GetValue(attribute) is string)
-                    {
-                        return null;
-                    }
+                    return attribute.GetType().GetProperty("StringKey")?.GetValue(attribute) as string;
                 }
             }
 

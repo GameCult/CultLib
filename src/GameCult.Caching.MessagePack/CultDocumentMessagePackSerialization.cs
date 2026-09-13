@@ -69,16 +69,6 @@ public static class CultDocumentMessagePackSerialization
                    $"Formatter resolver {resolverType.FullName} needs a public static Instance or a public parameterless constructor and must implement {nameof(IFormatterResolver)}.");
     }
 
-    public static byte[] Serialize<T>(T value)
-    {
-        return MessagePackSerializer.Serialize(value, Options);
-    }
-
-    public static T Deserialize<T>(byte[] payload)
-    {
-        return MessagePackSerializer.Deserialize<T>(payload, Options);
-    }
-
     public static byte[] SerializeUntyped(object value, Type type)
     {
         return SerializeUntyped(value, type, CultDocumentRegistry.Shared);

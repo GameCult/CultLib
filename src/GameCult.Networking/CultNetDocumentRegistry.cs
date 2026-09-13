@@ -80,7 +80,8 @@ namespace GameCult.Networking
             Func<byte[], T>? payloadDeserializer = null)
             where T : class
         {
-            var descriptor = (registry ?? CultDocumentRegistry.Shared).GetRequired<T>();
+            var documents = registry ?? CultDocumentRegistry.Shared;
+            var descriptor = documents.GetRequired<T>();
             return new CultNetDocumentBinding(
                 typeof(T),
                 string.IsNullOrWhiteSpace(schemaId) ? descriptor.SchemaId : schemaId!,
@@ -89,11 +90,11 @@ namespace GameCult.Networking
                     var typed = (T)document;
                     return payloadSerializer != null
                         ? payloadSerializer(typed)
-                        : CultDocumentMessagePackSerialization.Serialize(typed);
+                        : CultDocumentMessagePackSerialization.SerializeUntyped(typed, typeof(T), documents);
                 },
                 payload => payloadDeserializer != null
                     ? payloadDeserializer(payload)
-                    : CultDocumentMessagePackSerialization.Deserialize<T>(payload));
+                    : (T)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(T), payload, documents));
         }
 
         /// <summary>
@@ -111,7 +112,8 @@ namespace GameCult.Networking
                 throw new ArgumentNullException(nameof(documentType));
             }
 
-            var descriptor = (registry ?? CultDocumentRegistry.Shared).GetRequired(documentType);
+            var documents = registry ?? CultDocumentRegistry.Shared;
+            var descriptor = documents.GetRequired(documentType);
             return new CultNetDocumentBinding(
                 documentType,
                 string.IsNullOrWhiteSpace(schemaId) ? descriptor.SchemaId : schemaId!,
@@ -125,11 +127,11 @@ namespace GameCult.Networking
 
                     return payloadSerializer != null
                         ? payloadSerializer(document)
-                        : CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType);
+                        : CultDocumentMessagePackSerialization.SerializeUntyped(document, documentType, documents);
                 },
                 payload => payloadDeserializer != null
                     ? payloadDeserializer(payload)
-                    : CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload));
+                    : CultDocumentMessagePackSerialization.DeserializeUntyped(documentType, payload, documents));
         }
     }
 

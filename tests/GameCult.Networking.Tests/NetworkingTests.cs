@@ -3102,12 +3102,12 @@ namespace GameCult.Networking.Tests
                     RecordKey = key.Value,
                     StoredAt = DateTimeOffset.UtcNow.ToString("O"),
                     PayloadEncoding = "messagepack",
-                    Payload = CultDocumentMessagePackSerialization.Serialize(new NetworkSchemaNote
+                    Payload = CultDocumentMessagePackSerialization.SerializeUntyped(new NetworkSchemaNote
                     {
                         Schema = "tests.networking_note.v1",
                         Text = "payload-routed",
                         Revision = 5
-                    })
+                    }, typeof(NetworkSchemaNote))
                 }
             };
 
@@ -3182,7 +3182,7 @@ namespace GameCult.Networking.Tests
 
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
-            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]
@@ -3224,7 +3224,7 @@ namespace GameCult.Networking.Tests
 
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
-            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]
@@ -5645,7 +5645,7 @@ namespace GameCult.Networking.Tests
             Assert.That(message.ChangeKind, Is.EqualTo("added"));
             Assert.That(message.Document, Is.Not.Null);
             Assert.That(message.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
-            Assert.That(message.Document.Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(message.Document.Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]

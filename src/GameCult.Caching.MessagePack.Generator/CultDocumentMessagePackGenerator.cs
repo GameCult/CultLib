@@ -50,8 +50,8 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 return null;
             }
 
-            var unkeyedMembers = new List<string>();
-            var members = DiscoverMembers(typeSymbol, unkeyedMembers);
+            var rejections = new List<string>();
+            var members = DiscoverMembers(typeSymbol, rejections);
             var nameMember = members.FirstOrDefault(member => member.IsName);
             var canConstructForDeserialization = typeSymbol.TypeKind == TypeKind.Struct ||
                 typeSymbol.InstanceConstructors.Any(constructor =>
@@ -71,55 +71,139 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 members.Where(member => member.IndexAlias != null)
                     .Select(member => new IndexAccessorShape(member.IndexAlias!, member.IndexAccessorMethodName!))
                     .ToImmutableArray(),
-                members.ToImmutableArray(),
+                members,
                 canConstructForDeserialization,
                 hasDenseSlots,
-                unkeyedMembers.Select(name => UnkeyedMemberMessage(typeSymbol.Name, name)).ToImmutableArray(),
+                rejections.ToImmutableArray(),
                 typeSymbol.Locations.FirstOrDefault());
         }
 
-        // The same members CultDocumentRegistry reflects: public instance fields and get/set properties, inherited included.
-        private static ImmutableArray<MemberShape> DiscoverMembers(INamedTypeSymbol typeSymbol, List<string> unkeyedMembers)
+        // Mirrors CultDocumentRegistry.DiscoverMembers step for step: public instance fields and get/set properties, most-derived
+        // declaration first, a property's attributes resolved up its override chain, rejections in the same order and text.
+        private static ImmutableArray<MemberShape> DiscoverMembers(INamedTypeSymbol typeSymbol, List<string> rejections)
         {
-            var shaped = new List<MemberShape>();
-            for (var type = typeSymbol; type != null && type.SpecialType != SpecialType.System_Object; type = type.BaseType)
+            var documentName = typeSymbol.Name;
+            var documentStem = SanitizeIdentifier(typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+                .Replace("global::", string.Empty).Replace(".", "_"));
+            var candidates = new List<MemberCandidate>();
+            var seenRoots = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            var depth = 0;
+            for (var type = typeSymbol; type != null && type.SpecialType != SpecialType.System_Object; type = type.BaseType, depth++)
             {
                 foreach (var member in type.GetMembers())
                 {
-                    ITypeSymbol memberType;
-                    if (member is IFieldSymbol field && !field.IsStatic && field.DeclaredAccessibility == Accessibility.Public)
-                        memberType = field.Type;
-                    else if (member is IPropertySymbol property && !property.IsStatic && !property.IsIndexer && !property.IsOverride &&
-                             property.DeclaredAccessibility == Accessibility.Public && property.GetMethod != null && property.SetMethod != null)
-                        memberType = property.Type;
-                    else
-                        continue;
-
-                    if (IsIgnored(member))
-                        continue;
-                    var slot = GetExplicitSlot(member);
-                    if (slot == null)
-                        unkeyedMembers.Add(member.Name);
-                    else
-                        shaped.Add(MemberShapeSeed.From(member, memberType).WithSlot(slot.Value));
+                    if (member is IFieldSymbol field && !field.IsStatic && !field.IsConst && !field.IsImplicitlyDeclared &&
+                        field.DeclaredAccessibility == Accessibility.Public)
+                    {
+                        if (!IsIgnored(field))
+                            candidates.Add(new MemberCandidate(field, field.Type, depth, !field.IsReadOnly, null));
+                    }
+                    else if (member is IPropertySymbol property && !property.IsStatic && !property.IsIndexer &&
+                             property.DeclaredAccessibility == Accessibility.Public && seenRoots.Add(RootOf(property)))
+                    {
+                        var setter = OverrideChain(property).Select(declaration => declaration.SetMethod).FirstOrDefault(method => method != null);
+                        if (OverrideChain(property).All(declaration => declaration.GetMethod == null) || setter == null)
+                            continue;
+                        var root = RootOf(property);
+                        var divergentRoot = OverrideChain(property).Any(declaration =>
+                            !Equals(KeyValue(declaration), KeyValue(root)) || IsIgnored(declaration) != IsIgnored(root))
+                            ? root
+                            : null;
+                        if (divergentRoot == null && IsIgnored(property))
+                            continue;
+                        candidates.Add(new MemberCandidate(property, property.Type, depth,
+                            !setter.IsInitOnly && setter.DeclaredAccessibility is Accessibility.Public or Accessibility.Internal or Accessibility.ProtectedOrInternal,
+                            divergentRoot));
+                    }
                 }
             }
 
-            return shaped.OrderBy(member => member.Slot).ToImmutableArray();
+            var keyed = new List<(MemberCandidate Candidate, int Slot)>();
+            foreach (var candidate in candidates.OrderBy(candidate => candidate.Depth).ThenBy(candidate => candidate.Member.Name, StringComparer.Ordinal))
+            {
+                var keyValue = KeyValue(candidate.Member);
+                if (candidate.DivergentRoot != null)
+                    rejections.Add(DivergentOverrideMessage(documentName, Qualified(candidate.Member), Qualified(candidate.DivergentRoot)));
+                else if (keyValue is string)
+                    rejections.Add(StringKeyMessage(documentName, candidate.Member.Name));
+                else if (keyValue is not int slot)
+                    rejections.Add(UnkeyedMemberMessage(documentName, candidate.Member.Name));
+                else
+                {
+                    if (!candidate.Writable)
+                        rejections.Add(NotWritableMessage(documentName, candidate.Member.Name));
+                    keyed.Add((candidate, slot));
+                }
+            }
+
+            foreach (var group in keyed.GroupBy(entry => entry.Slot).Where(group => group.Count() > 1).OrderBy(group => group.Key))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(DuplicateSlotMessage(documentName, Qualified(pair[0].Candidate.Member), Qualified(pair[1].Candidate.Member), group.Key));
+            }
+
+            foreach (var group in keyed.GroupBy(entry => entry.Candidate.Member.Name)
+                         .Where(group => group.Select(entry => entry.Slot).Distinct().Count() > 1)
+                         .OrderBy(group => group.Key, StringComparer.Ordinal))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(HiddenMemberMessage(documentName, Qualified(pair[0].Candidate.Member), Qualified(pair[1].Candidate.Member)));
+            }
+
+            return keyed
+                .Select(entry => MemberShapeSeed.From(entry.Candidate.Member, entry.Candidate.Type).WithSlot(entry.Slot, documentStem))
+                .OrderBy(member => member.Slot)
+                .ToImmutableArray();
         }
 
-        // CultDocumentRegistry.UnkeyedMemberMessage throws the same text.
+        private static IPropertySymbol RootOf(IPropertySymbol property)
+        {
+            while (property.OverriddenProperty != null)
+                property = property.OverriddenProperty;
+            return property;
+        }
+
+        private static IEnumerable<IPropertySymbol> OverrideChain(IPropertySymbol property)
+        {
+            for (IPropertySymbol? declaration = property; declaration != null; declaration = declaration.OverriddenProperty)
+                yield return declaration;
+        }
+
+        private static string Qualified(ISymbol member) => member.ContainingType.Name + "." + member.Name;
+
+        // CultDocumentRegistry throws the same texts.
         private static string UnkeyedMemberMessage(string documentTypeName, string memberName) =>
             $"Cult document {documentTypeName} member {memberName} has no [Key]; every persisted member of a [CultDocument] type needs an explicit [Key(n)].";
 
+        private static string StringKeyMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} has a string [Key]; string keys are not supported; use integer [Key(n)].";
+
+        private static string NotWritableMessage(string documentTypeName, string memberName) =>
+            $"Cult document {documentTypeName} member {memberName} is not writable; a persisted member needs a non-readonly field or a public or internal set accessor.";
+
+        private static string DuplicateSlotMessage(string documentTypeName, string first, string second, int slot) =>
+            $"Cult document {documentTypeName} members {first} and {second} share [Key({slot})]; every persisted member needs a distinct [Key(n)].";
+
+        private static string DivergentOverrideMessage(string documentTypeName, string member, string root) =>
+            $"Cult document {documentTypeName} member {member} overrides {root} with a different [Key] or [IgnoreMember]; MessagePack reads the base declaration's, so an override must repeat or omit them.";
+
+        private static object? KeyValue(ISymbol member)
+        {
+            var key = GetMemberAttribute(member, "MessagePack.KeyAttribute");
+            return key != null && key.ConstructorArguments.Length > 0 ? key.ConstructorArguments[0].Value : null;
+        }
+
+        private static string HiddenMemberMessage(string documentTypeName, string first, string second) =>
+            $"Cult document {documentTypeName} member {first} hides persisted member {second}; persisted member names must be unique.";
+
 #pragma warning disable RS2008
-        private static readonly DiagnosticDescriptor UnkeyedMember = new(
-            "GCC001", "Cult document member has no [Key]", "{0}", "GameCult.Caching", DiagnosticSeverity.Error, isEnabledByDefault: true);
+        private static readonly DiagnosticDescriptor RejectedMember = new(
+            "GCC001", "Cult document member cannot be persisted", "{0}", "GameCult.Caching", DiagnosticSeverity.Error, isEnabledByDefault: true);
 #pragma warning restore RS2008
 
         private static bool IsIgnored(ISymbol member)
         {
-            return GetAttribute(member, "MessagePack.IgnoreMemberAttribute") != null;
+            return GetMemberAttribute(member, "MessagePack.IgnoreMemberAttribute") != null;
         }
 
         private static AttributeData? GetAttribute(ISymbol symbol, string fullyQualifiedName)
@@ -128,18 +212,12 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 attribute.AttributeClass?.ToDisplayString() == fullyQualifiedName);
         }
 
-        private static int? GetExplicitSlot(ISymbol member)
+        // Attribute.GetCustomAttributes(inherit: true) semantics: an override without the attribute inherits its base declaration's.
+        private static AttributeData? GetMemberAttribute(ISymbol member, string fullyQualifiedName)
         {
-            var keyAttribute = GetAttribute(member, "MessagePack.KeyAttribute");
-            if (keyAttribute == null || keyAttribute.ConstructorArguments.Length == 0)
-            {
-                return null;
-            }
-
-            var argument = keyAttribute.ConstructorArguments[0];
-            return argument.Kind == TypedConstantKind.Primitive && argument.Value is int slot
-                ? slot
-                : null;
+            if (member is not IPropertySymbol property)
+                return GetAttribute(member, fullyQualifiedName);
+            return OverrideChain(property).Select(declaration => GetAttribute(declaration, fullyQualifiedName)).FirstOrDefault(attribute => attribute != null);
         }
 
         private static void EmitProvider(SourceProductionContext context, Compilation compilation, ImmutableArray<DocumentShape> shapes)
@@ -152,11 +230,11 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 .ToArray();
             foreach (var shape in shaped)
             {
-                foreach (var message in shape.UnkeyedMemberMessages)
-                    context.ReportDiagnostic(Diagnostic.Create(UnkeyedMember, shape.Location, message));
+                foreach (var message in shape.Rejections)
+                    context.ReportDiagnostic(Diagnostic.Create(RejectedMember, shape.Location, message));
             }
 
-            var documents = shaped.Where(shape => shape.UnkeyedMemberMessages.IsEmpty).ToArray();
+            var documents = shaped.Where(shape => shape.Rejections.IsEmpty).ToArray();
 
             if (documents.Length == 0)
             {
@@ -410,13 +488,30 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                    namedType.ConstructedFrom.SpecialType == SpecialType.System_Nullable_T;
         }
 
+        private sealed class MemberCandidate
+        {
+            public MemberCandidate(ISymbol member, ITypeSymbol type, int depth, bool writable, IPropertySymbol? divergentRoot)
+            {
+                Member = member;
+                Type = type;
+                Depth = depth;
+                Writable = writable;
+                DivergentRoot = divergentRoot;
+            }
+
+            public ISymbol Member { get; }
+            public ITypeSymbol Type { get; }
+            public int Depth { get; }
+            public bool Writable { get; }
+            public IPropertySymbol? DivergentRoot { get; }
+        }
+
         private sealed class MemberShapeSeed
         {
             private MemberShapeSeed(
                 string name,
                 string schemaTypeName,
                 string typeSyntaxName,
-                string sortKey,
                 bool isName,
                 string? indexAlias,
                 bool isReference,
@@ -427,7 +522,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 Name = name;
                 SchemaTypeName = schemaTypeName;
                 TypeSyntaxName = typeSyntaxName;
-                SortKey = sortKey;
                 IsName = isName;
                 IndexAlias = indexAlias;
                 IsReference = isReference;
@@ -439,7 +533,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public string Name { get; }
             public string SchemaTypeName { get; }
             public string TypeSyntaxName { get; }
-            public string SortKey { get; }
             public bool IsName { get; }
             public string? IndexAlias { get; }
             public bool IsReference { get; }
@@ -447,9 +540,11 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public bool CanBeNull { get; }
             public string? TargetSchemaName { get; }
 
-            public MemberShape WithSlot(int slot)
+            // Accessors are named per document: one provider class holds every document of the assembly, and documents sharing a
+            // base member would otherwise emit the same method twice.
+            public MemberShape WithSlot(int slot, string documentStem)
             {
-                var accessorStem = SanitizeIdentifier(SortKey);
+                var accessorStem = documentStem + "_" + SanitizeIdentifier(Name);
                 return new MemberShape(
                     Name,
                     slot,
@@ -467,7 +562,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
 
             public static MemberShapeSeed From(ISymbol member, ITypeSymbol memberType)
             {
-                var referenceAttribute = GetAttribute(member, "GameCult.Caching.CultReferenceAttribute");
+                var referenceAttribute = GetMemberAttribute(member, "GameCult.Caching.CultReferenceAttribute");
                 var explicitTarget = referenceAttribute?.ConstructorArguments.Length > 0
                     ? referenceAttribute.ConstructorArguments[0].Value as INamedTypeSymbol
                     : null;
@@ -478,7 +573,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 var targetSchemaName = targetType == null
                     ? null
                     : GetAttribute(targetType, "GameCult.Caching.CultDocumentAttribute")?.ConstructorArguments[0].Value as string;
-                var indexAttribute = GetAttribute(member, "GameCult.Caching.CultIndexAttribute");
+                var indexAttribute = GetMemberAttribute(member, "GameCult.Caching.CultIndexAttribute");
                 var indexAlias = indexAttribute == null
                     ? null
                     : indexAttribute.ConstructorArguments.Length == 0 || indexAttribute.ConstructorArguments[0].Value is not string alias || string.IsNullOrWhiteSpace(alias)
@@ -489,8 +584,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                     member.Name,
                     GetSchemaTypeName(memberType),
                     memberType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                    BuildAccessorStem(member),
-                    GetAttribute(member, "GameCult.Caching.CultNameAttribute") != null,
+                    GetMemberAttribute(member, "GameCult.Caching.CultNameAttribute") != null,
                     indexAlias,
                     targetType != null || referenceAttribute != null,
                     many,
@@ -512,13 +606,6 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                     ? namedType.TypeArguments[0] as INamedTypeSymbol
                     : null;
             }
-
-            private static string BuildAccessorStem(ISymbol member)
-            {
-                return member.ContainingType == null
-                    ? member.Name
-                    : member.ContainingType.Name + "_" + member.Name;
-            }
         }
 
         private sealed class DocumentShape
@@ -534,10 +621,10 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
                 ImmutableArray<MemberShape> members,
                 bool canConstructForDeserialization,
                 bool hasDenseSlots,
-                ImmutableArray<string> unkeyedMemberMessages,
+                ImmutableArray<string> rejections,
                 Location? location)
             {
-                UnkeyedMemberMessages = unkeyedMemberMessages;
+                Rejections = rejections;
                 Location = location;
                 DocumentTypeName = documentTypeName;
                 SchemaName = schemaName;
@@ -566,7 +653,7 @@ public sealed class CultDocumentMessagePackGenerator : IIncrementalGenerator
             public ImmutableArray<MemberShape> Members { get; }
             public bool CanConstructForDeserialization { get; }
             public bool HasDenseSlots { get; }
-            public ImmutableArray<string> UnkeyedMemberMessages { get; }
+            public ImmutableArray<string> Rejections { get; }
             public Location? Location { get; }
         }
 

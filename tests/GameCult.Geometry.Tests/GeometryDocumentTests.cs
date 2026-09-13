@@ -121,8 +121,8 @@ namespace GameCult.Geometry.Tests
         {
             var chunk = SampleChunk();
 
-            var payload = CultDocumentMessagePackSerialization.Serialize(chunk);
-            var decoded = CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload);
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(chunk, typeof(CultGeometryChunkArtifact));
+            var decoded = (CultGeometryChunkArtifact)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(CultGeometryChunkArtifact), payload);
 
             decoded.ChunkId.Should().Be(chunk.ChunkId);
             decoded.RenderMesh.TriangleCount.Should().Be(1);
@@ -150,7 +150,7 @@ namespace GameCult.Geometry.Tests
         public void RustExportedDomainDocument_DecodesWithStableCultCacheKey()
         {
             var payload = File.ReadAllBytes(FixturePath("ragnarok-domain.msgpack"));
-            var domain = CultDocumentMessagePackSerialization.Deserialize<CultGeometryDomainDocument>(payload);
+            var domain = (CultGeometryDomainDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(CultGeometryDomainDocument), payload);
 
             domain.DomainId.Should().Be("ragnarok-column");
             domain.Root.Children.Should().NotBeEmpty();
@@ -163,7 +163,7 @@ namespace GameCult.Geometry.Tests
         public void RustExportedChunkArtifact_DecodesWithStableCultCacheKey()
         {
             var payload = File.ReadAllBytes(FixturePath("ragnarok-first-chunk.msgpack"));
-            var chunk = CultDocumentMessagePackSerialization.Deserialize<CultGeometryChunkArtifact>(payload);
+            var chunk = (CultGeometryChunkArtifact)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(CultGeometryChunkArtifact), payload);
 
             chunk.ChunkId.Should().StartWith("chunk/");
             chunk.RenderMesh.TriangleCount.Should().BeGreaterThan(0);

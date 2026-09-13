@@ -2609,12 +2609,12 @@ public sealed class CultMeshStreamingTests
         var filePath = Path.Combine(directory.Path, "legacy-single-document.ccmp");
         var key = new CultRecordKey("mesh-note:legacy-single-document");
         var descriptor = CultDocumentRegistry.Shared.GetRequired<MeshPublicationNoteDocument>();
-        var payload = CultDocumentMessagePackSerialization.Serialize(new MeshPublicationNoteDocument
+        var payload = CultDocumentMessagePackSerialization.SerializeUntyped(new MeshPublicationNoteDocument
         {
             Schema = "tests.mesh_publication_note.v1",
             Text = "legacy-published",
             Revision = 4
-        });
+        }, typeof(MeshPublicationNoteDocument));
 
         File.WriteAllBytes(filePath, WriteLegacySingleDocumentSnapshot(
             key.Value,
