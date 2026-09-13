@@ -15,8 +15,8 @@ using MessagePack;
 [MessagePackObject]
 public sealed class CounterState
 {
-    [Key("counterId")] public string CounterId { get; set; } = "";
-    [Key("count")] public int Count { get; set; }
+    [Key(0)] public string CounterId { get; set; } = "";
+    [Key(1)] public int Count { get; set; }
 }
 ```
 
