@@ -229,7 +229,7 @@ pub fn enroll_service_identity_at<P: ServiceIdentityProfile>(
             path.display()
         );
     }
-    prepare_parent(path)?;
+    prepare_private_parent(path)?;
     let mut seed = Zeroizing::new([0u8; 32]);
     rand::rng().fill_bytes(seed.as_mut());
     let signing_key = SigningKey::from_bytes(&*seed);
@@ -338,7 +338,7 @@ pub fn export_service_identity_trust_anchor<P: ServiceIdentityProfile>(
     path: &Path,
 ) -> Result<ServiceIdentityTrustAnchor> {
     let anchor = signer.trust_anchor()?;
-    prepare_parent(path)?;
+    ensure_parent(path)?;
     let envelope = CultCacheEnvelope {
         key: P::TRUST_ANCHOR_KEY.into(),
         r#type: P::TRUST_ANCHOR_TYPE.into(),
@@ -470,14 +470,27 @@ fn private_envelope<P: ServiceIdentityProfile>(
     })
 }
 
-fn prepare_parent(path: &Path) -> Result<()> {
+fn ensure_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("service identity path has no parent"))?;
     std::fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+/// Like [`ensure_parent`], but also locks the directory down to owner-only
+/// access. Reserved for paths that hold private key material: a public trust
+/// anchor is routinely exported into a directory another service already
+/// owns and reads from, and forcing that directory to `0700` would lock the
+/// legitimate reader out rather than protect anything.
+fn prepare_private_parent(path: &Path) -> Result<()> {
+    ensure_parent(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("service identity path has no parent"))?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
@@ -827,6 +840,32 @@ mod tests {
         let good = temp.path().join("good.ccmp");
         enroll_service_identity_at::<IdunnServiceIdentity>(&good)?;
         assert!(open_service_identity_at::<Alien>(&good).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn exporting_a_public_trust_anchor_does_not_narrow_its_parent_permissions() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let signer =
+            enroll_service_identity_at::<IdunnServiceIdentity>(&temp.path().join("private.ccmp"))?;
+        let public_parent = temp.path().join("public");
+        std::fs::create_dir(&public_parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&public_parent, std::fs::Permissions::from_mode(0o750))?;
+        }
+        let output = public_parent.join("public.ccmp");
+        export_service_identity_trust_anchor(&signer, &output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&public_parent)?.permissions().mode() & 0o777,
+                0o750,
+                "exporting a public trust anchor must not reassign its parent directory's permissions"
+            );
+        }
         Ok(())
     }
 
