@@ -1677,7 +1677,7 @@ class CultNetTests(unittest.TestCase):
         self.assertIn("operations", mutation_contract["properties"])
         self.assertEqual(
             hello_schema["properties"]["transportProfiles"]["items"]["$ref"],
-            "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+            "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.transport-profile.schema.json",
         )
 
         consensus_schema = json.loads(by_version["cultnet.simulation_consensus_candidate.v0"]["schemaJson"])
@@ -1686,7 +1686,7 @@ class CultNetTests(unittest.TestCase):
 
     def test_cultnet_schema_catalog_applies_filters_and_responses(self) -> None:
         catalog = wire_message_schema_catalog(include_schema_json=True)
-        descriptor = catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json")
+        descriptor = catalog.get("https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.document-put-raw.schema.json")
         self.assertIsNotNone(descriptor)
         assert descriptor is not None
         self.assertEqual(descriptor.kind, "wire_message")
@@ -1902,7 +1902,7 @@ class CultNetTests(unittest.TestCase):
             runtime_kind="python",
             display_name="Python Interop Test",
             agent_id="python-interop-test-agent",
-            schema_path=str(Path("packages/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json")),
+            schema_path=str(Path("contracts/cultnet/interop/cultnet.interop-note.schema.json")),
         )
         binding = state.bindings["note"]
         logged_value = {

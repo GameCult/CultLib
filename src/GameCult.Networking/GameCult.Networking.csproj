@@ -18,6 +18,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Contracts\*.schema.json" />
+    <EmbeddedResource Include="..\..\contracts\cultnet\*.schema.json" LogicalName="GameCult.Networking.Contracts.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

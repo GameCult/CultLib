@@ -194,28 +194,28 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
 
     for registration in [
         schema_registration(
-            include_str!("../contracts/cultnet.hello.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.hello.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.hello.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.document-mutation-contract.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.document-mutation-contract.schema.json"),
             CultNetSchemaKind::SharedContract,
             vec![CultNetWireContract::CultNetSchemaV0],
             None,
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.transport-profile.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.transport-profile.schema.json"),
             CultNetSchemaKind::SharedContract,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.transport_profile.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.login.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.login.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -225,7 +225,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.register.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.register.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -235,7 +235,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.verify.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.verify.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -245,7 +245,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.login-success.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.login-success.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -255,7 +255,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.error.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.error.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -265,7 +265,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.sample-change-name.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.sample-change-name.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -275,7 +275,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.sample-chat.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.sample-chat.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -285,56 +285,56 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.document-put.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.document-put.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.document_put.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.document-delete.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.document-delete.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.document_delete.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.raw-document-record.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.raw-document-record.schema.json"),
             CultNetSchemaKind::SharedContract,
             vec![CultNetWireContract::CultNetSchemaV0],
             None,
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.document-put-raw.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.document-put-raw.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.document_put_raw.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.snapshot-request.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.snapshot-request.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.snapshot_request.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.snapshot-response.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.snapshot-response.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.snapshot_response.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.snapshot-response-raw.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.snapshot-response-raw.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.snapshot_response_raw.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.schema-catalog-request.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.schema-catalog-request.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -344,7 +344,7 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.schema-catalog-response.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.schema-catalog-response.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![
                 CultNetWireContract::CultNetSchemaV0,
@@ -354,21 +354,21 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.shard-catalog-request.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.shard-catalog-request.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.shard_catalog_request.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/cultnet.shard-catalog-response.schema.json"),
+            include_str!("../../../contracts/cultnet/cultnet.shard-catalog-response.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.shard_catalog_response.v0"),
             None,
         )?,
         schema_registration(
-            include_str!("../contracts/ghostlight.agent-state.schema.json"),
+            include_str!("../../../contracts/cultnet/ghostlight.agent-state.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("ghostlight.agent_state.v0"),

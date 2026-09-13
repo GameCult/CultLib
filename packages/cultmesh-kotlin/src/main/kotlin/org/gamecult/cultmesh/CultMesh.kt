@@ -1359,7 +1359,7 @@ fun defineCultNetSchemaDescriptor(
     schemaJson = schemaJson,
 )
 
-private const val cultNetSchemaBase = "https://github.com/GameCult/cultnet-ts/contracts"
+private const val cultNetSchemaBase = "https://github.com/GameCult/CultLib/contracts/cultnet"
 
 private data class CultNetBuiltInSchemaSpec(
     val schemaVersion: String,
@@ -1377,58 +1377,58 @@ private val cultNetBuiltInSchemaSpecs = listOf(
         title = "CultNet Hello Message",
         schemaId = "$cultNetSchemaBase/cultnet.hello.schema.json",
         requiredFields = listOf("schemaVersion", "runtimeId", "runtimeKind"),
-        contentHash = "1d2114bf0c92a2dd5e07dd735778ceeb939402c6424550d6d281d9db423f56b3",
+        contentHash = "f660ef803f293e2882650b3981c6eed835bd8e595c9b880d6c6271e0dcbd79e4",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.document_delete.v0",
         title = "CultNet Document Delete Message",
         schemaId = "$cultNetSchemaBase/cultnet.document-delete.schema.json",
         requiredFields = listOf("schemaVersion", "messageId", "schemaId", "recordKey"),
-        contentHash = "037f7cf1b30756904e0bfada6bcff486269378997afbe3c4b6fc5c573fc8a4df",
+        contentHash = "ed7dc202e4f1ebe0d88c5d60c81c53005b44a2557698d3d3c5d2126c01b40f08",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.document_put_raw.v0",
         title = "CultNet Raw Document Put Message",
         schemaId = "$cultNetSchemaBase/cultnet.document-put-raw.schema.json",
-        contentHash = "b61e7e6cce8508653fbeccc4d956ef211c853a174d67c7e1903ce294e15985a2",
+        contentHash = "34b61b14b49cfc887728673f08aa0f33df7ccd401e79c77d3bc324c72e547177",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.snapshot_request.v0",
         title = "CultNet Snapshot Request Message",
         schemaId = "$cultNetSchemaBase/cultnet.snapshot-request.schema.json",
-        contentHash = "9f6546f51a1aab85978554e6908d7a59e96b3329feff7b35022be210495dd721",
+        contentHash = "05267d9b5eb450d4aa8979179f74ba3aec2f3a82fead7ba4a16ab5462c7750fa",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.snapshot_response_raw.v0",
         title = "CultNet Raw Snapshot Response Message",
         schemaId = "$cultNetSchemaBase/cultnet.snapshot-response-raw.schema.json",
-        contentHash = "0dbca3338a3ae5d4011aed2c973c75b9b47b6b9dfc0874459ac56da01fef4582",
+        contentHash = "fdefbdf5d6b0844dd0eabe2c7430d054295d78e41289f96b227dc39f4aab78b9",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.schema_catalog_request.v0",
         title = "CultNet Schema Catalog Request Message",
         schemaId = "$cultNetSchemaBase/cultnet.schema-catalog-request.schema.json",
         wireContracts = listOf("cultnet.schema.v0", "gamecult.networking.v0"),
-        contentHash = "bdd49b44428daf24b514c521e53027ec944aecfebb39ca0d10967661c303e096",
+        contentHash = "ed6d63e29de2d492bb831f030b26ff49ba6883cd2be791ec4936c385f765c76a",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.schema_catalog_response.v0",
         title = "CultNet Schema Catalog Response Message",
         schemaId = "$cultNetSchemaBase/cultnet.schema-catalog-response.schema.json",
         wireContracts = listOf("cultnet.schema.v0", "gamecult.networking.v0"),
-        contentHash = "b158de53d1ca614eacf2e05767122fb4b9e06504c037ad76c649cffdf71dd648",
+        contentHash = "10b4835d33181fe4b93a33e39b63886c5514899e93682de786e298f7e4a213e9",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.shard_catalog_request.v0",
         title = "CultNet Shard Catalog Request Message",
-        schemaId = "cultnet.shard_catalog_request.v0",
-        contentHash = "0abd131a1db12f6731010333b86e104d550160bd58f539b18413a2b61198fa38",
+        schemaId = "$cultNetSchemaBase/cultnet.shard-catalog-request.schema.json",
+        contentHash = "b4edecd8a24f68ebccf0aca9b429d234618ff7e8858a10123d0b328aeae7eb3f",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.shard_catalog_response.v0",
         title = "CultNet Shard Catalog Response Message",
-        schemaId = "cultnet.shard_catalog_response.v0",
-        contentHash = "93a0e90ac81bc6ab21b68925ad25e381edfac8773232333679d3275141cff37b",
+        schemaId = "$cultNetSchemaBase/cultnet.shard-catalog-response.schema.json",
+        contentHash = "d86a94c57d7820483912b8b5cef6214ac951d34cb2641d2d21dcb1f1bc0263c0",
     ),
     CultNetBuiltInSchemaSpec(
         schemaVersion = "cultnet.shard_log_request.v0",
@@ -1468,7 +1468,7 @@ private val cultNetBuiltInSchemaSpecs = listOf(
         schemaId = "$cultNetSchemaBase/cultnet.transport-profile.schema.json",
         kind = "shared_contract",
         requiredFields = listOf("schemaVersion", "runtimeId", "transports"),
-        contentHash = "84473264f543ca3443267999e43d72b7993b61b7b2ac53c642c9cbe8b6de0217",
+        contentHash = "63dfd484e1fd332c167caadf52cb5b4fe12d5ffea4415206c3ef111c196507aa",
     ),
 )
 
@@ -3717,16 +3717,16 @@ private fun cultNetReconnectControllerSchedulesAttemptsAndReset() {
 private const val interopDocumentType = "cultnet.interop-note"
 private const val interopSchemaVersion = "cultnet.interop_note.v0"
 private const val interopMutationIntentType = "cultnet.interop-note-mutation-intent"
-private const val interopMutationIntentSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-intent.schema.json"
+private const val interopMutationIntentSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.interop-note-mutation-intent.schema.json"
 private const val interopMutationIntentSchemaVersion = "cultnet.interop_note_mutation_intent.v0"
 private const val interopMutationReceiptType = "cultnet.interop-note-mutation-receipt"
-private const val interopMutationReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-receipt.schema.json"
+private const val interopMutationReceiptSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.interop-note-mutation-receipt.schema.json"
 private const val interopMutationReceiptSchemaVersion = "cultnet.interop_note_mutation_receipt.v0"
 private const val interopFireCommandType = "cultnet.interop-fire-weapon-command"
-private const val interopFireCommandSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-command.schema.json"
+private const val interopFireCommandSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.interop-fire-weapon-command.schema.json"
 private const val interopFireCommandSchemaVersion = "cultnet.interop_fire_weapon_command.v0"
 private const val interopFireReceiptType = "cultnet.interop-fire-weapon-receipt"
-private const val interopFireReceiptSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-receipt.schema.json"
+private const val interopFireReceiptSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.interop-fire-weapon-receipt.schema.json"
 private const val interopFireReceiptSchemaVersion = "cultnet.interop_fire_weapon_receipt.v0"
 private const val rudpInteropConnectionId = 0x43554c54L
 private const val rudpInteropMaxFragmentBytes = 1024
@@ -4627,11 +4627,11 @@ private fun cultNetBuiltInSchemaCatalogAdvertisesWireContracts() {
     check(schemaCatalogRequest["wireContracts"] == listOf("cultnet.schema.v0", "gamecult.networking.v0"))
     check(!schemaCatalogRequest.containsKey("schemaJson"))
     val shardCatalogRequest = schemas.single { it["schemaVersion"] == "cultnet.shard_catalog_request.v0" }
-    check(shardCatalogRequest["schemaId"] == "cultnet.shard_catalog_request.v0")
+    check(shardCatalogRequest["schemaId"] == "$cultNetSchemaBase/cultnet.shard-catalog-request.schema.json")
     check(shardCatalogRequest["wireContracts"] == listOf("cultnet.schema.v0"))
-    check(shardCatalogRequest["contentHash"] == "0abd131a1db12f6731010333b86e104d550160bd58f539b18413a2b61198fa38")
+    check(shardCatalogRequest["contentHash"] == "b4edecd8a24f68ebccf0aca9b429d234618ff7e8858a10123d0b328aeae7eb3f")
     val shardCatalogResponse = schemas.single { it["schemaVersion"] == "cultnet.shard_catalog_response.v0" }
-    check(shardCatalogResponse["schemaId"] == "cultnet.shard_catalog_response.v0")
+    check(shardCatalogResponse["schemaId"] == "$cultNetSchemaBase/cultnet.shard-catalog-response.schema.json")
     check(shardCatalogResponse["wireContracts"] == listOf("cultnet.schema.v0"))
 
     val inlineCatalog = cultNetBuiltInSchemaCatalog(includeSchemaJson = true)
@@ -4644,7 +4644,7 @@ private fun cultNetBuiltInSchemaCatalogAdvertisesWireContracts() {
     )
     val transportProfile = mapList(transportResponse.body["schemas"]).single()
     check(transportProfile["kind"] == "shared_contract")
-    check(transportProfile["contentHash"] == "84473264f543ca3443267999e43d72b7993b61b7b2ac53c642c9cbe8b6de0217")
+    check(transportProfile["contentHash"] == "63dfd484e1fd332c167caadf52cb5b4fe12d5ffea4415206c3ef111c196507aa")
     check(!transportProfile.containsKey("schemaJson"))
 
     val filteredTransportCatalog = CultMesh.createBuiltInSchemaCatalog(

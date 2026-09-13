@@ -7,7 +7,7 @@ import { compile } from "json-schema-to-typescript";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
-const manifestPath = path.join(repoRoot, "contracts", "swarm-contracts.manifest.json");
+const manifestPath = path.join(repoRoot, "tools", "swarm-contracts.manifest.json");
 const outputPath = path.join(repoRoot, "src", "generated", "swarm-contracts.generated.ts");
 
 /**

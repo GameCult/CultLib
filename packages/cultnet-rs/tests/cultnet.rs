@@ -1759,7 +1759,7 @@ fn cultmesh_facade_exposes_schema_registry_and_shard_catalog_owners() -> Result<
     });
     assert!(shared_contracts.iter().any(|schema| {
         schema.schema_id
-            == "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json"
+            == "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.transport-profile.schema.json"
             && schema.schema_version.as_deref() == Some("cultnet.transport_profile.v0")
     }));
 
@@ -2285,7 +2285,7 @@ fn builtin_schema_registry_advertises_canonical_ghostlight_schema_without_inline
     assert_eq!(transport_profile.kind, CultNetSchemaKind::SharedContract);
     assert_eq!(
         transport_profile.schema_id,
-        "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json"
+        "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.transport-profile.schema.json"
     );
     assert_eq!(
         transport_profile.wire_contracts,

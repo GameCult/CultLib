@@ -2509,7 +2509,7 @@ test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
   );
   assert.equal(
     builtIns.get(
-      "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+      "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.transport-profile.schema.json",
     )?.schemaVersion,
     "cultnet.transport_profile.v0",
   );

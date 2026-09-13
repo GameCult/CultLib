@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 INTEROP_WIRE_CONTRACT = "cultnet.schema.v0"
-CULTNET_SCHEMA_BASE = "https://github.com/GameCult/cultnet-ts/contracts"
+CULTNET_SCHEMA_BASE = "https://github.com/GameCult/CultLib/contracts/cultnet"
 VERSE_CATALOG_REQUEST = "cultmesh.verse_catalog_request.v0"
 PEER_EXCHANGE_REQUEST = "cultmesh.peer_exchange_request.v0"
 TRANSPORT_PROFILE_SCHEMA_VERSION = "cultnet.transport_profile.v0"

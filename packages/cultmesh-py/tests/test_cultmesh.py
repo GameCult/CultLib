@@ -1759,11 +1759,11 @@ class CultMeshTests(unittest.TestCase):
             )
             self.assertEqual(
                 builtins.list()[0].schema_id,
-                "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+                "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.transport-profile.schema.json",
             )
             self.assertIsNone(builtins.list()[0].schema_json)
             peer_exchange_schema_id = (
-                "https://github.com/GameCult/cultnet-ts/contracts/cultmesh.peer-exchange-request.schema.json"
+                "https://github.com/GameCult/CultLib/contracts/cultnet/cultmesh.peer-exchange-request.schema.json"
             )
             filtered_builtin = CultMesh.create_builtin_schema_catalog(
                 include_schema_json=True,
@@ -4033,7 +4033,7 @@ class CultMeshTests(unittest.TestCase):
         self.assertIn("cultmesh.peer_exchange_response.v0", wire_descriptors)
         self.assertIn("cultnet.error.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
         self.assertIn("cultnet.document_put_raw.v0", {descriptor.schema_version for descriptor in synced_wire_descriptors})
-        self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json"))
+        self.assertIsNotNone(synced_schema_catalog.get("https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.document-put-raw.schema.json"))
         self.assertEqual(snapshot_response["documents"][0]["recordKey"], "note:1")
         self.assertEqual(typed_snapshot_response.documents[0].record_key, "note:1")
         self.assertEqual(typed_snapshot_response.documents[0].schema_id, "mesh.server_note.v1")

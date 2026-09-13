@@ -39,9 +39,9 @@ const cultnetRsRoot = existsSync(resolve(cultLibRoot, "packages", "cultnet-rs"))
   : resolve(cultNetTsRoot, "..", "cultnet-rs");
 
 const tsPeerScript = resolve(cultNetTsRoot, "dist-test", "test", "interop", "cultnet-interop-peer.js");
-const interopSchemaPath = resolve(cultNetTsRoot, "integration", "contracts", "cultnet.interop-note.schema.json");
-const interopNoteSchemaId = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note.schema.json";
-const witnessArtifactBundleSchemaId = "https://github.com/GameCult/cultnet-ts/contracts/cultnet.witness-artifact-bundle.schema.json";
+const interopSchemaPath = resolve(cultNetTsRoot, "..", "..", "contracts", "cultnet", "interop", "cultnet.interop-note.schema.json");
+const interopNoteSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/interop/cultnet.interop-note.schema.json";
+const witnessArtifactBundleSchemaId = "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.witness-artifact-bundle.schema.json";
 const simulationFactSchemaId = "gamecult.mesh.simulation_fact";
 const csharpProjectPath = resolve(
   cultLibRoot,
