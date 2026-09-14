@@ -208,17 +208,22 @@ namespace GameCult.Unity.Caching.Editor
                 _inspectorScroll = EditorGUILayout.BeginScrollView(_inspectorScroll);
 
                 // Drawers edit the edit's private copy. A commit spends the edit, admitted or refused, and the next frame
-                // begins a new one from whatever record the cache then holds. A frame in which a drawer threw is discarded
-                // the same way, uncommitted: its copy may hold a half-made mutation.
-                if (_edit == null || !_edit.IsFor(record)) _edit = _model.BeginEdit(record);
+                // begins a new one from whatever record the cache then holds. The copy is held here and kept only by a frame
+                // that drew to the end with no drawer failing: a claimed drawer that threw, a built-in drawing exception, or
+                // an ExitGUIException all leave _edit null, so a half-made in-place mutation is never committed later.
+                var edit = _edit != null && _edit.IsFor(record) ? _edit : _model.BeginEdit(record);
+                _edit = null;
                 var readOnly = ReadOnly;
                 using (new EditorGUI.DisabledScope(readOnly))
                 {
                     EditorGUI.BeginChangeCheck();
-                    var drawn = _inspector.DrawDocument(_edit);
+                    var drawn = _inspector.DrawDocument(edit);
                     var changed = EditorGUI.EndChangeCheck();
-                    if (!drawn) _edit = null;
-                    else if (changed && !readOnly && !_edit.Commit(_cache, out var error)) SetStatus(error, MessageType.Error);
+                    if (drawn)
+                    {
+                        _edit = edit;
+                        if (changed && !readOnly && !edit.Commit(_cache, out var error)) SetStatus(error, MessageType.Error);
+                    }
                 }
 
                 EditorGUILayout.EndScrollView();
