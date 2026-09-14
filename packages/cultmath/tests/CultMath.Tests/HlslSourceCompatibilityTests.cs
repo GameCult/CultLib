@@ -31,24 +31,68 @@ public sealed class HlslSourceCompatibilityTests
     private static MethodInfo? ShaderFunction(Type shader, string name, params Type[] parameters) =>
         shader.GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic, null, parameters, null);
 
-    [Theory]
-    [InlineData(0.0f, 0.0f, 0.0f)]
-    [InlineData(0.25f, -0.5f, 1.75f)]
-    [InlineData(12.25f, -4.5f, 3.125f)]
-    [InlineData(-7.3f, 2.9f, 101.4f)]
-    public void CompiledShaderNoiseMatchesCSharpMirror(float x, float y, float z)
+    // Mirror internals with no public C# math counterpart. Any other cultmath_* function must match one.
+    private static readonly string[] MirrorOnly = { "cultmath_snoise_mod289", "cultmath_snoise_permute" };
+
+    private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN };
+
+    /// <summary>
+    /// Every mirror function with a C# math counterpart returns the same bits (NaN equal to NaN, -0 equal
+    /// to 0) over random inputs, every special value in every argument (ties, zeros, negatives, NaN,
+    /// large values, integer lattice points), special pairs, and vectors whose first two components tie
+    /// (x0.x == x0.y in snoise). Equality is exact: both sides are float32 C# over the same intrinsics.
+    /// </summary>
+    [Fact]
+    public void EveryMirrorFunctionMatchesCSharpMath()
     {
         var (assembly, errors) = CompileShaderMirror();
         Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
         var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
         var shader = Activator.CreateInstance(shaderType);
 
-        var snoise3 = (float)ShaderFunction(shaderType, "cultmath_snoise", typeof(float3))!.Invoke(shader, new object[] { float3(x, y, z) })!;
-        var snoise2 = (float)ShaderFunction(shaderType, "cultmath_snoise", typeof(float2))!.Invoke(shader, new object[] { float2(x, y) })!;
+        var random = new System.Random(0x5EED);
+        float Next() => random.NextSingle() * 200.0f - 100.0f;
+        var cases = new List<Func<int, float>>();
+        foreach (var s in Specials) cases.Add(_ => s);
+        for (var k = 0; k < Specials.Length; k++) { var o = k; cases.Add(i => Specials[(i + o + 1) % Specials.Length]); }
+        for (var k = 0; k < 64; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i]); }
+        for (var k = 0; k < 16; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i & ~1]); }
 
-        Assert.Equal(snoise(float3(x, y, z)), snoise3, precision: 6);
-        Assert.Equal(snoise(float2(x, y)), snoise2, precision: 6);
+        var mismatches = new List<string>();
+        var compared = new HashSet<string>();
+        foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_")))
+        {
+            var types = mirror.GetParameters().Select(p => p.ParameterType).ToArray();
+            var counterpart = typeof(math).GetMethod(mirror.Name["cultmath_".Length..], BindingFlags.Public | BindingFlags.Static, null, types, null);
+            if (counterpart is null)
+            {
+                Assert.Contains(mirror.Name, MirrorOnly);
+                continue;
+            }
+
+            compared.Add(mirror.Name);
+            foreach (var input in cases)
+            {
+                var slot = 0;
+                var args = types.Select(t => t == typeof(float) ? (object)input(slot++)
+                    : Activator.CreateInstance(t, Enumerable.Range(0, Components(t)).Select(_ => (object)input(slot++)).ToArray())!).ToArray();
+                var expected = Floats(counterpart.Invoke(null, args)!);
+                var actual = Floats(mirror.Invoke(shader, args)!);
+                if (!expected.SequenceEqual(actual))
+                {
+                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Floats(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
+                }
+            }
+        }
+
+        Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
+        Assert.Equal(26, compared.Count);
     }
+
+    private static int Components(Type t) => t.GetFields().Count(f => f.FieldType == typeof(float) && !f.IsStatic);
+
+    private static float[] Floats(object value) => value is float f ? new[] { f }
+        : value.GetType().GetFields().Where(field => field.FieldType == typeof(float) && !field.IsStatic).Select(field => (float)field.GetValue(value)!).ToArray();
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
