@@ -29,7 +29,7 @@ if (Test-Path -LiteralPath $outputRoot) {
 
 # The tracked DLL and pdb are committed beside their source, so neither may name a commit: Source Link
 # writes the commit SHA into the pdb, and the DLL carries that pdb's content id.
-dotnet build $projectPath -c $Configuration -f netstandard2.1 -o $buildRoot `
+dotnet build $projectPath -c $Configuration -f netstandard2.1 -o $buildRoot --no-incremental `
   --disable-build-servers -p:UseSharedCompilation=false -p:ContinuousIntegrationBuild=true -p:EnableSourceLink=false -m:1
 if ($LASTEXITCODE -ne 0) {
   throw "CultMath Unity assembly build failed with exit code $LASTEXITCODE"
