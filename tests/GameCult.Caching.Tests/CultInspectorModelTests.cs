@@ -231,11 +231,14 @@ namespace GameCult.Caching.Tests
             Assert.That(open.Kind, Is.EqualTo(CultInspectorValueKind.Nested));
             Assert.That(open.Members.Select(member => member.Name), Is.EqualTo(new[] { "x", "y" }));
             Assert.That(open.Members.All(member => member.IsAssignable), Is.True);
-            foreach (var (locked, member) in new[] { (typeof(InspectReadonlyField), "y"), (typeof(InspectGetOnly), "Id") })
-            {
-                Assert.That(model.ShapeOf(locked).Kind, Is.EqualTo(CultInspectorValueKind.Unsupported), locked.Name);
-                Assert.That(model.ShapeOf(locked).Reason, Does.Contain(locked.Name + "." + member).And.Contain("readonly or get-only"));
-            }
+            (string, bool)[] Rows(Type type) => model.ShapeOf(type).Members.Select(member => (member.Name, member.IsReadOnly)).ToArray();
+            Assert.That(Rows(typeof(InspectMixedStruct)), Is.EqualTo(new[] { ("x", false), ("y", true), ("Settable", false), ("Initable", true) }),
+                "fields, then settable properties; readonly and init are read-only; get-only is not a row");
+            Assert.That(Rows(typeof(InspectRecordStruct)), Is.EqualTo(new[] { ("A", false), ("B", false) }));
+            Assert.That(Rows(typeof(InspectReadonlyRecordStruct)), Is.EqualTo(new[] { ("A", true), ("B", true) }));
+            object boxed = new InspectRecordStruct(1, 2f);
+            model.ShapeOf(typeof(InspectRecordStruct)).Members[0].SetValue(boxed, 5);
+            Assert.That(((InspectRecordStruct)boxed).A, Is.EqualTo(5), "a property edit lands in the boxed struct in place");
 
             Assert.That(model.ShapeOf(typeof(IDictionary<string, int>)).Kind, Is.EqualTo(CultInspectorValueKind.Dictionary));
             Assert.That(model.BuildDictionary(typeof(IDictionary<string, int>), new[] { new KeyValuePair<object?, object?>("a", 1) }),
@@ -342,17 +345,18 @@ namespace GameCult.Caching.Tests
             public float Length => x + y;
         }
 
-        public struct InspectReadonlyField
+        public struct InspectMixedStruct
         {
             public float x;
             public readonly float y;
+            public int Settable { get; set; }
+            public int Initable { get; init; }
+            public int Computed => Settable + 1;
         }
 
-        public struct InspectGetOnly
-        {
-            public float x;
-            public int Id { get; }
-        }
+        public record struct InspectRecordStruct(int A, float B);
+
+        public readonly record struct InspectReadonlyRecordStruct(int A, float B);
 
         [MessagePackObject]
         public readonly record struct InspectKey([property: Key(0)] int Value)

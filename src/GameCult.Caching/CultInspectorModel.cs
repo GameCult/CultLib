@@ -535,21 +535,20 @@ namespace GameCult.Caching
             var keyed = KeyedMembers(type);
             if (keyed.Length > 0)
                 return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = keyed };
-            // An unkeyed struct is edited in place through its public fields. State it cannot write in place (a readonly field,
-            // a get-only auto-property) makes it unsupported until a drawer claims it.
+            // An unkeyed struct is edited in place: its public fields, readonly ones read-only, then its public properties with
+            // a setter, init-only ones read-only. Get-only properties are computed (a vector's swizzles) or kept by the
+            // in-place edit, so they are not rows.
             if (type.IsValueType)
             {
-                var locked = type.GetFields(Public).FirstOrDefault(field => field.IsInitOnly)?.Name
-                             ?? type.GetProperties(Public).FirstOrDefault(property => property.GetSetMethod() == null &&
-                                 type.GetField($"<{property.Name}>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance) != null)?.Name;
-                if (locked != null)
-                    return Unsupported(type, $"{type.Name}.{locked} is readonly or get-only, so {type.Name} cannot be edited in place; it needs a drawer.");
-                var fields = type.GetFields(Public)
-                    .OrderBy(field => field.MetadataToken)
-                    .Select((field, slot) => new CultInspectorMember(field, field.FieldType, slot, true, MetadataOf(field)))
+                var members = type.GetFields(Public).OrderBy(field => field.MetadataToken)
+                    .Select(field => (Member: (MemberInfo)field, Type: field.FieldType, Assignable: !field.IsInitOnly))
+                    .Concat(type.GetProperties(Public).OrderBy(property => property.MetadataToken)
+                        .Where(property => property.GetIndexParameters().Length == 0 && property.GetGetMethod() != null && property.GetSetMethod() != null)
+                        .Select(property => (Member: (MemberInfo)property, Type: property.PropertyType, Assignable: !IsInitOnly(property.GetSetMethod()!))))
+                    .Select((member, slot) => new CultInspectorMember(member.Member, member.Type, slot, member.Assignable, MetadataOf(member.Member)))
                     .ToArray();
-                if (fields.Length > 0)
-                    return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = fields };
+                if (members.Length > 0)
+                    return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = members };
             }
 
             return Unsupported(type, "no drawer for " + type.FullName);
@@ -591,6 +590,11 @@ namespace GameCult.Caching
             new CultInspectorShape(type, CultInspectorValueKind.Unsupported) { Reason = reason };
 
         private static int Ancestry(Type? type) => type == null ? 0 : 1 + Ancestry(type.BaseType);
+
+        // `init` is a setter whose return carries the IsExternalInit modreq; the language contract, matched by name because
+        // netstandard2.1 does not ship the type.
+        private static bool IsInitOnly(MethodInfo setter) =>
+            setter.ReturnParameter.GetRequiredCustomModifiers().Any(modifier => modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit");
 
         private static Type TypeOf(MemberInfo member) => member is FieldInfo field ? field.FieldType : ((PropertyInfo)member).PropertyType;
 

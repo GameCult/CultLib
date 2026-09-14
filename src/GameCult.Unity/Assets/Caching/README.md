@@ -45,7 +45,7 @@ catalog slots, `CultInspector*` metadata, whether a member is assignable), the
 shape of any value (string, integer, float, bool, enum, `CultRecordRef<T>` with
 its candidate records, rank-1 list or array, dictionary, `[Union]` with only
 its declared subtypes, nested keyed object, struct edited in place through its
-public fields, or unsupported with a reason), drawer claim resolution
+public fields and settable properties, or unsupported with a reason), drawer claim resolution
 (`CultInspectorDrawerClaims`), and the edit decisions: the key a dictionary
 entry keeps and the notice when a key is refused (null, an empty record
 reference, or a duplicate: serialized the same as another key or equal by the
@@ -59,8 +59,9 @@ renderer and drawers to show and edit the same documents under the same rules.
 ## Drawers
 
 Built in: every model shape above. A struct without `[Key]` members folds out
-to its public fields and is edited in place; a struct with a readonly field or
-a get-only auto-property is unsupported until a drawer claims it. Unity object
+to its public fields and its public properties with a setter, and is edited in
+place; readonly fields and `init` properties show read-only, and get-only
+properties are not shown (record structs work as written). Unity object
 references draw as object fields. A value no drawer claims and no shape covers
 shows a red error row with the model's reason, as does a multi-dimensional
 array.
