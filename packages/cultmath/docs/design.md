@@ -37,6 +37,11 @@ That makes these HLSL rules, not options:
   products go through `mul` (`mul(m, v)` treats `v` as a column, `mul(v, m)` as a
   row). `*` on matrices would be component-wise in HLSL, so CultMath does not
   define it.
+- `m[r][c] = v` writes through locals, array elements, fields of classes, and
+  ref locals. Through a readonly field, an `in` parameter, a property
+  (auto-properties included), or a static readonly value such as
+  `float3x3.identity`, C# takes a defensive copy: the write compiles and is
+  silently lost. Copy the matrix to a local, write to it, and assign it back.
 - Scalar/vector arithmetic and comparisons have explicit overloads on both
   sides rather than leaning on implicit scalar splat.
 - Intrinsics return HLSL's types and edge cases: `sign` returns `int`/`intN`

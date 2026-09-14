@@ -42,6 +42,7 @@ public struct float3x3 : IEquatable<float3x3>
     public float _m21 { readonly get => _row2.y; set => _row2.y = value; }
     public float _m22 { readonly get => _row2.z; set => _row2.z = value; }
 
+    /// <remarks>Writes through a readonly field, <c>in</c> parameter, property, or <c>identity</c> hit a defensive copy and are lost; write to a local and assign it back.</remarks>
     [UnscopedRef]
     public ref float3 this[int row]
     {
