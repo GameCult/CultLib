@@ -238,14 +238,24 @@ namespace GameCult.Caching
     // A private copy of one stored document. A lowering draws into Document; the cached object is never touched.
     public sealed class CultInspectorEdit
     {
-        internal CultInspectorEdit(CultStoredDocument source, object document)
+        private readonly Func<object> _snapshot;
+        private object? _record;
+
+        internal CultInspectorEdit(CultStoredDocument source, object document, Func<object> snapshot)
         {
             Source = source;
             Document = document;
+            _snapshot = snapshot;
         }
 
         public CultStoredDocument Source { get; }
         public object Document { get; }
+
+        // The record being drawn, as stored when this edit began, for drawers that read the document they sit in. It is a
+        // second copy, made on first read: not the cached object, and not Document, which a lowering commits. Nothing
+        // reads it back, so writing to it saves nothing and changes neither the edit nor the cache.
+        public object Record => _record ??= _snapshot();
+
         public bool IsSpent { get; private set; }
 
         public bool IsFor(CultStoredDocument record) => !IsSpent && ReferenceEquals(Source, record);
@@ -342,7 +352,8 @@ namespace GameCult.Caching
         public CultInspectorEdit BeginEdit(CultStoredDocument record)
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
-            return new CultInspectorEdit(record, Clone(record.Document, record.Descriptor.DocumentType));
+            var type = record.Descriptor.DocumentType;
+            return new CultInspectorEdit(record, Clone(record.Document, type), () => Clone(record.Document, type));
         }
 
         // Whether CreateDefault makes a value: a string, struct, list or dictionary, or a concrete class with a parameterless constructor.

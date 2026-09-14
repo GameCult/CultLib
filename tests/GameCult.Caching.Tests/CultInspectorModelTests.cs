@@ -216,6 +216,11 @@ namespace GameCult.Caching.Tests
                 var record = readOnly.AllStoredDocuments.Single();
                 var edit = model.BeginEdit(record);
                 Assert.That(edit.Document, Is.Not.SameAs(record.Document));
+                var drawn = (InspectItem)edit.Record;
+                Assert.That(drawn, Is.Not.SameAs(record.Document).And.Not.SameAs(edit.Document));
+                Assert.That(edit.Record, Is.SameAs(drawn), "one record copy per edit");
+                drawn.Name = "a drawer wrote here";
+                Assert.That(((InspectItem)edit.Document).Name, Is.EqualTo("original"), "the record copy is not the committed copy");
                 ((InspectItem)edit.Document).Name = "changed";
                 ((InspectItem)edit.Document).Numbers.Add(3);
 

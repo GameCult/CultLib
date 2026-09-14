@@ -16,7 +16,7 @@ namespace GameCult.Unity.Caching.Editor
     // frame's edit copy, so nothing it or any other drawer did that frame is saved. type is the value's declared type.
     // member is the member the value belongs to, also for list elements and dictionary keys and values, and null for a
     // bare value. inspector.DrawDefault hands the value back to built-in drawing; inspector.DrawValue draws a sub-value
-    // with claims.
+    // with claims. inspector.Record is the record being drawn, read-only: a copy nothing saves.
     public interface ICultInspectorDrawer
     {
         object Draw(CultInspector inspector, string label, Type type, object value, MemberInfo member);
@@ -33,7 +33,7 @@ namespace GameCult.Unity.Caching.Editor
         private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _notices = new Dictionary<string, string>(StringComparer.Ordinal);
         private string _path = string.Empty;
-        private Type _document;
+        private CultInspectorEdit _edit;
         private bool _drawerFailed;
 
         internal CultInspector(CultInspectorModel model)
@@ -44,6 +44,9 @@ namespace GameCult.Unity.Caching.Editor
         public CultInspectorModel Model { get; }
 
         public IReadOnlyList<CultStoredDocument> Records { get; internal set; } = Array.Empty<CultStoredDocument>();
+
+        // The document being drawn, as the model's CultInspectorEdit.Record: a copy for reading, never saved.
+        public object Record => _edit?.Record;
 
         private static GUIStyle ErrorStyle => _errorStyle ??= new GUIStyle(EditorStyles.label) { normal = { textColor = new Color(1f, .35f, .3f) } };
 
@@ -62,7 +65,7 @@ namespace GameCult.Unity.Caching.Editor
         internal bool DrawDocument(CultInspectorEdit edit)
         {
             _drawerFailed = false;
-            _document = edit.Document.GetType();
+            _edit = edit;
             DrawMembers(edit.Document, edit.Source.Descriptor.DocumentType, edit.Source.Key.Value);
             return !_drawerFailed;
         }
@@ -242,7 +245,7 @@ namespace GameCult.Unity.Caching.Editor
                         var item = DrawValue("Value", shape.ValueType, entries[i].Value, member, path + "{" + i + "}.value");
                         if (EditorGUI.EndChangeCheck())
                         {
-                            key = Model.ReplaceKey(_document, shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
+                            key = Model.ReplaceKey(_edit.Document.GetType(),shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
                             Notice(path, notice);
                             entries[i] = new KeyValuePair<object, object>(key, item);
                             changed = true;
@@ -261,7 +264,7 @@ namespace GameCult.Unity.Caching.Editor
 
             if (Add(shape.ValueType, path, out var created))
             {
-                var fresh = Model.FreshKey(_document, shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
+                var fresh = Model.FreshKey(_edit.Document.GetType(),shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
                 Notice(path, notice);
                 if (fresh != null)
                 {

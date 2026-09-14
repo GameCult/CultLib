@@ -114,6 +114,15 @@ for list elements and dictionary keys and values, so an attribute drawer
 checks the type it is handed. `inspector.DrawDefault` hands a value back to
 built-in drawing; `inspector.DrawValue` draws a sub-value with claims applied.
 
+`inspector.Record` is the whole document the value sits in, for drawers that
+read sibling members (a texture path, a hull's tints). It is read-only by
+contract: the model's `CultInspectorEdit.Record`, a second copy of the stored
+document as the edit began, made on first read. It is neither the cached
+object nor the edit copy the Studio saves, so writing to it saves nothing; an
+edit reaches the record only through the value `Draw` returns. Within one frame
+it does not show edits other drawers made earlier in that frame; after a save
+the next frame's edit starts from the saved record.
+
 ## Inspector Annotations
 
 The annotations live in `GameCult.Caching`, so headless shared models carry
