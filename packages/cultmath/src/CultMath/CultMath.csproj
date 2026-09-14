@@ -8,12 +8,14 @@
     <RootNamespace>CultMath</RootNamespace>
     <AssemblyName>CultMath</AssemblyName>
     <PackageId>GameCult.Math</PackageId>
-    <Version>0.1.2</Version>
+    <Version>0.2.0</Version>
     <Description>Clean-room C# math shaped for HLSL-style renderer code.</Description>
     <Authors>GameCult</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);CS8981</NoWarn>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The Unity DLL is committed beside its source, so its bytes must not name a commit. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

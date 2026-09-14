@@ -1,9 +1,9 @@
 # Third-Party Notices
 
-## 2D Simplex Noise
+## 2D and 3D Simplex Noise
 
-`math.simplex_noise` and `cultmath_simplex_noise` port the textureless 2D
-simplex-noise function by Ian McEwan and Ashima Arts, as distributed by Stefan
+`math.snoise` and `cultmath_snoise` port the textureless 2D and 3D
+simplex-noise functions by Ian McEwan and Ashima Arts, as distributed by Stefan
 Gustavson's `webgl-noise` project and Unity Mathematics.
 
 - Copyright 2011 Ashima Arts.

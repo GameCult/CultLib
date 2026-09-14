@@ -1,0 +1,16 @@
+{
+  "name": "CultMath.UnityBridge",
+  "rootNamespace": "CultMath.UnityBridge",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "CultMath.dll"
+  ],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

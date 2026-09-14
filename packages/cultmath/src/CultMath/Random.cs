@@ -58,5 +58,9 @@ public struct Random
         return new float2(math.cos(angle), math.sin(angle));
     }
 
-    public float3 NextFloat3(float3 min, float3 max) => min + new float3(NextFloat(), NextFloat(), NextFloat()) * (max - min);
+    public float3 NextFloat3() => new(NextFloat(), NextFloat(), NextFloat());
+
+    public float3 NextFloat3(float3 max) => NextFloat3() * max;
+
+    public float3 NextFloat3(float3 min, float3 max) => min + NextFloat3() * (max - min);
 }
