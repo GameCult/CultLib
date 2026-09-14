@@ -14,6 +14,9 @@ target_compile_definitions(gamecult_mesh_quic_native PRIVATE GAMECULT_MESH_QUIC_
 target_include_directories(gamecult_mesh_quic_native PRIVATE "${MSQUIC_ROOT}/include")
 target_link_directories(gamecult_mesh_quic_native PRIVATE "${MSQUIC_ROOT}/lib/x64")
 target_link_libraries(gamecult_mesh_quic_native PRIVATE msquic crypt32 bcrypt)
+# The DLL is committed beside its source, so a rebuild must reproduce it: /Brepro drops the link timestamps.
+target_compile_options(gamecult_mesh_quic_native PRIVATE /Brepro)
+target_link_options(gamecult_mesh_quic_native PRIVATE /Brepro)
 
 set_target_properties(gamecult_mesh_quic_native PROPERTIES
   OUTPUT_NAME "gamecult_mesh_quic_native"
