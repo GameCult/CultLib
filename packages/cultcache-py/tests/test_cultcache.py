@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -542,6 +543,90 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(self._store_state(path), store_before)
             self.assertEqual(cache.snapshot_envelopes(), cache_before)
             self.assertEqual(cache.get_required_global(settings), {"theme": "base"})
+
+    @staticmethod
+    def _pausing_store(path: Path, barrier: threading.Barrier, resume: threading.Event):
+        """A store whose first push writes, meets the other thread at the barrier, then waits until that
+        thread's call has returned (or a timeout: a locked cache makes the other thread wait on us)."""
+
+        class PausingStore(SingleFileMessagePackBackingStore):
+            pushes = 0
+            paused = False
+            other_reached_store_while_paused = False
+
+            def push(self, envelope):
+                self.other_reached_store_while_paused |= self.paused
+                self.pushes += 1
+                super().push(envelope)
+                if self.pushes == 1:
+                    self.paused = True
+                    barrier.wait(timeout=5)
+                    resume.wait(timeout=0.5)
+                    self.paused = False
+
+        return PausingStore(path)
+
+    @staticmethod
+    def _run_racing(first, second, resume: threading.Event) -> list[BaseException]:
+        errors: list[BaseException] = []
+
+        def run(action, signal):
+            try:
+                action()
+            except BaseException as error:  # noqa: BLE001 - reported to the test
+                errors.append(error)
+            finally:
+                if signal:
+                    resume.set()
+
+        threads = [threading.Thread(target=run, args=(first, False)), threading.Thread(target=run, args=(second, True))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        return errors
+
+    def test_concurrent_put_and_attach_cannot_land_record_in_non_home_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_database_entry_type("settings", [("theme", 0)])
+            generic_path, settings_path = Path(tmp) / "generic.cc", Path(tmp) / "settings.cc"
+            barrier, resume = threading.Barrier(2), threading.Event()
+            generic = self._pausing_store(generic_path, barrier, resume)
+            cache = CultCache.builder().register_document_type(settings).add_generic_store(generic).build()
+
+            def attach() -> None:
+                barrier.wait(timeout=5)
+                cache.add_backing_store(SingleFileMessagePackBackingStore(settings_path), ["settings"])
+
+            errors = self._run_racing(lambda: cache.put(settings, "app", {"theme": "t"}), attach, resume)
+
+            # Either the attach was refused (the record is held, so its home cannot move) or it won;
+            # in every case each held record must be in the store that is its home.
+            home = SingleFileMessagePackBackingStore(generic_path if errors else settings_path)
+            self.assertEqual([(e.key, e.type) for e in home.pull_all()], [("app", "settings")])
+            self.assertTrue(all(isinstance(error, CultCacheError) for error in errors), errors)
+
+    def test_concurrent_global_puts_cannot_both_reach_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            path = Path(tmp) / "generic.cc"
+            barrier, resume = threading.Barrier(2), threading.Event()
+            store = self._pausing_store(path, barrier, resume)
+            cache = CultCache.builder().register_document_type(settings).add_generic_store(store).build()
+
+            def second() -> None:
+                barrier.wait(timeout=5)
+                cache.put_global(settings, {"theme": "second"})
+
+            errors = self._run_racing(lambda: cache.put_global(settings, {"theme": "first"}), second, resume)
+
+            self.assertEqual(errors, [])
+            # While the first write was between its store push and its apply, the second never reached disk.
+            self.assertFalse(store.other_reached_store_while_paused)
+            on_disk = SingleFileMessagePackBackingStore(path).pull_all()
+            self.assertEqual(len(on_disk), 1)
+            self.assertEqual(on_disk[0].payload, cache.get_required_envelope(settings, CultCache.GLOBAL_KEY).payload)
+            self.assertEqual(cache.get_required_global(settings), {"theme": "second"})
 
     def test_put_envelope_refuses_a_global_under_another_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

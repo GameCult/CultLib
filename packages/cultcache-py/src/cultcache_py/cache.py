@@ -1,13 +1,28 @@
 ﻿from __future__ import annotations
 
+import functools
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, extract_value
 
 T = TypeVar("T")
+F = TypeVar("F", bound=Callable[..., Any])
 GLOBAL_KEY = "__global__"
+
+
+def _locked(method: F) -> F:
+    """Runs the method holding the cache's lock, so its validation, store I/O and apply cannot
+    interleave with another thread's attach, pull, registration, write or delete."""
+
+    @functools.wraps(method)
+    def wrapper(self: "CultCache", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 class CultCacheError(RuntimeError):
@@ -83,7 +98,13 @@ class CultCache:
 
     def __init__(self) -> None:
         self._state = _State()
+        # Reentrant: extractors, decoders and updaters may read or write this cache from inside a
+        # held call. Single-structure reads (get, get_all, get_envelope, key lookups) stay unlocked:
+        # each reads one dict under the GIL, and every write installs a record's value, envelope and
+        # lookups before releasing the lock, so they never observe a store/cache split.
+        self._lock = threading.RLock()
 
+    @_locked
     def register_document_type(self, document: DocumentDefinition[Any]) -> None:
         if document.type in self._state.documents:
             raise CultCacheError(f"Document type already registered: {document.type}")
@@ -100,16 +121,19 @@ class CultCache:
         self._state.documents[document.type] = document
         self._state.documents_by_schema_name[schema_name] = document
 
+    @_locked
     def register_registry(self, documents: list[DocumentDefinition[Any]] | tuple[DocumentDefinition[Any], ...]) -> None:
         for document in documents:
             self.register_document_type(document)
 
+    @_locked
     def register_name_lookup(self, document: DocumentDefinition[Any], extractor: str | Any) -> None:
         self._assert_registered(document)
         name_extractors = dict(self._state.name_extractors)
         name_extractors[document.type] = extractor
         self._install_lookups(name_extractors, self._state.index_extractors)
 
+    @_locked
     def register_index(self, document: DocumentDefinition[Any], index: str, extractor: str | Any) -> None:
         self._assert_registered(document)
         index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
@@ -130,6 +154,7 @@ class CultCache:
             self._state.lookup_keys,
         ) = (name_extractors, index_extractors, names, indexes, lookup_keys)
 
+    @_locked
     def add_backing_store(self, store: BackingStore, types: list[str] | tuple[str, ...] | set[str]) -> None:
         """Makes the store home to the given types, or the generic store when there are none.
 
@@ -149,6 +174,7 @@ class CultCache:
         self._refuse_home_moves(routes, self._state.generic_store)
         self._state.stores_by_type = routes
 
+    @_locked
     def add_generic_store(self, store: BackingStore) -> None:
         """Makes the store home to every type no other store claims. A cache has at most one."""
         if self._state.generic_store is not None:
@@ -178,6 +204,7 @@ class CultCache:
             return "the generic store"
         return "the store routed to " + ", ".join(sorted(type for type, routed in routes.items() if routed is store))
 
+    @_locked
     def pull_all_backing_stores(self) -> None:
         """Builds the complete next state (values, envelopes, name and index lookups) in local
         structures, running every check and every user extractor; the cache's state is replaced
@@ -267,6 +294,9 @@ class CultCache:
         self._assert_registered(document)
         return self._state.names.get((document.type, name))
 
+    # Name and index resolution read the lookup and then the values, two structures a pull swaps and a
+    # write updates in sequence, so they hold the lock to resolve a key and its value from one state.
+    @_locked
     def get_by_name(self, document: DocumentDefinition[T], name: str) -> T | None:
         key = self.get_key_by_name(document, name)
         return None if key is None else self.get(document, key)
@@ -275,10 +305,12 @@ class CultCache:
         self._assert_registered(document)
         return self._state.indexes.get((document.type, index, value))
 
+    @_locked
     def get_by_index(self, document: DocumentDefinition[T], index: str, value: str) -> T | None:
         key = self.get_key_by_index(document, index, value)
         return None if key is None else self.get(document, key)
 
+    @_locked
     def put(self, document: DocumentDefinition[T], key: str, value: T) -> None:
         self._assert_registered(document)
         if document.global_document and key != GLOBAL_KEY:
@@ -293,6 +325,7 @@ class CultCache:
         )
         self._write(document, [(envelope, value)], batch=False)
 
+    @_locked
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
         self._check_envelope(document, envelope)
@@ -300,6 +333,7 @@ class CultCache:
         self._write(document, [(envelope, value)], batch=False)
         return value
 
+    @_locked
     def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
         self._assert_registered(document)
         values: list[T] = []
@@ -351,20 +385,24 @@ class CultCache:
             for index, index_value in keys.indexes.items():
                 self._state.indexes[(type, index, index_value)] = envelope.key
 
+    @_locked
     def put_global(self, document: DocumentDefinition[T], value: T) -> None:
         self._assert_global(document)
         self.put(document, GLOBAL_KEY, value)
 
+    @_locked
     def update(self, document: DocumentDefinition[T], key: str, updater: Any) -> T:
         current = self.get_required(document, key)
         updated = updater(current)
         self.put(document, key, updated)
         return updated
 
+    @_locked
     def update_global(self, document: DocumentDefinition[T], updater: Any) -> T:
         self._assert_global(document)
         return self.update(document, GLOBAL_KEY, updater)
 
+    @_locked
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
         store = self._store_for_type(document.type)
@@ -378,16 +416,20 @@ class CultCache:
                 if not held:
                     by_type.pop(document.type, None)
 
+    @_locked
     def delete_global(self, document: DocumentDefinition[Any]) -> None:
         self._assert_global(document)
         self.delete(document, GLOBAL_KEY)
 
+    # Snapshots iterate dicts a concurrent write would resize mid-iteration, so they hold the lock.
+    @_locked
     def snapshot(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for type, values in self._state.values.items():
             out[type] = dict(values)
         return out
 
+    @_locked
     def snapshot_envelopes(self) -> list[CultCacheEnvelope]:
         return [
             envelope
