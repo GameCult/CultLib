@@ -2208,33 +2208,29 @@ impl CultCache {
         if staged.is_empty() {
             return Err(anyhow!("CultCache batch must contain at least one entry"));
         }
-        if self.stores.is_empty() {
-            for entry in &staged {
-                if !self.definitions.contains_key(&entry.r#type) {
-                    return Err(anyhow!(
-                        "CultCache batch entry type {:?} is not registered",
-                        entry.r#type
-                    ));
-                }
-            }
-            for entry in staged {
-                self.entries.insert(entry_id(&entry), entry);
-            }
-            return Ok(());
-        }
+        // Validate every staged record before any store is touched.
         let mut store_index = None;
-        for entry in staged.iter().chain(self.entries.values()) {
+        for entry in &staged {
             if !self.definitions.contains_key(&entry.r#type) {
                 return Err(anyhow!(
                     "CultCache batch entry type {:?} is not registered",
                     entry.r#type
                 ));
             }
-            let Some(home) = self.resolve_route_index(&entry.r#type) else {
+            if entry.key.trim().is_empty() {
                 return Err(anyhow!(
-                    "No backing store is registered for entry type {:?}",
+                    "CultCache envelope keys for type {:?} must be non-empty",
                     entry.r#type
                 ));
+            }
+            if entry.stored_at.trim().is_empty() {
+                return Err(anyhow!(
+                    "CultCache envelope stored_at for type {:?} must be non-empty",
+                    entry.r#type
+                ));
+            }
+            let Some(home) = self.home_index(&entry.r#type)? else {
+                continue;
             };
             match store_index {
                 Some(expected) if expected != home => {
@@ -2244,15 +2240,22 @@ impl CultCache {
                 _ => {}
             }
         }
-        let store_index = store_index.expect("non-empty batch establishes a store route");
         let mut next = self.entries.clone();
-        for entry in staged {
-            next.insert(entry_id(&entry), entry);
+        for entry in &staged {
+            next.insert(entry_id(entry), entry.clone());
         }
-        let snapshot: Vec<_> = next.values().cloned().collect();
-        self.stores[store_index]
-            .store
-            .push_all(&snapshot, PushAllOptions::default())?;
+        if let Some(store_index) = store_index {
+            // The home store receives its own records only: those it already
+            // holds in this cache plus the staged ones.
+            let snapshot: Vec<_> = next
+                .values()
+                .filter(|entry| self.resolve_route_index(&entry.r#type) == Some(store_index))
+                .cloned()
+                .collect();
+            self.stores[store_index]
+                .store
+                .push_all(&snapshot, PushAllOptions::default())?;
+        }
         self.entries = next;
         Ok(())
     }
@@ -2295,15 +2298,6 @@ impl CultCache {
         }
         self.entries.insert(entry_id(&entry), entry);
         Ok(())
-    }
-
-    /// Validates and admits an existing envelope into this cache image without
-    /// publishing it to any backing store. This is the typed read primitive for
-    /// owner-filtered views over a shared polymorphic store.
-    pub fn load_envelope<T: DatabaseEntry>(&mut self, entry: CultCacheEnvelope) -> Result<T> {
-        let parsed = self.validate_envelope::<T>(&entry)?;
-        self.entries.insert(entry_id(&entry), entry);
-        Ok(parsed)
     }
 
     fn validate_envelope<T: DatabaseEntry>(&self, entry: &CultCacheEnvelope) -> Result<T> {
@@ -2368,18 +2362,23 @@ impl CultCache {
         CultCacheSoaTable::from_envelopes(self.snapshot())
     }
 
+    /// Replaces the cache's view with the table's records. Every record is
+    /// checked (registered type, and a home store once any store is attached)
+    /// into a local image first, so a refused load admits nothing and leaves
+    /// the prior view intact. Loading writes no store.
     pub fn load_soa(&mut self, table: CultCacheSoaTable) -> Result<()> {
-        let known_types: BTreeSet<String> = self.definitions.keys().cloned().collect();
-        self.entries.clear();
+        let mut loaded = BTreeMap::new();
         for entry in table.into_envelopes()? {
-            if !known_types.contains(&entry.r#type) {
+            if !self.definitions.contains_key(&entry.r#type) {
                 return Err(anyhow!(
                     "No schema is registered for SoA entry type {:?}",
                     entry.r#type
                 ));
             }
-            self.entries.insert(entry_id(&entry), entry);
+            self.home_index(&entry.r#type)?;
+            loaded.insert(entry_id(&entry), entry);
         }
+        self.entries = loaded;
         Ok(())
     }
 
@@ -3871,6 +3870,10 @@ mod tests {
         cache.register_entry_type::<Settings>()?;
         cache.add_backing_store(SingleFileMessagePackBackingStore::new(&settings_path), ["settings"])?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
+        // The cache already holds a record, in its home store, before the refused load.
+        cache.put("held", &Settings { theme: "home".to_string(), retries: 0 })?;
+        let before = cache.snapshot();
+        let settings_bytes = fs::read(&settings_path)?;
         let error = cache.pull_all_backing_stores().unwrap_err();
         assert!(
             error.to_string().contains(
@@ -3878,9 +3881,122 @@ mod tests {
             ),
             "{error}"
         );
-        assert!(cache.snapshot().is_empty());
+        assert_eq!(cache.snapshot(), before);
+        assert_eq!(cache.get_required::<Settings>("held")?.theme, "home");
         assert_eq!(fs::read(&generic_path)?, generic_bytes);
-        assert!(!settings_path.exists());
+        assert_eq!(fs::read(&settings_path)?, settings_bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn refused_pull_leaves_prior_view_intact() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("generic.cc");
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        cache.put("app", &Settings { theme: "before".to_string(), retries: 1 })?;
+        let before = cache.snapshot();
+
+        // A record of a type this cache never registered lands in the store behind its back.
+        SingleFileMessagePackBackingStore::new(&store_path).push(&CultCacheEnvelope {
+            key: "stray".into(),
+            r#type: "unregistered".into(),
+            payload: rmp_serde::to_vec(&("x",))?,
+            stored_at: "2026-09-14T00:00:00Z".into(),
+            schema_id: Some("unregistered".into()),
+        })?;
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert!(error.to_string().contains("\"unregistered\""), "{error}");
+        assert_eq!(cache.snapshot(), before);
+        assert_eq!(cache.get_required::<Settings>("app")?.theme, "before");
+        Ok(())
+    }
+
+    #[test]
+    fn refused_soa_load_leaves_prior_view_intact() -> Result<()> {
+        let mut source = CultCache::new();
+        source.register_registry(TestEntries)?;
+        source.put("app", &Settings { theme: "ash".to_string(), retries: 3 })?;
+        source.put("memo", &Note { title: "machine".to_string(), body: "awake".to_string() })?;
+        let table = source.snapshot_soa();
+
+        // A type with no registration.
+        let mut unregistered = CultCache::new();
+        unregistered.register_entry_type::<Settings>()?;
+        unregistered.put("held", &Settings { theme: "held".to_string(), retries: 0 })?;
+        let before = unregistered.snapshot();
+        let error = unregistered.load_soa(table.clone()).unwrap_err();
+        assert!(error.to_string().contains("\"note\""), "{error}");
+        assert_eq!(unregistered.snapshot(), before);
+
+        // A registered type with no home once a store is attached.
+        let temp = tempfile::tempdir()?;
+        let mut homeless = CultCache::new();
+        homeless.register_registry(TestEntries)?;
+        homeless.add_backing_store(SingleFileMessagePackBackingStore::new(temp.path().join("settings.cc")), ["settings"])?;
+        homeless.put("held", &Settings { theme: "held".to_string(), retries: 0 })?;
+        let before = homeless.snapshot();
+        let error = homeless.load_soa(table).unwrap_err();
+        assert!(error.to_string().contains("No backing store is registered for entry type \"note\""), "{error}");
+        assert_eq!(homeless.snapshot(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn single_home_batch_is_not_refused_by_other_homes_records() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let generic_path = temp.path().join("generic.cc");
+        let settings_path = temp.path().join("settings.cc");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_backing_store(SingleFileMessagePackBackingStore::new(&settings_path), ["settings"])?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&generic_path))?;
+        cache.put("memo", &Note { title: "generic".to_string(), body: "home".to_string() })?;
+        cache.put("old", &Settings { theme: "kept".to_string(), retries: 0 })?;
+
+        let (staged, _) = cache.prepare_entry("app", &Settings { theme: "batch".to_string(), retries: 1 })?;
+        cache.put_prepared_batch(vec![staged])?;
+
+        let mut settings_keys: Vec<_> = SingleFileMessagePackBackingStore::new(&settings_path)
+            .pull_all()?
+            .into_iter()
+            .map(|entry| format!("{}:{}", entry.r#type, entry.key))
+            .collect();
+        settings_keys.sort();
+        assert_eq!(settings_keys, vec!["settings:app".to_string(), "settings:old".to_string()]);
+        let generic_keys: Vec<_> = SingleFileMessagePackBackingStore::new(&generic_path)
+            .pull_all()?
+            .into_iter()
+            .map(|entry| format!("{}:{}", entry.r#type, entry.key))
+            .collect();
+        assert_eq!(generic_keys, vec!["note:memo".to_string()]);
+        assert_eq!(cache.get_required::<Settings>("app")?.theme, "batch");
+        Ok(())
+    }
+
+    #[test]
+    fn batch_with_empty_key_or_stored_at_is_refused_before_any_store() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("generic.cc");
+        let mut cache = CultCache::new();
+        cache.register_registry(TestEntries)?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
+        cache.put("app", &Settings { theme: "before".to_string(), retries: 1 })?;
+        let before = cache.snapshot();
+        let store_bytes = fs::read(&store_path)?;
+
+        let (empty_key, _) = cache.prepare_entry("", &Note { title: "t".to_string(), body: "b".to_string() })?;
+        let error = cache.put_prepared_batch(vec![empty_key]).unwrap_err();
+        assert!(error.to_string().contains("keys for type \"note\" must be non-empty"), "{error}");
+
+        let (mut empty_stored_at, _) = cache.prepare_entry("n", &Note { title: "t".to_string(), body: "b".to_string() })?;
+        empty_stored_at.stored_at = " ".to_string();
+        let error = cache.put_prepared_batch(vec![empty_stored_at]).unwrap_err();
+        assert!(error.to_string().contains("stored_at for type \"note\" must be non-empty"), "{error}");
+
+        assert_eq!(cache.snapshot(), before);
+        assert_eq!(fs::read(&store_path)?, store_bytes);
         Ok(())
     }
 
