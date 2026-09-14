@@ -402,8 +402,9 @@ public static partial class math
     public static float3 atan2(float3 y, float3 x) => new(atan2(y.x, x.x), atan2(y.y, x.y), atan2(y.z, x.z));
     public static float4 atan2(float4 y, float4 x) => new(atan2(y.x, x.x), atan2(y.y, x.y), atan2(y.z, x.z), atan2(y.w, x.w));
 
-    public static double min(double left, double right) => Math.Min(left, right);
-    public static double max(double left, double right) => Math.Max(left, right);
+    // DXIL FMin/FMax take double overloads with the same rules as float (see min/max above).
+    public static double min(double left, double right) => left < right || double.IsNaN(right) ? left : right;
+    public static double max(double left, double right) => left >= right || double.IsNaN(right) ? left : right;
 
     public static bool any(bool2 value) => value.x || value.y;
     public static bool any(bool3 value) => value.x || value.y || value.z;

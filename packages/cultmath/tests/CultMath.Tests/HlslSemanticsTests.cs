@@ -178,6 +178,14 @@ public sealed class HlslSemanticsTests
         Assert.Equal(Bits(-0.0f), Bits(math.max(-0.0f, 0.0f)));
         Assert.Equal(Bits(0.0f), Bits(math.min(-0.0f, 0.0f)));
         Assert.Equal(Bits(0.0f), Bits(math.saturate(-0.0f)));
+        Assert.Equal(1.0, math.min(double.NaN, 1.0));
+        Assert.Equal(1.0, math.min(1.0, double.NaN));
+        Assert.Equal(1.0, math.max(double.NaN, 1.0));
+        Assert.Equal(1.0, math.max(1.0, double.NaN));
+        Assert.True(double.IsNaN(math.max(double.NaN, double.NaN)));
+        static long DoubleBits(double value) => BitConverter.DoubleToInt64Bits(value);
+        Assert.Equal(DoubleBits(-0.0), DoubleBits(math.max(-0.0, 0.0)));
+        Assert.Equal(DoubleBits(0.0), DoubleBits(math.min(-0.0, 0.0)));
 
         Assert.Equal(0, math.sign(float.NaN));
         Assert.Equal(-1, math.sign(-0.5f));
