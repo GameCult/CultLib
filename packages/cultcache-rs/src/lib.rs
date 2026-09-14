@@ -309,16 +309,31 @@ pub trait CacheBackingStore: Send {
     fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()>;
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
-        let existing = self.pull_all()?;
-        for entry in existing {
-            self.delete(&entry)?;
-        }
-        for entry in entries {
-            self.push(entry)?;
-        }
-        Ok(())
-    }
+    /// Replaces everything the store holds with `entries` in one atomic step:
+    /// on `Err` the store still holds exactly what it held before. A cache
+    /// batch (`put_prepared_batch`) is all-or-nothing only through this. There
+    /// is no default, because a replace assembled from `delete` and `push`
+    /// calls leaves the store emptied or partial when one of them fails; a
+    /// store without an atomic replace does not compile:
+    ///
+    /// ```compile_fail,E0046
+    /// use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
+    ///
+    /// struct PerRecordStore;
+    ///
+    /// impl CacheBackingStore for PerRecordStore {
+    ///     fn pull_all(&self) -> anyhow::Result<Vec<CultCacheEnvelope>> {
+    ///         Ok(Vec::new())
+    ///     }
+    ///     fn push(&mut self, _entry: &CultCacheEnvelope) -> anyhow::Result<()> {
+    ///         Ok(())
+    ///     }
+    ///     fn delete(&mut self, _entry: &CultCacheEnvelope) -> anyhow::Result<()> {
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
