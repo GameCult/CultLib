@@ -1018,8 +1018,7 @@ impl CultMesh {
     {
         let mut cache = CultCache::new();
         documents.register_cache(&mut cache)?;
-        cache
-            .add_generic_backing_store(SingleFileMessagePackBackingStore::new(store_path.as_ref()));
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(store_path.as_ref()))?;
         if options.pull_on_start {
             cache.pull_all_backing_stores()?;
         }

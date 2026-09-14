@@ -26,6 +26,53 @@ The canonical fixtures currently exercised in C# are:
 See `GameCult.Caching.Tests/BackingStoreTests.cs` for the canonical fixture
 documents and the expected receipts.
 
+## Slots
+
+A member's slot is its MessagePack `[Key(n)]` integer. MessagePack's `[Key]` and
+`[IgnoreMember]` are the single slot authority, so `GameCult.Caching` depends on
+`MessagePack.Annotations`. Payloads are written by `MessagePackSerializer`, so
+the registry refuses a document type without `[MessagePackObject]` and a
+non-public document type without `[MessagePackObject(AllowPrivate = true)]`.
+A member's type name is the CLR full name; a nested type is written `Outer+Inner`.
+The registry also refuses a public member without `[Key]` or `[IgnoreMember]`
+(get-only properties included; MessagePack throws on them), a string `[Key]`,
+two members sharing a slot (including `new`-hidden members), a hidden persisted
+member, and an override whose `[Key]` or `[IgnoreMember]` differs from its base
+declaration's (MessagePack reads the base declaration).
+
+Visibility follows MessagePack's rule: the registry accepts what MessagePack
+round-trips and refuses what it would silently lose. The registry persists
+every keyed public field and property, get-only ones included, because
+MessagePack writes them all. A `[Key]` on a non-public member without
+`AllowPrivate` is refused because MessagePack skips that member. With
+`AllowPrivate`, MessagePack also reads non-public members, so every non-public
+instance field or property must be `[IgnoreMember]`.
+
+A class needs a constructor MessagePack can call: the `[SerializationConstructor]`
+if one is marked, otherwise the longest constructor (public unless
+`AllowPrivate`) whose every parameter takes the keyed member at its position
+(`[Key(0)]`, `[Key(1)]`, ...). A parameterless constructor always qualifies; a
+primary constructor usually does not. MessagePack reads a member back through
+its setter, or through that constructor when the member's slot is below the
+constructor's parameter count. A setter counts when it is public, or any setter
+(private, internal, init-only) under `AllowPrivate`; a readonly field counts as
+writable under `AllowPrivate` only. A keyed member MessagePack cannot read back
+either way is refused: a get-only property, a readonly field without
+`AllowPrivate`, or a property whose setter is non-public without
+`AllowPrivate`, when the constructor does not fill it.
+
+## Which schema a record carries
+
+A record is written under the schema of its runtime type. Writing a derived
+document through a base-typed handle or generic parameter (`UpsertAsync<Gear>`
+with a `Weapon`) persists the `Weapon` schema, and the record reloads as a
+`Weapon`. A runtime type without `[CultDocument]` is refused.
+
+Typed lookups and watches (`Get<T>`, `GetAll<T>`, `GetByName<T>`,
+`GetByIndex<T>`, `GetGlobal<T>`, `Watch<T>`) match every record whose runtime
+type is assignable to `T`. A single-result lookup with several candidates
+throws.
+
 ## Soft-migratable drift
 
 CultCache accepts compatible drift only when the local reader can still map the

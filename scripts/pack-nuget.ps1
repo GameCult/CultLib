@@ -16,7 +16,6 @@ $outputRoot = if ([IO.Path]::IsPathRooted($OutputDirectory)) {
 $projects = @(
   "src\GameCult.Logging\GameCult.Logging.csproj",
   "src\GameCult.Caching\GameCult.Caching.csproj",
-  "src\GameCult.Caching.MessagePack.Analyzers\GameCult.Caching.MessagePack.Analyzers.csproj",
   "src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj",
   "src\GameCult.Networking\GameCult.Networking.csproj",
   "src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj",
@@ -53,7 +52,6 @@ $version = [regex]::Match($meshPackage.Name, '^GameCult\.Mesh\.(.+)\.nupkg$').Gr
 $expectedPackages = @(
   "GameCult.Logging.$version.nupkg",
   "GameCult.Caching.$version.nupkg",
-  "GameCult.Caching.MessagePack.Analyzers.$version.nupkg",
   "GameCult.Caching.MessagePack.$version.nupkg",
   "GameCult.Networking.$version.nupkg",
   "GameCult.Networking.WebSockets.$version.nupkg",

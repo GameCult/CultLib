@@ -9,9 +9,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameCult.Caching\GameCult.Caching.csproj" />
     <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack\GameCult.Caching.MessagePack.csproj" />
-    <ProjectReference Include="..\..\src\GameCult.Caching.MessagePack.Generator\GameCult.Caching.MessagePack.Generator.csproj"
-                      OutputItemType="Analyzer"
-                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

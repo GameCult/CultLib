@@ -1,0 +1,4 @@
+# Store fixtures are byte-exact and content-addressed; never convert line endings.
+* binary
+*.md text
+.gitattributes text

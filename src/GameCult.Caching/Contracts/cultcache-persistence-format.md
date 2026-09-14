@@ -41,18 +41,33 @@ Those belong to the CultCache persistence layer.
 
 ## Transaction Visibility
 
-An authoritative multi-record change uses `CultCache.ExecuteTransactionAsync`.
-The executing async flow sees its buffered overlay while staging; other readers
-and all observers continue to see the prior committed generation. The backing
-store commits the complete batch before the live cache swaps to it. Observer
-notifications run only after the transaction context and commit lock have been
-released, so an observer-triggered write begins a separate transaction.
+A multi-record commit is an explicit batch of records that resolve to one home
+store. The store commits the batch as one durable step. Nothing in the batch is
+visible, to the committing flow or to observers, until the store has accepted
+it; a failed commit changes nothing on disk or in memory.
 
-An exception before durable finality discards the overlay. It cannot become
-visible through a later flush. A transaction currently permits at most one
-durable backing store because independent stores cannot provide one atomic
-commit boundary. Applications that require authoritative writes may configure
-`CultNetDatabase` to reject record-at-a-time writes outside this primitive.
+A batch may carry conditions: per-record `(schemaId, storedAt)` identity, or
+the whole store unchanged since it was last loaded. Conditions are evaluated
+under the store's exclusive lock against what is durably on disk. A failed
+condition is a lost race, not an error: the commit reports it and writes
+nothing.
+
+**Conditional commit is the only safe multi-process write.** A plain flush and
+an unconditional commit are last-writer-wins and write the same bytes: a single
+file is replaced by the writer's whole view, a directory manifest takes the
+writer's staged keys over the current manifest. An unconditional commit also
+persists writes staged earlier and leaves the store clean. Processes sharing a
+store must all use conditional commit.
+
+A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
+makes the open throw and is left byte-identical; it is never silently
+overwritten. Within one process the lock order is the cache's gate, then the
+store's file lock; a store's I/O blocks its cache's readers.
+
+C# implements batch and conditional commit (`CultCache.Commit`, `TryCommit`,
+`CultCacheBatch`). Rust implements both. TypeScript and Python implement
+neither yet. Routing, batches and conditions are specified in
+`cultcache-store-composition.md`.
 
 ## Canonical Store Shape
 
@@ -350,12 +365,14 @@ The v1 concurrent single-file policy is:
    lock.
 2. Writers take an exclusive sidecar lock derived from the `.cc` path.
 3. Writers re-read the current snapshot after taking the lock.
-4. Writers merge or reject local staged changes against the latest generation.
+4. Writers using conditional commit evaluate their conditions against the
+   latest snapshot and write nothing if one fails. A plain flush and an
+   unconditional commit compare nothing and are last-writer-wins.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 
-This preserves the key invariant: every reader sees a complete snapshot, and no
-writer commits over unseen data without passing through the merge/reject point.
+This preserves the key invariant: every reader sees a complete snapshot. Only a
+conditional commit is protected against committing over unseen data.
 
 ## Live Change Observation
 

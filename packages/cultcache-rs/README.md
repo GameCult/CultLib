@@ -218,7 +218,7 @@ not a missing reflection party trick.
 Generic store:
 
 ```rust
-cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"));
+cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new("cache.cc"))?;
 ```
 
 Type-specific store:
@@ -227,18 +227,17 @@ Type-specific store:
 cache.add_backing_store(
     SingleFileMessagePackBackingStore::new("players.cc"),
     ["player"],
-);
+)?;
 ```
 
-When writing a `PlayerData`, the cache checks type-specific stores first. If none
-match, it writes to the first generic store. Later matching stores are mirrors.
+The contract, shared with every runtime, is one home store per document type
+(`src/GameCult.Caching/Contracts/cultcache-store-composition.md` in CultLib):
 
-This mirrors the C# behavior:
-
-- specific domain stores own their domain
-- the first generic store is the primary generic write target
-- later generic stores mirror writes
-- this is not multi-master
+- a type-specific store owns its types; otherwise the generic store is the home
+- a second generic store is an error, and so is a type claimed by a second
+  store; both registrations return `Err` and attach nothing
+- a write touches exactly one store; there are no mirrors
+- a write whose type has no home store is an error
 
 ## Persistence Semantics
 

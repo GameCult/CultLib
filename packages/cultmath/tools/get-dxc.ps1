@@ -8,24 +8,25 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $installPath = Join-Path $repoRoot $InstallRoot
 New-Item -ItemType Directory -Force -Path $installPath | Out-Null
 
-$release = Invoke-RestMethod `
-    -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest" `
-    -Headers @{ "User-Agent" = "CultMath-DXC-Bootstrap" }
+# Pinned: parity means this compiler's lowering (dxcompiler 1.9.0.5402). The hash is the SHA256
+# of dxc_2026_07_29.zip downloaded from Microsoft's GitHub release v1.9.2607, and matches the
+# digest GitHub publishes for that asset.
+$zipName = "dxc_2026_07_29.zip"
+$zipUrl = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/$zipName"
+$zipSha256 = "A1DFB116BA3EEAE6A1582291B53A8E7BF65AD760676BD3194685C8F7367CD241"
 
-$asset = $release.assets |
-    Where-Object { $_.name -like "dxc_*.zip" } |
-    Select-Object -First 1
-
-if (-not $asset) {
-    throw "No Windows dxc_*.zip asset found on the latest DirectXShaderCompiler release."
-}
-
-$zipPath = Join-Path $installPath $asset.name
+$zipPath = Join-Path $installPath $zipName
 Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 
-& curl.exe -L --retry 5 --retry-delay 2 --fail -o $zipPath $asset.browser_download_url
+& curl.exe -L --retry 5 --retry-delay 2 --fail -o $zipPath $zipUrl
 if ($LASTEXITCODE -ne 0) {
     throw "curl.exe failed with exit code $LASTEXITCODE."
+}
+
+$actualSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+if ($actualSha256 -ne $zipSha256) {
+    Remove-Item -LiteralPath $zipPath -Force
+    throw "$zipName SHA256 is $actualSha256, expected $zipSha256."
 }
 
 $currentPath = Join-Path $installPath "current"

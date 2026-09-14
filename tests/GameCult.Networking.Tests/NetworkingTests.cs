@@ -1490,6 +1490,44 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
         }
 
+        // A batch is a value: nothing staged in it reaches CultNet observers before the store commits it. A put made
+        // while a batch is being staged is its own write, not part of the batch.
+        [Test]
+        public void CultNetPutInsideCommitPublishesOnlyAfterCommit()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultnet-commit-{Guid.NewGuid():N}.cc");
+            try
+            {
+                var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                var database = new CultNetDatabase(cache);
+                var published = new List<CultRecordKey>();
+                using var subscription = database.Watch<NetworkSchemaNote>().Subscribe(change => published.Add(change.Key));
+                var batched = new CultRecordKey("tests:commit:batched");
+                var put = new CultRecordKey("tests:commit:put");
+
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Upsert(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "batched" }, new CultRecordHandle<NetworkSchemaNote>(batched));
+                    database.PutAsync(put, new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "put" }).GetAwaiter().GetResult();
+                    Assert.That(published, Is.EqualTo(new[] { put }), "a record staged in the batch was published before the store committed it");
+                    Assert.That(cache.Get(batched), Is.Null);
+                }), Is.True);
+
+                Assert.That(published, Is.EqualTo(new[] { put }));
+                Assert.That(cache.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
+                var reopened = new CultCache();
+                reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                Assert.That(reopened.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
+                Assert.That(reopened.Get<NetworkSchemaNote>(put)?.Text, Is.EqualTo("put"));
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path + ".lock")) File.Delete(path + ".lock");
+            }
+        }
+
         [Test]
         public async Task DatabaseSubscriptionServer_StreamsRecordChangesOverRudp()
         {
@@ -1780,6 +1818,78 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(removed.Active, Is.False);
+        }
+
+        // A load's delivery reaches a subscription observer that needs the lifecycle gate while a subscribe's demand
+        // handler, holding that gate, writes the same cache. Nothing is disposed on failure: disposal would hang too.
+        [Test]
+        public async Task SubscriptionDemandHandlerWritingCacheDuringDeliveryDoesNotDeadlock()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultlib-demand-{Guid.NewGuid():N}.cc");
+            using (var seed = new CultCache())
+            {
+                seed.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                await seed.UpsertAsync(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "loaded" },
+                    new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("demand:loaded")));
+                seed.FlushAllBackingStores();
+            }
+
+            var cache = new CultCache();
+            var delivering = new ManualResetEventSlim();
+            cache.OnUpdate += (_, _) => delivering.Set();
+            var database = new CultNetDatabase(cache);
+            var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "demand-write-server",
+                Socket = BindUdpSocket()
+            });
+            var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            var written = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            subscriptions.DemandChanged += demand =>
+            {
+                if (!demand.Active) return;
+                _ = Task.Run(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(path)));
+                if (!delivering.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    written.TrySetException(new TimeoutException("the load never started delivering"));
+                    return;
+                }
+                cache.UpsertAsync(new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "demanded" },
+                    new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("demand:written"))).GetAwaiter().GetResult();
+                written.TrySetResult(true);
+            };
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+
+            using var client = CultNetSchemaClients.CreateRudp("demand-write-client");
+            client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+            await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+            client.SendCultNet(new CultNetDatabaseSubscribeMessage
+            {
+                MessageId = "subscribe-demand-write",
+                SubscriptionId = "demand-write",
+                RecordKeys = ["demand:other"],
+                IncludeSnapshot = false
+            });
+
+            var finished = await Task.WhenAny(written.Task, Task.Delay(TimeSpan.FromSeconds(10))) == written.Task;
+            cancellation.Cancel();
+            Assert.That(finished, Is.True, "the demand handler's cache write deadlocked with the load's delivery");
+            await written.Task;
+            serverThread.Join();
+            subscriptions.Dispose();
+            server.Dispose();
+            database.Dispose();
+            cache.Dispose();
+            File.Delete(path);
         }
 
         [Test]
@@ -2958,60 +3068,6 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task CultNetDatabase_RequiredTransaction_DefersRawPutPublicationUntilCommit()
-        {
-            var cache = new CultCache();
-            var registry = new CultNetDocumentRegistry(cache.Registry)
-                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
-                    cache.Registry,
-                    payloadSerializer: SerializePlayerDataPayload,
-                    payloadDeserializer: DeserializePlayerDataPayload));
-            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
-            {
-                DocumentRegistry = registry,
-                RequireTransactionsForAuthoritativeWrites = true
-            });
-            var key = new CultRecordKey("player:transactional-raw");
-            var message = registry.CreateRawDocumentPutMessage(
-                "put-transactional-raw",
-                new CultRecordHandle<PlayerData>(key),
-                new PlayerData
-                {
-                    PlayerId = Guid.NewGuid(),
-                    Email = "transactional@example.test",
-                    PasswordHash = "hash",
-                    Username = "Transactional"
-                });
-            var changes = new List<CultNetDatabaseChange<PlayerData>>();
-            using var subscription = database.WatchRecord<PlayerData>(key)
-                .Subscribe(change => changes.Add(change));
-
-            Assert.That(
-                async () => await database.ApplyPutAsync(message),
-                Throws.TypeOf<InvalidOperationException>());
-
-            var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var transaction = database.ExecuteTransactionAsync(async () =>
-            {
-                await database.ApplyPutAsync(message);
-                staged.SetResult(true);
-                await release.Task;
-            });
-            await staged.Task;
-
-            Assert.That(cache.Get<PlayerData>(key), Is.Null);
-            Assert.That(changes, Is.Empty);
-
-            release.SetResult(true);
-            await transaction;
-
-            Assert.That(cache.Get<PlayerData>(key)?.Username, Is.EqualTo("Transactional"));
-            Assert.That(changes, Has.Count.EqualTo(1));
-            Assert.That(changes[0].Kind, Is.EqualTo(CultNetDatabaseChangeKind.Added));
-        }
-
-        [Test]
         public async Task CultNetDatabase_ApplyRawPut_ResolvesForeignSchemaIdFromPayload()
         {
             var cache = new CultCache();
@@ -3046,12 +3102,12 @@ namespace GameCult.Networking.Tests
                     RecordKey = key.Value,
                     StoredAt = DateTimeOffset.UtcNow.ToString("O"),
                     PayloadEncoding = "messagepack",
-                    Payload = CultDocumentMessagePackSerialization.Serialize(new NetworkSchemaNote
+                    Payload = CultDocumentMessagePackSerialization.SerializeUntyped(new NetworkSchemaNote
                     {
                         Schema = "tests.networking_note.v1",
                         Text = "payload-routed",
                         Revision = 5
-                    })
+                    }, typeof(NetworkSchemaNote))
                 }
             };
 
@@ -3126,7 +3182,7 @@ namespace GameCult.Networking.Tests
 
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
-            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]
@@ -3168,7 +3224,7 @@ namespace GameCult.Networking.Tests
 
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
-            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]
@@ -5589,7 +5645,7 @@ namespace GameCult.Networking.Tests
             Assert.That(message.ChangeKind, Is.EqualTo("added"));
             Assert.That(message.Document, Is.Not.Null);
             Assert.That(message.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
-            Assert.That(message.Document.Payload, Is.EqualTo(CultDocumentMessagePackSerialization.Serialize(note)));
+            Assert.That(message.Document.Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
         [Test]

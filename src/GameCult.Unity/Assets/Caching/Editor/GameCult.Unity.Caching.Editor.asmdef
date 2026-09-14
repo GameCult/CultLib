@@ -2,7 +2,7 @@
     "name": "GameCult.Unity.Caching.Editor",
     "rootNamespace": "GameCult.Unity.Caching.Editor",
     "references": [
-        "GameCult.Unity.Caching"
+        "GameCult.CultLib"
     ],
     "includePlatforms": [
         "Editor"

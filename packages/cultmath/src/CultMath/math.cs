@@ -2,11 +2,27 @@ using System;
 
 namespace CultMath;
 
-public static class math
+public static partial class math
 {
     public const float PI = MathF.PI;
     public const float TAU = MathF.PI * 2.0f;
     public const float HALF_PI = MathF.PI * 0.5f;
+
+    /// <summary>
+    /// Extrinsic Euler order for <see cref="CultMath.float3x3.Euler(CultMath.float3, RotationOrder)"/>:
+    /// the first letter is the axis applied first. Nested here so <c>using static CultMath.math;</c>
+    /// brings it into scope with the rest of the shader vocabulary.
+    /// </summary>
+    public enum RotationOrder : byte
+    {
+        XYZ,
+        XZY,
+        YXZ,
+        YZX,
+        ZXY,
+        ZYX,
+        Default = ZXY,
+    }
 
     public static float2 float2(float x, float y) => new(x, y);
     public static float2 float2(float value) => new(value, value);
@@ -14,14 +30,28 @@ public static class math
     public static bool2 bool2(bool value) => new(value, value);
     public static int2 int2(int x, int y) => new(x, y);
     public static int2 int2(int value) => new(value, value);
+    // Mixed constructor functions (float4(float2, float2), ...) are generated in Swizzles.g.cs.
     public static float3 float3(float x, float y, float z) => new(x, y, z);
-    public static float3 float3(float2 xy, float z) => new(xy, z);
     public static float3 float3(float value) => new(value, value, value);
     public static float4 float4(float x, float y, float z, float w) => new(x, y, z, w);
-    public static float4 float4(float2 xy, float z, float w) => new(xy, z, w);
-    public static float4 float4(float3 xyz, float w) => new(xyz, w);
-    public static float4 float4(float x, float3 yzw) => new(x, yzw);
     public static float4 float4(float value) => new(value, value, value, value);
+    public static bool3 bool3(bool x, bool y, bool z) => new(x, y, z);
+    public static bool3 bool3(bool value) => new(value, value, value);
+    public static bool4 bool4(bool x, bool y, bool z, bool w) => new(x, y, z, w);
+    public static bool4 bool4(bool value) => new(value, value, value, value);
+    public static int3 int3(int x, int y, int z) => new(x, y, z);
+    public static int3 int3(int value) => new(value, value, value);
+    public static int4 int4(int x, int y, int z, int w) => new(x, y, z, w);
+    public static int4 int4(int value) => new(value, value, value, value);
+
+    // Matrix constructor functions take rows, as HLSL does. Under `using static CultMath.math;`
+    // these method groups hide the type names in member access, so static members need a
+    // qualified type: `CultMath.float3x3.Euler(...)`, `CultMath.float2x2.Rotate(...)`.
+    public static float2x2 float2x2(float m00, float m01, float m10, float m11) => new(m00, m01, m10, m11);
+    public static float2x2 float2x2(float2 row0, float2 row1) => new(row0, row1);
+    public static float3x3 float3x3(float m00, float m01, float m02, float m10, float m11, float m12, float m20, float m21, float m22) =>
+        new(m00, m01, m02, m10, m11, m12, m20, m21, m22);
+    public static float3x3 float3x3(float3 row0, float3 row1, float3 row2) => new(row0, row1, row2);
     public static float radians(float degrees) => degrees * (PI / 180.0f);
     public static float degrees(float radians) => radians * (180.0f / PI);
     public static float sin(float value) => MathF.Sin(value);
@@ -46,11 +76,20 @@ public static class math
     public static float2 abs(float2 value) => new(abs(value.x), abs(value.y));
     public static float3 abs(float3 value) => new(abs(value.x), abs(value.y), abs(value.z));
     public static float4 abs(float4 value) => new(abs(value.x), abs(value.y), abs(value.z), abs(value.w));
+    public static int abs(int value) => Math.Abs(value);
+    public static int2 abs(int2 value) => new(abs(value.x), abs(value.y));
+    public static int3 abs(int3 value) => new(abs(value.x), abs(value.y), abs(value.z));
+    public static int4 abs(int4 value) => new(abs(value.x), abs(value.y), abs(value.z), abs(value.w));
 
-    public static float sign(float value) => MathF.Sign(value);
-    public static float2 sign(float2 value) => new(sign(value.x), sign(value.y));
-    public static float3 sign(float3 value) => new(sign(value.x), sign(value.y), sign(value.z));
-    public static float4 sign(float4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
+    // HLSL sign returns int. NaN compares false both ways, so it yields 0 instead of throwing.
+    public static int sign(float value) => value > 0.0f ? 1 : value < 0.0f ? -1 : 0;
+    public static int2 sign(float2 value) => new(sign(value.x), sign(value.y));
+    public static int3 sign(float3 value) => new(sign(value.x), sign(value.y), sign(value.z));
+    public static int4 sign(float4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
+    public static int sign(int value) => value > 0 ? 1 : value < 0 ? -1 : 0;
+    public static int2 sign(int2 value) => new(sign(value.x), sign(value.y));
+    public static int3 sign(int3 value) => new(sign(value.x), sign(value.y), sign(value.z));
+    public static int4 sign(int4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
 
     public static float floor(float value) => MathF.Floor(value);
     public static float2 floor(float2 value) => new(floor(value.x), floor(value.y));
@@ -67,27 +106,36 @@ public static class math
     public static float3 frac(float3 value) => value - floor(value);
     public static float4 frac(float4 value) => value - floor(value);
 
-    public static float min(float left, float right) => MathF.Min(left, right);
+    // dxc lowers float min/max/clamp to DXIL FMin/FMax (saturate to Saturate, defined as FMin(1, FMax(0, x))).
+    // DXIL.rst: FMin(a, b) is a < b ? a : b, FMax(a, b) is a >= b ? a : b, and a NaN operand returns the other.
+    public static float min(float left, float right) => left < right || float.IsNaN(right) ? left : right;
     public static int min(int left, int right) => Math.Min(left, right);
     public static float2 min(float2 left, float2 right) => new(min(left.x, right.x), min(left.y, right.y));
     public static float3 min(float3 left, float3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
     public static float4 min(float4 left, float4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
+    public static int2 min(int2 left, int2 right) => new(min(left.x, right.x), min(left.y, right.y));
+    public static int3 min(int3 left, int3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
+    public static int4 min(int4 left, int4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
 
-    public static float max(float left, float right) => MathF.Max(left, right);
+    public static float max(float left, float right) => left >= right || float.IsNaN(right) ? left : right;
     public static int max(int left, int right) => Math.Max(left, right);
     public static float2 max(float2 left, float2 right) => new(max(left.x, right.x), max(left.y, right.y));
     public static float3 max(float3 left, float3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
     public static float4 max(float4 left, float4 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z), max(left.w, right.w));
+    public static int2 max(int2 left, int2 right) => new(max(left.x, right.x), max(left.y, right.y));
+    public static int3 max(int3 left, int3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
+    public static int4 max(int4 left, int4 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z), max(left.w, right.w));
 
     public static float clamp(float value, float minimum, float maximum) => min(max(value, minimum), maximum);
     public static float2 clamp(float2 value, float2 minimum, float2 maximum) => min(max(value, minimum), maximum);
     public static float3 clamp(float3 value, float3 minimum, float3 maximum) => min(max(value, minimum), maximum);
     public static float4 clamp(float4 value, float4 minimum, float4 maximum) => min(max(value, minimum), maximum);
 
-    public static float saturate(float value) => clamp(value, 0.0f, 1.0f);
-    public static float2 saturate(float2 value) => clamp(value, 0.0f, 1.0f);
-    public static float3 saturate(float3 value) => clamp(value, 0.0f, 1.0f);
-    public static float4 saturate(float4 value) => clamp(value, 0.0f, 1.0f);
+    // DXIL Saturate is FMin(1, FMax(0, x)); that operand order, unlike clamp(x, 0, 1), maps -0 to +0.
+    public static float saturate(float value) => min(1.0f, max(0.0f, value));
+    public static float2 saturate(float2 value) => min(1.0f, max(0.0f, value));
+    public static float3 saturate(float3 value) => min(1.0f, max(0.0f, value));
+    public static float4 saturate(float4 value) => min(1.0f, max(0.0f, value));
 
     public static float lerp(float start, float end, float amount) => start + (end - start) * amount;
     public static double lerp(double start, double end, double amount) => start + (end - start) * amount;
@@ -105,6 +153,7 @@ public static class math
     public static double2 unlerp(double2 start, double2 end, double2 value) => (value - start) / (end - start);
     public static double3 unlerp(double3 start, double3 end, double3 value) => (value - start) / (end - start);
 
+    // dxc lowers step(y, x) to x < y ? 0 : 1 (fcmp olt, then select), so a NaN on either side yields 1.
     public static float step(float edge, float value) => value < edge ? 0.0f : 1.0f;
     public static float2 step(float2 edge, float2 value) => new(step(edge.x, value.x), step(edge.y, value.y));
     public static float3 step(float3 edge, float3 value) => new(step(edge.x, value.x), step(edge.y, value.y), step(edge.z, value.z));
@@ -156,9 +205,9 @@ public static class math
     public static float distance(float3 left, float3 right) => length(left - right);
     public static float distance(float4 left, float4 right) => length(left - right);
 
-    public static float2 normalize(float2 value) => value / MathF.Max(length(value), 1.0e-20f);
-    public static float3 normalize(float3 value) => value / MathF.Max(length(value), 1.0e-20f);
-    public static float4 normalize(float4 value) => value / MathF.Max(length(value), 1.0e-20f);
+    public static float2 normalize(float2 value) => value / max(length(value), 1.0e-20f);
+    public static float3 normalize(float3 value) => value / max(length(value), 1.0e-20f);
+    public static float4 normalize(float4 value) => value / max(length(value), 1.0e-20f);
     public static quaternion normalize(quaternion value)
     {
         var length = MathF.Sqrt(value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w);
@@ -324,9 +373,164 @@ public static class math
     public static float hash(float2 value) => hash(dot(value, new float2(127.1f, 311.7f)));
     public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
 
+    public static float log(float value) => MathF.Log(value);
+    public static float2 log(float2 value) => new(log(value.x), log(value.y));
+    public static float3 log(float3 value) => new(log(value.x), log(value.y), log(value.z));
+    public static float4 log(float4 value) => new(log(value.x), log(value.y), log(value.z), log(value.w));
+
+    public static float2 pow(float2 value, float2 power) => new(pow(value.x, power.x), pow(value.y, power.y));
+    public static float3 pow(float3 value, float3 power) => new(pow(value.x, power.x), pow(value.y, power.y), pow(value.z, power.z));
+    public static float4 pow(float4 value, float4 power) => new(pow(value.x, power.x), pow(value.y, power.y), pow(value.z, power.z), pow(value.w, power.w));
+
+    public static float2 sqrt(float2 value) => new(sqrt(value.x), sqrt(value.y));
+    public static float3 sqrt(float3 value) => new(sqrt(value.x), sqrt(value.y), sqrt(value.z));
+    public static float4 sqrt(float4 value) => new(sqrt(value.x), sqrt(value.y), sqrt(value.z), sqrt(value.w));
+
+    public static float2 sin(float2 value) => new(sin(value.x), sin(value.y));
+    public static float3 sin(float3 value) => new(sin(value.x), sin(value.y), sin(value.z));
+    public static float4 sin(float4 value) => new(sin(value.x), sin(value.y), sin(value.z), sin(value.w));
+
+    public static float2 cos(float2 value) => new(cos(value.x), cos(value.y));
+    public static float3 cos(float3 value) => new(cos(value.x), cos(value.y), cos(value.z));
+    public static float4 cos(float4 value) => new(cos(value.x), cos(value.y), cos(value.z), cos(value.w));
+
+    public static float2 acos(float2 value) => new(acos(value.x), acos(value.y));
+    public static float3 acos(float3 value) => new(acos(value.x), acos(value.y), acos(value.z));
+    public static float4 acos(float4 value) => new(acos(value.x), acos(value.y), acos(value.z), acos(value.w));
+
+    public static float2 atan2(float2 y, float2 x) => new(atan2(y.x, x.x), atan2(y.y, x.y));
+    public static float3 atan2(float3 y, float3 x) => new(atan2(y.x, x.x), atan2(y.y, x.y), atan2(y.z, x.z));
+    public static float4 atan2(float4 y, float4 x) => new(atan2(y.x, x.x), atan2(y.y, x.y), atan2(y.z, x.z), atan2(y.w, x.w));
+
+    // DXIL FMin/FMax take double overloads with the same rules as float (see min/max above).
+    public static double min(double left, double right) => left < right || double.IsNaN(right) ? left : right;
+    public static double max(double left, double right) => left >= right || double.IsNaN(right) ? left : right;
+
+    public static bool any(bool2 value) => value.x || value.y;
+    public static bool any(bool3 value) => value.x || value.y || value.z;
+    public static bool any(bool4 value) => value.x || value.y || value.z || value.w;
+    public static bool all(bool2 value) => value.x && value.y;
+    public static bool all(bool3 value) => value.x && value.y && value.z;
+    public static bool all(bool4 value) => value.x && value.y && value.z && value.w;
+
+    // HLSL any/all on numeric vectors test components against zero (NaN != 0 counts as true).
+    public static bool any(float2 value) => value.x != 0.0f || value.y != 0.0f;
+    public static bool any(float3 value) => value.x != 0.0f || value.y != 0.0f || value.z != 0.0f;
+    public static bool any(float4 value) => value.x != 0.0f || value.y != 0.0f || value.z != 0.0f || value.w != 0.0f;
+    public static bool all(float2 value) => value.x != 0.0f && value.y != 0.0f;
+    public static bool all(float3 value) => value.x != 0.0f && value.y != 0.0f && value.z != 0.0f;
+    public static bool all(float4 value) => value.x != 0.0f && value.y != 0.0f && value.z != 0.0f && value.w != 0.0f;
+    public static bool any(int2 value) => value.x != 0 || value.y != 0;
+    public static bool any(int3 value) => value.x != 0 || value.y != 0 || value.z != 0;
+    public static bool any(int4 value) => value.x != 0 || value.y != 0 || value.z != 0 || value.w != 0;
+    public static bool all(int2 value) => value.x != 0 && value.y != 0;
+    public static bool all(int3 value) => value.x != 0 && value.y != 0 && value.z != 0;
+    public static bool all(int4 value) => value.x != 0 && value.y != 0 && value.z != 0 && value.w != 0;
+
+    // HLSL 2021 argument order: select(condition, whenTrue, whenFalse).
+    // Unity.Mathematics' select(falseValue, trueValue, condition) is the reverse.
+    public static float select(bool condition, float whenTrue, float whenFalse) => condition ? whenTrue : whenFalse;
+    public static float2 select(bool2 condition, float2 whenTrue, float2 whenFalse) =>
+        new(condition.x ? whenTrue.x : whenFalse.x, condition.y ? whenTrue.y : whenFalse.y);
+    public static float3 select(bool3 condition, float3 whenTrue, float3 whenFalse) =>
+        new(condition.x ? whenTrue.x : whenFalse.x, condition.y ? whenTrue.y : whenFalse.y, condition.z ? whenTrue.z : whenFalse.z);
+    public static float4 select(bool4 condition, float4 whenTrue, float4 whenFalse) =>
+        new(condition.x ? whenTrue.x : whenFalse.x, condition.y ? whenTrue.y : whenFalse.y, condition.z ? whenTrue.z : whenFalse.z, condition.w ? whenTrue.w : whenFalse.w);
+
+    // HLSL mul: mul(m, v) treats v as a column vector, mul(v, m) as a row vector.
+    public static float mul(float left, float right) => left * right;
+
+    public static float2 mul(float2x2 m, float2 v) =>
+        new(m._m00 * v.x + m._m01 * v.y, m._m10 * v.x + m._m11 * v.y);
+
+    public static float2 mul(float2 v, float2x2 m) =>
+        new(v.x * m._m00 + v.y * m._m10, v.x * m._m01 + v.y * m._m11);
+
+    public static float2x2 mul(float2x2 a, float2x2 b) =>
+        new(
+            a._m00 * b._m00 + a._m01 * b._m10, a._m00 * b._m01 + a._m01 * b._m11,
+            a._m10 * b._m00 + a._m11 * b._m10, a._m10 * b._m01 + a._m11 * b._m11);
+
+    public static float3 mul(float3x3 m, float3 v) =>
+        new(
+            m._m00 * v.x + m._m01 * v.y + m._m02 * v.z,
+            m._m10 * v.x + m._m11 * v.y + m._m12 * v.z,
+            m._m20 * v.x + m._m21 * v.y + m._m22 * v.z);
+
+    public static float3 mul(float3 v, float3x3 m) =>
+        new(
+            v.x * m._m00 + v.y * m._m10 + v.z * m._m20,
+            v.x * m._m01 + v.y * m._m11 + v.z * m._m21,
+            v.x * m._m02 + v.y * m._m12 + v.z * m._m22);
+
+    public static float3x3 mul(float3x3 a, float3x3 b) =>
+        new(
+            a._m00 * b._m00 + a._m01 * b._m10 + a._m02 * b._m20,
+            a._m00 * b._m01 + a._m01 * b._m11 + a._m02 * b._m21,
+            a._m00 * b._m02 + a._m01 * b._m12 + a._m02 * b._m22,
+            a._m10 * b._m00 + a._m11 * b._m10 + a._m12 * b._m20,
+            a._m10 * b._m01 + a._m11 * b._m11 + a._m12 * b._m21,
+            a._m10 * b._m02 + a._m11 * b._m12 + a._m12 * b._m22,
+            a._m20 * b._m00 + a._m21 * b._m10 + a._m22 * b._m20,
+            a._m20 * b._m01 + a._m21 * b._m11 + a._m22 * b._m21,
+            a._m20 * b._m02 + a._m21 * b._m12 + a._m22 * b._m22);
+
+    // Ashima Arts / Ian McEwan 3D simplex noise (MIT), mirrored by cultmath_snoise(float3)
+    // in shaders/CultMath.hlsl with the same float32 evaluation order.
+    public static float snoise(float3 value)
+    {
+        const float cx = 1.0f / 6.0f;
+        const float cy = 1.0f / 3.0f;
+        var i = floor(value + dot(value, new float3(cy, cy, cy)));
+        var x0 = value - i + dot(i, new float3(cx, cx, cx));
+        var g = step(new float3(x0.y, x0.z, x0.x), x0);
+        var l = 1.0f - g;
+        var lzxy = new float3(l.z, l.x, l.y);
+        var i1 = min(g, lzxy);
+        var i2 = max(g, lzxy);
+        var x1 = x0 - i1 + cx;
+        var x2 = x0 - i2 + cy;
+        var x3 = x0 - 0.5f;
+
+        i = snoise_mod289(i);
+        var p = snoise_permute(snoise_permute(snoise_permute(
+            i.z + new float4(0.0f, i1.z, i2.z, 1.0f)) + i.y + new float4(0.0f, i1.y, i2.y, 1.0f)) + i.x + new float4(0.0f, i1.x, i2.x, 1.0f));
+
+        const float n = 0.142857142857f;
+        var ns = new float3(2.0f * n, 0.5f * n - 1.0f, n);
+        var j = p - 49.0f * floor(p * ns.z * ns.z);
+        var xs = floor(j * ns.z);
+        var ys = floor(j - 7.0f * xs);
+        var x = xs * ns.x + ns.y;
+        var y = ys * ns.x + ns.y;
+        var h = 1.0f - abs(x) - abs(y);
+
+        var b0 = new float4(x.x, x.y, y.x, y.y);
+        var b1 = new float4(x.z, x.w, y.z, y.w);
+        var s0 = floor(b0) * 2.0f + 1.0f;
+        var s1 = floor(b1) * 2.0f + 1.0f;
+        var sh = -step(h, 0.0f);
+        var a0 = new float4(b0.x, b0.z, b0.y, b0.w) + new float4(s0.x, s0.z, s0.y, s0.w) * new float4(sh.x, sh.x, sh.y, sh.y);
+        var a1 = new float4(b1.x, b1.z, b1.y, b1.w) + new float4(s1.x, s1.z, s1.y, s1.w) * new float4(sh.z, sh.z, sh.w, sh.w);
+
+        var p0 = new float3(a0.x, a0.y, h.x);
+        var p1 = new float3(a0.z, a0.w, h.y);
+        var p2 = new float3(a1.x, a1.y, h.z);
+        var p3 = new float3(a1.z, a1.w, h.w);
+        var norm = 1.79284291400159f - 0.85373472095314f * new float4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+
+        var m = max(0.6f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
+        m = m * m;
+        return 42.0f * dot(m * m, new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+    }
+
     // Ashima Arts / Ian McEwan 2D simplex noise, kept component-explicit so
     // the C# and HLSL mirrors preserve the same float32 evaluation order.
-    public static float simplex_noise(float2 value)
+    public static float snoise(float2 value)
     {
         var c = new float4(
             0.211324865405187f,
@@ -342,8 +546,8 @@ public static class math
             x0.x + c.z,
             x0.y + c.z);
 
-        i = simplex_mod289(i);
-        var p = simplex_permute(simplex_permute(i.y + new float3(0.0f, i1.y, 1.0f)) + i.x + new float3(0.0f, i1.x, 1.0f));
+        i = snoise_mod289(i);
+        var p = snoise_permute(snoise_permute(i.y + new float3(0.0f, i1.y, 1.0f)) + i.x + new float3(0.0f, i1.x, 1.0f));
         var m = max(0.5f - new float3(
             dot(x0, x0),
             x12.x * x12.x + x12.y * x12.y,
@@ -364,9 +568,11 @@ public static class math
         return 130.0f * dot(m, g);
     }
 
-    private static float2 simplex_mod289(float2 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
-    private static float3 simplex_mod289(float3 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
-    private static float3 simplex_permute(float3 value) => simplex_mod289(((value * 34.0f) + 1.0f) * value);
+    private static float2 snoise_mod289(float2 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
+    private static float3 snoise_mod289(float3 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
+    private static float4 snoise_mod289(float4 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
+    private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
+    private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
 
     public static float value_noise(float2 position)
     {

@@ -248,18 +248,12 @@ namespace GameCult.Networking
             });
         }
 
-        private async Task DeleteAsync(CultNetDatabaseChangeRawMessage message)
+        private Task DeleteAsync(CultNetDatabaseChangeRawMessage message)
         {
-            if (string.IsNullOrWhiteSpace(message.RecordKey) || string.IsNullOrWhiteSpace(message.SchemaId)) return;
-            var descriptor = _documents.ResolveDescriptorForSchemaId(message.SchemaId!);
-            var handle = Activator.CreateInstance(
-                typeof(CultRecordHandle<>).MakeGenericType(descriptor.DocumentType),
-                new object[] { new CultRecordKey(message.RecordKey!) });
-            var task = (Task)typeof(CultCache)
-                .GetMethod(nameof(CultCache.DeleteAsync), BindingFlags.Public | BindingFlags.Instance)!
-                .MakeGenericMethod(descriptor.DocumentType)
-                .Invoke(_cache, new[] { handle })!;
-            await task.ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(message.RecordKey) || string.IsNullOrWhiteSpace(message.SchemaId)) return Task.CompletedTask;
+            _documents.ResolveDescriptorForSchemaId(message.SchemaId!);
+            _cache.Remove(new CultRecordKey(message.RecordKey!));
+            return Task.CompletedTask;
         }
 
         private void Enqueue(Func<Task> operation)

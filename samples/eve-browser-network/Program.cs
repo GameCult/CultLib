@@ -467,9 +467,9 @@ sealed class Args
 [MessagePackObject]
 public sealed class CounterState
 {
-    [Key("counterId")] public string CounterId { get; set; } = "";
-    [Key("count")] public int Count { get; set; }
-    [Key("receipts")] public Dictionary<string, IncrementReceipt> Receipts { get; set; } = new(StringComparer.Ordinal);
+    [Key(0)] public string CounterId { get; set; } = "";
+    [Key(1)] public int Count { get; set; }
+    [Key(2)] public Dictionary<string, IncrementReceipt> Receipts { get; set; } = new(StringComparer.Ordinal);
     public static CounterState Initial(string counterId) => new() { CounterId = counterId };
 }
 

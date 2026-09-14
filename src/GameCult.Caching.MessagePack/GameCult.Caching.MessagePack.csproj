@@ -1,13 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <Description>File-based MessagePack backing store for CultCache</Description>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
   
   <ItemGroup>
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
-    <!-- Bring in analyzers project so its DLL is packed alongside -->
-    <ProjectReference Include="..\GameCult.Caching.MessagePack.Analyzers\GameCult.Caching.MessagePack.Analyzers.csproj"
-                      PrivateAssets="none" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
+    <PackageReference Include="MessagePackAnalyzer" Version="3.1.7" PrivateAssets="all" />
+    <InternalsVisibleTo Include="GameCult.Caching.Tests" />
   </ItemGroup>
 </Project>

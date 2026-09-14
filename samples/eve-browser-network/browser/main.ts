@@ -7,6 +7,10 @@ import {
   decodeCultNetPayload,
 } from "cultmesh-browser";
 
+// CounterState is an integer-keyed MessagePack object: [counterId, count, receipts].
+const counterCount = (record: Parameters<typeof decodeCultNetPayload>[0]) =>
+  decodeCultNetPayload<[string, number, unknown]>(record)[1];
+
 declare global {
   interface Window {
     __sampleReady?: boolean;
@@ -83,17 +87,17 @@ try {
     stateBindingResolver: async binding => {
       if (binding.pointerId !== "sample.counter.count") return undefined;
       return {
-        latest: async () => decodeCultNetPayload<{ count: number }>(counter.current!).count,
+        latest: async () => counterCount(counter.current!),
         watch: callback => counter.watch(record => {
           if (!record) return;
-          const count = decodeCultNetPayload<{ count: number }>(record).count;
+          const count = counterCount(record);
           window.__sampleCount = count;
           callback(count);
         }),
       };
     },
   });
-  window.__sampleCount = decodeCultNetPayload<{ count: number }>(counter.current!).count;
+  window.__sampleCount = counterCount(counter.current!);
   window.__sampleReady = true;
 } catch (error) {
   const details = error instanceof AggregateError

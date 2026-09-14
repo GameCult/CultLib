@@ -1387,6 +1387,135 @@ public sealed class CultMeshStreamingTests
         observed.Current.Revision.Should().Be(2);
     }
 
+    // The older of two racing writes is parked in an earlier observer until the newer one has been applied.
+    [Test]
+    public async Task WatchRecordIgnoresStaleSequence()
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:stale-sequence");
+        var handle = new CultRecordHandle<MeshNoteDocument>(key);
+        MeshNoteDocument Note(string text, int revision) =>
+            new() { Schema = "tests.mesh_note.v1", Text = text, Revision = revision };
+        await cache.UpsertAsync(Note("initial", 1), handle);
+        using var release = new System.Threading.ManualResetEventSlim();
+        using var parked = new System.Threading.ManualResetEventSlim();
+        using var park = cache.WatchRecord<MeshNoteDocument>(key).Subscribe(change =>
+        {
+            if (change.Document?.Revision != 2) return;
+            parked.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        using var observed = await CultMesh.Document<MeshNoteDocument>(cache, key).ObserveAsync();
+
+        var older = Task.Run(() => cache.UpsertAsync(Note("older", 2), handle));
+        parked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        var newer = Task.Run(() => cache.UpsertAsync(Note("newer", 3), handle));
+        var newerFinished = newer.Wait(TimeSpan.FromSeconds(10));
+        release.Set();
+
+        newerFinished.Should().BeTrue("a writer waited on another thread's delivery");
+        older.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        observed.Current.Text.Should().Be("newer");
+        cache.Dispose();
+    }
+
+    // A batch parks in an observer of another key before publishing its (older) target-key change; the mirror is
+    // created after a newer write landed, then the straggler is delivered.
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ObserveAfterNewerSnapshotIgnoresStraggler(bool reactive)
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:straggler");
+        var other = new CultRecordKey("mesh-note:straggler-other");
+        await cache.UpsertAsync(Note("initial", 1), new CultRecordHandle<MeshNoteDocument>(key));
+        using var release = new ManualResetEventSlim();
+        using var parked = new ManualResetEventSlim();
+        using var park = cache.WatchRecord<MeshNoteDocument>(other).Subscribe(_ =>
+        {
+            parked.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+
+        var batch = Task.Run(() => cache.Commit(stage =>
+        {
+            stage.Upsert(Note("other", 1), new CultRecordHandle<MeshNoteDocument>(other));
+            stage.Upsert(Note("older", 2), new CultRecordHandle<MeshNoteDocument>(key));
+        }));
+        parked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        await cache.UpsertAsync(Note("newer", 3), new CultRecordHandle<MeshNoteDocument>(key));
+        var (mirror, text, _) = await Mirror(cache, key, reactive);
+        release.Set();
+
+        batch.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        mirror.Dispose();
+        cache.Dispose();
+    }
+
+    // The mirror's own delivery of the newer write is parked too, so only the refresh saw it before the straggler.
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RefreshIgnoresStragglerOlderThanSnapshot(bool reactive)
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:refresh-straggler");
+        var other = new CultRecordKey("mesh-note:refresh-straggler-other");
+        await cache.UpsertAsync(Note("initial", 1), new CultRecordHandle<MeshNoteDocument>(key));
+        using var releaseOlder = new ManualResetEventSlim();
+        using var olderParked = new ManualResetEventSlim();
+        using var releaseNewer = new ManualResetEventSlim();
+        using var newerParked = new ManualResetEventSlim();
+        using var parkOlder = cache.WatchRecord<MeshNoteDocument>(other).Subscribe(_ =>
+        {
+            olderParked.Set();
+            releaseOlder.Wait(TimeSpan.FromSeconds(30));
+        });
+        using var parkNewer = cache.WatchRecord<MeshNoteDocument>(key).Subscribe(change =>
+        {
+            if (change.Document?.Text != "newer") return;
+            newerParked.Set();
+            releaseNewer.Wait(TimeSpan.FromSeconds(30));
+        });
+        var (mirror, text, refresh) = await Mirror(cache, key, reactive);
+
+        var batch = Task.Run(() => cache.Commit(stage =>
+        {
+            stage.Upsert(Note("other", 1), new CultRecordHandle<MeshNoteDocument>(other));
+            stage.Upsert(Note("older", 2), new CultRecordHandle<MeshNoteDocument>(key));
+        }));
+        olderParked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        var newer = Task.Run(() => cache.UpsertAsync(Note("newer", 3), new CultRecordHandle<MeshNoteDocument>(key)));
+        newerParked.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        await refresh();
+        releaseOlder.Set();
+        batch.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        releaseNewer.Set();
+
+        newer.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        text().Should().Be("newer");
+        mirror.Dispose();
+        cache.Dispose();
+    }
+
+    private static MeshNoteDocument Note(string text, int revision) =>
+        new() { Schema = "tests.mesh_note.v1", Text = text, Revision = revision };
+
+    private static async Task<(IDisposable Mirror, Func<string> Text, Func<Task> Refresh)> Mirror(
+        CultCache cache, CultRecordKey key, bool reactive)
+    {
+        var handle = CultMesh.Document<MeshNoteDocument>(cache, key);
+        if (reactive)
+        {
+            var mirror = await handle.AuthoritativeWriter().ReactiveAsync();
+            return (mirror, () => mirror.Snapshot.Text, () => mirror.RefreshAsync());
+        }
+
+        var observed = await handle.ObserveAsync();
+        return (observed, () => observed.Current.Text, () => observed.RefreshAsync());
+    }
+
     [Test]
     public async Task ReactiveDocument_DisposeSuppressesScheduledFlush()
     {
@@ -1761,8 +1890,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -1820,8 +1948,7 @@ public sealed class CultMeshStreamingTests
                        StartServer = false,
                        CacheOptions = new CultCacheOpenOptions
                        {
-                           Registry = sourceCache.Registry,
-                           PullOnOpen = false
+                           Registry = sourceCache.Registry
                        },
                        DatabaseOptions = new CultNetDatabaseOptions
                        {
@@ -1846,8 +1973,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -1899,8 +2025,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2484,12 +2609,12 @@ public sealed class CultMeshStreamingTests
         var filePath = Path.Combine(directory.Path, "legacy-single-document.ccmp");
         var key = new CultRecordKey("mesh-note:legacy-single-document");
         var descriptor = CultDocumentRegistry.Shared.GetRequired<MeshPublicationNoteDocument>();
-        var payload = CultDocumentMessagePackSerialization.Serialize(new MeshPublicationNoteDocument
+        var payload = CultDocumentMessagePackSerialization.SerializeUntyped(new MeshPublicationNoteDocument
         {
             Schema = "tests.mesh_publication_note.v1",
             Text = "legacy-published",
             Revision = 4
-        });
+        }, typeof(MeshPublicationNoteDocument));
 
         File.WriteAllBytes(filePath, WriteLegacySingleDocumentSnapshot(
             key.Value,
@@ -2760,8 +2885,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2835,8 +2959,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = targetCache.Registry,
-                    PullOnOpen = false
+                    Registry = targetCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -2993,8 +3116,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = cacheRegistry,
-                    PullOnOpen = false
+                    Registry = cacheRegistry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -3030,8 +3152,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -3170,8 +3291,7 @@ public sealed class CultMeshStreamingTests
                 StartServer = false,
                 CacheOptions = new CultCacheOpenOptions
                 {
-                    Registry = sourceCache.Registry,
-                    PullOnOpen = false
+                    Registry = sourceCache.Registry
                 },
                 DatabaseOptions = new CultNetDatabaseOptions
                 {
@@ -3522,51 +3642,6 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ManagedDocument_Commits_Through_MeshDatabase_And_Watches_Networked_Updates()
-    {
-        var filePath = Path.Combine(Path.GetTempPath(), $"cultmesh-managed-{Guid.NewGuid():N}.ccmp");
-
-        try
-        {
-            using var node = await CultMesh.CreateNodeAsync(
-                filePath,
-                new CultMeshNodeOptions { StartServer = false });
-            var key = new CultRecordKey("player:alice");
-            var document = node.Database.Document<MeshManagedPlayer>(key);
-            MeshManagedPlayer observed = null!;
-            using var subscription = document.Watch().Subscribe(value => observed = value);
-
-            await document.ReplaceAsync(new MeshManagedPlayer
-            {
-                Name = "alice",
-                PositionX = 4,
-                Health = 100
-            });
-            await node.Database.PutAsync(key, new MeshManagedPlayer
-            {
-                Name = "alice",
-                PositionX = 8,
-                Health = 75
-            });
-
-            document.Value.Should().NotBeNull();
-            document.Value!.Health.Should().Be(75);
-            observed.Should().NotBeNull();
-            observed!.PositionX.Should().Be(8);
-            node.Cache.Soa<MeshManagedPlayer>().Column<int>(nameof(MeshManagedPlayer.Health)).Span.ToArray()
-                .Should()
-                .Equal(75);
-        }
-        finally
-        {
-            if (File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-        }
-    }
-
-    [Test]
     public void NegotiatesGpuTextureStreamsWithoutForcingCopies()
     {
         var catalog = CultMesh.CreateStreamCatalog();
@@ -3798,19 +3873,6 @@ public sealed class CultMeshStreamingTests
                 Directory.Delete(Path, recursive: true);
             }
         }
-    }
-
-    [CultDocument("tests.mesh_managed_player", "tests.mesh_managed_player.v1")]
-    private sealed class MeshManagedPlayer
-    {
-        [MessagePack.Key(0)]
-        public string Name = string.Empty;
-
-        [MessagePack.Key(1)]
-        public float PositionX;
-
-        [MessagePack.Key(2)]
-        public int Health;
     }
 
     [CultDocument("tests.mesh_indexed_player", "tests.mesh_indexed_player.v1")]

@@ -13,32 +13,84 @@ import type {
   CultCacheStoreRegistration,
 } from "./types";
 
-type StoreRoute = {
-  primary?: CacheBackingStore;
-  mirrors: CacheBackingStore[];
-};
+type Accessor = (value: unknown) => string | undefined;
 
 type RegisteredDefinition = {
   readonly definition: AnyCultCacheDocumentDefinition;
   readonly global: boolean;
   readonly formatter: CultCacheDocumentFormatter<unknown>;
   readonly catalogEntry: CultCacheSchemaCatalogEntry;
-  nameAccessor?: (value: unknown) => string | undefined;
-  readonly indexAccessors: Map<string, (value: unknown) => string | undefined>;
+  nameAccessor?: Accessor;
+  indexAccessors: ReadonlyMap<string, Accessor>;
+};
+
+// The name and index values a record produced when it was admitted. Removing the record
+// reads these and runs no accessor, so removal has no fallible step.
+type EntryLookups = {
+  readonly name?: string;
+  readonly indexes: ReadonlyMap<string, string>;
 };
 
 type HydratedEntry = CultCacheEnvelope & {
   value: unknown;
+  lookups: EntryLookups;
 };
+
+// Everything a pull replaces. Built whole, then swapped in with one assignment.
+type HydratedState = {
+  readonly entries: Map<string, HydratedEntry>;
+  readonly typeEntryIds: Map<string, Set<string>>;
+  readonly nameToKeyMaps: Map<string, Map<string, string>>;
+  readonly indexToKeyMaps: Map<string, Map<string, string>>;
+  readonly globalKeys: Map<string, string>;
+  // Load compatibility shim: a global persisted under a key other than GLOBAL_KEY is held as that
+  // type's global under GLOBAL_KEY, and its persisted envelope is kept here so the first write or
+  // delete of that global removes it from the home store. Remove once no store holds a global under
+  // a key other than GLOBAL_KEY.
+  readonly legacyGlobals: Map<string, CultCacheEnvelope>;
+};
+
+// Lookups for every held record of one type under candidate accessors, derived before anything is installed.
+type DerivedTypeLookups = {
+  readonly entryLookups: Array<[HydratedEntry, EntryLookups]>;
+  readonly nameMap?: Map<string, string>;
+  readonly indexMaps: Map<string, Map<string, string>>;
+};
+
+function emptyHydratedState(): HydratedState {
+  return {
+    entries: new Map(),
+    typeEntryIds: new Map(),
+    nameToKeyMaps: new Map(),
+    indexToKeyMaps: new Map(),
+    globalKeys: new Map(),
+    legacyGlobals: new Map(),
+  };
+}
+
+function getOrCreate<K, V>(map: Map<K, V>, key: K, create: () => V): V {
+  let value = map.get(key);
+  if (value === undefined) {
+    value = create();
+    map.set(key, value);
+  }
+  return value;
+}
 
 type BackingStoreTypeReference = string | AnyCultCacheDocumentDefinition;
 type AccessorInput = string | ((value: any) => unknown);
 
+// Assigned in CultCache's static block. The builder's cache is unreachable until build(), so no
+// queued operation can be in flight and registration and attach may run synchronously.
+let registerNow!: (cache: CultCache, definition: AnyCultCacheDocumentDefinition) => void;
+let attachNow!: (cache: CultCache, store: CacheBackingStore, types: BackingStoreTypeReference[]) => void;
+
 export class CultCacheBuilder {
   readonly #cache = new CultCache();
+  #built = false;
 
   withDocumentType<TDefinition extends AnyCultCacheDocumentDefinition>(definition: TDefinition): this {
-    this.#cache.registerDocumentType(definition);
+    registerNow(this.#unbuilt(), definition);
     return this;
   }
 
@@ -47,7 +99,10 @@ export class CultCacheBuilder {
       | CultCacheDocumentRegistry
       | Iterable<AnyCultCacheDocumentDefinition>,
   ): this {
-    this.#cache.registerRegistry(registry);
+    const cache = this.#unbuilt();
+    for (const definition of registryDefinitions(registry)) {
+      registerNow(cache, definition);
+    }
     return this;
   }
 
@@ -55,167 +110,193 @@ export class CultCacheBuilder {
     store: CacheBackingStore,
     ...types: BackingStoreTypeReference[]
   ): this {
-    this.#cache.addBackingStore(store, ...types);
+    attachNow(this.#unbuilt(), store, types);
     return this;
   }
 
   withGenericStore(store: CacheBackingStore): this {
-    this.#cache.addGenericBackingStore(store);
+    attachNow(this.#unbuilt(), store, []);
     return this;
   }
 
   build(): CultCache {
+    this.#built = true;
     return this.#cache;
   }
+
+  #unbuilt(): CultCache {
+    if (this.#built) {
+      throw new Error("CultCacheBuilder has already built its cache; configure the cache through its own methods.");
+    }
+    return this.#cache;
+  }
+}
+
+function registryDefinitions(
+  registry: CultCacheDocumentRegistry | Iterable<AnyCultCacheDocumentDefinition>,
+): Iterable<AnyCultCacheDocumentDefinition> {
+  return Symbol.iterator in Object(registry) && !("definitions" in Object(registry))
+    ? registry as Iterable<AnyCultCacheDocumentDefinition>
+    : (registry as CultCacheDocumentRegistry).definitions;
 }
 
 export class CultCache {
   static readonly GLOBAL_KEY = "__global__";
 
+  static {
+    registerNow = (cache, definition) => cache.#registerNow(definition);
+    attachNow = (cache, store, types) => cache.#attachNow(store, types);
+  }
+
   readonly #definitions = new Map<string, RegisteredDefinition>();
   readonly #schemaIdDefinitions = new Map<string, RegisteredDefinition>();
   readonly #schemaNameDefinitions = new Map<string, RegisteredDefinition>();
-  readonly #entries = new Map<string, HydratedEntry>();
-  readonly #typeEntryIds = new Map<string, Set<string>>();
-  readonly #nameToKeyMaps = new Map<string, Map<string, string>>();
-  readonly #indexToKeyMaps = new Map<string, Map<string, string>>();
-  readonly #globalKeys = new Map<string, string>();
+  #hydrated = emptyHydratedState();
   readonly #stores: CultCacheStoreRegistration[] = [];
+  #tail: Promise<void> = Promise.resolve();
 
   static builder(): CultCacheBuilder {
     return new CultCacheBuilder();
   }
 
+  // Attach, pull, registration and every write and delete run one at a time through this chain,
+  // so validation, the store call and applying to the cache never interleave with another
+  // mutation of this cache. Reads are not queued. Observer delivery is not scheduled here.
+  // The chain advances on its own promise; the caller gets the operation's promise, untouched, so
+  // an unawaited failure is still an unhandled rejection. A call made from inside an operation
+  // queues behind it; a store call that waits for that call waits on itself and never finishes.
+  #serial<T>(operation: () => T | Promise<T>): Promise<T> {
+    let advance!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((resolve) => {
+      advance = resolve;
+    });
+    return previous.then(async () => {
+      try {
+        return await operation();
+      } finally {
+        advance();
+      }
+    });
+  }
+
   registerDocumentType<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
-  ): TDefinition {
-    const existing = this.#definitions.get(definition.type);
-    if (existing && existing.definition !== definition) {
-      throw new Error(`CultCache already has a different definition registered for type "${definition.type}".`);
-    }
-
-    const registered = existing ?? {
-      definition,
-      global: definition.global === true,
-      formatter: this.#createFormatter(definition),
-      catalogEntry: this.#createCatalogEntry(definition),
-      nameAccessor: undefined,
-      indexAccessors: new Map<string, (value: unknown) => string | undefined>(),
-    };
-
-    registered.nameAccessor = definition.name
-      ? this.#compileAccessor(definition.type, "name", definition.name)
-      : undefined;
-    registered.indexAccessors.clear();
-    for (const [indexName, accessor] of this.#enumerateDefinitionIndexes(definition)) {
-      registered.indexAccessors.set(
-        indexName,
-        this.#compileAccessor(definition.type, `index "${indexName}"`, accessor),
-      );
-    }
-
-    this.#definitions.set(definition.type, registered);
-    for (const schemaId of registered.catalogEntry.compatibleSchemaIds ?? [registered.catalogEntry.schemaId]) {
-      const existingBySchema = this.#schemaIdDefinitions.get(schemaId);
-      if (existingBySchema && existingBySchema !== registered) {
-        throw new Error(`CultCache schema id "${schemaId}" is already registered for type "${existingBySchema.definition.type}".`);
-      }
-      this.#schemaIdDefinitions.set(schemaId, registered);
-    }
-    const existingBySchemaName = this.#schemaNameDefinitions.get(registered.catalogEntry.schemaName);
-    if (existingBySchemaName && existingBySchemaName !== registered) {
-      throw new Error(
-        `CultCache schema name "${registered.catalogEntry.schemaName}" is already registered for type "${existingBySchemaName.definition.type}".`,
-      );
-    }
-    this.#schemaNameDefinitions.set(registered.catalogEntry.schemaName, registered);
-    this.#rebuildDefinitionLookups(registered);
-    return definition;
+  ): Promise<TDefinition> {
+    return this.#serial(() => {
+      this.#registerNow(definition);
+      return definition;
+    });
   }
 
   registerRegistry(
     registry:
       | CultCacheDocumentRegistry
       | Iterable<AnyCultCacheDocumentDefinition>,
-  ): this {
-    const definitions = Symbol.iterator in Object(registry) && !("definitions" in Object(registry))
-      ? registry as Iterable<AnyCultCacheDocumentDefinition>
-      : (registry as CultCacheDocumentRegistry).definitions;
-
-    for (const definition of definitions) {
-      this.registerDocumentType(definition);
-    }
-
-    return this;
+  ): Promise<void> {
+    return this.#serial(() => {
+      for (const definition of registryDefinitions(registry)) {
+        this.#registerNow(definition);
+      }
+    });
   }
 
   registerNameLookup<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     accessor: CultCacheDocumentAccessor<CultCacheDocumentValue<TDefinition>>,
-  ): TDefinition {
-    const registered = this.#requireDefinition(definition);
-    registered.nameAccessor = this.#compileAccessor(definition.type, "name", accessor);
-    this.#rebuildNameLookup(registered);
-    return definition;
+  ): Promise<TDefinition> {
+    return this.#serial(() => {
+      const registered = this.#requireDefinition(definition);
+      const nameAccessor = this.#compileAccessor(definition.type, "name", accessor);
+      const derived = this.#deriveTypeLookups(definition.type, nameAccessor, registered.indexAccessors);
+      this.#installAccessors(registered, nameAccessor, registered.indexAccessors, derived);
+      return definition;
+    });
   }
 
   registerIndex<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     indexName: string,
     accessor: CultCacheDocumentAccessor<CultCacheDocumentValue<TDefinition>>,
-  ): TDefinition {
-    if (!indexName || indexName.trim().length === 0) {
-      throw new Error(`CultCache index names for type "${definition.type}" must be non-empty.`);
-    }
+  ): Promise<TDefinition> {
+    return this.#serial(() => {
+      if (!indexName || indexName.trim().length === 0) {
+        throw new Error(`CultCache index names for type "${definition.type}" must be non-empty.`);
+      }
 
-    const registered = this.#requireDefinition(definition);
-    registered.indexAccessors.set(
-      indexName,
-      this.#compileAccessor(definition.type, `index "${indexName}"`, accessor),
-    );
-    this.#rebuildIndexLookup(registered, indexName);
-    return definition;
+      const registered = this.#requireDefinition(definition);
+      const indexAccessors = new Map(registered.indexAccessors);
+      indexAccessors.set(indexName, this.#compileAccessor(definition.type, `index "${indexName}"`, accessor));
+      const derived = this.#deriveTypeLookups(definition.type, registered.nameAccessor, indexAccessors);
+      this.#installAccessors(registered, registered.nameAccessor, indexAccessors, derived);
+      return definition;
+    });
   }
 
   addBackingStore(
     store: CacheBackingStore,
     ...types: BackingStoreTypeReference[]
-  ): void {
-    this.#stores.push({
-      store,
-      types: [...new Set(types.map((value) => (typeof value === "string" ? value : value.type)))],
-    });
+  ): Promise<void> {
+    return this.#serial(() => this.#attachNow(store, types));
   }
 
-  addGenericBackingStore(store: CacheBackingStore): void {
-    this.addBackingStore(store);
+  addGenericBackingStore(store: CacheBackingStore): Promise<void> {
+    return this.addBackingStore(store);
   }
 
-  async pullAllBackingStores(): Promise<void> {
-    this.#resetHydratedState();
+  // The complete next state (entries, globals, name and index lookups) is built into a fresh
+  // HydratedState, running every check and every user accessor, and replaces the cache's state
+  // in one assignment only once the build finishes. A refused load admits nothing.
+  pullAllBackingStores(): Promise<void> {
+    return this.#serial(async () => {
+      const next = emptyHydratedState();
+      const persistedGlobalKeys = new Map<string, string>();
 
-    for (const registration of this.#stores) {
-      const entries = await registration.store.pullAll();
+      for (const registration of this.#stores) {
+        const entries = await registration.store.pullAll();
 
-      for (const entry of entries) {
-        const registered = this.#resolveDefinitionForEnvelope(entry);
-        if (!registered) {
-          throw new Error(
-            entry.schemaId
-              ? `No schema is registered for persisted schema id "${entry.schemaId}".`
-              : `No schema is registered for persisted document type "${entry.type}".`,
-          );
+        for (const entry of entries) {
+          const registered = this.#resolveDefinitionForEnvelope(entry);
+          if (!registered) {
+            throw new Error(
+              entry.schemaId
+                ? `No schema is registered for persisted schema id "${entry.schemaId}".`
+                : `No schema is registered for persisted document type "${entry.type}".`,
+            );
+          }
+
+          const type = registered.definition.type;
+          const home = this.#resolveRegistration(type);
+          if (home?.store !== registration.store) {
+            throw new Error(
+              `CultCache "${type}" record "${entry.key}" was loaded from ${this.#describe(registration)}, ` +
+                `but its home is ${this.#describe(home)}.`,
+            );
+          }
+
+          const payload = this.#cloneBytes(entry.payload);
+          const value = registered.formatter.decode(payload);
+          let admitted: CultCacheEnvelope = { ...entry, type, payload };
+          if (registered.global) {
+            const persistedKey = persistedGlobalKeys.get(type);
+            if (persistedKey !== undefined) {
+              throw new Error(
+                `CultCache global document type "${type}" has multiple persisted entries: "${persistedKey}" and "${entry.key}".`,
+              );
+            }
+            persistedGlobalKeys.set(type, entry.key);
+            if (entry.key !== CultCache.GLOBAL_KEY) {
+              next.legacyGlobals.set(type, admitted);
+              admitted = { ...admitted, key: CultCache.GLOBAL_KEY };
+            }
+          }
+          const hydrated = this.#admitEntry(next, registered, admitted, value);
+          this.#installEntry(next, registered, hydrated);
         }
-
-        const payload = this.#cloneBytes(entry.payload);
-        const value = registered.formatter.decode(payload);
-        this.#applyHydratedEntry(registered, {
-          ...entry,
-          type: registered.definition.type,
-          payload,
-        }, value, "pull");
       }
-    }
+
+      this.#hydrated = next;
+    });
   }
 
   get<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -223,7 +304,7 @@ export class CultCache {
     key: string,
   ): CultCacheDocumentValue<TDefinition> | undefined {
     this.#requireDefinition(definition);
-    const entry = this.#entries.get(this.#entryId(definition.type, key));
+    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
     return entry ? (entry.value as CultCacheDocumentValue<TDefinition>) : undefined;
   }
 
@@ -244,7 +325,7 @@ export class CultCache {
     key: string,
   ): CultCacheEnvelope | undefined {
     this.#requireDefinition(definition);
-    const entry = this.#entries.get(this.#entryId(definition.type, key));
+    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
     return entry ? this.#toEnvelope(entry) : undefined;
   }
 
@@ -263,12 +344,8 @@ export class CultCache {
   getGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
   ): CultCacheDocumentValue<TDefinition> | undefined {
-    const registered = this.#requireDefinition(definition);
-    if (!registered.global) {
-      throw new Error(`CultCache document type "${definition.type}" is not marked as global.`);
-    }
-
-    const globalKey = this.#globalKeys.get(definition.type);
+    this.#requireGlobal(definition);
+    const globalKey = this.#hydrated.globalKeys.get(definition.type);
     return globalKey ? this.get(definition, globalKey) : undefined;
   }
 
@@ -286,12 +363,8 @@ export class CultCache {
   getGlobalEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
   ): CultCacheEnvelope | undefined {
-    const registered = this.#requireDefinition(definition);
-    if (!registered.global) {
-      throw new Error(`CultCache document type "${definition.type}" is not marked as global.`);
-    }
-
-    const globalKey = this.#globalKeys.get(definition.type);
+    this.#requireGlobal(definition);
+    const globalKey = this.#hydrated.globalKeys.get(definition.type);
     return globalKey ? this.getEnvelope(definition, globalKey) : undefined;
   }
 
@@ -299,21 +372,7 @@ export class CultCache {
     definition: TDefinition,
   ): CultCacheDocumentValue<TDefinition>[] {
     this.#requireDefinition(definition);
-    const values: CultCacheDocumentValue<TDefinition>[] = [];
-    const entryIds = this.#typeEntryIds.get(definition.type);
-
-    if (!entryIds) {
-      return values;
-    }
-
-    for (const entryId of entryIds) {
-      const entry = this.#entries.get(entryId);
-      if (entry) {
-        values.push(entry.value as CultCacheDocumentValue<TDefinition>);
-      }
-    }
-
-    return values;
+    return this.#entriesForType(definition.type).map((entry) => entry.value as CultCacheDocumentValue<TDefinition>);
   }
 
   getKeyByName<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -325,7 +384,7 @@ export class CultCache {
       return undefined;
     }
 
-    return this.#nameToKeyMaps.get(definition.type)?.get(name);
+    return this.#hydrated.nameToKeyMaps.get(definition.type)?.get(name);
   }
 
   getIdByName<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -349,7 +408,7 @@ export class CultCache {
     value: string,
   ): string | undefined {
     this.#requireDefinition(definition);
-    return this.#indexToKeyMaps.get(this.#indexId(definition.type, indexName))?.get(value);
+    return this.#hydrated.indexToKeyMaps.get(this.#indexId(definition.type, indexName))?.get(value);
   }
 
   getIdByIndex<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -369,12 +428,180 @@ export class CultCache {
     return key ? this.get(definition, key) : undefined;
   }
 
-  async put<TDefinition extends AnyCultCacheDocumentDefinition>(
+  put<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    value: CultCacheDocumentValue<TDefinition>,
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return this.#serial(() => this.#putNow(definition, key, value));
+  }
+
+  putEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    envelope: CultCacheEnvelope,
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return this.#serial(async () => {
+      const registered = this.#requireDefinition(definition);
+      if (envelope.type !== definition.type) {
+        throw new Error(
+          `CultCache envelope type "${envelope.type}" does not match definition "${definition.type}".`,
+        );
+      }
+      if (!envelope.key || envelope.key.trim().length === 0) {
+        throw new Error(`CultCache envelope key for type "${definition.type}" must be non-empty.`);
+      }
+      if (!envelope.storedAt || envelope.storedAt.trim().length === 0) {
+        throw new Error(`CultCache envelope storedAt for type "${definition.type}" must be non-empty.`);
+      }
+      this.#requireGlobalKey(registered, envelope.key);
+
+      const payload = this.#cloneBytes(envelope.payload);
+      const parsed = registered.formatter.decode(payload) as CultCacheDocumentValue<TDefinition>;
+      const entry: CultCacheEnvelope = {
+        key: envelope.key,
+        type: envelope.type,
+        payload,
+        storedAt: envelope.storedAt,
+        schemaId: envelope.schemaId ?? registered.catalogEntry.schemaId,
+        catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
+      };
+      await this.#writeNow(registered, entry, parsed);
+      return parsed;
+    });
+  }
+
+  putGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    value: CultCacheDocumentValue<TDefinition>,
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return this.#serial(() => {
+      this.#requireGlobal(definition);
+      return this.#putNow(definition, CultCache.GLOBAL_KEY, value);
+    });
+  }
+
+  update<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+    updater: (
+      current: CultCacheDocumentValue<TDefinition> | undefined,
+    ) => CultCacheDocumentValue<TDefinition>,
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return this.#serial(() => this.#putNow(definition, key, updater(this.get(definition, key))));
+  }
+
+  updateGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    updater: (
+      current: CultCacheDocumentValue<TDefinition> | undefined,
+    ) => CultCacheDocumentValue<TDefinition>,
+  ): Promise<CultCacheDocumentValue<TDefinition>> {
+    return this.#serial(() =>
+      this.#putNow(definition, CultCache.GLOBAL_KEY, updater(this.getGlobal(definition))),
+    );
+  }
+
+  delete<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+    key: string,
+  ): Promise<boolean> {
+    return this.#serial(() => this.#deleteNow(definition, key));
+  }
+
+  deleteGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
+    definition: TDefinition,
+  ): Promise<boolean> {
+    return this.#serial(async () => {
+      this.#requireGlobal(definition);
+      const globalKey = this.#hydrated.globalKeys.get(definition.type);
+      return globalKey ? this.#deleteNow(definition, globalKey) : false;
+    });
+  }
+
+  snapshot(): CultCacheEnvelope[] {
+    return [...this.#hydrated.entries.values()].map((entry) => this.#toEnvelope(entry));
+  }
+
+  #registerNow(definition: AnyCultCacheDocumentDefinition): void {
+    const existing = this.#definitions.get(definition.type);
+    if (existing && existing.definition !== definition) {
+      throw new Error(`CultCache already has a different definition registered for type "${definition.type}".`);
+    }
+
+    const registered: RegisteredDefinition = existing ?? {
+      definition,
+      global: definition.global === true,
+      formatter: this.#createFormatter(definition),
+      catalogEntry: this.#createCatalogEntry(definition),
+      nameAccessor: undefined,
+      indexAccessors: new Map<string, Accessor>(),
+    };
+
+    const nameAccessor = definition.name
+      ? this.#compileAccessor(definition.type, "name", definition.name)
+      : undefined;
+    const indexAccessors = new Map<string, Accessor>();
+    for (const [indexName, accessor] of this.#enumerateDefinitionIndexes(definition)) {
+      indexAccessors.set(indexName, this.#compileAccessor(definition.type, `index "${indexName}"`, accessor));
+    }
+
+    const schemaIds = registered.catalogEntry.compatibleSchemaIds ?? [registered.catalogEntry.schemaId];
+    for (const schemaId of schemaIds) {
+      const existingBySchema = this.#schemaIdDefinitions.get(schemaId);
+      if (existingBySchema && existingBySchema !== registered) {
+        throw new Error(`CultCache schema id "${schemaId}" is already registered for type "${existingBySchema.definition.type}".`);
+      }
+    }
+    const existingBySchemaName = this.#schemaNameDefinitions.get(registered.catalogEntry.schemaName);
+    if (existingBySchemaName && existingBySchemaName !== registered) {
+      throw new Error(
+        `CultCache schema name "${registered.catalogEntry.schemaName}" is already registered for type "${existingBySchemaName.definition.type}".`,
+      );
+    }
+    const derived = this.#deriveTypeLookups(definition.type, nameAccessor, indexAccessors);
+
+    // Every check and accessor has run; install.
+    this.#definitions.set(definition.type, registered);
+    for (const schemaId of schemaIds) {
+      this.#schemaIdDefinitions.set(schemaId, registered);
+    }
+    this.#schemaNameDefinitions.set(registered.catalogEntry.schemaName, registered);
+    this.#installAccessors(registered, nameAccessor, indexAccessors, derived);
+  }
+
+  #attachNow(store: CacheBackingStore, types: BackingStoreTypeReference[]): void {
+    const claimed = [...new Set(types.map((value) => (typeof value === "string" ? value : value.type)))];
+    if (claimed.length === 0 && this.#stores.some((registration) => registration.types.length === 0)) {
+      throw new Error("Backing store would be a second generic store; name the types it is home to.");
+    }
+    for (const type of claimed) {
+      if (this.#stores.some((registration) => registration.types.includes(type))) {
+        throw new Error(`CultCache type "${type}" is already routed to another backing store; it cannot also route to this one.`);
+      }
+    }
+    const candidate: CultCacheStoreRegistration = { store, types: claimed };
+    for (const type of this.#hydrated.typeEntryIds.keys()) {
+      const before = this.#resolveRegistration(type);
+      this.#stores.push(candidate);
+      const after = this.#resolveRegistration(type);
+      this.#stores.pop();
+      if (before !== after) {
+        throw new Error(
+          `Attaching this backing store would move "${type}" from ${this.#describe(before)} to ${this.#describe(after)}; ` +
+            "attach routed stores before the generic store.",
+        );
+      }
+    }
+    this.#stores.push(candidate);
+  }
+
+  async #putNow<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
     value: CultCacheDocumentValue<TDefinition>,
   ): Promise<CultCacheDocumentValue<TDefinition>> {
     const registered = this.#requireDefinition(definition);
+    this.#requireGlobalKey(registered, key);
     const payload = registered.formatter.encode(value);
     const parsed = registered.formatter.decode(payload) as CultCacheDocumentValue<TDefinition>;
     const entry: CultCacheEnvelope = {
@@ -385,140 +612,67 @@ export class CultCache {
       schemaId: registered.catalogEntry.schemaId,
       catalogEntry: registered.catalogEntry,
     };
-
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
-
-    if (registered.global) {
-      const existingGlobalKey = this.#globalKeys.get(definition.type);
-      if (existingGlobalKey && existingGlobalKey !== key) {
-        await this.delete(definition, existingGlobalKey);
-      }
-    }
-
-    await route.primary.push(entry);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.push(entry)));
-    this.#applyHydratedEntry(registered, entry, parsed, "put");
+    await this.#writeNow(registered, entry, parsed);
     return parsed;
   }
 
-  async putEnvelope<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    envelope: CultCacheEnvelope,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const registered = this.#requireDefinition(definition);
-    if (envelope.type !== definition.type) {
-      throw new Error(
-        `CultCache envelope type "${envelope.type}" does not match definition "${definition.type}".`,
-      );
+  // Validates the whole write (home, global singleton, name and index accessors) before the store
+  // is touched; once the store accepts, applying to the cache has no fallible step.
+  async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
+    const home = this.#homeStore(entry.type);
+    const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
+    const legacy = this.#hydrated.legacyGlobals.get(entry.type);
+    await home?.push(entry);
+    if (home && legacy) {
+      await this.#retireLegacyGlobal(home, legacy, entry);
     }
-    if (!envelope.key || envelope.key.trim().length === 0) {
-      throw new Error(`CultCache envelope key for type "${definition.type}" must be non-empty.`);
-    }
-    if (!envelope.storedAt || envelope.storedAt.trim().length === 0) {
-      throw new Error(`CultCache envelope storedAt for type "${definition.type}" must be non-empty.`);
-    }
-
-    const payload = this.#cloneBytes(envelope.payload);
-    const parsed = registered.formatter.decode(payload) as CultCacheDocumentValue<TDefinition>;
-    const entry: CultCacheEnvelope = {
-      key: envelope.key,
-      type: envelope.type,
-      payload,
-      storedAt: envelope.storedAt,
-      schemaId: envelope.schemaId ?? registered.catalogEntry.schemaId,
-      catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
-    };
-
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
-
-    if (registered.global) {
-      const existingGlobalKey = this.#globalKeys.get(definition.type);
-      if (existingGlobalKey && existingGlobalKey !== entry.key) {
-        await this.delete(definition, existingGlobalKey);
-      }
-    }
-
-    await route.primary.push(entry);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.push(entry)));
-    this.#applyHydratedEntry(registered, entry, parsed, "put");
-    return parsed;
+    this.#hydrated.legacyGlobals.delete(entry.type);
+    this.#installEntry(this.#hydrated, registered, hydrated);
   }
 
-  async putGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    value: CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const registered = this.#requireDefinition(definition);
-    if (!registered.global) {
-      throw new Error(`CultCache document type "${definition.type}" is not marked as global.`);
+  // The first write of a global loaded from a legacy key removes that record in the same write. If the
+  // removal fails, the new record is taken back out, so the store keeps only the legacy record.
+  async #retireLegacyGlobal(home: CacheBackingStore, legacy: CultCacheEnvelope, written: CultCacheEnvelope): Promise<void> {
+    try {
+      await home.delete(legacy);
+    } catch (error) {
+      await home.delete(written).catch(() => undefined);
+      throw error;
     }
-
-    return this.put(definition, CultCache.GLOBAL_KEY, value);
   }
 
-  async update<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    key: string,
-    updater: (
-      current: CultCacheDocumentValue<TDefinition> | undefined,
-    ) => CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const current = this.get(definition, key);
-    return this.put(definition, key, updater(current));
-  }
-
-  async updateGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-    updater: (
-      current: CultCacheDocumentValue<TDefinition> | undefined,
-    ) => CultCacheDocumentValue<TDefinition>,
-  ): Promise<CultCacheDocumentValue<TDefinition>> {
-    const current = this.getGlobal(definition);
-    return this.putGlobal(definition, updater(current));
-  }
-
-  async delete<TDefinition extends AnyCultCacheDocumentDefinition>(
+  async #deleteNow<TDefinition extends AnyCultCacheDocumentDefinition>(
     definition: TDefinition,
     key: string,
   ): Promise<boolean> {
     const registered = this.#requireDefinition(definition);
-    const entry = this.#entries.get(this.#entryId(definition.type, key));
+    const entry = this.#hydrated.entries.get(this.#entryId(definition.type, key));
     if (!entry) {
       return false;
     }
 
-    const route = this.#resolveRoute(definition.type);
-    if (!route.primary) {
-      throw new Error(`No backing store is registered for document type "${definition.type}".`);
-    }
-
-    const envelope = this.#toEnvelope(entry);
-    await route.primary.delete(envelope);
-    await Promise.all(route.mirrors.map(async (mirror) => mirror.delete(envelope)));
-    this.#removeHydratedEntry(registered, entry);
+    const home = this.#homeStore(definition.type);
+    await home?.delete(this.#hydrated.legacyGlobals.get(definition.type) ?? this.#toEnvelope(entry));
+    this.#hydrated.legacyGlobals.delete(definition.type);
+    this.#removeEntry(this.#hydrated, registered, entry);
     return true;
   }
 
-  async deleteGlobal<TDefinition extends AnyCultCacheDocumentDefinition>(
-    definition: TDefinition,
-  ): Promise<boolean> {
+  #requireGlobal(definition: AnyCultCacheDocumentDefinition): RegisteredDefinition {
     const registered = this.#requireDefinition(definition);
     if (!registered.global) {
       throw new Error(`CultCache document type "${definition.type}" is not marked as global.`);
     }
-
-    const globalKey = this.#globalKeys.get(definition.type);
-    return globalKey ? this.delete(definition, globalKey) : false;
+    return registered;
   }
 
-  snapshot(): CultCacheEnvelope[] {
-    return [...this.#entries.values()].map((entry) => this.#toEnvelope(entry));
+  // A global is only ever stored under GLOBAL_KEY; any other key is refused before a store is touched.
+  #requireGlobalKey(registered: RegisteredDefinition, key: string): void {
+    if (registered.global && key !== CultCache.GLOBAL_KEY) {
+      throw new Error(
+        `CultCache global document type "${registered.definition.type}" must use key "${CultCache.GLOBAL_KEY}", not "${key}".`,
+      );
+    }
   }
 
   #createFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
@@ -603,7 +757,7 @@ export class CultCache {
     type: string,
     label: string,
     accessor: AccessorInput,
-  ): (value: unknown) => string | undefined {
+  ): Accessor {
     if (typeof accessor === "function") {
       return (value: unknown) => this.#normalizeIndexValue(type, label, accessor(value));
     }
@@ -660,193 +814,201 @@ export class CultCache {
     return this.#schemaNameDefinitions.get(entry.type) ?? this.#definitions.get(entry.type);
   }
 
-  #resolveRoute(type: string): StoreRoute {
-    const typeSpecific = this.#stores.filter((registration) => registration.types.includes(type));
-    if (typeSpecific.length > 0) {
-      return {
-        primary: typeSpecific[0]?.store,
-        mirrors: typeSpecific.slice(1).map((registration) => registration.store),
-      };
-    }
-
-    const generic = this.#stores.filter((registration) => registration.types.length === 0);
-    return {
-      primary: generic[0]?.store,
-      mirrors: generic.slice(1).map((registration) => registration.store),
-    };
+  // The registration that claims the type, else the generic one. Registration guarantees at most one of each.
+  #resolveRegistration(type: string): CultCacheStoreRegistration | undefined {
+    return this.#stores.find((registration) => registration.types.includes(type))
+      ?? this.#stores.find((registration) => registration.types.length === 0);
   }
 
-  #applyHydratedEntry(
+  // A cache with no stores is in memory: undefined. Once any store is attached, a type with no home is an error.
+  #homeStore(type: string): CacheBackingStore | undefined {
+    if (this.#stores.length === 0) {
+      return undefined;
+    }
+    const home = this.#resolveRegistration(type);
+    if (!home) {
+      throw new Error(`No backing store is registered for document type "${type}".`);
+    }
+    return home.store;
+  }
+
+  #describe(registration: CultCacheStoreRegistration | undefined): string {
+    if (!registration) {
+      return "memory";
+    }
+    return registration.types.length === 0
+      ? "the generic store"
+      : `the store routed to ${registration.types.join(", ")}`;
+  }
+
+  #lookupsFor(
+    nameAccessor: Accessor | undefined,
+    indexAccessors: ReadonlyMap<string, Accessor>,
+    value: unknown,
+  ): EntryLookups {
+    const name = nameAccessor?.(value);
+    const indexes = new Map<string, string>();
+    for (const [indexName, accessor] of indexAccessors) {
+      const indexValue = accessor(value);
+      if (indexValue !== undefined) {
+        indexes.set(indexName, indexValue);
+      }
+    }
+    return { name, indexes };
+  }
+
+  // Fallible half of admission: the global singleton check and every user accessor. Touches no state.
+  #admitEntry(
+    state: HydratedState,
     registered: RegisteredDefinition,
     entry: CultCacheEnvelope,
     value: unknown,
-    source: "pull" | "put",
-  ): void {
-    const entryId = this.#entryId(entry.type, entry.key);
-    const existing = this.#entries.get(entryId);
-    if (existing) {
-      this.#removeHydratedEntry(registered, existing);
-    }
-
+  ): HydratedEntry {
     if (registered.global) {
-      const currentGlobalKey = this.#globalKeys.get(entry.type);
-      if (currentGlobalKey && currentGlobalKey !== entry.key) {
+      const currentGlobalKey = state.globalKeys.get(entry.type);
+      if (currentGlobalKey !== undefined && currentGlobalKey !== entry.key) {
         throw new Error(
-          source === "pull"
-            ? `CultCache global document type "${entry.type}" has multiple persisted entries.`
-            : `CultCache global document type "${entry.type}" already has a different key "${currentGlobalKey}".`,
+          `CultCache global document type "${entry.type}" has multiple persisted entries: "${currentGlobalKey}" and "${entry.key}".`,
         );
       }
     }
 
-    const hydrated: HydratedEntry = {
+    return {
       ...entry,
       payload: this.#cloneBytes(entry.payload),
       schemaId: entry.schemaId ?? registered.catalogEntry.schemaId,
       catalogEntry: entry.catalogEntry ?? registered.catalogEntry,
       value,
+      lookups: this.#lookupsFor(registered.nameAccessor, registered.indexAccessors, value),
     };
-    this.#entries.set(entryId, hydrated);
-    this.#getOrCreateTypeEntrySet(entry.type).add(entryId);
+  }
 
+  // Infallible half of admission: replaces any held record at the same key and installs the admitted one.
+  #installEntry(state: HydratedState, registered: RegisteredDefinition, hydrated: HydratedEntry): void {
+    const entryId = this.#entryId(hydrated.type, hydrated.key);
+    const existing = state.entries.get(entryId);
+    if (existing) {
+      this.#removeEntry(state, registered, existing);
+    }
+
+    state.entries.set(entryId, hydrated);
+    getOrCreate(state.typeEntryIds, hydrated.type, () => new Set<string>()).add(entryId);
     if (registered.global) {
-      this.#globalKeys.set(entry.type, entry.key);
+      state.globalKeys.set(hydrated.type, hydrated.key);
     }
-
-    if (registered.nameAccessor) {
-      const name = registered.nameAccessor(value);
-      if (name !== undefined) {
-        this.#getOrCreateNameMap(entry.type).set(name, entry.key);
-      }
+    if (hydrated.lookups.name !== undefined) {
+      getOrCreate(state.nameToKeyMaps, hydrated.type, () => new Map<string, string>()).set(hydrated.lookups.name, hydrated.key);
     }
-
-    for (const [indexName, accessor] of registered.indexAccessors) {
-      const indexValue = accessor(value);
-      if (indexValue !== undefined) {
-        this.#getOrCreateIndexMap(entry.type, indexName).set(indexValue, entry.key);
-      }
+    for (const [indexName, indexValue] of hydrated.lookups.indexes) {
+      getOrCreate(state.indexToKeyMaps, this.#indexId(hydrated.type, indexName), () => new Map<string, string>())
+        .set(indexValue, hydrated.key);
     }
   }
 
-  #removeHydratedEntry(
+  // Reads the lookups stored at admission; runs no accessor.
+  #removeEntry(
+    state: HydratedState,
     registered: RegisteredDefinition,
     entry: HydratedEntry,
   ): void {
     const entryId = this.#entryId(entry.type, entry.key);
-    this.#entries.delete(entryId);
+    state.entries.delete(entryId);
 
-    const typeEntryIds = this.#typeEntryIds.get(entry.type);
+    const typeEntryIds = state.typeEntryIds.get(entry.type);
     if (typeEntryIds) {
       typeEntryIds.delete(entryId);
       if (typeEntryIds.size === 0) {
-        this.#typeEntryIds.delete(entry.type);
+        state.typeEntryIds.delete(entry.type);
       }
     }
 
-    if (registered.global && this.#globalKeys.get(entry.type) === entry.key) {
-      this.#globalKeys.delete(entry.type);
+    if (registered.global && state.globalKeys.get(entry.type) === entry.key) {
+      state.globalKeys.delete(entry.type);
     }
 
-    if (registered.nameAccessor) {
-      const name = registered.nameAccessor(entry.value);
-      if (name !== undefined) {
-        this.#nameToKeyMaps.get(entry.type)?.delete(name);
+    if (entry.lookups.name !== undefined) {
+      const names = state.nameToKeyMaps.get(entry.type);
+      if (names?.get(entry.lookups.name) === entry.key) {
+        names.delete(entry.lookups.name);
       }
     }
-
-    for (const [indexName, accessor] of registered.indexAccessors) {
-      const value = accessor(entry.value);
-      if (value !== undefined) {
-        this.#indexToKeyMaps.get(this.#indexId(entry.type, indexName))?.delete(value);
+    for (const [indexName, indexValue] of entry.lookups.indexes) {
+      const index = state.indexToKeyMaps.get(this.#indexId(entry.type, indexName));
+      if (index?.get(indexValue) === entry.key) {
+        index.delete(indexValue);
       }
     }
   }
 
-  #rebuildDefinitionLookups(registered: RegisteredDefinition): void {
-    this.#rebuildNameLookup(registered);
+  // Runs the candidate accessors over every held record of the type into local maps.
+  #deriveTypeLookups(
+    type: string,
+    nameAccessor: Accessor | undefined,
+    indexAccessors: ReadonlyMap<string, Accessor>,
+  ): DerivedTypeLookups {
+    const entryLookups: Array<[HydratedEntry, EntryLookups]> = [];
+    const nameMap = nameAccessor ? new Map<string, string>() : undefined;
+    const indexMaps = new Map<string, Map<string, string>>();
+    for (const indexName of indexAccessors.keys()) {
+      indexMaps.set(indexName, new Map());
+    }
 
+    for (const entry of this.#entriesForType(type)) {
+      const lookups = this.#lookupsFor(nameAccessor, indexAccessors, entry.value);
+      entryLookups.push([entry, lookups]);
+      if (lookups.name !== undefined) {
+        nameMap?.set(lookups.name, entry.key);
+      }
+      for (const [indexName, indexValue] of lookups.indexes) {
+        indexMaps.get(indexName)?.set(indexValue, entry.key);
+      }
+    }
+
+    return { entryLookups, nameMap, indexMaps };
+  }
+
+  // Installs accessors and their derived lookups together. Nothing here can throw.
+  #installAccessors(
+    registered: RegisteredDefinition,
+    nameAccessor: Accessor | undefined,
+    indexAccessors: ReadonlyMap<string, Accessor>,
+    derived: DerivedTypeLookups,
+  ): void {
+    const type = registered.definition.type;
     for (const indexName of registered.indexAccessors.keys()) {
-      this.#rebuildIndexLookup(registered, indexName);
-    }
-  }
-
-  #rebuildNameLookup(registered: RegisteredDefinition): void {
-    this.#nameToKeyMaps.delete(registered.definition.type);
-
-    if (!registered.nameAccessor) {
-      return;
+      this.#hydrated.indexToKeyMaps.delete(this.#indexId(type, indexName));
     }
 
-    const map = this.#getOrCreateNameMap(registered.definition.type);
-    for (const entry of this.#entriesForType(registered.definition.type)) {
-      const name = registered.nameAccessor(entry.value);
-      if (name !== undefined) {
-        map.set(name, entry.key);
-      }
+    registered.nameAccessor = nameAccessor;
+    registered.indexAccessors = indexAccessors;
+    for (const [entry, lookups] of derived.entryLookups) {
+      entry.lookups = lookups;
     }
-  }
-
-  #rebuildIndexLookup(registered: RegisteredDefinition, indexName: string): void {
-    const lookupId = this.#indexId(registered.definition.type, indexName);
-    this.#indexToKeyMaps.delete(lookupId);
-
-    const accessor = registered.indexAccessors.get(indexName);
-    if (!accessor) {
-      return;
+    if (derived.nameMap) {
+      this.#hydrated.nameToKeyMaps.set(type, derived.nameMap);
+    } else {
+      this.#hydrated.nameToKeyMaps.delete(type);
     }
-
-    const map = this.#getOrCreateIndexMap(registered.definition.type, indexName);
-    for (const entry of this.#entriesForType(registered.definition.type)) {
-      const value = accessor(entry.value);
-      if (value !== undefined) {
-        map.set(value, entry.key);
-      }
+    for (const [indexName, map] of derived.indexMaps) {
+      this.#hydrated.indexToKeyMaps.set(this.#indexId(type, indexName), map);
     }
   }
 
   #entriesForType(type: string): HydratedEntry[] {
-    const entryIds = this.#typeEntryIds.get(type);
+    const entryIds = this.#hydrated.typeEntryIds.get(type);
     if (!entryIds) {
       return [];
     }
 
     const entries: HydratedEntry[] = [];
     for (const entryId of entryIds) {
-      const entry = this.#entries.get(entryId);
+      const entry = this.#hydrated.entries.get(entryId);
       if (entry) {
         entries.push(entry);
       }
     }
 
     return entries;
-  }
-
-  #getOrCreateTypeEntrySet(type: string): Set<string> {
-    let set = this.#typeEntryIds.get(type);
-    if (!set) {
-      set = new Set<string>();
-      this.#typeEntryIds.set(type, set);
-    }
-    return set;
-  }
-
-  #getOrCreateNameMap(type: string): Map<string, string> {
-    let map = this.#nameToKeyMaps.get(type);
-    if (!map) {
-      map = new Map<string, string>();
-      this.#nameToKeyMaps.set(type, map);
-    }
-    return map;
-  }
-
-  #getOrCreateIndexMap(type: string, indexName: string): Map<string, string> {
-    const lookupId = this.#indexId(type, indexName);
-    let map = this.#indexToKeyMaps.get(lookupId);
-    if (!map) {
-      map = new Map<string, string>();
-      this.#indexToKeyMaps.set(lookupId, map);
-    }
-    return map;
   }
 
   #toEnvelope(entry: HydratedEntry): CultCacheEnvelope {
@@ -858,14 +1020,6 @@ export class CultCache {
       schemaId: entry.schemaId,
       catalogEntry: entry.catalogEntry,
     };
-  }
-
-  #resetHydratedState(): void {
-    this.#entries.clear();
-    this.#typeEntryIds.clear();
-    this.#nameToKeyMaps.clear();
-    this.#indexToKeyMaps.clear();
-    this.#globalKeys.clear();
   }
 
   #entryId(type: string, key: string): string {

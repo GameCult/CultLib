@@ -142,6 +142,25 @@ Document definitions may also carry persistence metadata for cross-language
 stores: `schemaId`, `schemaName`, `schemaVersion`, `contentHash`,
 `canonicalSchemaJson`, `compatibleSchemaIds`, and slot `members`.
 
+## Backing Store Routing
+
+```ts
+const cache = CultCache.builder()
+  .withRegistry(registry)
+  .withBackingStore(new SingleFileMessagePackBackingStore("settings.cc"), settingsDocument)
+  .withGenericStore(new SingleFileMessagePackBackingStore("cache.cc"))
+  .build();
+```
+
+A document type has exactly one home store
+(`src/GameCult.Caching/Contracts/cultcache-store-composition.md` in CultLib):
+
+- a store added with types owns those types; otherwise the generic store is the home
+- a second generic store throws, and so does a type claimed by a second store;
+  a refused registration attaches nothing
+- `put`, `putEnvelope` and `delete` touch exactly one store; nothing is mirrored
+- a write whose type has no home store throws
+
 ## Name, Index, and Global Semantics
 
 `name` and `indexes` can be declared on the document definition:
@@ -161,11 +180,19 @@ const playerDocument = defineDocumentType({
 You can also register them later if you feel like changing the machine after boot:
 
 ```ts
-cache.registerNameLookup(playerDocument, "displayName");
-cache.registerIndex(playerDocument, "faction", "faction");
+await cache.registerNameLookup(playerDocument, "displayName");
+await cache.registerIndex(playerDocument, "faction", "faction");
 ```
 
-Global documents are singleton-style per type:
+Registration, `addBackingStore`, `pullAllBackingStores` and every write and
+delete run one at a time through a per-cache queue and return promises; reads
+are synchronous. A write validates the whole record (home store, global key,
+name and index accessors) before any store is touched, so a refused write
+changes neither store nor cache. Registering an accessor that throws on a held
+record installs nothing.
+
+Global documents are singleton-style per type, always stored under
+`CultCache.GLOBAL_KEY` (`__global__`); writing one under any other key throws:
 
 ```ts
 await cache.putGlobal(settingsDocument, { theme: "ash", retries: 3 });

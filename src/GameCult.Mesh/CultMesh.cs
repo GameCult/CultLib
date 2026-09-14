@@ -432,7 +432,7 @@ namespace GameCult.Mesh
         /// </summary>
         public Task FlushAsync(bool soft = false)
         {
-            return _host.FlushAsync(soft);
+            return _host.FlushAsync();
         }
 
         /// <summary>
@@ -1520,19 +1520,23 @@ namespace GameCult.Mesh
             var sourceList = sources?.ToArray()
                 ?? new[] { ProjectionSource(key.Value, descriptor.SchemaId, "CultCache record") };
             var route = routeHint ?? new CultMeshRouteHint(CultMeshLocalityKind.InProcess, "CultCache document");
-            return Document<TDocument>(
+            var feed = LiveFeed<CultMeshDocumentQueryParameters, TDocument>(
                 ResolveDocumentId(documentId, key),
-                context,
-                _ => Task.FromResult(ReadRequired<TDocument>(cache, key)),
-                _ => cache.WatchRecord<TDocument>(key)
+                (_parameters, _context) => Task.FromResult(ReadRequired<TDocument>(cache, key)),
+                (_parameters, _context) => cache.WatchRecord<TDocument>(key)
                     .Where(change => change.Document != null)
                     .Select(change => change.Document!),
-                async value =>
-                {
-                    await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false);
-                },
                 sourceList,
                 route);
+            return new CultMeshDocumentHandle<TDocument>(
+                BindLiveFeed(context, feed),
+                async value => await cache.UpsertAsync(value, new CultRecordHandle<TDocument>(key)).ConfigureAwait(false),
+                () => cache.WatchRecord<TDocument>(key),
+                () =>
+                {
+                    var (document, sequence) = cache.GetWithSequence(key);
+                    return (RequireDocument<TDocument>(document, key), sequence);
+                });
         }
 
         /// <summary>
@@ -3371,13 +3375,15 @@ namespace GameCult.Mesh
         }
 
         private static TDocument ReadRequired<TDocument>(CultCache cache, CultRecordKey key)
+            where TDocument : class =>
+            RequireDocument<TDocument>(cache.Get(key), key);
+
+        private static TDocument RequireDocument<TDocument>(object? untyped, CultRecordKey key)
             where TDocument : class
         {
-            var document = cache.Get<TDocument>(key);
-            if (document != null)
+            if (untyped is TDocument document)
                 return document;
 
-            var untyped = cache.Get(key);
             if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
                 return ConvertUntypedDocument<TDocument>(untyped);
 

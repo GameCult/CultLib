@@ -1,10 +1,10 @@
 using System;
 
-namespace GameCult.Unity.Caching
+namespace GameCult.Caching
 {
-    /// <summary>
-    /// Overrides the label shown for a CultCache document member in Unity editor tooling.
-    /// </summary>
+    // Inspection metadata for document members. Engine-free: headless models carry it, and every inspector lowering
+    // (the Unity editor Studio, a runtime CultUI panel) reads it through CultInspectorModel.
+
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property | AttributeTargets.Class, Inherited = true)]
     public sealed class CultInspectorLabelAttribute : Attribute
     {
@@ -16,25 +16,17 @@ namespace GameCult.Unity.Caching
         public string Label { get; }
     }
 
-    /// <summary>
-    /// Hides a CultCache document member from Unity editor tooling.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorHiddenAttribute : Attribute
     {
     }
 
-    /// <summary>
-    /// Shows a CultCache document member without allowing editor mutation.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorReadOnlyAttribute : Attribute
     {
     }
 
-    /// <summary>
-    /// Controls member ordering in Unity editor tooling. Lower values appear first.
-    /// </summary>
+    // Lower values appear first; members without it keep their slot order.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorOrderAttribute : Attribute
     {
@@ -46,9 +38,6 @@ namespace GameCult.Unity.Caching
         public int Order { get; }
     }
 
-    /// <summary>
-    /// Draws a string member as a multi-line text area.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorTextAreaAttribute : Attribute
     {
@@ -62,9 +51,6 @@ namespace GameCult.Unity.Caching
         public int MaxLines { get; }
     }
 
-    /// <summary>
-    /// Draws numeric members with a slider.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorRangeAttribute : Attribute
     {
@@ -78,17 +64,33 @@ namespace GameCult.Unity.Caching
         public float Max { get; }
     }
 
-    /// <summary>
-    /// Draws a string member as a Unity asset path picker.
-    /// </summary>
+    // A string member holding an engine asset path. AssetType is the engine's asset type, named by the consumer
+    // (typeof(UnityEngine.Texture2D) in a Unity assembly); a lowering that does not know the type ignores it.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorAssetPathAttribute : Attribute
     {
-        public CultInspectorAssetPathAttribute(Type assetType = null)
+        public CultInspectorAssetPathAttribute(Type? assetType = null)
         {
             AssetType = assetType;
         }
 
-        public Type AssetType { get; }
+        public Type? AssetType { get; }
+    }
+
+    // Marks a lowering's drawer class as the drawer for a claimed type. Claimed is either an Attribute subclass (the
+    // drawer draws every member carrying that attribute) or a value type (every value of that type, or of any closed
+    // form when Claimed is an open generic definition). Attribute claims win over type claims, which win over the
+    // built-in kinds. A claim two drawers make is used by neither.
+    [AttributeUsage(AttributeTargets.Class, Inherited = false)]
+    public sealed class CultInspectorDrawerAttribute : Attribute
+    {
+        public CultInspectorDrawerAttribute(Type claimed)
+        {
+            Claimed = claimed ?? throw new ArgumentNullException(nameof(claimed));
+        }
+
+        public Type Claimed { get; }
+
+        public bool ClaimsAttribute => typeof(Attribute).IsAssignableFrom(Claimed);
     }
 }
