@@ -773,27 +773,174 @@ test("concurrentGlobalPutsCannotBothReachDisk", async () => {
     global: true,
   });
   const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-global-race-")), "generic.cc");
+  const inner = new SingleFileMessagePackBackingStore(storePath);
+  // The first push after arming writes, then pauses until released. A second write that reaches the
+  // store during that pause is recorded: serialized writes cannot.
+  let armed = false;
+  let paused = false;
+  let reachedStoreWhilePaused = false;
+  let release!: () => void;
+  let reportPaused!: () => void;
+  const pausedSignal = new Promise<void>((resolve) => {
+    reportPaused = resolve;
+  });
+  const store: CacheBackingStore = {
+    pullAll: () => inner.pullAll(),
+    delete: (entry) => inner.delete(entry),
+    push: async (entry) => {
+      reachedStoreWhilePaused ||= paused;
+      await inner.push(entry);
+      if (armed) {
+        armed = false;
+        paused = true;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+          reportPaused();
+        });
+        paused = false;
+      }
+    },
+  };
+  const build = (backing: CacheBackingStore) => CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(backing)
+    .build();
+  const cache = build(store);
+  await cache.putGlobal(settingsDocument, { t: "base" });
+
+  armed = true;
+  const first = cache.putGlobal(settingsDocument, { t: "first" });
+  await pausedSignal;
+  const second = cache.putGlobal(settingsDocument, { t: "second" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  release();
+  await Promise.all([first, second]);
+
+  assert.equal(reachedStoreWhilePaused, false);
+  const onDisk = await inner.pullAll();
+  assert.deepEqual(onDisk.map((entry) => entry.key), [CultCache.GLOBAL_KEY]);
+  assert.deepEqual(
+    Buffer.from(onDisk[0].payload),
+    Buffer.from(cache.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY).payload),
+  );
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "second" });
+  const reloaded = build(new SingleFileMessagePackBackingStore(storePath));
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.getRequiredGlobal(settingsDocument), { t: "second" });
+});
+
+test("unawaitedFailingPutIsAnUnhandledRejection", async () => {
+  const itemDocument = defineDocumentType({ type: "item", schema: z.object({ n: z.string() }) });
+  const store: CacheBackingStore = {
+    pullAll: async () => [],
+    push: async () => {
+      throw new Error("disk full");
+    },
+    delete: async () => undefined,
+  };
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument))
+    .withGenericStore(store)
+    .build();
+
+  const runnerListeners = process.listeners("unhandledRejection");
+  process.removeAllListeners("unhandledRejection");
+  const unhandled: unknown[] = [];
+  const listener = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", listener);
+  try {
+    void cache.put(itemDocument, "k", { n: "x" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    process.off("unhandledRejection", listener);
+    for (const runnerListener of runnerListeners) {
+      process.on("unhandledRejection", runnerListener);
+    }
+  }
+
+  assert.equal(unhandled.length, 1);
+  assert.match(String((unhandled[0] as Error).message), /disk full/u);
+  // The chain survived the rejection: the next operation still runs.
+  await assert.rejects(cache.put(itemDocument, "k", { n: "y" }), /disk full/u);
+});
+
+test("storePushThatAwaitsItsOwnCacheIsRefusedInsteadOfHanging", async () => {
+  const itemDocument = defineDocumentType({ type: "item", schema: z.object({ n: z.string() }) });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-reentrant-")), "generic.cc");
+  const inner = new SingleFileMessagePackBackingStore(storePath);
+  let cache!: CultCache;
+  const store: CacheBackingStore = {
+    pullAll: () => inner.pullAll(),
+    delete: (entry) => inner.delete(entry),
+    push: async (entry) => {
+      await cache.put(itemDocument, "side", { n: "side" });
+      await inner.push(entry);
+    },
+  };
+  cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument))
+    .withGenericStore(store)
+    .build();
+
+  const outcome = await Promise.race([
+    cache.put(itemDocument, "k", { n: "x" }).then(() => "resolved", (error: unknown) => error),
+    new Promise((resolve) => setTimeout(() => resolve("timed out"), 2000)),
+  ]);
+
+  assert.ok(outcome instanceof Error, `expected a refusal, got ${String(outcome)}`);
+  assert.match(outcome.message, /re-entrant call/u);
+  assert.deepEqual(await inner.pullAll(), []);
+  assert.deepEqual(cache.snapshot(), []);
+  // Concurrent callers outside the operation are still queued, not refused.
+  const plain = CultCache.builder().withRegistry(defineDocumentRegistry(itemDocument)).build();
+  await Promise.all([plain.put(itemDocument, "a", { n: "a" }), plain.put(itemDocument, "b", { n: "b" })]);
+  assert.equal(plain.getAll(itemDocument).length, 2);
+});
+
+test("legacyKeyGlobalLoadsWithoutWritingAndFirstWriteLeavesOneGlobal", async () => {
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ t: z.string() }),
+    global: true,
+  });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-legacy-global-")), "generic.cc");
   const build = () => CultCache.builder()
     .withRegistry(defineDocumentRegistry(settingsDocument))
     .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
     .build();
-  const cache = build();
-  await cache.putGlobal(settingsDocument, { t: "base" });
+  const seed = CultCache.builder().withRegistry(defineDocumentRegistry(settingsDocument)).build();
+  await seed.putGlobal(settingsDocument, { t: "old" });
+  const legacy = { ...seed.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY), key: "legacy" };
+  await new SingleFileMessagePackBackingStore(storePath).push(legacy);
+  const bytes = await readFile(storePath);
 
-  await Promise.allSettled([
-    cache.put(settingsDocument, "a", { t: "a" }),
-    cache.put(settingsDocument, "b", { t: "b" }),
-    cache.putGlobal(settingsDocument, { t: "c" }),
-    cache.putGlobal(settingsDocument, { t: "d" }),
-  ]);
+  const cache = build();
+  await cache.pullAllBackingStores();
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "old" });
+  assert.deepEqual(cache.get(settingsDocument, CultCache.GLOBAL_KEY), { t: "old" });
+  assert.deepEqual(await readFile(storePath), bytes);
+
+  await cache.putGlobal(settingsDocument, { t: "new" });
   assert.deepEqual(
     (await new SingleFileMessagePackBackingStore(storePath).pullAll()).map((entry) => entry.key),
     [CultCache.GLOBAL_KEY],
   );
-  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "d" });
   const reloaded = build();
   await reloaded.pullAllBackingStores();
-  assert.deepEqual(reloaded.getRequiredGlobal(settingsDocument), { t: "d" });
+  assert.deepEqual(reloaded.getRequiredGlobal(settingsDocument), { t: "new" });
+
+  // Deleting an adopted global removes the legacy record.
+  await new SingleFileMessagePackBackingStore(storePath).pushAll([legacy]);
+  const deleting = build();
+  await deleting.pullAllBackingStores();
+  assert.equal(await deleting.deleteGlobal(settingsDocument), true);
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(storePath).pullAll(), []);
+
+  // Two globals of one type on disk, under any keys, are refused.
+  await new SingleFileMessagePackBackingStore(storePath).pushAll([legacy, { ...legacy, key: CultCache.GLOBAL_KEY }]);
+  await assert.rejects(build().pullAllBackingStores(), /has multiple persisted entries/u);
 });
 
 test("concurrentPutAndAttachCannotLandRecordInNonHomeStore", async () => {

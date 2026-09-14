@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { decode, encode } from "@msgpack/msgpack";
 
 import type {
@@ -43,7 +45,17 @@ type HydratedState = {
   readonly nameToKeyMaps: Map<string, Map<string, string>>;
   readonly indexToKeyMaps: Map<string, Map<string, string>>;
   readonly globalKeys: Map<string, string>;
+  // Load compatibility shim: a global persisted under a key other than GLOBAL_KEY is held as that
+  // type's global under GLOBAL_KEY, and its persisted envelope is kept here so the first write or
+  // delete of that global removes it from the home store. Remove once no store holds a global under
+  // a key other than GLOBAL_KEY.
+  readonly legacyGlobals: Map<string, CultCacheEnvelope>;
 };
+
+// The operations running in the current async flow. A queued call from inside one of this cache's
+// own operations would wait on itself, so it is refused at entry.
+type RunningOperation = { readonly cache: CultCache; running: boolean };
+const runningOperations = new AsyncLocalStorage<readonly RunningOperation[]>();
 
 // Lookups for every held record of one type under candidate accessors, derived before anything is installed.
 type DerivedTypeLookups = {
@@ -59,6 +71,7 @@ function emptyHydratedState(): HydratedState {
     nameToKeyMaps: new Map(),
     indexToKeyMaps: new Map(),
     globalKeys: new Map(),
+    legacyGlobals: new Map(),
   };
 }
 
@@ -147,7 +160,7 @@ export class CultCache {
   readonly #schemaNameDefinitions = new Map<string, RegisteredDefinition>();
   #hydrated = emptyHydratedState();
   readonly #stores: CultCacheStoreRegistration[] = [];
-  #tail: Promise<unknown> = Promise.resolve();
+  #tail: Promise<void> = Promise.resolve();
 
   static builder(): CultCacheBuilder {
     return new CultCacheBuilder();
@@ -156,10 +169,35 @@ export class CultCache {
   // Attach, pull, registration and every write and delete run one at a time through this chain,
   // so validation, the store call and applying to the cache never interleave with another
   // mutation of this cache. Reads are not queued. Observer delivery is not scheduled here.
+  // The chain advances on its own promise; the caller gets the operation's promise, untouched, so
+  // an unawaited failure is still an unhandled rejection. Stores, decoders, accessors and updaters
+  // must not call a queued method of the cache they are serving: that call throws.
   #serial<T>(operation: () => T | Promise<T>): Promise<T> {
-    const run = this.#tail.then(operation);
-    this.#tail = run.catch(() => undefined);
-    return run;
+    const outer = runningOperations.getStore() ?? [];
+    if (outer.some((candidate) => candidate.cache === this && candidate.running)) {
+      throw new Error(
+        "CultCache refuses a re-entrant call: an attach, pull, registration, write or delete was started from " +
+          "inside a store call, decoder, accessor or updater of an operation on the same cache, and would wait on itself.",
+      );
+    }
+
+    const current: RunningOperation = { cache: this, running: false };
+    let advance!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((resolve) => {
+      advance = resolve;
+    });
+    return previous.then(() =>
+      runningOperations.run([...outer, current], async () => {
+        current.running = true;
+        try {
+          return await operation();
+        } finally {
+          current.running = false;
+          advance();
+        }
+      }),
+    );
   }
 
   registerDocumentType<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -232,6 +270,7 @@ export class CultCache {
   pullAllBackingStores(): Promise<void> {
     return this.#serial(async () => {
       const next = emptyHydratedState();
+      const persistedGlobalKeys = new Map<string, string>();
 
       for (const registration of this.#stores) {
         const entries = await registration.store.pullAll();
@@ -257,7 +296,21 @@ export class CultCache {
 
           const payload = this.#cloneBytes(entry.payload);
           const value = registered.formatter.decode(payload);
-          const hydrated = this.#admitEntry(next, registered, { ...entry, type, payload }, value);
+          let admitted: CultCacheEnvelope = { ...entry, type, payload };
+          if (registered.global) {
+            const persistedKey = persistedGlobalKeys.get(type);
+            if (persistedKey !== undefined) {
+              throw new Error(
+                `CultCache global document type "${type}" has multiple persisted entries: "${persistedKey}" and "${entry.key}".`,
+              );
+            }
+            persistedGlobalKeys.set(type, entry.key);
+            if (entry.key !== CultCache.GLOBAL_KEY) {
+              next.legacyGlobals.set(type, admitted);
+              admitted = { ...admitted, key: CultCache.GLOBAL_KEY };
+            }
+          }
+          const hydrated = this.#admitEntry(next, registered, admitted, value);
           this.#installEntry(next, registered, hydrated);
         }
       }
@@ -588,8 +641,24 @@ export class CultCache {
   async #writeNow(registered: RegisteredDefinition, entry: CultCacheEnvelope, value: unknown): Promise<void> {
     const home = this.#homeStore(entry.type);
     const hydrated = this.#admitEntry(this.#hydrated, registered, entry, value);
+    const legacy = this.#hydrated.legacyGlobals.get(entry.type);
     await home?.push(entry);
+    if (home && legacy) {
+      await this.#retireLegacyGlobal(home, legacy, entry);
+    }
+    this.#hydrated.legacyGlobals.delete(entry.type);
     this.#installEntry(this.#hydrated, registered, hydrated);
+  }
+
+  // The first write of a global loaded from a legacy key removes that record in the same write. If the
+  // removal fails, the new record is taken back out, so the store keeps only the legacy record.
+  async #retireLegacyGlobal(home: CacheBackingStore, legacy: CultCacheEnvelope, written: CultCacheEnvelope): Promise<void> {
+    try {
+      await home.delete(legacy);
+    } catch (error) {
+      await home.delete(written).catch(() => undefined);
+      throw error;
+    }
   }
 
   async #deleteNow<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -603,7 +672,8 @@ export class CultCache {
     }
 
     const home = this.#homeStore(definition.type);
-    await home?.delete(this.#toEnvelope(entry));
+    await home?.delete(this.#hydrated.legacyGlobals.get(definition.type) ?? this.#toEnvelope(entry));
+    this.#hydrated.legacyGlobals.delete(definition.type);
     this.#removeEntry(this.#hydrated, registered, entry);
     return true;
   }
