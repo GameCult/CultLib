@@ -39,6 +39,48 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task UnsetRefReloadsAndResavesByteIdentical()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultlib-unsetref-{Guid.NewGuid():N}.cc");
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(UnsetRefHolder) });
+            byte[] Payload() => CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single().Payload;
+            try
+            {
+                using (var seed = new CultCache(registry))
+                {
+                    seed.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                    await seed.UpsertAsync(typeof(UnsetRefHolder), new UnsetRefHolder { Name = "holder", Set = new CultRecordRef<UnsetRefHolder>(new CultRecordKey("other")) },
+                        new CultRecordKey("holder"));
+                    await seed.FlushAsync();
+                }
+
+                var written = Payload();
+                CultRecordRef<UnsetRefHolder> unset;
+                using (var reopened = new CultCache(registry))
+                {
+                    reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                    await reopened.PullAllBackingStoresAsync();
+                    var loaded = reopened.Get<UnsetRefHolder>(new CultRecordKey("holder"))!;
+                    unset = loaded.Unset;
+                    await reopened.UpsertAsync(typeof(UnsetRefHolder), loaded, new CultRecordKey("holder"));
+                    await reopened.FlushAsync();
+                }
+
+                Assert.That(Payload(), Is.EqualTo(written), "an unset reference loads and re-saves byte-identical");
+                Assert.That(unset, Is.EqualTo(default(CultRecordRef<UnsetRefHolder>)));
+                Assert.That(unset.Key, Is.EqualTo(new CultRecordKey("")), "default and \"\" are one empty key");
+                var legacy = MessagePackSerializer.Serialize("", CultDocumentMessagePackSerialization.Options);
+                var read = MessagePackSerializer.Deserialize<CultRecordRef<UnsetRefHolder>>(legacy, CultDocumentMessagePackSerialization.Options);
+                Assert.That(MessagePackSerializer.Serialize(read, CultDocumentMessagePackSerialization.Options), Is.EqualTo(new[] { MessagePackCode.Nil }),
+                    "a \"\" reference reads as unset and writes nil");
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        [Test]
         public async Task RefKeyedDictionaryRoundTrips()
         {
             var path = Path.Combine(Path.GetTempPath(), $"cultlib-refkeyed-{Guid.NewGuid():N}.cc");
@@ -170,6 +212,15 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName] public string Name = string.Empty;
             [Key(1)] public Dictionary<CultRecordRef<RefKeyedHolder>, float> Weights = new();
+        }
+
+        [CultDocument("tests.unset_ref_holder", "tests.unset_ref_holder.v1")]
+        [MessagePackObject]
+        public sealed class UnsetRefHolder
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+            [Key(1)] public CultRecordRef<UnsetRefHolder> Unset;
+            [Key(2)] public CultRecordRef<UnsetRefHolder> Set;
         }
     }
 }

@@ -236,6 +236,17 @@ another runtime need not obey the `storedAt` rule.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
 
+## Record references
+
+A record reference is its target's key string. An unset reference, the empty
+key, is **nil** on the wire, never `""`. A reader takes nil and `""` as the same
+unset reference and writes it back as nil, so loading and re-saving an unchanged
+record is byte-stable. In C# the unset reference is `default(CultRecordRef<T>)`,
+equal to one built from `""`; `CultRecordKey.Value` is never null. Rust,
+TypeScript and Python have no reference type: a reference member is a string in
+the consumer's own payload value, so a consumer writes an unset one as its
+language's null (`null`, `None`, `Option::None`), not as an empty string.
+
 ## Value-type encoding
 
 Vector-like value types (Unity.Mathematics, consumer structs) encode as

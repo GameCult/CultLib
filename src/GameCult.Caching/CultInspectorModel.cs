@@ -305,7 +305,7 @@ namespace GameCult.Caching
             return string.IsNullOrWhiteSpace(name) ? record.Key.Value : name!;
         }
 
-        // The key a CultRecordRef<T> holds; null and "" are both the empty key.
+        // The key a CultRecordRef<T> holds; "" when unset.
         public static string RecordKey(object? recordRef) => (recordRef as ICultRecordRef)?.Key.Value ?? string.Empty;
 
         public CultInspectorShape ShapeOf(Type type)
@@ -464,7 +464,7 @@ namespace GameCult.Caching
             }
         }
 
-        // A key is taken when another serializes the same (a CultRecordRef<T> by its key string, null and "" alike) or when
+        // A key is taken when another serializes the same (a CultRecordRef<T> by its key string) or when
         // the rebuilt dictionary type's default comparer calls them equal (0.0 and -0.0 serialize apart but are one double key).
         private bool Taken(Type documentType, CultInspectorShape dictionary, object key, IEnumerable<object?> keys)
         {

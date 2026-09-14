@@ -57,12 +57,15 @@ namespace GameCult.Caching
 
     public readonly struct CultRecordKey : IEquatable<CultRecordKey>
     {
+        private readonly string? _value;
+
         public CultRecordKey(string value)
         {
-            Value = value ?? string.Empty;
+            _value = value;
         }
 
-        public string Value { get; }
+        // Never null: default(CultRecordKey) and new CultRecordKey("") are one empty key.
+        public string Value => _value ?? string.Empty;
 
         public override string ToString() => Value;
 
