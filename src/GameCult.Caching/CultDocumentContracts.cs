@@ -85,7 +85,13 @@ namespace GameCult.Caching
         public override string ToString() => Key.ToString();
     }
 
-    public readonly struct CultRecordRef<T>
+    // The key of any CultRecordRef<T>, for code that holds one without knowing T.
+    public interface ICultRecordRef
+    {
+        CultRecordKey Key { get; }
+    }
+
+    public readonly struct CultRecordRef<T> : ICultRecordRef
     {
         public CultRecordRef(CultRecordKey key)
         {
