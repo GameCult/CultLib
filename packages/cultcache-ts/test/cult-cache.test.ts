@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -866,37 +867,44 @@ test("unawaitedFailingPutIsAnUnhandledRejection", async () => {
   await assert.rejects(cache.put(itemDocument, "k", { n: "y" }), /disk full/u);
 });
 
-test("storePushThatAwaitsItsOwnCacheIsRefusedInsteadOfHanging", async () => {
+test("storeChangeHandlerWritingBackQueuesAfterTheOperation", async () => {
   const itemDocument = defineDocumentType({ type: "item", schema: z.object({ n: z.string() }) });
-  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-reentrant-")), "generic.cc");
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-writeback-")), "generic.cc");
   const inner = new SingleFileMessagePackBackingStore(storePath);
-  let cache!: CultCache;
+  const changes = new EventEmitter();
+  const pushed: string[] = [];
   const store: CacheBackingStore = {
     pullAll: () => inner.pullAll(),
     delete: (entry) => inner.delete(entry),
     push: async (entry) => {
-      await cache.put(itemDocument, "side", { n: "side" });
       await inner.push(entry);
+      pushed.push(entry.key);
+      changes.emit("pushed", entry.key);
     },
   };
-  cache = CultCache.builder()
+  const cache = CultCache.builder()
     .withRegistry(defineDocumentRegistry(itemDocument))
     .withGenericStore(store)
     .build();
+  // The handler writes back and the store does not wait for it: that write queues behind the put.
+  const writeBacks: Promise<unknown>[] = [];
+  changes.on("pushed", (key: string) => {
+    if (key === "k") {
+      writeBacks.push(cache.put(itemDocument, "side", { n: "side" }));
+    }
+  });
 
-  const outcome = await Promise.race([
-    cache.put(itemDocument, "k", { n: "x" }).then(() => "resolved", (error: unknown) => error),
-    new Promise((resolve) => setTimeout(() => resolve("timed out"), 2000)),
-  ]);
+  await cache.put(itemDocument, "k", { n: "x" });
+  await Promise.all(writeBacks);
 
-  assert.ok(outcome instanceof Error, `expected a refusal, got ${String(outcome)}`);
-  assert.match(outcome.message, /re-entrant call/u);
-  assert.deepEqual(await inner.pullAll(), []);
-  assert.deepEqual(cache.snapshot(), []);
-  // Concurrent callers outside the operation are still queued, not refused.
-  const plain = CultCache.builder().withRegistry(defineDocumentRegistry(itemDocument)).build();
-  await Promise.all([plain.put(itemDocument, "a", { n: "a" }), plain.put(itemDocument, "b", { n: "b" })]);
-  assert.equal(plain.getAll(itemDocument).length, 2);
+  assert.equal(writeBacks.length, 1);
+  assert.deepEqual(pushed, ["k", "side"]);
+  assert.deepEqual(cache.get(itemDocument, "k"), { n: "x" });
+  assert.deepEqual(cache.get(itemDocument, "side"), { n: "side" });
+  assert.deepEqual(
+    (await inner.pullAll()).map((entry) => entry.key).sort(),
+    cache.snapshot().map((entry) => entry.key).sort(),
+  );
 });
 
 test("legacyKeyGlobalLoadsWithoutWritingAndFirstWriteLeavesOneGlobal", async () => {

@@ -1,5 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-
 import { decode, encode } from "@msgpack/msgpack";
 
 import type {
@@ -51,11 +49,6 @@ type HydratedState = {
   // a key other than GLOBAL_KEY.
   readonly legacyGlobals: Map<string, CultCacheEnvelope>;
 };
-
-// The operations running in the current async flow. A queued call from inside one of this cache's
-// own operations would wait on itself, so it is refused at entry.
-type RunningOperation = { readonly cache: CultCache; running: boolean };
-const runningOperations = new AsyncLocalStorage<readonly RunningOperation[]>();
 
 // Lookups for every held record of one type under candidate accessors, derived before anything is installed.
 type DerivedTypeLookups = {
@@ -170,34 +163,21 @@ export class CultCache {
   // so validation, the store call and applying to the cache never interleave with another
   // mutation of this cache. Reads are not queued. Observer delivery is not scheduled here.
   // The chain advances on its own promise; the caller gets the operation's promise, untouched, so
-  // an unawaited failure is still an unhandled rejection. Stores, decoders, accessors and updaters
-  // must not call a queued method of the cache they are serving: that call throws.
+  // an unawaited failure is still an unhandled rejection. A call made from inside an operation
+  // queues behind it; a store call that waits for that call waits on itself and never finishes.
   #serial<T>(operation: () => T | Promise<T>): Promise<T> {
-    const outer = runningOperations.getStore() ?? [];
-    if (outer.some((candidate) => candidate.cache === this && candidate.running)) {
-      throw new Error(
-        "CultCache refuses a re-entrant call: an attach, pull, registration, write or delete was started from " +
-          "inside a store call, decoder, accessor or updater of an operation on the same cache, and would wait on itself.",
-      );
-    }
-
-    const current: RunningOperation = { cache: this, running: false };
     let advance!: () => void;
     const previous = this.#tail;
     this.#tail = new Promise<void>((resolve) => {
       advance = resolve;
     });
-    return previous.then(() =>
-      runningOperations.run([...outer, current], async () => {
-        current.running = true;
-        try {
-          return await operation();
-        } finally {
-          current.running = false;
-          advance();
-        }
-      }),
-    );
+    return previous.then(async () => {
+      try {
+        return await operation();
+      } finally {
+        advance();
+      }
+    });
   }
 
   registerDocumentType<TDefinition extends AnyCultCacheDocumentDefinition>(
