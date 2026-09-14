@@ -138,9 +138,10 @@ namespace GameCult.Unity.Caching.Editor
             {
                 var descriptor = _selectedType == null ? null : _cache.Registry.GetRequired(_selectedType);
                 var selected = Selected();
+                var cannotAdd = descriptor == null || ReadOnly || !_model.CanCreate(_selectedType);
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    using (new EditorGUI.DisabledScope(descriptor == null || descriptor.IsGlobal || ReadOnly))
+                    using (new EditorGUI.DisabledScope(cannotAdd || descriptor.IsGlobal))
                     {
                         if (GUILayout.Button("Add", EditorStyles.miniButtonLeft)) Add();
                     }
@@ -169,7 +170,7 @@ namespace GameCult.Unity.Caching.Editor
                         using (new EditorGUILayout.HorizontalScope())
                         {
                             EditorGUILayout.LabelField("Global is absent.");
-                            using (new EditorGUI.DisabledScope(ReadOnly))
+                            using (new EditorGUI.DisabledScope(cannotAdd))
                             {
                                 if (GUILayout.Button("Create", GUILayout.Width(56))) Add();
                             }

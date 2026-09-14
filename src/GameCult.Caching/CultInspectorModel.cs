@@ -345,14 +345,19 @@ namespace GameCult.Caching
             return new CultInspectorEdit(record, Clone(record.Document, record.Descriptor.DocumentType));
         }
 
+        // Whether CreateDefault makes a value: a string, struct, list or dictionary, or a concrete class with a parameterless constructor.
+        public bool CanCreate(Type type) =>
+            type == typeof(string) || type.IsValueType ||
+            ShapeOf(type).Kind is CultInspectorValueKind.List or CultInspectorValueKind.Dictionary ||
+            !type.IsAbstract && !type.IsInterface && type.GetConstructor(Type.EmptyTypes) != null;
+
         public object? CreateDefault(Type type)
         {
+            if (!CanCreate(type)) return null;
             if (type == typeof(string)) return string.Empty;
-            if (type.IsValueType) return Activator.CreateInstance(type);
             var shape = ShapeOf(type);
-            if (shape.Kind == CultInspectorValueKind.List && type.IsArray) return Array.CreateInstance(shape.ElementType!, 0);
-            if (shape.Kind == CultInspectorValueKind.Dictionary) return Activator.CreateInstance(shape.BuildType!);
-            return type.IsAbstract || type.IsInterface || type.GetConstructor(Type.EmptyTypes) == null ? null : Activator.CreateInstance(type);
+            if (type.IsArray) return Array.CreateInstance(shape.ElementType!, 0);
+            return Activator.CreateInstance(shape.Kind == CultInspectorValueKind.Dictionary ? shape.BuildType! : type);
         }
 
         // What a new value for a slot of elementType (a list element, a dictionary value, a union pick) may be: a union's
@@ -366,11 +371,10 @@ namespace GameCult.Caching
         // A new value of choice for a slot of elementType, or null with a notice when choice cannot be made.
         public object? CreateElement(Type elementType, Type choice, out string? notice)
         {
-            if (!ElementChoices(elementType).Contains(choice))
+            // A slot's own type is always offered; an abstract one is refused with the notice below.
+            if (choice != elementType && !ElementChoices(elementType).Contains(choice))
                 throw new ArgumentException($"{choice.Name} is not a choice for {elementType.Name}.", nameof(choice));
-            var created = choice == elementType ? CreateDefault(choice)
-                : choice.GetConstructor(Type.EmptyTypes) == null ? null
-                : Activator.CreateInstance(choice);
+            var created = CreateDefault(choice);
             // Null is a value only for a Nullable<T> slot; anywhere else it is nothing made.
             notice = created == null && !choice.IsValueType
                 ? $"{choice.Name} is abstract or has no parameterless constructor; nothing was created."

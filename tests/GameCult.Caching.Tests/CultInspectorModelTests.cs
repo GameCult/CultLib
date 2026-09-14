@@ -85,6 +85,11 @@ namespace GameCult.Caching.Tests
             Assert.That(bare, Does.Contain("parameterless"), "a plain element type that cannot be made says so; nothing is added");
             Assert.That(model.CreateElement(typeof(int?), typeof(int?), out var nullable), Is.Null);
             Assert.That(nullable, Is.Null, "null is a Nullable<T> element, not a failure");
+
+            Assert.That(model.CreateElement(typeof(InspectShape), typeof(InspectShape), out var @abstract), Is.Null);
+            Assert.That(@abstract, Does.Contain("abstract"), "a union's own type cannot be made; it says so instead of throwing");
+            Assert.That(new[] { typeof(InspectShape), typeof(InspectNeedsArgs), typeof(IList<int>) }.Any(model.CanCreate), Is.False);
+            Assert.That(new[] { typeof(InspectItem), typeof(string), typeof(int[]), typeof(IDictionary<string, int>), typeof(InspectOpenStruct) }.All(model.CanCreate), Is.True);
         }
 
         [Test]
