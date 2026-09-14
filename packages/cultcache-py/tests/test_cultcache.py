@@ -331,15 +331,20 @@ class CultCacheTests(unittest.TestCase):
                 .add_generic_store(SingleFileMessagePackBackingStore(generic_path))
                 .build()
             )
+            # The cache already holds a record, in its home store, before the refused load.
+            cache.put(settings, "held", {"theme": "home"})
+            before = cache.snapshot_envelopes()
+            settings_bytes = settings_path.read_bytes()
             with self.assertRaisesRegex(
                 CultCacheError,
                 "settings record app was loaded from the generic store, but its home is the store routed to settings",
             ):
                 cache.pull_all_backing_stores()
             self.assertIsNone(cache.get(settings, "app"))
-            self.assertEqual(cache.snapshot_envelopes(), [])
+            self.assertEqual(cache.snapshot_envelopes(), before)
+            self.assertEqual(cache.get_required(settings, "held"), {"theme": "home"})
             self.assertEqual(generic_path.read_bytes(), generic_bytes)
-            self.assertFalse(settings_path.exists())
+            self.assertEqual(settings_path.read_bytes(), settings_bytes)
 
     def test_pull_with_duplicate_global_leaves_cache_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +419,162 @@ class CultCacheTests(unittest.TestCase):
             self.assertIsNone(cache.get_key_by_name(item, "Bomb"))
             self.assertEqual(cache.get_key_by_index(item, "category", "Consumable"), "item:potion")
             self.assertEqual(cache.get_required_global(settings)["theme"], "ash")
+
+    def _store_state(self, path: Path) -> list[tuple[str, str, bytes]]:
+        return sorted((e.type, e.key, e.payload) for e in SingleFileMessagePackBackingStore(path).pull_all())
+
+    def test_put_with_throwing_name_extractor_changes_neither_store_nor_cache(self) -> None:
+        def name(value: dict) -> str:
+            if value["n"] == "bad":
+                raise ValueError("extractor refuses bad")
+            return value["n"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = define_document_type("item", name=name)
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(item).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.put(item, "k", {"n": "good"})
+            store_before, cache_before = self._store_state(path), cache.snapshot_envelopes()
+
+            with self.assertRaisesRegex(ValueError, "extractor refuses bad"):
+                cache.put(item, "k", {"n": "bad"})
+            self.assertEqual(self._store_state(path), store_before)
+            self.assertEqual(cache.snapshot_envelopes(), cache_before)
+            self.assertEqual(cache.get_required(item, "k"), {"n": "good"})
+            self.assertEqual(cache.get_key_by_name(item, "good"), "k")
+
+    def test_overwrite_under_a_registered_extractor_that_now_raises_changes_neither_store_nor_cache(self) -> None:
+        refusing = {"on": False}
+
+        def category(value: dict) -> str:
+            if refusing["on"]:
+                raise ValueError("extractor refuses now")
+            return value["c"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = define_document_type("item")
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(item).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.put(item, "k", {"c": "old"})
+            cache.register_index(item, "category", category)
+            refusing["on"] = True
+            store_before, cache_before = self._store_state(path), cache.snapshot_envelopes()
+
+            with self.assertRaisesRegex(ValueError, "extractor refuses now"):
+                cache.put(item, "k", {"c": "new"})
+            self.assertEqual(self._store_state(path), store_before)
+            self.assertEqual(cache.snapshot_envelopes(), cache_before)
+            self.assertEqual(cache.get_key_by_index(item, "category", "old"), "k")
+            # Deleting runs no extractor: it uses the lookup keys stored when the record was admitted.
+            cache.delete(item, "k")
+            self.assertIsNone(cache.get_key_by_index(item, "category", "old"))
+
+    def test_registering_an_extractor_that_raises_on_a_held_value_installs_nothing(self) -> None:
+        def name(value: dict) -> str:
+            if value["n"] == "bad":
+                raise ValueError("extractor refuses bad")
+            return value["n"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = define_document_type("item")
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(item).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.put(item, "old", {"n": "bad"})
+            with self.assertRaisesRegex(ValueError, "extractor refuses bad"):
+                cache.register_name_lookup(item, name)
+            cache.put(item, "old", {"n": "fine"})
+            self.assertEqual(cache.get_required(item, "old"), {"n": "fine"})
+            self.assertIsNone(cache.get_key_by_name(item, "fine"))
+            self.assertEqual([item.decode_payload(e.payload) for e in SingleFileMessagePackBackingStore(path).pull_all()], [{"n": "fine"}])
+
+    def test_put_envelopes_with_throwing_extractor_changes_neither_store_nor_cache(self) -> None:
+        def name(value: dict) -> str:
+            if value["n"] == "bad":
+                raise ValueError("extractor refuses bad")
+            return value["n"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = define_document_type("item", name=name)
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(item).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.put(item, "seed", {"n": "seed"})
+            seed = cache.get_required_envelope(item, "seed")
+            first = replace(seed, key="a", payload=item.encode_payload({"n": "a"}))
+            second = replace(seed, key="b", payload=item.encode_payload({"n": "bad"}))
+            store_before, cache_before = self._store_state(path), cache.snapshot_envelopes()
+
+            with self.assertRaisesRegex(ValueError, "extractor refuses bad"):
+                cache.put_envelopes(item, [first, second])
+            self.assertEqual(self._store_state(path), store_before)
+            self.assertEqual(cache.snapshot_envelopes(), cache_before)
+            self.assertIsNone(cache.get_key_by_name(item, "a"))
+
+    def test_global_replace_with_failing_store_push_keeps_old_global(self) -> None:
+        class FailingPushStore(SingleFileMessagePackBackingStore):
+            fail = False
+
+            def push(self, envelope):
+                if self.fail:
+                    raise OSError("disk full")
+                super().push(envelope)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            path = Path(tmp) / "generic.cc"
+            store = FailingPushStore(path)
+            cache = CultCache.builder().register_document_type(settings).add_generic_store(store).build()
+            cache.put_global(settings, {"theme": "base"})
+            store_before, cache_before = self._store_state(path), cache.snapshot_envelopes()
+            store.fail = True
+
+            with self.assertRaisesRegex(OSError, "disk full"):
+                cache.put_global(settings, {"theme": "new"})
+            with self.assertRaisesRegex(CultCacheError, "must use key __global__"):
+                cache.put(settings, "other", {"theme": "new"})
+            self.assertEqual(self._store_state(path), store_before)
+            self.assertEqual(cache.snapshot_envelopes(), cache_before)
+            self.assertEqual(cache.get_required_global(settings), {"theme": "base"})
+
+    def test_put_envelope_refuses_a_global_under_another_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(settings).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.put_global(settings, {"theme": "base"})
+            store_before, cache_before = self._store_state(path), cache.snapshot_envelopes()
+            stray = replace(cache.get_required_envelope(settings, CultCache.GLOBAL_KEY), key="stray")
+
+            with self.assertRaisesRegex(CultCacheError, "must use key __global__"):
+                cache.put_envelope(settings, stray)
+            with self.assertRaisesRegex(CultCacheError, "must be non-empty"):
+                cache.put_envelope(settings, replace(stray, key=""))
+            self.assertEqual(self._store_state(path), store_before)
+            self.assertEqual(cache.snapshot_envelopes(), cache_before)
+
+    def test_refused_put_leaves_no_empty_type_entry(self) -> None:
+        def refuse(value: dict) -> dict:
+            raise ValueError("encode refuses")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            other = define_document_type("other", encode=refuse)
+            path = Path(tmp) / "generic.cc"
+            cache = CultCache.builder().register_document_type(other).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            with self.assertRaisesRegex(ValueError, "encode refuses"):
+                cache.put(other, "x", {"a": 1})
+            self.assertEqual(cache.snapshot(), {})
+            self.assertFalse(path.exists())
 
     def test_attach_with_empty_type_list_is_the_generic_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

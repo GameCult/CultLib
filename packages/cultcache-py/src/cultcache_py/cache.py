@@ -26,6 +26,20 @@ class _State:
     index_extractors: dict[str, dict[str, str | Any]] = field(default_factory=dict)
     names: dict[tuple[str, str], str] = field(default_factory=dict)
     indexes: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    # The name and index values each held record produced when it was admitted. Removing a
+    # record reads these and runs no extractor, so removal has no fallible step.
+    lookup_keys: dict[str, dict[str, "_LookupKeys"]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _LookupKeys:
+    name: str | None
+    indexes: dict[str, str]
+
+
+_Names = dict[tuple[str, str], str]
+_Indexes = dict[tuple[str, str, str], str]
+_LookupKeysByType = dict[str, dict[str, _LookupKeys]]
 
 
 class CultCacheBuilder:
@@ -76,12 +90,15 @@ class CultCache:
         schema_name = document.catalog_entry().schema_name
         if schema_name in self._state.documents_by_schema_name:
             raise CultCacheError(f"Document schema name already registered: {schema_name}")
+        name_extractors = dict(self._state.name_extractors)
+        index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
+        if document.name is not None:
+            name_extractors[document.type] = document.name
+        if document.indexes:
+            index_extractors.setdefault(document.type, {}).update(document.indexes)
+        self._install_lookups(name_extractors, index_extractors)
         self._state.documents[document.type] = document
         self._state.documents_by_schema_name[schema_name] = document
-        if document.name is not None:
-            self.register_name_lookup(document, document.name)
-        for index, extractor in document.indexes.items():
-            self.register_index(document, index, extractor)
 
     def register_registry(self, documents: list[DocumentDefinition[Any]] | tuple[DocumentDefinition[Any], ...]) -> None:
         for document in documents:
@@ -89,13 +106,29 @@ class CultCache:
 
     def register_name_lookup(self, document: DocumentDefinition[Any], extractor: str | Any) -> None:
         self._assert_registered(document)
-        self._state.name_extractors[document.type] = extractor
-        self._rebuild_indexes()
+        name_extractors = dict(self._state.name_extractors)
+        name_extractors[document.type] = extractor
+        self._install_lookups(name_extractors, self._state.index_extractors)
 
     def register_index(self, document: DocumentDefinition[Any], index: str, extractor: str | Any) -> None:
         self._assert_registered(document)
-        self._state.index_extractors.setdefault(document.type, {})[index] = extractor
-        self._rebuild_indexes()
+        index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
+        index_extractors.setdefault(document.type, {})[index] = extractor
+        self._install_lookups(self._state.name_extractors, index_extractors)
+
+    def _install_lookups(
+        self, name_extractors: dict[str, str | Any], index_extractors: dict[str, dict[str, str | Any]]
+    ) -> None:
+        """Derives every lookup under the candidate extractors, then installs extractors and lookups
+        together. An extractor that raises on a held value installs nothing."""
+        names, indexes, lookup_keys = self._derive_lookups(self._state.values, name_extractors, index_extractors)
+        (
+            self._state.name_extractors,
+            self._state.index_extractors,
+            self._state.names,
+            self._state.indexes,
+            self._state.lookup_keys,
+        ) = (name_extractors, index_extractors, names, indexes, lookup_keys)
 
     def add_backing_store(self, store: BackingStore, types: list[str] | tuple[str, ...] | set[str]) -> None:
         """Makes the store home to the given types, or the generic store when there are none.
@@ -184,14 +217,17 @@ class CultCache:
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
-        loaded_names, loaded_indexes = self._derive_lookups(loaded_values)
+        loaded_names, loaded_indexes, loaded_lookup_keys = self._derive_lookups(
+            loaded_values, self._state.name_extractors, self._state.index_extractors
+        )
         # Plain attribute assignments: nothing fallible runs once the swap begins.
         (
             self._state.values,
             self._state.envelopes,
             self._state.names,
             self._state.indexes,
-        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes)
+            self._state.lookup_keys,
+        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes, loaded_lookup_keys)
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
         self._assert_registered(document)
@@ -247,9 +283,6 @@ class CultCache:
         self._assert_registered(document)
         if document.global_document and key != GLOBAL_KEY:
             raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
-        values = self._state.values.setdefault(document.type, {})
-        envelopes = self._state.envelopes.setdefault(document.type, {})
-        old_value = values.get(key)
         catalog_entry = document.catalog_entry()
         envelope = CultCacheEnvelope.create(
             key=key,
@@ -258,60 +291,65 @@ class CultCache:
             schema_id=catalog_entry.schema_id,
             catalog_entry=catalog_entry,
         )
-        store = self._store_for_type(document.type)
-        if store is not None:
-            store.push(envelope)
-        if old_value is not None:
-            self._remove_value_indexes(document.type, key, old_value)
-        values[key] = value
-        envelopes[key] = envelope
-        self._add_value_indexes(document.type, key, value)
+        self._write(document, [(envelope, value)], batch=False)
 
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
-        if envelope.type != document.type:
-            raise CultCacheError(
-                f"Envelope type {envelope.type} does not match document type {document.type}"
-            )
-        values = self._state.values.setdefault(document.type, {})
-        envelopes = self._state.envelopes.setdefault(document.type, {})
-        old_value = values.get(envelope.key)
+        self._check_envelope(document, envelope)
         value = document.decode_payload(envelope.payload)
-        store = self._store_for_type(document.type)
-        if store is not None:
-            store.push(envelope)
-        if old_value is not None:
-            self._remove_value_indexes(document.type, envelope.key, old_value)
-        values[envelope.key] = value
-        envelopes[envelope.key] = envelope
-        self._add_value_indexes(document.type, envelope.key, value)
+        self._write(document, [(envelope, value)], batch=False)
         return value
 
     def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
         self._assert_registered(document)
         values: list[T] = []
         for envelope in envelopes:
-            if envelope.type != document.type:
-                raise CultCacheError(
-                    f"Envelope type {envelope.type} does not match document type {document.type}"
-                )
-            if document.global_document and envelope.key != GLOBAL_KEY:
-                raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
+            self._check_envelope(document, envelope)
             values.append(document.decode_payload(envelope.payload))
-
-        store = self._store_for_type(document.type)
-        if store is not None:
-            store.push_all(envelopes)
-        values_by_key = self._state.values.setdefault(document.type, {})
-        envelopes_by_key = self._state.envelopes.setdefault(document.type, {})
-        for envelope, value in zip(envelopes, values):
-            old_value = values_by_key.get(envelope.key)
-            if old_value is not None:
-                self._remove_value_indexes(document.type, envelope.key, old_value)
-            values_by_key[envelope.key] = value
-            envelopes_by_key[envelope.key] = envelope
-            self._add_value_indexes(document.type, envelope.key, value)
+        self._write(document, list(zip(envelopes, values)), batch=True)
         return values
+
+    @staticmethod
+    def _check_envelope(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> None:
+        if envelope.type != document.type:
+            raise CultCacheError(
+                f"Envelope type {envelope.type} does not match document type {document.type}"
+            )
+        if not envelope.key or not envelope.key.strip():
+            raise CultCacheError(f"Envelope key for document type {document.type} must be non-empty")
+        if document.global_document and envelope.key != GLOBAL_KEY:
+            raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
+
+    def _write(
+        self, document: DocumentDefinition[Any], records: list[tuple[CultCacheEnvelope, Any]], *, batch: bool
+    ) -> None:
+        """Validates every record (home and name and index extractors included) before the store is
+        touched; once the store accepts, applying to the cache has no fallible step."""
+        type = document.type
+        name_extractor = self._state.name_extractors.get(type)
+        index_extractors = self._state.index_extractors.get(type, {})
+        admitted = [
+            (envelope, value, self._lookup_keys_for(value, name_extractor, index_extractors))
+            for envelope, value in records
+        ]
+        store = self._store_for_type(type)
+        if store is not None:
+            if batch:
+                store.push_all([envelope for envelope, _ in records])
+            else:
+                store.push(records[0][0])
+        values = self._state.values.setdefault(type, {})
+        envelopes = self._state.envelopes.setdefault(type, {})
+        lookup_keys = self._state.lookup_keys.setdefault(type, {})
+        for envelope, value, keys in admitted:
+            self._remove_lookups(type, envelope.key)
+            values[envelope.key] = value
+            envelopes[envelope.key] = envelope
+            lookup_keys[envelope.key] = keys
+            if keys.name is not None:
+                self._state.names[(type, keys.name)] = envelope.key
+            for index, index_value in keys.indexes.items():
+                self._state.indexes[(type, index, index_value)] = envelope.key
 
     def put_global(self, document: DocumentDefinition[T], value: T) -> None:
         self._assert_global(document)
@@ -332,17 +370,13 @@ class CultCache:
         store = self._store_for_type(document.type)
         if store is not None:
             store.delete(document.type, key)
-        values = self._state.values.get(document.type)
-        old_value = None if values is None else values.pop(key, None)
-        if values == {}:
-            self._state.values.pop(document.type, None)
-        envelopes = self._state.envelopes.get(document.type)
-        if envelopes is not None:
-            envelopes.pop(key, None)
-            if envelopes == {}:
-                self._state.envelopes.pop(document.type, None)
-        if old_value is not None:
-            self._remove_value_indexes(document.type, key, old_value)
+        self._remove_lookups(document.type, key)
+        for by_type in (self._state.values, self._state.envelopes, self._state.lookup_keys):
+            held = by_type.get(document.type)
+            if held is not None:
+                held.pop(key, None)
+                if not held:
+                    by_type.pop(document.type, None)
 
     def delete_global(self, document: DocumentDefinition[Any]) -> None:
         self._assert_global(document)
@@ -371,76 +405,60 @@ class CultCache:
             raise CultCacheError(f"No backing store is home to document type: {type}")
         return store
 
-    def _rebuild_indexes(self) -> None:
-        self._state.names, self._state.indexes = self._derive_lookups(self._state.values)
+    @staticmethod
+    def _lookup_keys_for(
+        value: Any, name_extractor: str | Any | None, index_extractors: dict[str, str | Any]
+    ) -> _LookupKeys:
+        name = None if name_extractor is None else extract_value(value, name_extractor)
+        indexes: dict[str, str] = {}
+        for index, extractor in index_extractors.items():
+            index_value = extract_value(value, extractor)
+            if index_value is not None:
+                indexes[index] = str(index_value)
+        return _LookupKeys(None if name is None else str(name), indexes)
 
     def _derive_lookups(
-        self, values_by_type: dict[str, dict[str, Any]]
-    ) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str, str], str]]:
+        self,
+        values_by_type: dict[str, dict[str, Any]],
+        name_extractors: dict[str, str | Any],
+        index_extractors: dict[str, dict[str, str | Any]],
+    ) -> tuple[_Names, _Indexes, _LookupKeysByType]:
         """Builds name and index lookups for the given values in fresh dicts, touching no cache state."""
-        names: dict[tuple[str, str], str] = {}
-        indexes: dict[tuple[str, str, str], str] = {}
+        names: _Names = {}
+        indexes: _Indexes = {}
+        lookup_keys: _LookupKeysByType = {}
         for type, values in values_by_type.items():
-            name_extractor = self._state.name_extractors.get(type)
-            index_extractors = self._state.index_extractors.get(type, {})
+            name_extractor = name_extractors.get(type)
+            type_index_extractors = index_extractors.get(type, {})
             for key, value in values.items():
-                if name_extractor is not None:
-                    name = extract_value(value, name_extractor)
-                    if name is not None:
-                        names[(type, str(name))] = key
-                for index, extractor in index_extractors.items():
-                    index_value = extract_value(value, extractor)
-                    if index_value is not None:
-                        indexes[(type, index, str(index_value))] = key
-        return names, indexes
+                keys = self._lookup_keys_for(value, name_extractor, type_index_extractors)
+                lookup_keys.setdefault(type, {})[key] = keys
+                if keys.name is not None:
+                    names[(type, keys.name)] = key
+                for index, index_value in keys.indexes.items():
+                    indexes[(type, index, index_value)] = key
+        return names, indexes, lookup_keys
 
-    def _add_value_indexes(self, type: str, key: str, value: Any) -> None:
-        name_extractor = self._state.name_extractors.get(type)
-        if name_extractor is not None:
-            name = extract_value(value, name_extractor)
-            if name is not None:
-                self._state.names[(type, str(name))] = key
-        for index, extractor in self._state.index_extractors.get(type, {}).items():
-            index_value = extract_value(value, extractor)
-            if index_value is not None:
-                self._state.indexes[(type, index, str(index_value))] = key
-
-    def _remove_value_indexes(self, type: str, key: str, value: Any) -> None:
-        name_extractor = self._state.name_extractors.get(type)
-        if name_extractor is not None:
-            name = extract_value(value, name_extractor)
-            if name is not None:
-                self._remove_name_index(type, key, str(name))
-        for index, extractor in self._state.index_extractors.get(type, {}).items():
-            index_value = extract_value(value, extractor)
-            if index_value is not None:
-                self._remove_secondary_index(type, key, index, str(index_value))
-
-    def _remove_name_index(self, type: str, key: str, name: str) -> None:
-        lookup_key = (type, name)
-        if self._state.names.get(lookup_key) != key:
+    def _remove_lookups(self, type: str, key: str) -> None:
+        """Removes the lookups the held record produced at admission, handing a name or index value to
+        another held record that produced it too. Reads stored lookup keys only; runs no extractor."""
+        held = self._state.lookup_keys.get(type, {})
+        keys = held.get(key)
+        if keys is None:
             return
-        self._state.names.pop(lookup_key, None)
-        name_extractor = self._state.name_extractors.get(type)
-        if name_extractor is None:
-            return
-        for candidate_key, candidate in self._state.values.get(type, {}).items():
-            candidate_name = extract_value(candidate, name_extractor)
-            if candidate_key != key and candidate_name is not None and str(candidate_name) == name:
-                self._state.names[lookup_key] = candidate_key
-
-    def _remove_secondary_index(self, type: str, key: str, index: str, value: str) -> None:
-        lookup_key = (type, index, value)
-        if self._state.indexes.get(lookup_key) != key:
-            return
-        self._state.indexes.pop(lookup_key, None)
-        extractor = self._state.index_extractors.get(type, {}).get(index)
-        if extractor is None:
-            return
-        for candidate_key, candidate in self._state.values.get(type, {}).items():
-            candidate_value = extract_value(candidate, extractor)
-            if candidate_key != key and candidate_value is not None and str(candidate_value) == value:
-                self._state.indexes[lookup_key] = candidate_key
+        if keys.name is not None and self._state.names.get((type, keys.name)) == key:
+            del self._state.names[(type, keys.name)]
+            for candidate_key, candidate in held.items():
+                if candidate_key != key and candidate.name == keys.name:
+                    self._state.names[(type, keys.name)] = candidate_key
+        for index, index_value in keys.indexes.items():
+            lookup_key = (type, index, index_value)
+            if self._state.indexes.get(lookup_key) != key:
+                continue
+            del self._state.indexes[lookup_key]
+            for candidate_key, candidate in held.items():
+                if candidate_key != key and candidate.indexes.get(index) == index_value:
+                    self._state.indexes[lookup_key] = candidate_key
 
     def _assert_registered(self, document: DocumentDefinition[Any]) -> None:
         if self._state.documents.get(document.type) is not document:
