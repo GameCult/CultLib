@@ -291,18 +291,8 @@ namespace GameCult.Unity.Caching.Editor
                         var item = DrawValue("Value", shape.ValueType, entries[i].Value, member, path + "{" + i + "}.value");
                         if (EditorGUI.EndChangeCheck())
                         {
-                            var index = i;
-                            var refusal = Model.RefuseKey(key, entries[i].Key, entries.Where((_, j) => j != index).Select(e => e.Key));
-                            if (refusal != null)
-                            {
-                                _notices[path] = "Refused " + refusal + " on entry " + i + "; its key was kept.";
-                                key = entries[i].Key;
-                            }
-                            else
-                            {
-                                _notices.Remove(path);
-                            }
-
+                            key = Model.ReplaceKey(shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
+                            Notice(path, notice);
                             entries[i] = new KeyValuePair<object, object>(key, item);
                             changed = true;
                         }
@@ -320,20 +310,16 @@ namespace GameCult.Unity.Caching.Editor
 
             if (GUILayout.Button("Add"))
             {
-                var fresh = Model.FreshKey(shape.KeyType, entries.Select(e => e.Key), Records);
-                if (fresh == null)
-                {
-                    _notices[path] = "No unused " + shape.KeyType.Name + " key is available; nothing was added.";
-                }
-                else
+                var fresh = Model.FreshKey(shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
+                Notice(path, notice);
+                if (fresh != null)
                 {
                     entries.Add(new KeyValuePair<object, object>(fresh, Model.CreateDefault(shape.ValueType)));
-                    _notices.Remove(path);
                     changed = true;
                 }
             }
 
-            if (_notices.TryGetValue(path, out var notice)) EditorGUILayout.HelpBox(notice, MessageType.Warning);
+            DrawNotice(path);
             EditorGUI.indentLevel--;
             return changed ? Model.BuildDictionary(shape.Type, entries) : dictionary;
         }
@@ -472,6 +458,18 @@ namespace GameCult.Unity.Caching.Editor
             GUI.changed = changed;
             _foldouts[path] = expanded;
             return expanded;
+        }
+
+        // The model's notice for the control at path, kept until that control's next answer.
+        private void Notice(string path, string notice)
+        {
+            if (notice == null) _notices.Remove(path);
+            else _notices[path] = notice;
+        }
+
+        private void DrawNotice(string path)
+        {
+            if (_notices.TryGetValue(path, out var notice)) EditorGUILayout.HelpBox(notice, MessageType.Warning);
         }
 
         private static object ErrorRow(string label, string message, object value)

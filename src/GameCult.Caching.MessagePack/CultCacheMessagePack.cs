@@ -19,6 +19,13 @@ namespace GameCult.Caching.MessagePack
 
     public static class CultCacheMessagePack
     {
+        // The inspection model over this codec. Values serialize without the document guard, so dictionary keys and other
+        // non-document values compare by their bytes; clones deserialize as registered documents.
+        public static CultInspectorModel CreateInspectorModel(CultDocumentRegistry registry) => new CultInspectorModel(
+            registry,
+            (value, type) => global::MessagePack.MessagePackSerializer.Serialize(type, value, CultDocumentMessagePackSerialization.OptionsFor(type.Assembly)),
+            (type, bytes) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry));
+
         // Opening hydrates. A consumer that wants a fresh store removes the records it does not keep, upserts, and
         // flushes; the atomic replace does the rest.
         public static CultCache Create(string filePath, CultCacheOpenOptions? options = null)

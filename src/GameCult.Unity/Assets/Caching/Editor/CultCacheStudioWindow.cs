@@ -273,10 +273,7 @@ namespace GameCult.Unity.Caching.Editor
                     if (!File.Exists(path)) throw new IOException("the store wrote no file");
                 }
 
-                var registry = _cache.Registry;
-                _model = new CultInspectorModel(registry,
-                    (value, type) => CultDocumentMessagePackSerialization.SerializeUntyped(value, type, registry),
-                    (type, bytes) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry));
+                _model = CultCacheMessagePack.CreateInspectorModel(_cache.Registry);
                 _inspector = new CultInspector(_model);
                 _path = path;
                 EditorPrefs.SetString(LastPathKey, path);

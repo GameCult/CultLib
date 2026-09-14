@@ -289,8 +289,8 @@ namespace GameCult.Caching
         private readonly Dictionary<Type, CultInspectorShape> _shapes = new Dictionary<Type, CultInspectorShape>();
         private readonly Dictionary<MemberInfo, CultInspectorMetadata> _metadata = new Dictionary<MemberInfo, CultInspectorMetadata>();
 
-        // serialize and deserialize are the store's document codec (CultDocumentMessagePackSerialization for .cc stores);
-        // edits clone through it and dictionary keys compare by it.
+        // serialize and deserialize are the store's codec (CultCacheMessagePack.CreateInspectorModel for .cc stores). Edits
+        // clone documents through both; dictionary keys compare by serialize, so it must take any value, not only documents.
         public CultInspectorModel(CultDocumentRegistry registry, Func<object, Type, byte[]> serialize, Func<Type, byte[], object> deserialize)
         {
             Registry = registry ?? throw new ArgumentNullException(nameof(registry));
@@ -392,16 +392,58 @@ namespace GameCult.Caching
 
         public object BuildDictionary(Type dictionaryType, IEnumerable<KeyValuePair<object?, object?>> entries)
         {
-            var shape = ShapeOf(dictionaryType);
-            if (shape.Kind != CultInspectorValueKind.Dictionary)
-                throw new ArgumentException($"{dictionaryType.Name} is not a dictionary the inspector builds.", nameof(dictionaryType));
-            var dictionary = (IDictionary)Activator.CreateInstance(shape.BuildType!)!;
+            var dictionary = (IDictionary)Activator.CreateInstance(DictionaryShape(dictionaryType).BuildType!)!;
             foreach (var entry in entries) dictionary.Add(entry.Key!, entry.Value);
             return dictionary;
         }
 
-        // Keys are the same key when they serialize the same. A CultRecordRef<T> key is its key string, null and "" alike.
-        public string? KeyIdentity(object? key)
+        // The key entry `index` of a dictionary holding `keys` takes when a lowering offers `candidate`: the candidate, or
+        // the kept key and a notice saying why. An unchanged key is never refused. Any other key must be non-null, not an
+        // empty record reference, and not taken by another entry, so BuildDictionary cannot throw.
+        public object? ReplaceKey(Type dictionaryType, IReadOnlyList<object?> keys, int index, object? candidate, out string? notice)
+        {
+            var shape = DictionaryShape(dictionaryType);
+            var identity = KeyIdentity(candidate);
+            var refusal = identity == KeyIdentity(keys[index]) ? null
+                : identity == null ? "a null key"
+                : identity == RecordRefIdentity ? "an empty record reference as a key"
+                : Taken(shape, candidate!, keys.Where((_, i) => i != index)) ? "a duplicate key"
+                : null;
+            notice = refusal == null ? null : $"Refused {refusal} on entry {index}; its key was kept.";
+            return refusal == null ? candidate : keys[index];
+        }
+
+        // A key to add beside `keys`: a record-reference key takes the first candidate record not already used; any other
+        // key is the type's default. Null with a notice when no such key is free.
+        public object? FreshKey(Type dictionaryType, IReadOnlyList<object?> keys, IEnumerable<CultStoredDocument> records, out string? notice)
+        {
+            var shape = DictionaryShape(dictionaryType);
+            var keyType = shape.KeyType!;
+            var candidates = ShapeOf(keyType).Kind == CultInspectorValueKind.RecordRef
+                ? RecordCandidates(keyType, records).Select(record => CreateRecordRef(keyType, record.Key.Value))
+                : new[] { CreateDefault(keyType) };
+            var fresh = candidates.FirstOrDefault(key => key != null && !Taken(shape, key, keys));
+            notice = fresh == null ? $"No unused {keyType.Name} key is available; nothing was added." : null;
+            return fresh;
+        }
+
+        // A key is taken when another serializes the same (a CultRecordRef<T> by its key string, null and "" alike) or when
+        // the dictionary's own comparer calls them equal (0.0 and -0.0 serialize apart but are one double key).
+        private bool Taken(CultInspectorShape dictionary, object key, IEnumerable<object?> keys)
+        {
+            var identity = KeyIdentity(key);
+            var probe = (IDictionary)Activator.CreateInstance(dictionary.BuildType!)!;
+            var filler = dictionary.ValueType!.IsValueType ? Activator.CreateInstance(dictionary.ValueType) : null;
+            foreach (var other in keys.Where(other => other != null))
+            {
+                if (KeyIdentity(other) == identity) return true;
+                probe[other!] = filler;
+            }
+
+            return probe.Contains(key);
+        }
+
+        private string? KeyIdentity(object? key)
         {
             if (key == null) return null;
             if (key is ICultRecordRef reference) return RecordRefIdentity + reference.Key.Value;
@@ -415,29 +457,12 @@ namespace GameCult.Caching
             }
         }
 
-        // Why candidate may not replace current among otherKeys, or null when it may (an unchanged key always may).
-        public string? RefuseKey(object? candidate, object? current, IEnumerable<object?> otherKeys)
+        private CultInspectorShape DictionaryShape(Type dictionaryType)
         {
-            var identity = KeyIdentity(candidate);
-            if (identity == KeyIdentity(current)) return null;
-            if (identity == null) return "a null key";
-            if (identity == RecordRefIdentity) return "an empty record reference as a key";
-            return otherKeys.Any(key => KeyIdentity(key) == identity) ? "a duplicate key" : null;
-        }
-
-        // A key to add: a record-reference key takes the first candidate record not already used; any other key is the
-        // type's default. Null when that key is taken or cannot be made.
-        public object? FreshKey(Type keyType, IEnumerable<object?> existingKeys, IEnumerable<CultStoredDocument> records)
-        {
-            var used = new HashSet<string?>(existingKeys.Select(KeyIdentity));
-            if (ShapeOf(keyType).Kind == CultInspectorValueKind.RecordRef)
-            {
-                var record = RecordCandidates(keyType, records).FirstOrDefault(candidate => !used.Contains(RecordRefIdentity + candidate.Key.Value));
-                return record == null ? null : CreateRecordRef(keyType, record.Key.Value);
-            }
-
-            var fresh = CreateDefault(keyType);
-            return fresh == null || used.Contains(KeyIdentity(fresh)) ? null : fresh;
+            var shape = ShapeOf(dictionaryType);
+            return shape.Kind == CultInspectorValueKind.Dictionary
+                ? shape
+                : throw new ArgumentException($"{dictionaryType.Name} is not a dictionary the inspector builds.", nameof(dictionaryType));
         }
 
         // The records a CultRecordRef<T> may point at: every record whose document is a T, by label.
