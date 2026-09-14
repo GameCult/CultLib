@@ -36,7 +36,7 @@ float2 cultmath_lerp(float2 start, float2 end, float2 amount) { return start + (
 float3 cultmath_lerp(float3 start, float3 end, float3 amount) { return start + (end - start) * amount; }
 float4 cultmath_lerp(float4 start, float4 end, float4 amount) { return start + (end - start) * amount; }
 
-float cultmath_step(float edge, float value) { return value < edge ? 0.0 : 1.0; }
+float cultmath_step(float edge, float value) { return value >= edge ? 1.0 : 0.0; }
 float2 cultmath_step(float2 edge, float2 value) { return float2(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y)); }
 float3 cultmath_step(float3 edge, float3 value) { return float3(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y), cultmath_step(edge.z, value.z)); }
 float4 cultmath_step(float4 edge, float4 value) { return float4(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y), cultmath_step(edge.z, value.z), cultmath_step(edge.w, value.w)); }
@@ -83,7 +83,7 @@ float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((v
 // order as the C# math.snoise(float3) mirror.
 float cultmath_snoise(float3 value)
 {
-    const float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
+    float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
     float3 i = floor(value + dot(value, c.yyy));
     float3 x0 = value - i + dot(i, c.xxx);
     float3 g = step(x0.yzx, x0.xyz);
@@ -132,7 +132,7 @@ float cultmath_snoise(float3 value)
 
 float cultmath_snoise(float2 value)
 {
-    const float4 c = float4(
+    float4 c = float4(
         0.211324865405187,
         0.366025403784439,
         -0.577350269189626,
@@ -142,9 +142,9 @@ float cultmath_snoise(float2 value)
     float2 i1 = x0.x > x0.y ? float2(1.0, 0.0) : float2(0.0, 1.0);
     float4 x12 = float4(x0.x + c.x - i1.x, x0.y + c.x - i1.y, x0.x + c.z, x0.y + c.z);
 
-    i = cultmath_simplex_mod289(i);
-    float3 p = cultmath_simplex_permute(
-        cultmath_simplex_permute(i.y + float3(0.0, i1.y, 1.0)) + i.x + float3(0.0, i1.x, 1.0));
+    i = cultmath_snoise_mod289(i);
+    float3 p = cultmath_snoise_permute(
+        cultmath_snoise_permute(i.y + float3(0.0, i1.y, 1.0)) + i.x + float3(0.0, i1.x, 1.0));
     float3 m = max(0.5 - float3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
     m *= m;
     m *= m;
