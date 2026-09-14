@@ -81,6 +81,10 @@ namespace GameCult.Caching.Tests
 
             Assert.That(model.CreateElement(typeof(InspectPicky), typeof(InspectNeedsArgs), out var refused), Is.Null);
             Assert.That(refused, Does.Contain("parameterless"));
+            Assert.That(model.CreateElement(typeof(InspectNeedsArgs), typeof(InspectNeedsArgs), out var bare), Is.Null);
+            Assert.That(bare, Does.Contain("parameterless"), "a plain element type that cannot be made says so; nothing is added");
+            Assert.That(model.CreateElement(typeof(int?), typeof(int?), out var nullable), Is.Null);
+            Assert.That(nullable, Is.Null, "null is a Nullable<T> element, not a failure");
         }
 
         [Test]

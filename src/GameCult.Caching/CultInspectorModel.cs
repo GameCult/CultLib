@@ -366,10 +366,14 @@ namespace GameCult.Caching
         {
             if (!ElementChoices(elementType).Contains(choice))
                 throw new ArgumentException($"{choice.Name} is not a choice for {elementType.Name}.", nameof(choice));
-            notice = choice == elementType || choice.GetConstructor(Type.EmptyTypes) != null
-                ? null
-                : $"{choice.Name} has no parameterless constructor; nothing was created.";
-            return notice != null ? null : choice == elementType ? CreateDefault(elementType) : Activator.CreateInstance(choice);
+            var created = choice == elementType ? CreateDefault(choice)
+                : choice.GetConstructor(Type.EmptyTypes) == null ? null
+                : Activator.CreateInstance(choice);
+            // Null is a value only for a Nullable<T> slot; anywhere else it is nothing made.
+            notice = created == null && !choice.IsValueType
+                ? $"{choice.Name} is abstract or has no parameterless constructor; nothing was created."
+                : null;
+            return created;
         }
 
         // An integer edit as a value of integerType, clamped to that type's range instead of overflowing.
