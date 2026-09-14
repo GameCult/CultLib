@@ -411,6 +411,22 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task GetByIndexMatchesAssignableTypes()
+        {
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(RoutingIndexedLeaf), typeof(RoutingIndexedTwin) }));
+            var leaf = await cache.UpsertAsync(typeof(RoutingIndexedLeaf), new RoutingIndexedLeaf { Code = "alpha" });
+
+            Assert.That(cache.GetByIndex<RoutingIndexedBase>("code", "alpha"), Is.InstanceOf<RoutingIndexedLeaf>(),
+                "an index declared on a base member resolves through the base type");
+
+            var twin = await cache.UpsertAsync(typeof(RoutingIndexedTwin), new RoutingIndexedTwin { Code = "alpha" });
+
+            Assert.That(() => cache.GetByIndex<RoutingIndexedBase>("code", "alpha"),
+                Throws.InvalidOperationException.With.Message.Contains(leaf.Value).And.Message.Contains(twin.Value));
+            Assert.That(cache.GetByIndex<RoutingIndexedLeaf>("code", "alpha"), Is.InstanceOf<RoutingIndexedLeaf>());
+        }
+
+        [Test]
         public async Task AmbiguousAssignableLookupThrows()
         {
             using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(RoutingLeaf), typeof(RoutingLeafTwin) }));
@@ -766,6 +782,25 @@ namespace GameCult.Caching.Tests
             [Key(0)]
             [CultName]
             public string Name = string.Empty;
+        }
+
+        internal abstract class RoutingIndexedBase
+        {
+            [Key(0)]
+            [CultIndex("code")]
+            public string Code = string.Empty;
+        }
+
+        [CultDocument("tests.routing_indexed_leaf", "tests.routing_indexed_leaf.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class RoutingIndexedLeaf : RoutingIndexedBase
+        {
+        }
+
+        [CultDocument("tests.routing_indexed_twin", "tests.routing_indexed_twin.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class RoutingIndexedTwin : RoutingIndexedBase
+        {
         }
 
         internal abstract class RoutingGlobalBase
