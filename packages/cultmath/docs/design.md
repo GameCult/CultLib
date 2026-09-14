@@ -85,6 +85,11 @@ The HLSL side is checked too: `tools/get-dxc.ps1` fetches Microsoft's
 DirectXShaderCompiler, and
 `dxc -T lib_6_3 -HV 2021 shaders/CultMath.hlsl` must compile cleanly.
 
+The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
+0). It proves the text of `CultMath.hlsl` computes the same float32 results as
+C# `math` on the CPU, not that a GPU agrees: driver `sin` precision alone makes
+`cultmath_hash` and value noise differ bit for bit on hardware.
+
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
 Unity.Mathematics: `normalize` is safe (divides by `max(length, 1e-20)`),
 `hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped

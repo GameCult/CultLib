@@ -37,10 +37,12 @@ public sealed class HlslSourceCompatibilityTests
     private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN };
 
     /// <summary>
-    /// Every mirror function with a C# math counterpart returns the same bits (NaN equal to NaN, -0 equal
-    /// to 0) over random inputs, every special value in every argument (ties, zeros, negatives, NaN,
-    /// large values, integer lattice points), special pairs, and vectors whose first two components tie
-    /// (x0.x == x0.y in snoise). Equality is exact: both sides are float32 C# over the same intrinsics.
+    /// Every mirror function with a C# math counterpart returns the same bits (any NaN equals any NaN;
+    /// -0 differs from 0) over random inputs, every special value in every argument (ties, zeros,
+    /// negatives, NaN, large values, integer lattice points), special pairs, and vectors whose first two
+    /// components tie (x0.x == x0.y in snoise). This proves the text of CultMath.hlsl computes the same
+    /// float32 results as C# math on the CPU. It does not prove GPU agreement: driver sin precision alone
+    /// makes cultmath_hash and value noise differ bit for bit on hardware.
     /// </summary>
     [Fact]
     public void EveryMirrorFunctionMatchesCSharpMath()
@@ -78,7 +80,8 @@ public sealed class HlslSourceCompatibilityTests
                     : Activator.CreateInstance(t, Enumerable.Range(0, Components(t)).Select(_ => (object)input(slot++)).ToArray())!).ToArray();
                 var expected = Floats(counterpart.Invoke(null, args)!);
                 var actual = Floats(mirror.Invoke(shader, args)!);
-                if (!expected.SequenceEqual(actual))
+                if (expected.Length != actual.Length || expected.Zip(actual).Any(p => !(float.IsNaN(p.First) && float.IsNaN(p.Second))
+                    && BitConverter.SingleToInt32Bits(p.First) != BitConverter.SingleToInt32Bits(p.Second)))
                 {
                     mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Floats(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
                 }
