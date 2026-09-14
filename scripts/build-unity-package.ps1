@@ -38,7 +38,19 @@ if (Test-Path -LiteralPath $outputRoot) {
 }
 
 $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
-$publishArguments = @("publish", $projectPath, "-c", $Configuration, "-o", $publishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+# The tracked DLLs and pdbs are committed beside their source, so none may name a commit or a worktree:
+# Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
+# carries its pdb's content id. ContinuousIntegrationBuild maps the local source path to /_/.
+# dotnet publish has no --no-incremental, so clear the configuration's intermediates instead: a stale obj
+# directory must not decide what the byte check compares.
+Get-ChildItem -LiteralPath (Join-Path $repoRoot "obj\src") -Directory -ErrorAction SilentlyContinue |
+  ForEach-Object { Join-Path $_.FullName $Configuration } |
+  Where-Object { Test-Path -LiteralPath $_ } |
+  ForEach-Object { Remove-Item -LiteralPath $_ -Recurse -Force }
+$deterministicArguments = @("--disable-build-servers", "-p:UseSharedCompilation=false",
+  "-p:ContinuousIntegrationBuild=true", "-p:EnableSourceLink=false",
+  "-p:IncludeSourceRevisionInInformationalVersion=false", "-m:1")
+$publishArguments = @("publish", $projectPath, "-c", $Configuration, "-o", $publishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
 if ($NoRestore) { $publishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $publishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
@@ -47,7 +59,7 @@ if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib publish failed with exit code $LASTEXITCODE"
 }
-$webSocketPublishArguments = @("publish", $webSocketProjectPath, "-c", $Configuration, "-f", "netstandard2.1", "-o", $webSocketPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+$webSocketPublishArguments = @("publish", $webSocketProjectPath, "-c", $Configuration, "-f", "netstandard2.1", "-o", $webSocketPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
 if ($NoRestore) { $webSocketPublishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $webSocketPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
@@ -56,7 +68,7 @@ if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib WebSocket publish failed with exit code $LASTEXITCODE"
 }
-$quicPublishArguments = @("publish", $quicProjectPath, "-c", $Configuration, "-o", $quicPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion")
+$quicPublishArguments = @("publish", $quicProjectPath, "-c", $Configuration, "-o", $quicPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
 if ($NoRestore) { $quicPublishArguments += "--no-restore" }
 if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
   $quicPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
