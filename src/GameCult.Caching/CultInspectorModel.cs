@@ -612,7 +612,8 @@ namespace GameCult.Caching
         private static int Ancestry(Type? type) => type == null ? 0 : 1 + Ancestry(type.BaseType);
 
         // `init` is a setter whose return carries the IsExternalInit modreq; the language contract, matched by name because
-        // netstandard2.1 does not ship the type.
+        // netstandard2.1 does not ship the type. A runtime that does not report the modreq (unverified on Unity's Mono) shows
+        // init members editable instead of read-only; SetValue still assigns them, so their edits round-trip either way.
         private static bool IsInitOnly(MethodInfo setter) =>
             setter.ReturnParameter.GetRequiredCustomModifiers().Any(modifier => modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit");
 
