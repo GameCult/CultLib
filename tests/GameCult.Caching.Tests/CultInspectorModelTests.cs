@@ -255,8 +255,10 @@ namespace GameCult.Caching.Tests
             Assert.That(open.Members.Select(member => member.Name), Is.EqualTo(new[] { "x", "y" }));
             Assert.That(open.Members.All(member => member.IsAssignable), Is.True);
             (string, bool)[] Rows(Type type) => model.ShapeOf(type).Members.Select(member => (member.Name, member.IsReadOnly)).ToArray();
-            Assert.That(Rows(typeof(InspectMixedStruct)), Is.EqualTo(new[] { ("x", false), ("y", true), ("Settable", false), ("Initable", true) }),
-                "fields, then settable properties; readonly and init are read-only; get-only is not a row");
+            Assert.That(Rows(typeof(InspectMixedStruct)), Is.EqualTo(new[] { ("x", false), ("y", true) }),
+                "a struct with public fields shows only them; its settable properties are aliases, not rows");
+            Assert.That(Rows(typeof(InspectPropertyStruct)), Is.EqualTo(new[] { ("Settable", false), ("Initable", true) }),
+                "without public fields, settable properties are rows; init is read-only; get-only is not a row");
             Assert.That(Rows(typeof(InspectRecordStruct)), Is.EqualTo(new[] { ("A", false), ("B", false) }));
             Assert.That(Rows(typeof(InspectReadonlyRecordStruct)), Is.EqualTo(new[] { ("A", true), ("B", true) }));
             object boxed = new InspectRecordStruct(1, 2f);
@@ -372,6 +374,11 @@ namespace GameCult.Caching.Tests
         {
             public float x;
             public readonly float y;
+            public float Alias { get => x; set => x = value; }
+        }
+
+        public struct InspectPropertyStruct
+        {
             public int Settable { get; set; }
             public int Initable { get; init; }
             public int Computed => Settable + 1;

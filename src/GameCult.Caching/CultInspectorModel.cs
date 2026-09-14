@@ -552,16 +552,19 @@ namespace GameCult.Caching
             var keyed = KeyedMembers(type);
             if (keyed.Length > 0)
                 return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = keyed };
-            // An unkeyed struct is edited in place: its public fields, readonly ones read-only, then its public properties with
-            // a setter, init-only ones read-only. Get-only properties are computed (a vector's swizzles) or kept by the
-            // in-place edit, so they are not rows.
+            // An unkeyed struct is edited in place. With public fields it shows only them, readonly ones read-only: its
+            // properties alias those values (a Quaternion's eulerAngles, a Rect's min and max). Without, it shows its public
+            // properties with a setter, init-only ones read-only (record structs, matrices over private rows). Get-only
+            // properties are computed or kept by the in-place edit, so they are never rows.
             if (type.IsValueType)
             {
-                var members = type.GetFields(Public).OrderBy(field => field.MetadataToken)
-                    .Select(field => (Member: (MemberInfo)field, Type: field.FieldType, Assignable: !field.IsInitOnly))
-                    .Concat(type.GetProperties(Public).OrderBy(property => property.MetadataToken)
-                        .Where(property => property.GetIndexParameters().Length == 0 && property.GetGetMethod() != null && property.GetSetMethod() != null)
-                        .Select(property => (Member: (MemberInfo)property, Type: property.PropertyType, Assignable: !IsInitOnly(property.GetSetMethod()!))))
+                var fields = type.GetFields(Public);
+                var members = (fields.Length > 0
+                        ? fields.OrderBy(field => field.MetadataToken)
+                            .Select(field => (Member: (MemberInfo)field, Type: field.FieldType, Assignable: !field.IsInitOnly))
+                        : type.GetProperties(Public).OrderBy(property => property.MetadataToken)
+                            .Where(property => property.GetIndexParameters().Length == 0 && property.GetGetMethod() != null && property.GetSetMethod() != null)
+                            .Select(property => (Member: (MemberInfo)property, Type: property.PropertyType, Assignable: !IsInitOnly(property.GetSetMethod()!))))
                     .Select((member, slot) => new CultInspectorMember(member.Member, member.Type, slot, member.Assignable, MetadataOf(member.Member)))
                     .ToArray();
                 if (members.Length > 0)

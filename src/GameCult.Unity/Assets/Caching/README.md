@@ -45,7 +45,7 @@ catalog slots, `CultInspector*` metadata, whether a member is assignable), the
 shape of any value (string, integer, float, bool, enum, `CultRecordRef<T>` with
 its candidate records, rank-1 list or array, dictionary, `[Union]` with only
 its declared subtypes, nested keyed object, struct edited in place through its
-public fields and settable properties, or unsupported with a reason), drawer claim resolution
+public fields, or its settable properties when it has none, or unsupported with a reason), drawer claim resolution
 (`CultInspectorDrawerClaims`), and the edit decisions: the key a dictionary
 entry keeps and the notice when a key is refused (null, an empty record
 reference, a duplicate: serialized the same as another key under the owning
@@ -59,10 +59,12 @@ renderer and drawers to show and edit the same documents under the same rules.
 
 ## Drawers
 
-Built in: every model shape above. A struct without `[Key]` members folds out
-to its public fields and its public properties with a setter, and is edited in
-place; readonly fields and `init` properties show read-only, and get-only
-properties are not shown (record structs work as written). Unity object
+Built in: every model shape above. A struct without `[Key]` members is edited
+in place. With public fields it folds out to those fields only (readonly ones
+read-only), so aliasing properties such as `Quaternion.eulerAngles` or
+`Rect.min` add no rows; without public fields it folds out to its public
+properties with a setter, `init` ones read-only (record structs and CultMath
+matrices work as written). Get-only properties are never shown. Unity object
 references draw as object fields. A value no drawer claims and no shape covers
 shows a red error row with the model's reason, as does a multi-dimensional
 array.
