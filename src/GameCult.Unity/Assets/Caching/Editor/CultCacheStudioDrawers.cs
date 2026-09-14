@@ -245,7 +245,7 @@ namespace GameCult.Unity.Caching.Editor
                         var item = DrawValue("Value", shape.ValueType, entries[i].Value, member, path + "{" + i + "}.value");
                         if (EditorGUI.EndChangeCheck())
                         {
-                            key = Model.ReplaceKey(_edit.Document.GetType(),shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
+                            key = Model.ReplaceKey(_edit.Document.GetType(), shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
                             Notice(path, notice);
                             entries[i] = new KeyValuePair<object, object>(key, item);
                             changed = true;
@@ -264,7 +264,7 @@ namespace GameCult.Unity.Caching.Editor
 
             if (Add(shape.ValueType, path, out var created))
             {
-                var fresh = Model.FreshKey(_edit.Document.GetType(),shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
+                var fresh = Model.FreshKey(_edit.Document.GetType(), shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
                 Notice(path, notice);
                 if (fresh != null)
                 {
