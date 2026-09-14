@@ -39,6 +39,10 @@ namespace GameCult.Caching.Tests
             var id = Model().MembersOf(typeof(InspectFixed)).Single();
             Assert.That(id.IsAssignable, Is.False, "a get-only member its constructor fills cannot be assigned");
             Assert.That(id.IsReadOnly, Is.True);
+
+            var hidden = Model().MembersOf(typeof(InspectHider)).Single();
+            Assert.That(hidden.Member.DeclaringType, Is.EqualTo(typeof(InspectHider)), "a `new` member is its most-derived declaration");
+            Assert.That(hidden.ValueType, Is.EqualTo(typeof(string)));
         }
 
         [Test]
@@ -240,6 +244,20 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)]
             public float Side;
+        }
+
+        [MessagePackObject]
+        public class InspectHidden
+        {
+            [Key(0)]
+            public int Value;
+        }
+
+        [MessagePackObject]
+        public sealed class InspectHider : InspectHidden
+        {
+            [Key(0)]
+            public new string Value = string.Empty;
         }
 
         public readonly record struct InspectPair(float x, float y);

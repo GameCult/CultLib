@@ -520,7 +520,10 @@ namespace GameCult.Caching
             var candidates = type.GetMembers(Public)
                 .Where(member => member is FieldInfo field && !field.IsLiteral ||
                                  member is PropertyInfo property && property.GetGetMethod() != null && property.GetIndexParameters().Length == 0)
-                .Where(member => !member.IsDefined(typeof(IgnoreMemberAttribute), true));
+                .Where(member => !member.IsDefined(typeof(IgnoreMemberAttribute), true))
+                // A member hidden with `new` is its most-derived declaration, as the registry's own-member scan reads it.
+                .GroupBy(member => member.Name)
+                .Select(hides => hides.OrderByDescending(member => Ancestry(member.DeclaringType)).First());
             IEnumerable<(MemberInfo Member, int Slot)> slotted;
             if (type.IsDefined(typeof(CultDocumentAttribute), false))
             {
@@ -574,6 +577,8 @@ namespace GameCult.Caching
 
         private static CultInspectorShape Unsupported(Type type, string reason) =>
             new CultInspectorShape(type, CultInspectorValueKind.Unsupported) { Reason = reason };
+
+        private static int Ancestry(Type? type) => type == null ? 0 : 1 + Ancestry(type.BaseType);
 
         private static Type TypeOf(MemberInfo member) => member is FieldInfo field ? field.FieldType : ((PropertyInfo)member).PropertyType;
 
