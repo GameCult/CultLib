@@ -14,6 +14,8 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);CS8981</NoWarn>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The Unity DLL is committed beside its source, so its bytes must not name a commit. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
