@@ -110,13 +110,32 @@ foreach ($pair in @(@($freshAssembly, $trackedAssembly), @($freshSymbols, $track
   }
 }
 
-$coreSourceNames = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "src\CultMath") -File -Filter "*.cs" | ForEach-Object Name)
 $trackedSourceFiles = @(Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Filter "*.cs")
-$strayOrCoreSources = @($trackedSourceFiles | Where-Object {
-  $_.DirectoryName -ne $bridgeRoot -or $coreSourceNames -contains $_.Name
-})
-if ($trackedSourceFiles.Count -eq 0 -or $strayOrCoreSources.Count -ne 0) {
-  throw "CultMath Unity package may compile only bridge sources under Runtime\UnityBridge, never core sources: $($strayOrCoreSources.FullName -join ', ')"
+$straySources = @($trackedSourceFiles | Where-Object { $_.DirectoryName -ne $bridgeRoot })
+if ($trackedSourceFiles.Count -eq 0 -or $straySources.Count -ne 0) {
+  throw "CultMath Unity package may compile only bridge sources under Runtime\UnityBridge: $($straySources.FullName -join ', ')"
+}
+
+# Check what the bridge declares, not what its files are called: it may declare types only in
+# CultMath.UnityBridge and never a type name the core CultMath sources declare.
+$declarationPattern = '\b(?:struct|class|enum|interface|record|delegate\s+[\w<>.,\s]+?)\s+(\w+)'
+function Get-CodeWithoutComments([string]$path) {
+  $text = Get-Content -LiteralPath $path -Raw
+  return [regex]::Replace($text, '(?s)/\*.*?\*/|//[^\r\n]*', '')
+}
+$coreTypeNames = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "src\CultMath") -File -Filter "*.cs" | ForEach-Object {
+  [regex]::Matches((Get-CodeWithoutComments $_.FullName), $declarationPattern) | ForEach-Object { $_.Groups[1].Value }
+} | Sort-Object -Unique)
+if ($coreTypeNames -notcontains "float3" -or $coreTypeNames -notcontains "math") {
+  throw "Could not read CultMath core type declarations; the bridge check would be vacuous"
+}
+foreach ($source in $trackedSourceFiles) {
+  $code = Get-CodeWithoutComments $source.FullName
+  $redeclared = @([regex]::Matches($code, $declarationPattern) | ForEach-Object { $_.Groups[1].Value } | Where-Object { $coreTypeNames -contains $_ })
+  $foreignNamespaces = @([regex]::Matches($code, '\bnamespace\s+([\w.]+)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -ne "CultMath.UnityBridge" })
+  if ($redeclared.Count -ne 0 -or $foreignNamespaces.Count -ne 0) {
+    throw "CultMath.UnityBridge source $($source.Name) re-declares core types [$($redeclared -join ', ')] or uses namespaces [$($foreignNamespaces -join ', ')]; the precompiled DLL owns CultMath's types"
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
