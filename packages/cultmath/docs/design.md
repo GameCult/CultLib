@@ -46,8 +46,8 @@ That makes these HLSL rules, not options:
   sides rather than leaning on implicit scalar splat.
 - Intrinsics return HLSL's types and edge cases: `sign` returns `int`/`intN`
   (NaN gives 0); `step(y, x)` is `x < y ? 0 : 1` (NaN gives 1), which is how dxc
-  lowers it, in C# and in the HLSL mirror; float `min`, `max`, `clamp`, and
-  `saturate` follow the DXIL `FMin`/`FMax`/`Saturate` operations dxc emits for
+  lowers it, in C# and in the HLSL mirror; float and double `min` and `max`, and
+  float `clamp` and `saturate`, follow the DXIL `FMin`/`FMax`/`Saturate` operations dxc emits for
   them: `min(a, b)` is `a < b ? a : b`, `max(a, b)` is `a >= b ? a : b`, a NaN
   operand returns the other (so `saturate(NaN)` is 0), `clamp(x, a, b)` is
   `min(max(x, a), b)`, and `saturate(x)` is `min(1, max(0, x))`, which maps -0
@@ -58,6 +58,16 @@ dxc marks float arithmetic and compares `fast` (no NaNs) unless a value is
 `precise`, so drivers may optimize NaN handling away and NaN results on real
 GPUs are not guaranteed. CultMath defines the CPU result by dxc's lowering and
 the DXIL operation spec (DirectXShaderCompiler `docs/DXIL.rst`).
+
+NaN does not reliably propagate through CultMath, just as it does not on the
+GPU. Because `min`, `max`, and `saturate` return the non-NaN operand, some
+functions turn NaN or infinity into numbers: `smoothstep(a, a, a)` is 0;
+infinite inputs to `smoothstep` and the intercept helpers give numbers; the
+bezier, `smoothstep01`, and `smootherstep` functions return finite values for
+NaN input; and `normalize((NaN, 2.41))` is `(NaN, 2.41e20)`, because the NaN
+length is clamped to the epsilon and the other component is divided by it.
+Callers that must detect bad data should check `isnan` before calling these
+functions.
 
 Deferred until a consumer needs them: `float4x4`, `transpose`, `determinant`,
 and HLSL's one-based `_11`..`_33` element names.
@@ -88,7 +98,10 @@ DirectXShaderCompiler, and
 The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
 0). It proves the text of `CultMath.hlsl` computes the same float32 results as
 C# `math` on the CPU, not that a GPU agrees: driver `sin` precision alone makes
-`cultmath_hash` and value noise differ bit for bit on hardware.
+`cultmath_hash` and value noise differ bit for bit on hardware. The mirror is
+compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
+itself: the test proves the composition in the text, not the intrinsic rules,
+which only `HlslSemanticsTests` pins.
 
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
 Unity.Mathematics: `normalize` is safe (divides by `max(length, 1e-20)`),

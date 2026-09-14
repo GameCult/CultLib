@@ -42,7 +42,9 @@ public sealed class HlslSourceCompatibilityTests
     /// negatives, NaN, large values, integer lattice points), special pairs, and vectors whose first two
     /// components tie (x0.x == x0.y in snoise). This proves the text of CultMath.hlsl computes the same
     /// float32 results as C# math on the CPU. It does not prove GPU agreement: driver sin precision alone
-    /// makes cultmath_hash and value noise differ bit for bit on hardware.
+    /// makes cultmath_hash and value noise differ bit for bit on hardware. The mirror's intrinsics are C#
+    /// math itself (it compiles under using static CultMath.math), so this proves the composition in the
+    /// text, not the intrinsic rules; HlslSemanticsTests alone pins those.
     /// </summary>
     [Fact]
     public void EveryMirrorFunctionMatchesCSharpMath()
