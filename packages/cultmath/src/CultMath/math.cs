@@ -106,7 +106,9 @@ public static partial class math
     public static float3 frac(float3 value) => value - floor(value);
     public static float4 frac(float4 value) => value - floor(value);
 
-    public static float min(float left, float right) => MathF.Min(left, right);
+    // dxc lowers float min/max/clamp to DXIL FMin/FMax (saturate to Saturate, defined as FMin(1, FMax(0, x))).
+    // DXIL.rst: FMin(a, b) is a < b ? a : b, FMax(a, b) is a >= b ? a : b, and a NaN operand returns the other.
+    public static float min(float left, float right) => left < right || float.IsNaN(right) ? left : right;
     public static int min(int left, int right) => Math.Min(left, right);
     public static float2 min(float2 left, float2 right) => new(min(left.x, right.x), min(left.y, right.y));
     public static float3 min(float3 left, float3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
@@ -115,7 +117,7 @@ public static partial class math
     public static int3 min(int3 left, int3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
     public static int4 min(int4 left, int4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
 
-    public static float max(float left, float right) => MathF.Max(left, right);
+    public static float max(float left, float right) => left >= right || float.IsNaN(right) ? left : right;
     public static int max(int left, int right) => Math.Max(left, right);
     public static float2 max(float2 left, float2 right) => new(max(left.x, right.x), max(left.y, right.y));
     public static float3 max(float3 left, float3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
@@ -129,10 +131,11 @@ public static partial class math
     public static float3 clamp(float3 value, float3 minimum, float3 maximum) => min(max(value, minimum), maximum);
     public static float4 clamp(float4 value, float4 minimum, float4 maximum) => min(max(value, minimum), maximum);
 
-    public static float saturate(float value) => clamp(value, 0.0f, 1.0f);
-    public static float2 saturate(float2 value) => clamp(value, 0.0f, 1.0f);
-    public static float3 saturate(float3 value) => clamp(value, 0.0f, 1.0f);
-    public static float4 saturate(float4 value) => clamp(value, 0.0f, 1.0f);
+    // DXIL Saturate is FMin(1, FMax(0, x)); that operand order, unlike clamp(x, 0, 1), maps -0 to +0.
+    public static float saturate(float value) => min(1.0f, max(0.0f, value));
+    public static float2 saturate(float2 value) => min(1.0f, max(0.0f, value));
+    public static float3 saturate(float3 value) => min(1.0f, max(0.0f, value));
+    public static float4 saturate(float4 value) => min(1.0f, max(0.0f, value));
 
     public static float lerp(float start, float end, float amount) => start + (end - start) * amount;
     public static double lerp(double start, double end, double amount) => start + (end - start) * amount;
@@ -202,9 +205,9 @@ public static partial class math
     public static float distance(float3 left, float3 right) => length(left - right);
     public static float distance(float4 left, float4 right) => length(left - right);
 
-    public static float2 normalize(float2 value) => value / MathF.Max(length(value), 1.0e-20f);
-    public static float3 normalize(float3 value) => value / MathF.Max(length(value), 1.0e-20f);
-    public static float4 normalize(float4 value) => value / MathF.Max(length(value), 1.0e-20f);
+    public static float2 normalize(float2 value) => value / max(length(value), 1.0e-20f);
+    public static float3 normalize(float3 value) => value / max(length(value), 1.0e-20f);
+    public static float4 normalize(float4 value) => value / max(length(value), 1.0e-20f);
     public static quaternion normalize(quaternion value)
     {
         var length = MathF.Sqrt(value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w);

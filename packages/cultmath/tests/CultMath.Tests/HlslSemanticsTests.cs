@@ -165,6 +165,20 @@ public sealed class HlslSemanticsTests
         Assert.Equal(1.0f, math.step(float.NaN, 1.0f));
         Assert.Equal(1.0f, math.step(1.0f, 1.0f));
 
+        // DXIL FMin/FMax/Saturate: a NaN operand returns the other; max(a, b) is a >= b ? a : b.
+        Assert.Equal(1.0f, math.min(float.NaN, 1.0f));
+        Assert.Equal(1.0f, math.min(1.0f, float.NaN));
+        Assert.Equal(1.0f, math.max(float.NaN, 1.0f));
+        Assert.Equal(1.0f, math.max(1.0f, float.NaN));
+        Assert.True(float.IsNaN(math.max(float.NaN, float.NaN)));
+        Assert.Equal(2.0f, math.clamp(float.NaN, 2.0f, 3.0f));
+        Assert.Equal(new float3(0.0f, 1.0f, 0.0f), math.saturate(new float3(float.NaN, 2.0f, -1.0f)));
+        Assert.Equal(new float2(-1.0f, 4.0f), math.max(new float2(float.NaN, 4.0f), new float2(-1.0f, float.NaN)));
+        static int Bits(float value) => BitConverter.SingleToInt32Bits(value);
+        Assert.Equal(Bits(-0.0f), Bits(math.max(-0.0f, 0.0f)));
+        Assert.Equal(Bits(0.0f), Bits(math.min(-0.0f, 0.0f)));
+        Assert.Equal(Bits(0.0f), Bits(math.saturate(-0.0f)));
+
         Assert.Equal(0, math.sign(float.NaN));
         Assert.Equal(-1, math.sign(-0.5f));
         Assert.Equal(new int3(-1, 0, 1), math.sign(new float3(-2.0f, 0.0f, 4.0f)));

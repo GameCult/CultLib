@@ -46,8 +46,18 @@ That makes these HLSL rules, not options:
   sides rather than leaning on implicit scalar splat.
 - Intrinsics return HLSL's types and edge cases: `sign` returns `int`/`intN`
   (NaN gives 0); `step(y, x)` is `x < y ? 0 : 1` (NaN gives 1), which is how dxc
-  lowers it, in C# and in the HLSL mirror; `any`/`all` accept numeric vectors (a component is true when it is
+  lowers it, in C# and in the HLSL mirror; float `min`, `max`, `clamp`, and
+  `saturate` follow the DXIL `FMin`/`FMax`/`Saturate` operations dxc emits for
+  them: `min(a, b)` is `a < b ? a : b`, `max(a, b)` is `a >= b ? a : b`, a NaN
+  operand returns the other (so `saturate(NaN)` is 0), `clamp(x, a, b)` is
+  `min(max(x, a), b)`, and `saturate(x)` is `min(1, max(0, x))`, which maps -0
+  to +0; `any`/`all` accept numeric vectors (a component is true when it is
   not 0); `min`, `max`, and `abs` on int vectors return int vectors.
+
+dxc marks float arithmetic and compares `fast` (no NaNs) unless a value is
+`precise`, so drivers may optimize NaN handling away and NaN results on real
+GPUs are not guaranteed. CultMath defines the CPU result by dxc's lowering and
+the DXIL operation spec (DirectXShaderCompiler `docs/DXIL.rst`).
 
 Deferred until a consumer needs them: `float4x4`, `transpose`, `determinant`,
 and HLSL's one-based `_11`..`_33` element names.

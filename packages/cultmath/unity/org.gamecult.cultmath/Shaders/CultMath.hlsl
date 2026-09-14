@@ -26,10 +26,11 @@ float2 cultmath_clamp(float2 value, float2 minimum, float2 maximum) { return min
 float3 cultmath_clamp(float3 value, float3 minimum, float3 maximum) { return min(max(value, minimum), maximum); }
 float4 cultmath_clamp(float4 value, float4 minimum, float4 maximum) { return min(max(value, minimum), maximum); }
 
-float cultmath_saturate(float value) { return cultmath_clamp(value, 0.0, 1.0); }
-float2 cultmath_saturate(float2 value) { return cultmath_clamp(value, float2(0.0, 0.0), float2(1.0, 1.0)); }
-float3 cultmath_saturate(float3 value) { return cultmath_clamp(value, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)); }
-float4 cultmath_saturate(float4 value) { return cultmath_clamp(value, float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 1.0, 1.0, 1.0)); }
+// DXIL Saturate is FMin(1, FMax(0, x)); dxc lowers min/max to the same FMin/FMax, NaN rules included.
+float cultmath_saturate(float value) { return min(1.0, max(0.0, value)); }
+float2 cultmath_saturate(float2 value) { return min(float2(1.0, 1.0), max(float2(0.0, 0.0), value)); }
+float3 cultmath_saturate(float3 value) { return min(float3(1.0, 1.0, 1.0), max(float3(0.0, 0.0, 0.0), value)); }
+float4 cultmath_saturate(float4 value) { return min(float4(1.0, 1.0, 1.0, 1.0), max(float4(0.0, 0.0, 0.0, 0.0), value)); }
 
 float cultmath_lerp(float start, float end, float amount) { return start + (end - start) * amount; }
 float2 cultmath_lerp(float2 start, float2 end, float2 amount) { return start + (end - start) * amount; }
