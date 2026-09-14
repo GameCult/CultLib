@@ -38,41 +38,47 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(payload), Is.EqualTo(InteropNotePayloadHex));
         }
 
+        // An unset reference is "" (A0) on the wire. Legacy is the same record as 1.0.58 wrote it, with nil (C0).
+        private const string UnsetRefPayloadHex = "93A6686F6C646572A0A56F74686572";
+        private const string UnsetRefLegacyPayloadHex = "93A6686F6C646572C0A56F74686572";
+        // A ref-keyed dictionary whose unset key is "" (A0): msgpack readers under strict_map_key refuse a nil key.
+        private const string RefKeyedPayloadHex = "92A6686F6C64657282A5616C706861CA3E800000A0CA40000000";
+
         [Test]
-        public async Task UnsetRefReloadsAndResavesByteIdentical()
+        public async Task UnsetRefWritesEmptyStringAndResavesByteIdentical()
         {
             var path = Path.Combine(Path.GetTempPath(), $"cultlib-unsetref-{Guid.NewGuid():N}.cc");
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(UnsetRefHolder) });
-            byte[] Payload() => CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single().Payload;
+            var key = new CultRecordKey("holder");
             try
             {
                 using (var seed = new CultCache(registry))
                 {
                     seed.AddBackingStore(new SingleFileMessagePackBackingStore(path));
-                    await seed.UpsertAsync(typeof(UnsetRefHolder), new UnsetRefHolder { Name = "holder", Set = new CultRecordRef<UnsetRefHolder>(new CultRecordKey("other")) },
-                        new CultRecordKey("holder"));
+                    await seed.UpsertAsync(typeof(UnsetRefHolder), new UnsetRefHolder { Name = "holder", Set = new CultRecordRef<UnsetRefHolder>(new CultRecordKey("other")) }, key);
                     await seed.FlushAsync();
                 }
+                var written = Convert.ToHexString(StoredPayload(path));
 
-                var written = Payload();
-                CultRecordRef<UnsetRefHolder> unset;
                 using (var reopened = new CultCache(registry))
                 {
                     reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
                     await reopened.PullAllBackingStoresAsync();
-                    var loaded = reopened.Get<UnsetRefHolder>(new CultRecordKey("holder"))!;
-                    unset = loaded.Unset;
-                    await reopened.UpsertAsync(typeof(UnsetRefHolder), loaded, new CultRecordKey("holder"));
+                    await reopened.UpsertAsync(typeof(UnsetRefHolder), reopened.Get<UnsetRefHolder>(key)!, key);
                     await reopened.FlushAsync();
                 }
+                var resaved = Convert.ToHexString(StoredPayload(path));
 
-                Assert.That(Payload(), Is.EqualTo(written), "an unset reference loads and re-saves byte-identical");
-                Assert.That(unset, Is.EqualTo(default(CultRecordRef<UnsetRefHolder>)));
-                Assert.That(unset.Key, Is.EqualTo(new CultRecordKey("")), "default and \"\" are one empty key");
-                var legacy = MessagePackSerializer.Serialize("", CultDocumentMessagePackSerialization.Options);
-                var read = MessagePackSerializer.Deserialize<CultRecordRef<UnsetRefHolder>>(legacy, CultDocumentMessagePackSerialization.Options);
-                Assert.That(MessagePackSerializer.Serialize(read, CultDocumentMessagePackSerialization.Options), Is.EqualTo(new[] { MessagePackCode.Nil }),
-                    "a \"\" reference reads as unset and writes nil");
+                var legacy = (UnsetRefHolder)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(UnsetRefHolder), Convert.FromHexString(UnsetRefLegacyPayloadHex), registry);
+                var legacyResaved = Convert.ToHexString(CultDocumentMessagePackSerialization.SerializeUntyped(legacy, typeof(UnsetRefHolder), registry));
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(written, Is.EqualTo(UnsetRefPayloadHex), "the writer writes an unset reference as \"\"");
+                    Assert.That(resaved, Is.EqualTo(UnsetRefPayloadHex), "reloaded through a fresh cache, it resaves byte-identical");
+                    Assert.That(legacy.Unset, Is.EqualTo(default(CultRecordRef<UnsetRefHolder>)), "a nil reference reads as unset");
+                    Assert.That(legacyResaved, Is.EqualTo(UnsetRefPayloadHex), "a nil reference resaves as \"\"");
+                });
             }
             finally
             {
@@ -81,37 +87,49 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task RefKeyedDictionaryRoundTrips()
+        public async Task RefKeyedDictionaryWithUnsetKeyRoundTripsByteIdentical()
         {
             var path = Path.Combine(Path.GetTempPath(), $"cultlib-refkeyed-{Guid.NewGuid():N}.cc");
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(RefKeyedHolder) });
             var alpha = new CultRecordRef<RefKeyedHolder>(new CultRecordKey("alpha"));
-            var beta = new CultRecordRef<RefKeyedHolder>(new CultRecordKey("beta"));
+            var handle = new CultRecordHandle<RefKeyedHolder>(new CultRecordKey("holder"));
             try
             {
                 using (var cache = new CultCache(registry))
                 {
                     cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
-                    await cache.UpsertAsync(
-                        new RefKeyedHolder { Name = "holder", Weights = new() { [alpha] = 0.25f, [beta] = 2f } },
-                        new CultRecordHandle<RefKeyedHolder>(new CultRecordKey("holder")));
+                    await cache.UpsertAsync(new RefKeyedHolder { Name = "holder", Weights = new() { [alpha] = 0.25f, [default] = 2f } }, handle);
                     cache.FlushAllBackingStores();
                 }
+                var written = Convert.ToHexString(StoredPayload(path));
 
-                using var reopened = new CultCache(registry);
-                reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
-                await reopened.PullAllBackingStoresAsync();
-                var loaded = reopened.Get<RefKeyedHolder>(new CultRecordKey("holder"));
+                Dictionary<CultRecordRef<RefKeyedHolder>, float> weights;
+                using (var reopened = new CultCache(registry))
+                {
+                    reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                    await reopened.PullAllBackingStoresAsync();
+                    var loaded = reopened.Get<RefKeyedHolder>(handle.Key)!;
+                    weights = loaded.Weights;
+                    await reopened.UpsertAsync(loaded, handle);
+                    reopened.FlushAllBackingStores();
+                }
+                var resaved = Convert.ToHexString(StoredPayload(path));
 
-                Assert.That(loaded, Is.Not.Null);
-                Assert.That(loaded!.Weights[new CultRecordRef<RefKeyedHolder>(new CultRecordKey("alpha"))], Is.EqualTo(0.25f));
-                Assert.That(loaded.Weights[new CultRecordRef<RefKeyedHolder>(new CultRecordKey("beta"))], Is.EqualTo(2f));
+                Assert.Multiple(() =>
+                {
+                    Assert.That(written, Is.EqualTo(RefKeyedPayloadHex), "the unset key is written as \"\"");
+                    Assert.That(weights, Is.EqualTo(new Dictionary<CultRecordRef<RefKeyedHolder>, float> { [alpha] = 0.25f, [default] = 2f }), "the unset key reads back unset");
+                    Assert.That(resaved, Is.EqualTo(RefKeyedPayloadHex), "reloaded, it resaves byte-identical");
+                });
             }
             finally
             {
                 if (File.Exists(path)) File.Delete(path);
             }
         }
+
+        private static byte[] StoredPayload(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single().Payload;
 
         [Test]
         public void DeclaredResolverEncodesValueTypeAsPositionalArray()

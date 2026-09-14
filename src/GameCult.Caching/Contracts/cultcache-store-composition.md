@@ -239,13 +239,15 @@ another runtime need not obey the `storedAt` rule.
 ## Record references
 
 A record reference is its target's key string. An unset reference, the empty
-key, is **nil** on the wire, never `""`. A reader takes nil and `""` as the same
-unset reference and writes it back as nil, so loading and re-saving an unchanged
-record is byte-stable. In C# the unset reference is `default(CultRecordRef<T>)`,
-equal to one built from `""`; `CultRecordKey.Value` is never null. Rust,
-TypeScript and Python have no reference type: a reference member is a string in
-the consumer's own payload value, so a consumer writes an unset one as its
-language's null (`null`, `None`, `Option::None`), not as an empty string.
+key, is **`""`** on the wire in value and map-key position alike. Nil cannot be
+the form: msgpack readers in other runtimes (Python under `strict_map_key`)
+refuse nil map keys. Readers must also accept nil as unset, because C# 1.0.58
+stores wrote it; the writer always writes `""`, so such a record converts on its
+next save and is byte-stable after that. In C# the unset reference is
+`default(CultRecordRef<T>)`, equal to one built from `""`;
+`CultRecordKey.Value` is never null. Rust, TypeScript and Python have no
+reference type: a reference member is a string in the consumer's own payload,
+and a consumer writes an unset one as `""`.
 
 ## Value-type encoding
 
