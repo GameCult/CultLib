@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -83,15 +84,18 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     manifest.SchemaCatalog,
                     loaded,
                     reports);
-                if (lease != null || SameBytes(manifestBytes, ReadManifestBytes()))
+                if (lease != null || !ManifestMoved(manifestBytes))
                 {
                     catalog = manifest.SchemaCatalog;
                     Trace($"indexed-pages loaded={loaded.Count}");
                     break;
                 }
             }
-            catch (Exception exception) when (lease == null && IsTornGeneration(exception) && !SameBytes(manifestBytes, ReadManifestBytes()))
+            catch (Exception exception) when (lease == null && IsTornGeneration(exception))
             {
+                // The re-read stays out of the filter: an exception thrown inside a filter is swallowed as false.
+                if (!ManifestMoved(manifestBytes))
+                    throw;
                 if (attempt == UnleasedLoadAttempts)
                     throw Unsettled(exception);
                 continue;
@@ -305,7 +309,17 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var storedRecords = new CultStoredDocument?[records.Length];
         var pageBytes = tracePages ? new long[records.Length] : Array.Empty<long>();
         var pageElapsedTicks = tracePages ? new long[records.Length] : Array.Empty<long>();
-        Parallel.For(
+        try
+        {
+            ReadPages();
+        }
+        catch (AggregateException aggregate)
+        {
+            // The page's own failure propagates, not Parallel.For's wrapper.
+            ExceptionDispatchInfo.Capture(aggregate.Flatten().InnerExceptions[0]).Throw();
+        }
+
+        void ReadPages() => Parallel.For(
             0,
             records.Length,
             new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
@@ -383,15 +397,24 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
     private byte[]? ReadManifestBytes() => File.Exists(_manifestFile.FullName) ? ReadAllBytesShared(_manifestFile.FullName) : null;
 
-    private static bool SameBytes(byte[]? first, byte[]? second) =>
-        first == null ? second == null : second != null && first.SequenceEqual(second);
+    // A manifest that cannot be re-read (a writer mid-replace) has moved.
+    private bool ManifestMoved(byte[]? read)
+    {
+        try
+        {
+            var current = ReadManifestBytes();
+            return read == null ? current != null : current == null || !read.SequenceEqual(current);
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
 
     // A page the manifest named that vanished or was replaced. It is a writer committing mid-load only when the manifest
     // moved too; under an unchanged manifest the same failure is corruption and is thrown as it is.
     private static bool IsTornGeneration(Exception exception) =>
-        exception is AggregateException aggregate
-            ? aggregate.Flatten().InnerExceptions.All(IsTornGeneration)
-            : exception is InvalidDataException or FileNotFoundException or DirectoryNotFoundException;
+        exception is InvalidDataException or FileNotFoundException or DirectoryNotFoundException;
 
     private InvalidOperationException Unsettled(Exception? last) => new(
         $"Directory store {_manifestFile.FullName} changed under every one of {UnleasedLoadAttempts} unlocked loads; it did not settle.", last);

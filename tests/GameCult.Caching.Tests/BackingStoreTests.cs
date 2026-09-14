@@ -696,7 +696,8 @@ namespace GameCult.Caching.Tests
                 var thrown = Assert.CatchAsync(() => reader.PullAllBackingStoresAsync())!;
 
                 Assert.That(loads, Is.EqualTo(1), "corruption is not retried as a race");
-                Assert.That(thrown.ToString(), Does.Contain("does not match its committed content hash").And.Not.Contain("did not settle"));
+                Assert.That(thrown, Is.TypeOf<InvalidDataException>(), "the page's failure, not Parallel.For's wrapper");
+                Assert.That(thrown.Message, Does.Contain("does not match its committed content hash"));
             }
             finally
             {
