@@ -19,8 +19,6 @@ namespace GameCult.Caching
         Float,
         Bool,
         Enum,
-        // An unkeyed value type rebuilt through its constructor (CultMath vectors, rect, Color32).
-        Composite,
         RecordRef,
         List,
         Dictionary,
@@ -62,14 +60,14 @@ namespace GameCult.Caching
 
     public sealed class CultInspectorMember
     {
-        internal CultInspectorMember(MemberInfo member, Type valueType, int slot, bool assignable, bool component, CultInspectorMetadata metadata)
+        internal CultInspectorMember(MemberInfo member, Type valueType, int slot, bool assignable, CultInspectorMetadata metadata)
         {
             Member = member;
             ValueType = valueType;
             Slot = slot;
             IsAssignable = assignable;
             Metadata = metadata;
-            IsReadOnly = metadata.ReadOnly || !assignable && !component;
+            IsReadOnly = metadata.ReadOnly || !assignable;
         }
 
         public MemberInfo Member { get; }
@@ -79,10 +77,10 @@ namespace GameCult.Caching
         public CultInspectorMetadata Metadata { get; }
 
         // SetValue works: MessagePack's own rule, the one the registry persists by (a public setter or non-readonly field, or
-        // any setter or readonly field under AllowPrivate). A composite component is never assignable; its owner is composed.
+        // any setter or readonly field under AllowPrivate).
         public bool IsAssignable { get; }
 
-        // The lowering offers no edit: declared [CultInspectorReadOnly], or a member that can be neither assigned nor composed.
+        // The lowering offers no edit: declared [CultInspectorReadOnly], or not assignable.
         public bool IsReadOnly { get; }
 
         public object? GetValue(object target) =>
@@ -121,14 +119,13 @@ namespace GameCult.Caching
         // Union: the declared [Union] subtypes in key order, and nothing else.
         public IReadOnlyList<Type> UnionChoices { get; internal set; } = Array.Empty<Type>();
 
-        // Nested: the members in inspection order. Composite: the components in constructor order.
+        // Nested: the members in inspection order.
         public IReadOnlyList<CultInspectorMember> Members { get; internal set; } = Array.Empty<CultInspectorMember>();
 
         // Unsupported: why.
         public string? Reason { get; internal set; }
 
         internal Type? BuildType { get; set; }
-        internal ConstructorInfo? Composer { get; set; }
     }
 
     public readonly struct CultInspectorClaim
@@ -365,13 +362,6 @@ namespace GameCult.Caching
             return Activator.CreateInstance(subtype)!;
         }
 
-        public object Compose(CultInspectorShape composite, IReadOnlyList<object?> components)
-        {
-            if (composite?.Composer == null)
-                throw new ArgumentException("Only a composite shape is composed.", nameof(composite));
-            return composite.Composer.Invoke(components.ToArray());
-        }
-
         // A new collection holding items; the value it replaces is never mutated.
         public object BuildList(Type listType, IReadOnlyList<object?> items)
         {
@@ -522,14 +512,18 @@ namespace GameCult.Caching
             var keyed = KeyedMembers(type);
             if (keyed.Length > 0)
                 return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = keyed };
+            // An unkeyed struct is edited in place through its public fields. State it cannot write in place (a readonly field,
+            // a get-only auto-property) makes it unsupported until a drawer claims it.
             if (type.IsValueType)
             {
-                var composite = Composite(type);
-                if (composite != null)
-                    return composite;
-                var fields = type.GetFields(Public).Where(field => !field.IsLiteral)
+                var locked = type.GetFields(Public).FirstOrDefault(field => field.IsInitOnly)?.Name
+                             ?? type.GetProperties(Public).FirstOrDefault(property => property.GetSetMethod() == null &&
+                                 type.GetField($"<{property.Name}>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance) != null)?.Name;
+                if (locked != null)
+                    return Unsupported(type, $"{type.Name}.{locked} is readonly or get-only, so {type.Name} cannot be edited in place; it needs a drawer.");
+                var fields = type.GetFields(Public)
                     .OrderBy(field => field.MetadataToken)
-                    .Select((field, slot) => new CultInspectorMember(field, field.FieldType, slot, !field.IsInitOnly, false, MetadataOf(field)))
+                    .Select((field, slot) => new CultInspectorMember(field, field.FieldType, slot, true, MetadataOf(field)))
                     .ToArray();
                 if (fields.Length > 0)
                     return new CultInspectorShape(type, CultInspectorValueKind.Nested) { Members = fields };
@@ -564,40 +558,10 @@ namespace GameCult.Caching
             }
 
             return slotted
-                .Select(entry => new CultInspectorMember(entry.Member, TypeOf(entry.Member), entry.Slot, Assignable(entry.Member, allowPrivate), false, MetadataOf(entry.Member)))
+                .Select(entry => new CultInspectorMember(entry.Member, TypeOf(entry.Member), entry.Slot, Assignable(entry.Member, allowPrivate), MetadataOf(entry.Member)))
                 .OrderBy(member => member.Metadata.Order ?? member.Slot)
                 .ThenBy(member => member.Slot)
                 .ToArray();
-        }
-
-        // The longest public constructor whose every parameter takes a readable member of the same name and type. Public
-        // fields it does not take are state a rebuild would drop, so such a type is not composite.
-        private CultInspectorShape? Composite(Type type)
-        {
-            var readable = type.GetFields(Public).Where(field => !field.IsLiteral).Cast<MemberInfo>()
-                .Concat(type.GetProperties(Public).Where(property => property.GetGetMethod() != null && property.GetIndexParameters().Length == 0))
-                .ToArray();
-            foreach (var constructor in type.GetConstructors().OrderByDescending(constructor => constructor.GetParameters().Length))
-            {
-                var parameters = constructor.GetParameters();
-                if (parameters.Length == 0)
-                    break;
-                var components = parameters
-                    .Select(parameter => readable.FirstOrDefault(member =>
-                        string.Equals(member.Name, parameter.Name, StringComparison.OrdinalIgnoreCase) && TypeOf(member) == parameter.ParameterType))
-                    .ToArray();
-                if (components.Any(component => component == null) || components.Distinct().Count() != components.Length)
-                    continue;
-                if (readable.OfType<FieldInfo>().Any(field => !components.Contains(field)))
-                    continue;
-                return new CultInspectorShape(type, CultInspectorValueKind.Composite)
-                {
-                    Members = components.Select((component, slot) => new CultInspectorMember(component!, TypeOf(component!), slot, false, true, MetadataOf(component))).ToArray(),
-                    Composer = constructor
-                };
-            }
-
-            return null;
         }
 
         private static CultInspectorShape Unsupported(Type type, string reason) =>

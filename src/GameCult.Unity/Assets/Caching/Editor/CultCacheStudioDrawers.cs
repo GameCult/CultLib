@@ -84,8 +84,6 @@ namespace GameCult.Unity.Caching.Editor
                 case CultInspectorValueKind.Enum:
                     var current = value as Enum ?? (Enum)Enum.ToObject(type, 0);
                     return type.IsDefined(typeof(FlagsAttribute), false) ? EditorGUILayout.EnumFlagsField(label, current) : EditorGUILayout.EnumPopup(label, current);
-                case CultInspectorValueKind.Composite:
-                    return DrawComposite(label, shape, value);
                 case CultInspectorValueKind.RecordRef:
                     return DrawRecordRef(label, type, value);
                 case CultInspectorValueKind.List:
@@ -187,55 +185,6 @@ namespace GameCult.Unity.Caching.Editor
             {
                 return value ?? Activator.CreateInstance(type);
             }
-        }
-
-        // Scalar components draw on one row; anything else folds out. A change composes a new value.
-        private object DrawComposite(string label, CultInspectorShape shape, object value)
-        {
-            var path = _path;
-            value = value ?? Model.CreateDefault(shape.Type);
-            var components = shape.Members;
-            var values = components.Select(component => component.GetValue(value)).ToArray();
-            var changed = false;
-            if (components.All(component => Model.ShapeOf(component.ValueType).Kind is CultInspectorValueKind.Float or CultInspectorValueKind.Integer or CultInspectorValueKind.Bool))
-            {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    EditorGUILayout.PrefixLabel(label);
-                    var indent = EditorGUI.indentLevel;
-                    var labelWidth = EditorGUIUtility.labelWidth;
-                    EditorGUI.indentLevel = 0;
-                    EditorGUIUtility.labelWidth = 8 + 7 * components.Max(component => component.Name.Length);
-                    for (var i = 0; i < components.Count; i++)
-                    {
-                        EditorGUI.BeginChangeCheck();
-                        var next = DrawDefault(components[i].Name, components[i].ValueType, values[i], null);
-                        if (!EditorGUI.EndChangeCheck()) continue;
-                        values[i] = next;
-                        changed = true;
-                    }
-
-                    EditorGUIUtility.labelWidth = labelWidth;
-                    EditorGUI.indentLevel = indent;
-                }
-            }
-            else
-            {
-                if (!Foldout(path, label)) return value;
-                EditorGUI.indentLevel++;
-                for (var i = 0; i < components.Count; i++)
-                {
-                    EditorGUI.BeginChangeCheck();
-                    var next = DrawValue(LabelOf(components[i]), components[i].ValueType, values[i], components[i].Member, path + "." + components[i].Name);
-                    if (!EditorGUI.EndChangeCheck()) continue;
-                    values[i] = next;
-                    changed = true;
-                }
-
-                EditorGUI.indentLevel--;
-            }
-
-            return changed ? Model.Compose(shape, values) : value;
         }
 
         private object DrawRecordRef(string label, Type type, object value)

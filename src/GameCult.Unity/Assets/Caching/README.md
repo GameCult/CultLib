@@ -42,10 +42,10 @@ reloading scripts drops unsaved edits.
 in `GameCult.Caching`. Given a registry and the store's document codec it gives
 the member list of a type (registry catalog slots, `CultInspector*` metadata,
 whether a member is assignable), the shape of any value (string, integer,
-float, bool, enum, composite value rebuilt through its constructor,
-`CultRecordRef<T>` with its candidate records, rank-1 list or array,
-dictionary, `[Union]` with only its declared subtypes, nested keyed object, or
-unsupported with a reason), drawer claim resolution
+float, bool, enum, `CultRecordRef<T>` with its candidate records, rank-1 list
+or array, dictionary, `[Union]` with only its declared subtypes, nested keyed
+object, struct edited in place through its public fields, or unsupported with
+a reason), drawer claim resolution
 (`CultInspectorDrawerClaims`), dictionary key identity and refusal (null keys,
 empty record references and duplicates), and edits that work on a copy
 (`CultInspectorEdit`): a refused upsert leaves the cached object unchanged. The
@@ -55,11 +55,12 @@ the same documents under the same rules.
 
 ## Drawers
 
-Built in: every model shape above. Composite values of scalars (`float2/3/4`,
-`int2`, `double2/3`, `bool2`, `quaternion`, `Color32`) draw as one row;
-`rect` folds out to its corners. Unity object references draw as object
-fields. A value no drawer claims and no shape covers shows a red error row, as
-does a multi-dimensional array.
+Built in: every model shape above. A struct without `[Key]` members folds out
+to its public fields and is edited in place; a struct with a readonly field or
+a get-only auto-property is unsupported until a drawer claims it. Unity object
+references draw as object fields. A value no drawer claims and no shape covers
+shows a red error row with the model's reason, as does a multi-dimensional
+array.
 
 A project adds or overrides a drawer with an editor class. `Claimed` is either
 a value type (an open generic definition claims every closed form) or an

@@ -195,7 +195,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void ShapesClassifyCollectionsCompositesAndMultiDimensionalArrays()
+        public void ShapesClassifyCollectionsStructsAndMultiDimensionalArrays()
         {
             var model = Model();
 
@@ -204,10 +204,15 @@ namespace GameCult.Caching.Tests
             Assert.That(model.ShapeOf(typeof(List<int>)).ElementType, Is.EqualTo(typeof(int)));
             Assert.That(model.BuildList(typeof(float[]), new object?[] { 1f, 2f }), Is.EqualTo(new[] { 1f, 2f }));
 
-            var pair = model.ShapeOf(typeof(InspectPair));
-            Assert.That(pair.Kind, Is.EqualTo(CultInspectorValueKind.Composite));
-            Assert.That(pair.Members.Select(member => member.Name), Is.EqualTo(new[] { "x", "y" }));
-            Assert.That(model.Compose(pair, new object?[] { 1f, 2f }), Is.EqualTo(new InspectPair(1f, 2f)));
+            var open = model.ShapeOf(typeof(InspectOpenStruct));
+            Assert.That(open.Kind, Is.EqualTo(CultInspectorValueKind.Nested));
+            Assert.That(open.Members.Select(member => member.Name), Is.EqualTo(new[] { "x", "y" }));
+            Assert.That(open.Members.All(member => member.IsAssignable), Is.True);
+            foreach (var (locked, member) in new[] { (typeof(InspectReadonlyField), "y"), (typeof(InspectGetOnly), "Id") })
+            {
+                Assert.That(model.ShapeOf(locked).Kind, Is.EqualTo(CultInspectorValueKind.Unsupported), locked.Name);
+                Assert.That(model.ShapeOf(locked).Reason, Does.Contain(locked.Name + "." + member).And.Contain("readonly or get-only"));
+            }
 
             Assert.That(model.ShapeOf(typeof(IDictionary<string, int>)).Kind, Is.EqualTo(CultInspectorValueKind.Dictionary));
             Assert.That(model.BuildDictionary(typeof(IDictionary<string, int>), new[] { new KeyValuePair<object?, object?>("a", 1) }),
@@ -295,7 +300,24 @@ namespace GameCult.Caching.Tests
             public new string Value = string.Empty;
         }
 
-        public readonly record struct InspectPair(float x, float y);
+        public struct InspectOpenStruct
+        {
+            public float x;
+            public float y;
+            public float Length => x + y;
+        }
+
+        public struct InspectReadonlyField
+        {
+            public float x;
+            public readonly float y;
+        }
+
+        public struct InspectGetOnly
+        {
+            public float x;
+            public int Id { get; }
+        }
 
         [MessagePackObject]
         public readonly record struct InspectKey([property: Key(0)] int Value)
