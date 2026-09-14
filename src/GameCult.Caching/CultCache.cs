@@ -1398,8 +1398,7 @@ namespace GameCult.Caching
             return true;
         });
 
-        // soft is ignored.
-        public Task FlushAsync(bool soft = false)
+        public Task FlushAsync()
         {
             FlushAllBackingStores();
             return Task.CompletedTask;
