@@ -1,8 +1,27 @@
+using System;
+
 namespace CultMath;
 
-public record struct quaternion(float x, float y, float z, float w)
+/// <summary>
+/// Not an HLSL type: shaders carry rotations as float4. Equality therefore stays
+/// scalar (<c>==</c> returns bool) instead of following the component-wise vector rule.
+/// </summary>
+public struct quaternion : IEquatable<quaternion>
 {
     public static readonly quaternion identity = new(0.0f, 0.0f, 0.0f, 1.0f);
+
+    public float x;
+    public float y;
+    public float z;
+    public float w;
+
+    public quaternion(float x, float y, float z, float w)
+    {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.w = w;
+    }
 
     public static quaternion LookRotation(float3 forward, float3 up)
     {
@@ -65,4 +84,12 @@ public record struct quaternion(float x, float y, float z, float w)
 
     public static implicit operator quaternion(float4 value) => new(value.x, value.y, value.z, value.w);
     public static implicit operator float4(quaternion value) => new(value.x, value.y, value.z, value.w);
+
+    public static bool operator ==(quaternion left, quaternion right) => left.Equals(right);
+    public static bool operator !=(quaternion left, quaternion right) => !left.Equals(right);
+
+    public readonly bool Equals(quaternion other) => x.Equals(other.x) && y.Equals(other.y) && z.Equals(other.z) && w.Equals(other.w);
+    public override readonly bool Equals(object? obj) => obj is quaternion other && Equals(other);
+    public override readonly int GetHashCode() => HashCode.Combine(x, y, z, w);
+    public override readonly string ToString() => FormattableString.Invariant($"quaternion({x:R}, {y:R}, {z:R}, {w:R})");
 }

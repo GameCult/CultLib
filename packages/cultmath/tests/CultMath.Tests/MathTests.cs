@@ -33,7 +33,7 @@ public sealed class MathTests
     }
 
     [Fact]
-    public void VectorsExposeCommonReadOnlySwizzles()
+    public void VectorsExposeCommonSwizzles()
     {
         Assert.Equal(new float3(2.0f, 3.0f, 1.0f), new float3(1.0f, 2.0f, 3.0f).yzx);
         Assert.Equal(new float3(3.0f, 2.0f, 1.0f), new float3(1.0f, 2.0f, 3.0f).zyx);
@@ -277,7 +277,7 @@ public sealed class MathTests
     [InlineData(536.5106f, 536.5106f, -0.6901103f)]
     public void SimplexNoiseMatchesUnityMathematics(float x, float y, float expected)
     {
-        Assert.Equal(expected, math.simplex_noise(new float2(x, y)), precision: 6);
+        Assert.Equal(expected, math.snoise(new float2(x, y)), precision: 6);
     }
 
     [Fact]

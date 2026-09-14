@@ -73,11 +73,64 @@ float cultmath_smootherstep(float value)
     return value * value * value * (value * (value * 6.0 - 15.0) + 10.0);
 }
 
-float2 cultmath_simplex_mod289(float2 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
-float3 cultmath_simplex_mod289(float3 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
-float3 cultmath_simplex_permute(float3 value) { return cultmath_simplex_mod289(((value * 34.0) + 1.0) * value); }
+float2 cultmath_snoise_mod289(float2 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
+float3 cultmath_snoise_mod289(float3 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
+float4 cultmath_snoise_mod289(float4 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
+float3 cultmath_snoise_permute(float3 value) { return cultmath_snoise_mod289(((value * 34.0) + 1.0) * value); }
+float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((value * 34.0) + 1.0) * value); }
 
-float cultmath_simplex_noise(float2 value)
+// Ashima Arts / Ian McEwan 3D simplex noise (MIT), same float32 evaluation
+// order as the C# math.snoise(float3) mirror.
+float cultmath_snoise(float3 value)
+{
+    const float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
+    float3 i = floor(value + dot(value, c.yyy));
+    float3 x0 = value - i + dot(i, c.xxx);
+    float3 g = step(x0.yzx, x0.xyz);
+    float3 l = 1.0 - g;
+    float3 i1 = min(g.xyz, l.zxy);
+    float3 i2 = max(g.xyz, l.zxy);
+    float3 x1 = x0 - i1 + c.xxx;
+    float3 x2 = x0 - i2 + c.yyy;
+    float3 x3 = x0 - 0.5;
+
+    i = cultmath_snoise_mod289(i);
+    float4 p = cultmath_snoise_permute(cultmath_snoise_permute(cultmath_snoise_permute(
+        i.z + float4(0.0, i1.z, i2.z, 1.0)) + i.y + float4(0.0, i1.y, i2.y, 1.0)) + i.x + float4(0.0, i1.x, i2.x, 1.0));
+
+    const float n_ = 0.142857142857;
+    float3 ns = float3(2.0 * n_, 0.5 * n_ - 1.0, n_);
+    float4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    float4 x_ = floor(j * ns.z);
+    float4 y_ = floor(j - 7.0 * x_);
+    float4 x = x_ * ns.x + ns.yyyy;
+    float4 y = y_ * ns.x + ns.yyyy;
+    float4 h = 1.0 - abs(x) - abs(y);
+
+    float4 b0 = float4(x.xy, y.xy);
+    float4 b1 = float4(x.zw, y.zw);
+    float4 s0 = floor(b0) * 2.0 + 1.0;
+    float4 s1 = floor(b1) * 2.0 + 1.0;
+    float4 sh = -step(h, 0.0);
+    float4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    float4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    float3 p0 = float3(a0.xy, h.x);
+    float3 p1 = float3(a0.zw, h.y);
+    float3 p2 = float3(a1.xy, h.z);
+    float3 p3 = float3(a1.zw, h.w);
+    float4 norm = 1.79284291400159 - 0.85373472095314 * float4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    float4 m = max(0.6 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m * m, float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+
+float cultmath_snoise(float2 value)
 {
     const float4 c = float4(
         0.211324865405187,
