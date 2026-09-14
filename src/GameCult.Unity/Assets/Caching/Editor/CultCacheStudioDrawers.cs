@@ -10,10 +10,13 @@ using Object = UnityEngine.Object;
 
 namespace GameCult.Unity.Caching.Editor
 {
-    // An IMGUI drawer claimed through [CultInspectorDrawer]. Returns the value's next value; a reference value may be
-    // mutated in place (it is always the edit's private copy). type is the value's declared type. member is the member
-    // the value belongs to, also for list elements and dictionary keys and values, and null for a bare value.
-    // inspector.DrawDefault hands the value back to built-in drawing; inspector.DrawValue draws a sub-value with claims.
+    // An IMGUI drawer claimed through [CultInspectorDrawer]. A change returns the new value and sets GUI.changed, as IMGUI
+    // controls do; only a frame that reports a change is saved. Mutating value in place without GUI.changed is not saved
+    // reliably: it lingers in the edit copy until some later change saves it. A drawer that throws discards the whole
+    // frame's edit copy, so nothing it or any other drawer did that frame is saved. type is the value's declared type.
+    // member is the member the value belongs to, also for list elements and dictionary keys and values, and null for a
+    // bare value. inspector.DrawDefault hands the value back to built-in drawing; inspector.DrawValue draws a sub-value
+    // with claims.
     public interface ICultInspectorDrawer
     {
         object Draw(CultInspector inspector, string label, Type type, object value, MemberInfo member);
@@ -30,6 +33,7 @@ namespace GameCult.Unity.Caching.Editor
         private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _notices = new Dictionary<string, string>(StringComparer.Ordinal);
         private string _path = string.Empty;
+        private bool _drawerFailed;
 
         internal CultInspector(CultInspectorModel model)
         {
@@ -53,9 +57,12 @@ namespace GameCult.Unity.Caching.Editor
             }
         }
 
-        internal void DrawDocument(CultInspectorEdit edit)
+        // False when a drawer threw: the edit copy may hold part of its in-place mutation and must be discarded, not saved.
+        internal bool DrawDocument(CultInspectorEdit edit)
         {
+            _drawerFailed = false;
             DrawMembers(edit.Document, edit.Source.Descriptor.DocumentType, edit.Source.Key.Value);
+            return !_drawerFailed;
         }
 
         // Draws a sub-value of the value being drawn, claims applied.
@@ -122,7 +129,8 @@ namespace GameCult.Unity.Caching.Editor
                 catch (Exception exception)
                 {
                     GUI.changed = changed;
-                    return ErrorRow(label, claim.Drawer.Name + " failed: " + exception.Message, value);
+                    _drawerFailed = true;
+                    return ErrorRow(label, claim.Drawer.Name + " failed: " + exception.Message + " Nothing edited this frame was saved.", value);
                 }
             }
             finally
