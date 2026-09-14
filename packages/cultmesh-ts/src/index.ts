@@ -5677,7 +5677,7 @@ export class CultMesh {
     const documents = new CultNetDocumentRegistry(options.bindings);
 
     for (const definition of options.documents ?? []) {
-      cache.registerDocumentType(definition);
+      await cache.registerDocumentType(definition);
       if (!documents.get(definition.type)) {
         documents.register(defineCultNetDocumentBinding({ definition }));
       }

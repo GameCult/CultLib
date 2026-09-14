@@ -163,8 +163,8 @@ test("CultCache can register name and index lookups after entries already exist"
     body: "world",
   });
 
-  cache.registerNameLookup(noteDocument, "title");
-  cache.registerIndex(noteDocument, "author", "author");
+  await cache.registerNameLookup(noteDocument, "title");
+  await cache.registerIndex(noteDocument, "author", "author");
 
   assert.equal(cache.getIdByName(noteDocument, "Hello"), "note:hello");
   assert.equal(cache.getIdByIndex(noteDocument, "author", "ari"), "note:hello");
@@ -533,24 +533,24 @@ test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was
   assert.ok(records[0]?.[3] instanceof Uint8Array);
 });
 
-test("CultCache rejects a second generic backing store", () => {
+test("CultCache rejects a second generic backing store", async () => {
   const cache = new CultCache();
-  cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")));
-  assert.throws(
-    () => cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc"))),
+  await cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")));
+  await assert.rejects(
+    cache.addGenericBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc"))),
     /second generic store/u,
   );
 });
 
-test("CultCache rejects a type registered to two stores", () => {
+test("CultCache rejects a type registered to two stores", async () => {
   const cache = new CultCache();
-  cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")), "item");
-  assert.throws(
-    () => cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc")), "settings", "item"),
+  await cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-a.cc")), "item");
+  await assert.rejects(
+    cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-b.cc")), "settings", "item"),
     /"item" is already routed/u,
   );
   // A refused registration claims nothing, so "settings" is still free.
-  cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-c.cc")), "settings");
+  await cache.addBackingStore(new SingleFileMessagePackBackingStore(join(tmpdir(), "unused-c.cc")), "settings");
 });
 
 test("CultCache routes each type to its home store", async () => {
@@ -600,8 +600,8 @@ test("CultCache refuses an attach that would move a held record's home", async (
     .build();
   await cache.put(settingsDocument, "app", { theme: "v1-generic" });
 
-  assert.throws(
-    () => cache.addBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument),
+  await assert.rejects(
+    async () => cache.addBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument),
     /would move "settings" from the generic store to the store routed to settings/u,
   );
   // Nothing attached: the next write still lands in the generic store, and the refused store stays untouched.
@@ -629,14 +629,201 @@ test("CultCache refuses at load a record delivered by a store that is not its ho
     .withBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument)
     .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
     .build();
+  // The cache already holds a record, in its home store, before the refused load.
+  await cache.put(settingsDocument, "held", { theme: "home" });
+  const before = cache.snapshot();
+  const settingsBytes = await readFile(settingsPath);
   await assert.rejects(
     cache.pullAllBackingStores(),
     /"settings" record "app" was loaded from the generic store, but its home is the store routed to settings/u,
   );
   assert.equal(cache.get(settingsDocument, "app"), undefined);
-  assert.deepEqual(cache.snapshot(), []);
+  assert.deepEqual(cache.snapshot(), before);
+  assert.deepEqual(cache.getRequired(settingsDocument, "held"), { theme: "home" });
   assert.deepEqual(await readFile(genericPath), genericBytes);
+  assert.deepEqual(await readFile(settingsPath), settingsBytes);
+});
+
+async function storeState(path: string): Promise<string[]> {
+  if (!existsSync(path)) {
+    return [];
+  }
+  return (await new SingleFileMessagePackBackingStore(path).pullAll())
+    .map((entry) => `${entry.type}:${entry.key}:${Buffer.from(entry.payload).toString("hex")}`)
+    .sort();
+}
+
+test("putWithThrowingAccessorChangesNeitherStoreNorCache", async () => {
+  const itemDocument = defineDocumentType({
+    type: "item",
+    schema: z.object({ n: z.string() }),
+    name: (value: { n: string }) => {
+      if (value.n === "bad") {
+        throw new Error("accessor refuses bad");
+      }
+      return value.n;
+    },
+  });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-put-accessor-")), "generic.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await cache.put(itemDocument, "k", { n: "good" });
+  const storeBefore = await storeState(storePath);
+  const cacheBefore = cache.snapshot();
+
+  await assert.rejects(cache.put(itemDocument, "k", { n: "bad" }), /accessor refuses bad/u);
+  assert.deepEqual(await storeState(storePath), storeBefore);
+  assert.deepEqual(cache.snapshot(), cacheBefore);
+  assert.deepEqual(cache.getRequired(itemDocument, "k"), { n: "good" });
+  assert.equal(cache.getKeyByName(itemDocument, "good"), "k");
+});
+
+test("overwriteUnderRegisteredAccessorThatNowThrowsChangesNeitherStoreNorCache", async () => {
+  const itemDocument = defineDocumentType({ type: "item", schema: z.object({ c: z.string() }) });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-overwrite-accessor-")), "generic.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await cache.put(itemDocument, "k", { c: "old" });
+  let refusing = false;
+  await cache.registerIndex(itemDocument, "category", (value: { c: string }) => {
+    if (refusing) {
+      throw new Error("accessor refuses now");
+    }
+    return value.c;
+  });
+  refusing = true;
+  const storeBefore = await storeState(storePath);
+  const cacheBefore = cache.snapshot();
+
+  await assert.rejects(cache.put(itemDocument, "k", { c: "new" }), /accessor refuses now/u);
+  assert.deepEqual(await storeState(storePath), storeBefore);
+  assert.deepEqual(cache.snapshot(), cacheBefore);
+  assert.equal(cache.getKeyByIndex(itemDocument, "category", "old"), "k");
+  // Deleting runs no accessor: it uses the lookup values stored when the record was admitted.
+  assert.equal(await cache.delete(itemDocument, "k"), true);
+  assert.equal(cache.getKeyByIndex(itemDocument, "category", "old"), undefined);
+});
+
+test("registeringAccessorThatThrowsOnHeldRecordInstallsNothing", async () => {
+  const itemDocument = defineDocumentType({ type: "item", schema: z.object({ n: z.string() }) });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-register-accessor-")), "generic.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(itemDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  await cache.put(itemDocument, "old", { n: "bad" });
+  await assert.rejects(
+    async () => cache.registerIndex(itemDocument, "i", (value: { n: string }) => {
+      if (value.n === "bad") {
+        throw new Error("index refuses bad");
+      }
+      return value.n;
+    }),
+    /index refuses bad/u,
+  );
+  await cache.put(itemDocument, "old", { n: "fine" });
+  assert.deepEqual(cache.getRequired(itemDocument, "old"), { n: "fine" });
+  assert.equal(cache.getKeyByIndex(itemDocument, "i", "fine"), undefined);
+});
+
+test("globalReplaceWithFailingStorePushKeepsOldGlobal", async () => {
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ t: z.string() }),
+    global: true,
+  });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-global-push-")), "generic.cc");
+  const inner = new SingleFileMessagePackBackingStore(storePath);
+  let failPush = false;
+  const store: CacheBackingStore = {
+    pullAll: () => inner.pullAll(),
+    delete: (entry) => inner.delete(entry),
+    pushAll: (entries, options) => inner.pushAll(entries, options),
+    push: async (entry) => {
+      if (failPush) {
+        throw new Error("disk full");
+      }
+      return inner.push(entry);
+    },
+  };
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(store)
+    .build();
+  await cache.putGlobal(settingsDocument, { t: "base" });
+  const storeBefore = await storeState(storePath);
+  const cacheBefore = cache.snapshot();
+  failPush = true;
+
+  await assert.rejects(cache.putGlobal(settingsDocument, { t: "new" }), /disk full/u);
+  await assert.rejects(cache.put(settingsDocument, "other", { t: "new" }), /must use key "__global__"/u);
+  assert.deepEqual(await storeState(storePath), storeBefore);
+  assert.deepEqual(cache.snapshot(), cacheBefore);
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "base" });
+});
+
+test("concurrentGlobalPutsCannotBothReachDisk", async () => {
+  const settingsDocument = defineDocumentType({
+    type: "settings",
+    schema: z.object({ t: z.string() }),
+    global: true,
+  });
+  const storePath = join(await mkdtemp(join(tmpdir(), "cultcache-global-race-")), "generic.cc");
+  const build = () => CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
+    .build();
+  const cache = build();
+  await cache.putGlobal(settingsDocument, { t: "base" });
+
+  await Promise.allSettled([
+    cache.put(settingsDocument, "a", { t: "a" }),
+    cache.put(settingsDocument, "b", { t: "b" }),
+    cache.putGlobal(settingsDocument, { t: "c" }),
+    cache.putGlobal(settingsDocument, { t: "d" }),
+  ]);
+  assert.deepEqual(
+    (await new SingleFileMessagePackBackingStore(storePath).pullAll()).map((entry) => entry.key),
+    [CultCache.GLOBAL_KEY],
+  );
+  assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "d" });
+  const reloaded = build();
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.getRequiredGlobal(settingsDocument), { t: "d" });
+});
+
+test("concurrentPutAndAttachCannotLandRecordInNonHomeStore", async () => {
+  const settingsDocument = defineDocumentType({ type: "settings", schema: z.object({ t: z.string() }) });
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-put-attach-race-"));
+  const genericPath = join(tempDir, "generic.cc");
+  const settingsPath = join(tempDir, "settings.cc");
+  const cache = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+
+  const pending = cache.put(settingsDocument, "app", { t: "x" });
+  const attach = Promise.resolve().then(() =>
+    cache.addBackingStore(new SingleFileMessagePackBackingStore(settingsPath), settingsDocument),
+  );
+  await pending;
+  await assert.rejects(attach, /would move "settings" from the generic store/u);
+
+  assert.deepEqual(
+    (await new SingleFileMessagePackBackingStore(genericPath).pullAll()).map((entry) => entry.key),
+    ["app"],
+  );
   assert.equal(existsSync(settingsPath), false);
+  const reloaded = CultCache.builder()
+    .withRegistry(defineDocumentRegistry(settingsDocument))
+    .withGenericStore(new SingleFileMessagePackBackingStore(genericPath))
+    .build();
+  await reloaded.pullAllBackingStores();
+  assert.deepEqual(reloaded.getRequired(settingsDocument, "app"), { t: "x" });
 });
 
 test("pullWithDuplicateGlobalLeavesCacheUnchanged", async () => {
