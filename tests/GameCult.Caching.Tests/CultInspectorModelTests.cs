@@ -200,6 +200,18 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task RecordIsTheStateTheEditBeganFrom()
+        {
+            using var cache = new CultCache(Registry);
+            await cache.UpsertAsync(typeof(InspectItem), new InspectItem { Name = "original" });
+            var record = cache.AllStoredDocuments.Single();
+            var edit = Model().BeginEdit(record);
+            ((InspectItem)record.Document).Name = "changed in place before Record was read";
+
+            Assert.That(((InspectItem)edit.Record).Name, Is.EqualTo(((InspectItem)edit.Document).Name).And.EqualTo("original"));
+        }
+
+        [Test]
         public async Task RefusedCommitLeavesTheCachedDocumentUnchanged()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");

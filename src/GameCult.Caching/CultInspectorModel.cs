@@ -252,7 +252,8 @@ namespace GameCult.Caching
         public object Document { get; }
 
         // The record being drawn, as stored when this edit began, for drawers that read the document they sit in. It is a
-        // second copy, made on first read: not the cached object, and not Document, which a lowering commits. Nothing
+        // second copy, decoded on first read from the bytes Document came from, so a cache change in between cannot split
+        // them: not the cached object, and not Document, which a lowering commits. Nothing
         // reads it back, so writing to it saves nothing and changes neither the edit nor the cache.
         public object Record => _record ??= _snapshot();
 
@@ -353,7 +354,8 @@ namespace GameCult.Caching
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
             var type = record.Descriptor.DocumentType;
-            return new CultInspectorEdit(record, Clone(record.Document, type), () => Clone(record.Document, type));
+            var snapshot = _serialize(record.Document, type, type);
+            return new CultInspectorEdit(record, _deserialize(type, snapshot), () => _deserialize(type, snapshot));
         }
 
         // Whether CreateDefault makes a value: a string, struct, list or dictionary, or a concrete class with a parameterless constructor.
