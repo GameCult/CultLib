@@ -150,8 +150,8 @@ public static partial class math
     public static double2 unlerp(double2 start, double2 end, double2 value) => (value - start) / (end - start);
     public static double3 unlerp(double3 start, double3 end, double3 value) => (value - start) / (end - start);
 
-    // HLSL: step(y, x) = x >= y ? 1 : 0, so a NaN on either side yields 0.
-    public static float step(float edge, float value) => value >= edge ? 1.0f : 0.0f;
+    // dxc lowers step(y, x) to x < y ? 0 : 1 (fcmp olt, then select), so a NaN on either side yields 1.
+    public static float step(float edge, float value) => value < edge ? 0.0f : 1.0f;
     public static float2 step(float2 edge, float2 value) => new(step(edge.x, value.x), step(edge.y, value.y));
     public static float3 step(float3 edge, float3 value) => new(step(edge.x, value.x), step(edge.y, value.y), step(edge.z, value.z));
     public static float4 step(float4 edge, float4 value) => new(step(edge.x, value.x), step(edge.y, value.y), step(edge.z, value.z), step(edge.w, value.w));

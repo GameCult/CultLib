@@ -36,7 +36,7 @@ float2 cultmath_lerp(float2 start, float2 end, float2 amount) { return start + (
 float3 cultmath_lerp(float3 start, float3 end, float3 amount) { return start + (end - start) * amount; }
 float4 cultmath_lerp(float4 start, float4 end, float4 amount) { return start + (end - start) * amount; }
 
-float cultmath_step(float edge, float value) { return value >= edge ? 1.0 : 0.0; }
+float cultmath_step(float edge, float value) { return value < edge ? 0.0 : 1.0; }
 float2 cultmath_step(float2 edge, float2 value) { return float2(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y)); }
 float3 cultmath_step(float3 edge, float3 value) { return float3(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y), cultmath_step(edge.z, value.z)); }
 float4 cultmath_step(float4 edge, float4 value) { return float4(cultmath_step(edge.x, value.x), cultmath_step(edge.y, value.y), cultmath_step(edge.z, value.z), cultmath_step(edge.w, value.w)); }

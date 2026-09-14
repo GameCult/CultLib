@@ -161,8 +161,8 @@ public sealed class HlslSemanticsTests
         Assert.Equal(new int4(1, 2, 0, 3), math.abs(new int4(-1, 2, 0, -3)));
         Assert.Equal(7, math.abs(-7));
 
-        Assert.Equal(0.0f, math.step(1.0f, float.NaN));
-        Assert.Equal(0.0f, math.step(float.NaN, 1.0f));
+        Assert.Equal(1.0f, math.step(1.0f, float.NaN));
+        Assert.Equal(1.0f, math.step(float.NaN, 1.0f));
         Assert.Equal(1.0f, math.step(1.0f, 1.0f));
 
         Assert.Equal(0, math.sign(float.NaN));

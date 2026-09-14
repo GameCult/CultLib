@@ -40,8 +40,8 @@ That makes these HLSL rules, not options:
 - Scalar/vector arithmetic and comparisons have explicit overloads on both
   sides rather than leaning on implicit scalar splat.
 - Intrinsics return HLSL's types and edge cases: `sign` returns `int`/`intN`
-  (NaN gives 0); `step(y, x)` is `x >= y ? 1 : 0` (NaN gives 0), in C# and in the
-  HLSL mirror; `any`/`all` accept numeric vectors (a component is true when it is
+  (NaN gives 0); `step(y, x)` is `x < y ? 0 : 1` (NaN gives 1), which is how dxc
+  lowers it, in C# and in the HLSL mirror; `any`/`all` accept numeric vectors (a component is true when it is
   not 0); `min`, `max`, and `abs` on int vectors return int vectors.
 
 Deferred until a consumer needs them: `float4x4`, `transpose`, `determinant`,
