@@ -57,7 +57,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         CultSchemaCatalogEntry[] catalog;
-        using (AcquireCommitLease(wait: true))
+        using (AcquireCommitLease(wait: true, create: false))
         {
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded.
             var manifest = ReadManifest();
@@ -131,7 +131,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         return Held(() =>
         {
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
-            using var commitLease = AcquireCommitLease(wait);
+            using var commitLease = AcquireCommitLease(wait, create: true);
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
             var manifest = ReadManifest();
@@ -186,7 +186,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 return;
 
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
-            using var commitLease = AcquireCommitLease(wait: true);
+            using var commitLease = AcquireCommitLease(wait: true, create: true);
             WriteGeneration(ReadManifest());
         });
     }
@@ -470,9 +470,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         return buffer.ToArray();
     }
 
-    private FileStream? AcquireCommitLease(bool wait)
+    // Only a writer creates the records folder and the lock. A reader opens an existing lock; with none, no writer has ever
+    // committed here, so there is nothing to exclude and opening the store creates nothing.
+    private FileStream? AcquireCommitLease(bool wait, bool create)
     {
-        Directory.CreateDirectory(_recordDirectory.FullName);
+        if (create)
+            Directory.CreateDirectory(_recordDirectory.FullName);
         var lockPath = Path.Combine(_recordDirectory.FullName, ".commit.lock");
         var started = Stopwatch.StartNew();
         while (true)
@@ -481,11 +484,19 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             {
                 return new FileStream(
                     lockPath,
-                    FileMode.OpenOrCreate,
+                    create ? FileMode.OpenOrCreate : FileMode.Open,
                     FileAccess.ReadWrite,
                     FileShare.None,
                     bufferSize: 1,
                     FileOptions.WriteThrough);
+            }
+            catch (FileNotFoundException) when (!create)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException) when (!create)
+            {
+                return null;
             }
             catch (IOException) when (!wait)
             {

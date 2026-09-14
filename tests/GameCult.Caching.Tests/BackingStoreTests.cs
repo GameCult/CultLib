@@ -285,6 +285,55 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task DirectoryMessagePackBackingStore_Open_CreatesNothing_UntilAWrite()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(root);
+            var filePath = Path.Combine(root, "store.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                foreach (var readOnly in new[] { true, false })
+                {
+                    using (await CultCacheMessagePack.OpenAsync(filePath, new CultCacheOpenOptions { UseDirectoryStore = true, ReadOnly = readOnly }))
+                    {
+                    }
+
+                    Assert.That(Directory.GetFileSystemEntries(root), Is.Empty,
+                        $"opening a missing directory store (read-only {readOnly}) created files");
+                }
+
+                Directory.CreateDirectory(recordsPath);
+                foreach (var readOnly in new[] { true, false })
+                {
+                    using (var cache = await CultCacheMessagePack.OpenAsync(filePath, new CultCacheOpenOptions { UseDirectoryStore = true, ReadOnly = readOnly }))
+                    {
+                        Assert.That(cache.AllStoredDocuments, Is.Empty);
+                    }
+
+                    Assert.That(Directory.GetFileSystemEntries(recordsPath), Is.Empty,
+                        $"opening a manifest-less directory store (read-only {readOnly}) created a lock");
+                    Assert.That(File.Exists(filePath), Is.False);
+                }
+
+                using (var writer = await CultCacheMessagePack.OpenAsync(filePath, new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    await writer.UpsertAsync(new NamedTestEntry { Name = "first-write", Value = "creates the store" });
+                    await writer.FlushAsync();
+                }
+
+                Assert.That(File.Exists(filePath), Is.True);
+                Assert.That(File.Exists(Path.Combine(recordsPath, ".commit.lock")), Is.True);
+                Assert.That(Directory.GetFiles(recordsPath, "*.msgpack"), Has.Length.EqualTo(1));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
         public async Task CultCacheMessagePack_OpenAsync_HydratesPersistedGlobal()
         {
             var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
