@@ -209,6 +209,11 @@ public sealed class HlslSemanticsTests
         Assert.Equal(Bits(0.0f), Bits(math.length(float4.zero)));
         Assert.Equal(Bits(0.0f), Bits(math.distance(new float3(1.0f, 2.0f, 3.0f), new float3(1.0f, 2.0f, 3.0f))));
 
+        // asuint(float) reinterprets the IEEE-754 bits.
+        Assert.Equal(0x80000000u, math.asuint(-0.0f));
+        Assert.Equal(0x3FC00000u, math.asuint(1.5f));
+        Assert.Equal(0x7FC00000u, math.asuint(BitConverter.Int32BitsToSingle(0x7FC00000)));
+
         Assert.Equal(0, math.sign(float.NaN));
         Assert.Equal(-1, math.sign(-0.5f));
         Assert.Equal(new int3(-1, 0, 1), math.sign(new float3(-2.0f, 0.0f, 4.0f)));

@@ -281,6 +281,38 @@ float cultmath_hash(float value) { return cultmath_frac(sin(value) * 43758.5453)
 float cultmath_hash(float2 value) { return cultmath_hash(dot(value, float2(127.1, 311.7))); }
 float cultmath_hash(float3 value) { return cultmath_hash(dot(value, float3(127.1, 311.7, 74.7))); }
 
+// PCG hashes (Jarzynski and Olano, JCGT 2020), written over scalar uints so CultMath's int3/int4 carry the bits.
+uint cultmath_pcg(uint value)
+{
+    uint state = value * 747796405u + 2891336453u;
+    uint word = ((state >> (int)((state >> 28) + 4)) ^ state) * 277803737u;
+    return (word >> 22) ^ word;
+}
+
+int3 cultmath_pcg3d(int3 value)
+{
+    uint x = (uint)value.x * 1664525u + 1013904223u, y = (uint)value.y * 1664525u + 1013904223u, z = (uint)value.z * 1664525u + 1013904223u;
+    x += y * z; y += z * x; z += x * y;
+    x ^= x >> 16; y ^= y >> 16; z ^= z >> 16;
+    x += y * z; y += z * x; z += x * y;
+    return int3((int)x, (int)y, (int)z);
+}
+
+int3 cultmath_pcg3d(float2 value) { return cultmath_pcg3d(float3(value, 0.0)); }
+int3 cultmath_pcg3d(float3 value) { return cultmath_pcg3d(int3((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z))); }
+
+int4 cultmath_pcg4d(int4 value)
+{
+    uint x = (uint)value.x * 1664525u + 1013904223u, y = (uint)value.y * 1664525u + 1013904223u;
+    uint z = (uint)value.z * 1664525u + 1013904223u, w = (uint)value.w * 1664525u + 1013904223u;
+    x += y * w; y += z * x; z += x * y; w += y * z;
+    x ^= x >> 16; y ^= y >> 16; z ^= z >> 16; w ^= w >> 16;
+    x += y * w; y += z * x; z += x * y; w += y * z;
+    return int4((int)x, (int)y, (int)z, (int)w);
+}
+
+int4 cultmath_pcg4d(float4 value) { return cultmath_pcg4d(int4((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z), (int)asuint(value.w))); }
+
 float cultmath_value_noise(float2 position)
 {
     float2 cell = floor(position);

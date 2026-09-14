@@ -12,6 +12,41 @@ public sealed class MathTests
         Assert.Equal(0.75f, math.frac(-1.25f));
     }
 
+    // Expected values come from a Python transcription of the paper's pcg3d/pcg4d (JCGT 9(3) 2020, p. 32) and
+    // O'Neill's pcg_output_rxs_m_xs_32_32 with PCG_DEFAULT_MULTIPLIER_32/INCREMENT_32, independent of this code.
+    [Fact]
+    public void PcgHashesMatchReferenceTranscription()
+    {
+        static int3 U3(uint x, uint y, uint z) => new((int)x, (int)y, (int)z);
+        static int4 U4(uint x, uint y, uint z, uint w) => new((int)x, (int)y, (int)z, (int)w);
+
+        Assert.Equal(0x07BB2FE2u, math.pcg(0u));
+        Assert.Equal(0xA8BEEA3Cu, math.pcg(1u));
+        Assert.Equal(0x995312E1u, math.pcg(0x12345678u));
+        Assert.Equal(0xE62A4902u, math.pcg(0xFFFFFFFFu));
+        Assert.Equal(U3(0x9BAFD7C6u, 0xA8E88A6Bu, 0x3F15482Cu), math.pcg3d(new int3(0, 0, 0)));
+        Assert.Equal(U3(0xFA9F79A6u, 0x48F2F44Cu, 0x596F5AB1u), math.pcg3d(new int3(1, 2, 3)));
+        Assert.Equal(U3(0x67DCF282u, 0x49E87E17u, 0x10018917u), math.pcg3d(U3(0xFFFFFFFFu, 0x80000000u, 0x7FFFFFFFu)));
+        Assert.Equal(U4(0x0F02F829u, 0x2D568769u, 0x32B0C43Bu, 0xD32548EAu), math.pcg4d(new int4(0, 0, 0, 0)));
+        Assert.Equal(U4(0x3622CD16u, 0xF11471D8u, 0xE1109B3Fu, 0x02B94C2Fu), math.pcg4d(new int4(1, 2, 3, 4)));
+        Assert.Equal(U4(0x72180037u, 0x81D493E6u, 0xD9BA7226u, 0x14C9ABA7u), math.pcg4d(U4(0xFFFFFFFFu, 0x80000000u, 0x7FFFFFFFu, 0xDEADBEEFu)));
+        Assert.Equal(U3(0xA7B40FEEu, 0x9B70DFC0u, 0x3106C2C5u), math.pcg3d(new float3(1.5f, -2.25f, 1e7f)));
+        Assert.Equal(U3(0x5A09E5C6u, 0x53EC0DABu, 0x4BE4A1ECu), math.pcg3d(new float2(3.0f, 4.0f)));
+        Assert.Equal(U4(0x1849E380u, 0xF199DEE0u, 0x6C6B4934u, 0x34AF16DFu),
+            math.pcg4d(new float4(-0.0f, BitConverter.Int32BitsToSingle(0x7FC00000), 0.5f, 1e-7f)));
+    }
+
+    [Fact]
+    public void Pcg3dSeparatesAPositionGrid()
+    {
+        // A single 32-bit component is subject to birthday collisions (x has one here); the full output is distinct.
+        var hashes = new HashSet<int3>();
+        for (var i = 0; i < 100; i++)
+        for (var j = 0; j < 100; j++)
+            hashes.Add(math.pcg3d(new float2(i * 0.5f - 25.0f, j * 0.5f - 25.0f)));
+        Assert.Equal(10000, hashes.Count);
+    }
+
     [Fact]
     public void VectorOperationsAreComponentWise()
     {

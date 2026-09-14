@@ -120,6 +120,18 @@ compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
+Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
+for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
+permutation over one LCG step, and `pcg3d`/`pcg4d` are the paper's (3 → 3) and
+(4 → 4) hashes. They use only uint multiply, add, xor, and shifts. dxc wraps
+uint multiply and add modulo 2^32 exactly as C# unchecked arithmetic does, so
+they are integer-exact in HLSL and on the CPU, GPU included, unlike the
+`sin`-based `hash`. CultMath has no uint vectors, so `pcg3d(int3)` and
+`pcg4d(int4)` carry uint bit patterns in int components. The `float2`/`float3`/`float4`
+overloads hash the IEEE-754 bits (`asuint`), so -0 and 0 hash differently.
+`pcg3d(float2)` holds z at 0, which is the paper's route for (2 → N) inputs.
+Seeds and other scalar uses take one output component.
+
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
 Unity.Mathematics: `hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped
 helpers that HLSL lacks (`float2x2.Rotate`, `float3x3.Euler`, `quaternion`,

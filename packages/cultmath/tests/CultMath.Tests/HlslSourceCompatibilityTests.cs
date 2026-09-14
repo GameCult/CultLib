@@ -78,26 +78,33 @@ public sealed class HlslSourceCompatibilityTests
             foreach (var input in cases)
             {
                 var slot = 0;
-                var args = types.Select(t => t == typeof(float) ? (object)input(slot++)
-                    : Activator.CreateInstance(t, Enumerable.Range(0, Components(t)).Select(_ => (object)input(slot++)).ToArray())!).ToArray();
-                var expected = Floats(counterpart.Invoke(null, args)!);
-                var actual = Floats(mirror.Invoke(shader, args)!);
-                if (expected.Length != actual.Length || expected.Zip(actual).Any(p => !(float.IsNaN(p.First) && float.IsNaN(p.Second))
-                    && BitConverter.SingleToInt32Bits(p.First) != BitConverter.SingleToInt32Bits(p.Second)))
+                var args = types.Select(t => Scalars.Contains(t) ? Scalar(t, input(slot++))
+                    : Activator.CreateInstance(t, Components(t).Select(f => Scalar(f.FieldType, input(slot++))).ToArray())!).ToArray();
+                var expected = Values(counterpart.Invoke(null, args)!);
+                var actual = Values(mirror.Invoke(shader, args)!);
+                if (expected.Length != actual.Length || expected.Zip(actual).Any(p => p.First is float a && p.Second is float b
+                    ? !(float.IsNaN(a) && float.IsNaN(b)) && BitConverter.SingleToInt32Bits(a) != BitConverter.SingleToInt32Bits(b)
+                    : !p.First.Equals(p.Second)))
                 {
-                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Floats(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
+                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
                 }
             }
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(25, compared.Count);
+        Assert.Equal(28, compared.Count);
     }
 
-    private static int Components(Type t) => t.GetFields().Count(f => f.FieldType == typeof(float) && !f.IsStatic);
+    // Integer arguments take the bit pattern of the float input, so specials become 0, 0x80000000, NaN bits, ...
+    private static readonly Type[] Scalars = { typeof(float), typeof(int), typeof(uint) };
 
-    private static float[] Floats(object value) => value is float f ? new[] { f }
-        : value.GetType().GetFields().Where(field => field.FieldType == typeof(float) && !field.IsStatic).Select(field => (float)field.GetValue(value)!).ToArray();
+    private static object Scalar(Type t, float f) => t == typeof(float) ? f
+        : t == typeof(int) ? BitConverter.SingleToInt32Bits(f) : (object)(uint)BitConverter.SingleToInt32Bits(f);
+
+    private static FieldInfo[] Components(Type t) => t.GetFields().Where(f => !f.IsStatic && Scalars.Contains(f.FieldType)).ToArray();
+
+    private static object[] Values(object value) => Scalars.Contains(value.GetType()) ? new[] { value }
+        : Components(value.GetType()).Select(field => field.GetValue(value)!).ToArray();
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)

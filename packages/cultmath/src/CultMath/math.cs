@@ -382,6 +382,43 @@ public static partial class math
     public static float hash(float2 value) => hash(dot(value, new float2(127.1f, 311.7f)));
     public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
 
+    public static uint asuint(float value) => (uint)BitConverter.SingleToInt32Bits(value);
+
+    // PCG hashes from Jarzynski and Olano, "Hash Functions for GPU Rendering" (JCGT 9(3), 2020). Integer-only, so
+    // dxc and C# agree bit for bit. pcg3d/pcg4d carry uint bit patterns in int3/int4; float overloads hash IEEE bits.
+    public static uint pcg(uint value)
+    {
+        var state = value * 747796405u + 2891336453u;
+        var word = ((state >> (int)((state >> 28) + 4)) ^ state) * 277803737u;
+        return (word >> 22) ^ word;
+    }
+
+    public static int3 pcg3d(int3 value)
+    {
+        uint x = (uint)value.x * 1664525u + 1013904223u, y = (uint)value.y * 1664525u + 1013904223u, z = (uint)value.z * 1664525u + 1013904223u;
+        x += y * z; y += z * x; z += x * y;
+        x ^= x >> 16; y ^= y >> 16; z ^= z >> 16;
+        x += y * z; y += z * x; z += x * y;
+        return new int3((int)x, (int)y, (int)z);
+    }
+
+    // The paper hashes 2 -> N inputs through pcg3d with the unused component held constant.
+    public static int3 pcg3d(float2 value) => pcg3d(new float3(value, 0.0f));
+    public static int3 pcg3d(float3 value) => pcg3d(new int3((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z)));
+
+    public static int4 pcg4d(int4 value)
+    {
+        uint x = (uint)value.x * 1664525u + 1013904223u, y = (uint)value.y * 1664525u + 1013904223u;
+        uint z = (uint)value.z * 1664525u + 1013904223u, w = (uint)value.w * 1664525u + 1013904223u;
+        x += y * w; y += z * x; z += x * y; w += y * z;
+        x ^= x >> 16; y ^= y >> 16; z ^= z >> 16; w ^= w >> 16;
+        x += y * w; y += z * x; z += x * y; w += y * z;
+        return new int4((int)x, (int)y, (int)z, (int)w);
+    }
+
+    public static int4 pcg4d(float4 value) =>
+        pcg4d(new int4((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z), (int)asuint(value.w)));
+
     public static float log(float value) => MathF.Log(value);
     public static float2 log(float2 value) => new(log(value.x), log(value.y));
     public static float3 log(float3 value) => new(log(value.x), log(value.y), log(value.z));
