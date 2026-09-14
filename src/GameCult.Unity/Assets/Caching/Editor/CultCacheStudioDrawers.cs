@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using GameCult.Caching;
+using GameCult.Caching.MessagePack;
 using MessagePack;
 using UnityEditor;
 using UnityEngine;
@@ -21,12 +22,14 @@ namespace GameCult.Unity.Caching.Editor
     internal sealed class CultInspector
     {
         private static Dictionary<Type, ICultInspectorDrawer> _drawers;
+        private static Dictionary<Type, string> _conflicts;
         private static readonly Dictionary<Type, MemberInfo> NameMembers = new Dictionary<Type, MemberInfo>();
         private static GUIStyle _errorStyle;
 
         private readonly CultCache _cache;
         private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>(StringComparer.Ordinal);
         private readonly Dictionary<Type, MemberInfo[]> _members = new Dictionary<Type, MemberInfo[]>();
+        private readonly Dictionary<string, string> _notices = new Dictionary<string, string>(StringComparer.Ordinal);
 
         public CultInspector(CultCache cache)
         {
@@ -43,15 +46,32 @@ namespace GameCult.Unity.Caching.Editor
             {
                 if (_drawers != null) return _drawers;
                 _drawers = new Dictionary<Type, ICultInspectorDrawer>();
+                _conflicts = new Dictionary<Type, string>();
                 foreach (var type in TypeCache.GetTypesWithAttribute<CultInspectorDrawerAttribute>())
                 {
                     var memberType = type.GetCustomAttribute<CultInspectorDrawerAttribute>().MemberType;
                     if (!typeof(ICultInspectorDrawer).IsAssignableFrom(type) || type.IsAbstract || type.GetConstructor(Type.EmptyTypes) == null)
+                    {
                         Debug.LogError($"{type.FullName} is marked [CultInspectorDrawer] but is not a concrete ICultInspectorDrawer with a parameterless constructor.");
-                    else if (_drawers.ContainsKey(memberType))
-                        Debug.LogError($"{type.FullName} and {_drawers[memberType].GetType().FullName} both draw {memberType.FullName}.");
+                        continue;
+                    }
+
+                    // A contested type is claimed by nobody: it draws the red row until one claimant is removed.
+                    if (_drawers.TryGetValue(memberType, out var claimed))
+                    {
+                        _drawers.Remove(memberType);
+                        _conflicts[memberType] = claimed.GetType().FullName;
+                    }
+
+                    if (_conflicts.TryGetValue(memberType, out var claimants))
+                    {
+                        _conflicts[memberType] = claimants + ", " + type.FullName;
+                        Debug.LogError($"{_conflicts[memberType]} all draw {memberType.FullName}; none of them is used.");
+                    }
                     else
+                    {
                         _drawers[memberType] = (ICultInspectorDrawer)Activator.CreateInstance(type);
+                    }
                 }
 
                 return _drawers;
@@ -73,15 +93,36 @@ namespace GameCult.Unity.Caching.Editor
             return string.IsNullOrWhiteSpace(name) ? record.Key.Value : name;
         }
 
-        public void DrawDocument(CultStoredDocument record)
+        // Draws into the document it is given and mutates it in place; the caller hands over a working copy.
+        public void DrawDocument(object document, Type type, string key)
         {
-            DrawMembers(record.Document, record.Descriptor.DocumentType, record.Key.Value);
+            DrawMembers(document, type, key);
         }
 
         public object DrawValue(string label, Type type, object value, MemberInfo member, string path)
         {
             if (Drawers.TryGetValue(type, out var drawer) || type.IsGenericType && Drawers.TryGetValue(type.GetGenericTypeDefinition(), out drawer))
-                return drawer.Draw(label, value, member);
+            {
+                var changed = GUI.changed;
+                try
+                {
+                    return drawer.Draw(label, value, member);
+                }
+                catch (ExitGUIException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    GUI.changed = changed;
+                    return ErrorRow(label, drawer.GetType().Name + " failed: " + exception.Message, value);
+                }
+            }
+
+            if (_conflicts.TryGetValue(type, out var claimants) || type.IsGenericType && _conflicts.TryGetValue(type.GetGenericTypeDefinition(), out claimants))
+                return ErrorRow(label, "no drawer for " + type.FullName + " (contested by " + claimants + ")", value);
+            if (type.IsArray && type.GetArrayRank() != 1)
+                return ErrorRow(label, type.Name + " is a multi-dimensional array; the Studio cannot edit it", value);
 
             if (type == typeof(string)) return DrawString(label, value as string, member);
             var range = member?.GetCustomAttribute<CultInspectorRangeAttribute>();
@@ -269,7 +310,24 @@ namespace GameCult.Unity.Caching.Editor
                         if (EditorGUI.EndChangeCheck())
                         {
                             var index = i;
-                            if (key == null || entries.Where((_, j) => j != index).Any(e => Equals(e.Key, key))) key = entries[i].Key;
+                            var identity = KeyIdentity(key);
+                            if (identity != KeyIdentity(entries[i].Key))
+                            {
+                                var refusal = identity == null ? "a null key"
+                                    : identity == EmptyRefIdentity ? "an empty record reference as a key"
+                                    : entries.Where((_, j) => j != index).Any(e => KeyIdentity(e.Key) == identity) ? "a duplicate key"
+                                    : null;
+                                if (refusal != null)
+                                {
+                                    _notices[path] = "Refused " + refusal + " on entry " + i + "; its key was kept.";
+                                    key = entries[i].Key;
+                                }
+                                else
+                                {
+                                    _notices.Remove(path);
+                                }
+                            }
+
                             entries[i] = new DictionaryEntry(key, item);
                             changed = true;
                         }
@@ -285,16 +343,22 @@ namespace GameCult.Unity.Caching.Editor
                 changed = true;
             }
 
-            var fresh = CreateDefault(arguments[0]);
-            using (new EditorGUI.DisabledScope(fresh == null || entries.Any(e => Equals(e.Key, fresh))))
+            if (GUILayout.Button("Add"))
             {
-                if (GUILayout.Button("Add"))
+                var fresh = FreshKey(arguments[0], entries);
+                if (fresh == null)
+                {
+                    _notices[path] = "No unused " + arguments[0].Name + " key is available; nothing was added.";
+                }
+                else
                 {
                     entries.Add(new DictionaryEntry(fresh, CreateDefault(arguments[1])));
+                    _notices.Remove(path);
                     changed = true;
                 }
             }
 
+            if (_notices.TryGetValue(path, out var notice)) EditorGUILayout.HelpBox(notice, MessageType.Warning);
             EditorGUI.indentLevel--;
             if (!changed) return dictionary;
             var result = dictionary ?? (IDictionary)Activator.CreateInstance(type.IsInterface || type.IsAbstract
@@ -303,6 +367,39 @@ namespace GameCult.Unity.Caching.Editor
             result.Clear();
             foreach (var entry in entries) result.Add(entry.Key, entry.Value);
             return result;
+        }
+
+        private const string EmptyRefIdentity = "ref:";
+
+        // Keys are the same key when they serialize the same; a CultRecordRef<T> is its key string, null and "" alike.
+        private static string KeyIdentity(object key)
+        {
+            if (key == null) return null;
+            var type = key.GetType();
+            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>)) return EmptyRefIdentity + key;
+            try
+            {
+                return Convert.ToBase64String(MessagePackSerializer.Serialize(type, key, CultDocumentMessagePackSerialization.Options));
+            }
+            catch (Exception)
+            {
+                return type.FullName + ":" + key;
+            }
+        }
+
+        // A record-reference key takes the first record of its type not already used; nothing else invents a key.
+        private object FreshKey(Type type, List<DictionaryEntry> entries)
+        {
+            var used = new HashSet<string>(entries.Select(e => KeyIdentity(e.Key)), StringComparer.Ordinal);
+            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>))
+            {
+                var target = type.GetGenericArguments()[0];
+                var record = Records.FirstOrDefault(r => target.IsInstanceOfType(r.Document) && r.Key.Value.Length > 0 && !used.Contains(EmptyRefIdentity + r.Key.Value));
+                return record == null ? null : Activator.CreateInstance(type, new CultRecordKey(record.Key.Value));
+            }
+
+            var fresh = CreateDefault(type);
+            return fresh == null || used.Contains(KeyIdentity(fresh)) ? null : fresh;
         }
 
         private object DrawList(string label, Type type, Type element, object value, MemberInfo member, string path)
@@ -376,7 +473,7 @@ namespace GameCult.Unity.Caching.Editor
             var unions = UnionsOf(type);
             if (unions.Length == 0) return ErrorRow(label, type.Name + " declares no [Union] subtypes", value);
             var index = value == null ? 0 : Array.IndexOf(unions, value.GetType()) + 1;
-            var names = unions.Select(u => u.Name).Prepend(value == null ? "None" : value.GetType().Name + " (not a declared union)").ToArray();
+            var names = unions.Select(u => u.Name).Prepend(value == null || index > 0 ? "None" : value.GetType().Name + " (not a declared union)").ToArray();
 
             bool expanded;
             using (new EditorGUILayout.HorizontalScope())
@@ -453,14 +550,17 @@ namespace GameCult.Unity.Caching.Editor
             return new CM.bool2(x, y);
         }
 
-        // Foldouts stay usable inside disabled scopes so read-only data can still be browsed.
+        // Foldouts stay usable inside disabled scopes so read-only data can still be browsed. Expanding is view state:
+        // it never counts as a change, so it never upserts.
         private bool Foldout(string path, string label, params GUILayoutOption[] options)
         {
             _foldouts.TryGetValue(path, out var expanded);
             var enabled = GUI.enabled;
+            var changed = GUI.changed;
             GUI.enabled = true;
             expanded = EditorGUI.Foldout(EditorGUILayout.GetControlRect(false, options), expanded, label, true);
             GUI.enabled = enabled;
+            GUI.changed = changed;
             _foldouts[path] = expanded;
             return expanded;
         }
@@ -481,7 +581,7 @@ namespace GameCult.Unity.Caching.Editor
 
         private static Type ListElement(Type type)
         {
-            if (type.IsArray) return type.GetElementType();
+            if (type.IsArray) return type.GetArrayRank() == 1 ? type.GetElementType() : null;
             return type.IsGenericType && !type.IsAbstract && !type.IsInterface && typeof(IList).IsAssignableFrom(type)
                 ? type.GetGenericArguments()[0]
                 : null;
