@@ -122,7 +122,7 @@ namespace GameCult.Caching.Tests
             var keys = new object?[] { Ref("a"), Ref("b") };
             string? Refusal(object? candidate)
             {
-                var kept = model.ReplaceKey(links, keys, 0, candidate, out var notice);
+                var kept = model.ReplaceKey(typeof(InspectItem),links, keys, 0, candidate, out var notice);
                 Assert.That(kept, Is.EqualTo(notice == null ? candidate : keys[0]), "a refused key keeps the entry's key");
                 return notice;
             }
@@ -134,16 +134,16 @@ namespace GameCult.Caching.Tests
             Assert.That(Refusal(Ref("c")), Is.Null);
 
             // An entry an old store left with an empty reference key keeps it through an edit of its value.
-            Assert.That(model.ReplaceKey(links, new object?[] { Ref(""), Ref("b") }, 0, default(CultRecordRef<InspectItem>), out var unchanged),
+            Assert.That(model.ReplaceKey(typeof(InspectItem),links, new object?[] { Ref(""), Ref("b") }, 0, default(CultRecordRef<InspectItem>), out var unchanged),
                 Is.EqualTo(default(CultRecordRef<InspectItem>)));
             Assert.That(unchanged, Is.Null, "an unchanged key is never refused");
 
             using var cache = new CultCache(Registry);
             var first = await cache.UpsertAsync(typeof(InspectItem), new InspectItem { Name = "first" });
             var second = await cache.UpsertAsync(typeof(InspectItem), new InspectItem { Name = "second" });
-            var fresh = model.FreshKey(links, new object?[] { new CultRecordRef<InspectItem>(first) }, cache.AllStoredDocuments, out _);
+            var fresh = model.FreshKey(typeof(InspectItem),links, new object?[] { new CultRecordRef<InspectItem>(first) }, cache.AllStoredDocuments, out _);
             Assert.That(CultInspectorModel.RecordKey(fresh), Is.EqualTo(second.Value));
-            Assert.That(model.FreshKey(links, new object?[] { new CultRecordRef<InspectItem>(first), new CultRecordRef<InspectItem>(second) },
+            Assert.That(model.FreshKey(typeof(InspectItem),links, new object?[] { new CultRecordRef<InspectItem>(first), new CultRecordRef<InspectItem>(second) },
                 cache.AllStoredDocuments, out var none), Is.Null);
             Assert.That(none, Does.Contain("No unused"));
         }
@@ -155,12 +155,12 @@ namespace GameCult.Caching.Tests
             var doubles = typeof(Dictionary<double, int>);
             var keys = new object?[] { 0.0, 1.0 };
 
-            Assert.That(model.ReplaceKey(doubles, keys, 1, -0.0, out var notice), Is.EqualTo(1.0));
+            Assert.That(model.ReplaceKey(typeof(InspectItem),doubles, keys, 1, -0.0, out var notice), Is.EqualTo(1.0));
             Assert.That(notice, Does.Contain("duplicate"), "-0.0 serializes apart from 0.0 but Equals it");
             Assert.That(() => model.BuildDictionary(doubles, keys.Select(key => new KeyValuePair<object?, object?>(key, 0))), Throws.Nothing);
-            Assert.That(model.FreshKey(doubles, new object?[] { -0.0 }, Array.Empty<CultStoredDocument>(), out _), Is.Null,
+            Assert.That(model.FreshKey(typeof(InspectItem),doubles, new object?[] { -0.0 }, Array.Empty<CultStoredDocument>(), out _), Is.Null,
                 "the default 0.0 is taken by -0.0");
-            Assert.That(model.ReplaceKey(doubles, new object?[] { 0.0 }, 0, -0.0, out _), Is.EqualTo(-0.0), "a key may replace itself");
+            Assert.That(model.ReplaceKey(typeof(InspectItem),doubles, new object?[] { 0.0 }, 0, -0.0, out _), Is.EqualTo(-0.0), "a key may replace itself");
         }
 
         [Test]
@@ -169,11 +169,29 @@ namespace GameCult.Caching.Tests
             var model = Model();
             var dictionary = typeof(Dictionary<InspectKey, int>);
 
-            Assert.That(model.FreshKey(dictionary, new object?[] { new InspectKey(1) }, Array.Empty<CultStoredDocument>(), out _),
+            Assert.That(model.FreshKey(typeof(InspectItem),dictionary, new object?[] { new InspectKey(1) }, Array.Empty<CultStoredDocument>(), out _),
                 Is.EqualTo(new InspectKey(0)), "keys whose text collides are still distinct keys");
-            Assert.That(model.ReplaceKey(dictionary, new object?[] { new InspectKey(1), new InspectKey(2) }, 1, new InspectKey(3), out var notice),
+            Assert.That(model.ReplaceKey(typeof(InspectItem),dictionary, new object?[] { new InspectKey(1), new InspectKey(2) }, 1, new InspectKey(3), out var notice),
                 Is.EqualTo(new InspectKey(3)));
             Assert.That(notice, Is.Null);
+        }
+
+        // Pair's formatter is declared only by this test assembly (AssemblyInfo). A key's bytes come from its owning document's
+        // options, so a document here stores it and a document from an assembly declaring no resolver cannot.
+        [Test]
+        public void DictionaryKeysSerializeUnderTheOwningDocument()
+        {
+            var model = Model();
+            var pairs = typeof(Dictionary<Pair, int>);
+            var keys = new object?[] { new Pair { A = 1 }, new Pair { A = 2 } };
+
+            Assert.That(model.ReplaceKey(typeof(InspectItem), pairs, keys, 1, new Pair { A = 3 }, out var accepted), Is.EqualTo(new Pair { A = 3 }));
+            Assert.That(accepted, Is.Null);
+            Assert.That(model.ReplaceKey(typeof(object), pairs, keys, 1, new Pair { A = 3 }, out var refused), Is.EqualTo(keys[1]),
+                "a key its document cannot serialize is refused, not compared by text");
+            Assert.That(refused, Does.Contain("cannot serialize"));
+            Assert.That(model.FreshKey(typeof(object), pairs, new object?[] { new Pair { A = 1 } }, Array.Empty<CultStoredDocument>(), out var none), Is.Null);
+            Assert.That(none, Does.Contain("cannot serialize"));
         }
 
         [Test]

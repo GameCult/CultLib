@@ -281,14 +281,16 @@ namespace GameCult.Caching
             typeof(int), typeof(long), typeof(uint), typeof(short), typeof(ushort), typeof(byte), typeof(sbyte)
         };
 
-        private readonly Func<object, Type, byte[]> _serialize;
+        private readonly Func<object, Type, Type, byte[]> _serialize;
         private readonly Func<Type, byte[], object> _deserialize;
         private readonly Dictionary<Type, CultInspectorShape> _shapes = new Dictionary<Type, CultInspectorShape>();
         private readonly Dictionary<MemberInfo, CultInspectorMetadata> _metadata = new Dictionary<MemberInfo, CultInspectorMetadata>();
 
-        // serialize and deserialize are the store's codec (CultCacheMessagePack.CreateInspectorModel for .cc stores). Edits
-        // clone documents through both; dictionary keys compare by serialize, so it must take any value, not only documents.
-        public CultInspectorModel(CultDocumentRegistry registry, Func<object, Type, byte[]> serialize, Func<Type, byte[], object> deserialize)
+        // serialize (value, value type, owning document type) and deserialize are the store's codec
+        // (CultCacheMessagePack.CreateInspectorModel for .cc stores). Edits clone documents through both; dictionary keys
+        // compare by serialize under their owning document, exactly as the store writes them inside it, so serialize must
+        // take any value, not only documents.
+        public CultInspectorModel(CultDocumentRegistry registry, Func<object, Type, Type, byte[]> serialize, Func<Type, byte[], object> deserialize)
         {
             Registry = registry ?? throw new ArgumentNullException(nameof(registry));
             _serialize = serialize ?? throw new ArgumentNullException(nameof(serialize));
@@ -335,7 +337,7 @@ namespace GameCult.Caching
             }
         }
 
-        public object Clone(object document, Type type) => _deserialize(type, _serialize(document, type));
+        public object Clone(object document, Type type) => _deserialize(type, _serialize(document, type, type));
 
         public CultInspectorEdit BeginEdit(CultStoredDocument record)
         {
@@ -410,65 +412,76 @@ namespace GameCult.Caching
             return dictionary;
         }
 
-        // The key entry `index` of a dictionary holding `keys` takes when a lowering offers `candidate`: the candidate, or
-        // the kept key and a notice saying why. An unchanged key is never refused. Any other key must be non-null, not an
-        // empty record reference, and not taken by another entry, so BuildDictionary cannot throw.
-        public object? ReplaceKey(Type dictionaryType, IReadOnlyList<object?> keys, int index, object? candidate, out string? notice)
+        // The key entry `index` of a dictionary in a documentType document holding `keys` takes when a lowering offers
+        // `candidate`: the candidate, or the kept key and a notice saying why. An unchanged key is never refused. Any other
+        // key must be non-null, not an empty record reference, and not taken by another entry, so BuildDictionary cannot
+        // throw. A key the document cannot serialize is refused: the store could not write it.
+        public object? ReplaceKey(Type documentType, Type dictionaryType, IReadOnlyList<object?> keys, int index, object? candidate, out string? notice)
         {
             var shape = DictionaryShape(dictionaryType);
-            var identity = KeyIdentity(candidate);
-            var refusal = identity == KeyIdentity(keys[index]) ? null
-                : identity == null ? "a null key"
-                : identity == RecordRefIdentity ? "an empty record reference as a key"
-                : Taken(shape, candidate!, keys.Where((_, i) => i != index)) ? "a duplicate key"
-                : null;
+            string? refusal;
+            try
+            {
+                var identity = KeyIdentity(documentType, shape, candidate);
+                refusal = identity == KeyIdentity(documentType, shape, keys[index]) ? null
+                    : identity == null ? "a null key"
+                    : identity == RecordRefIdentity ? "an empty record reference as a key"
+                    : Taken(documentType, shape, candidate!, keys.Where((_, i) => i != index)) ? "a duplicate key"
+                    : null;
+            }
+            catch (Exception exception)
+            {
+                refusal = $"a key {documentType.Name} cannot serialize ({exception.GetBaseException().Message})";
+            }
+
             notice = refusal == null ? null : $"Refused {refusal} on entry {index}; its key was kept.";
             return refusal == null ? candidate : keys[index];
         }
 
-        // A key to add beside `keys`: a record-reference key takes the first candidate record not already used; any other
-        // key is the type's default. Null with a notice when no such key is free.
-        public object? FreshKey(Type dictionaryType, IReadOnlyList<object?> keys, IEnumerable<CultStoredDocument> records, out string? notice)
+        // A key to add beside `keys` in a documentType document: a record-reference key takes the first candidate record not
+        // already used; any other key is the type's default. Null with a notice when no such key is free or serializable.
+        public object? FreshKey(Type documentType, Type dictionaryType, IReadOnlyList<object?> keys, IEnumerable<CultStoredDocument> records, out string? notice)
         {
             var shape = DictionaryShape(dictionaryType);
             var keyType = shape.KeyType!;
             var candidates = ShapeOf(keyType).Kind == CultInspectorValueKind.RecordRef
                 ? RecordCandidates(keyType, records).Select(record => CreateRecordRef(keyType, record.Key.Value))
                 : new[] { CreateDefault(keyType) };
-            var fresh = candidates.FirstOrDefault(key => key != null && !Taken(shape, key, keys));
-            notice = fresh == null ? $"No unused {keyType.Name} key is available; nothing was added." : null;
-            return fresh;
+            try
+            {
+                var fresh = candidates.FirstOrDefault(key => key != null && !Taken(documentType, shape, key, keys));
+                notice = fresh == null ? $"No unused {keyType.Name} key is available; nothing was added." : null;
+                return fresh;
+            }
+            catch (Exception exception)
+            {
+                notice = $"{documentType.Name} cannot serialize a {keyType.Name} key ({exception.GetBaseException().Message}); nothing was added.";
+                return null;
+            }
         }
 
         // A key is taken when another serializes the same (a CultRecordRef<T> by its key string, null and "" alike) or when
-        // the dictionary's own comparer calls them equal (0.0 and -0.0 serialize apart but are one double key).
-        private bool Taken(CultInspectorShape dictionary, object key, IEnumerable<object?> keys)
+        // the rebuilt dictionary type's default comparer calls them equal (0.0 and -0.0 serialize apart but are one double key).
+        private bool Taken(Type documentType, CultInspectorShape dictionary, object key, IEnumerable<object?> keys)
         {
-            var identity = KeyIdentity(key);
+            var identity = KeyIdentity(documentType, dictionary, key);
             var probe = (IDictionary)Activator.CreateInstance(dictionary.BuildType!)!;
             var filler = dictionary.ValueType!.IsValueType ? Activator.CreateInstance(dictionary.ValueType) : null;
             foreach (var other in keys.Where(other => other != null))
             {
-                if (KeyIdentity(other) == identity) return true;
+                if (KeyIdentity(documentType, dictionary, other) == identity) return true;
                 probe[other!] = filler;
             }
 
             return probe.Contains(key);
         }
 
-        private string? KeyIdentity(object? key)
-        {
-            if (key == null) return null;
-            if (key is ICultRecordRef reference) return RecordRefIdentity + reference.Key.Value;
-            try
-            {
-                return "value:" + Convert.ToBase64String(_serialize(key, key.GetType()));
-            }
-            catch (Exception)
-            {
-                return key.GetType().FullName + ":" + key;
-            }
-        }
+        // A key's bytes as its declared key type under the owning document's serializer, the store's own path. Throws when
+        // that serializer cannot write the key.
+        private string? KeyIdentity(Type documentType, CultInspectorShape dictionary, object? key) =>
+            key == null ? null
+            : key is ICultRecordRef reference ? RecordRefIdentity + reference.Key.Value
+            : "value:" + Convert.ToBase64String(_serialize(key, dictionary.KeyType!, documentType));
 
         private CultInspectorShape DictionaryShape(Type dictionaryType)
         {

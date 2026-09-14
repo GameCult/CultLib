@@ -33,6 +33,7 @@ namespace GameCult.Unity.Caching.Editor
         private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _notices = new Dictionary<string, string>(StringComparer.Ordinal);
         private string _path = string.Empty;
+        private Type _document;
         private bool _drawerFailed;
 
         internal CultInspector(CultInspectorModel model)
@@ -61,6 +62,7 @@ namespace GameCult.Unity.Caching.Editor
         internal bool DrawDocument(CultInspectorEdit edit)
         {
             _drawerFailed = false;
+            _document = edit.Document.GetType();
             DrawMembers(edit.Document, edit.Source.Descriptor.DocumentType, edit.Source.Key.Value);
             return !_drawerFailed;
         }
@@ -240,7 +242,7 @@ namespace GameCult.Unity.Caching.Editor
                         var item = DrawValue("Value", shape.ValueType, entries[i].Value, member, path + "{" + i + "}.value");
                         if (EditorGUI.EndChangeCheck())
                         {
-                            key = Model.ReplaceKey(shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
+                            key = Model.ReplaceKey(_document, shape.Type, entries.Select(e => e.Key).ToArray(), i, key, out var notice);
                             Notice(path, notice);
                             entries[i] = new KeyValuePair<object, object>(key, item);
                             changed = true;
@@ -259,7 +261,7 @@ namespace GameCult.Unity.Caching.Editor
 
             if (Add(shape.ValueType, path, out var created))
             {
-                var fresh = Model.FreshKey(shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
+                var fresh = Model.FreshKey(_document, shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
                 Notice(path, notice);
                 if (fresh != null)
                 {

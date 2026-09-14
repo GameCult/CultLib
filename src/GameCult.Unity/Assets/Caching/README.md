@@ -48,8 +48,9 @@ its declared subtypes, nested keyed object, struct edited in place through its
 public fields and settable properties, or unsupported with a reason), drawer claim resolution
 (`CultInspectorDrawerClaims`), and the edit decisions: the key a dictionary
 entry keeps and the notice when a key is refused (null, an empty record
-reference, or a duplicate: serialized the same as another key or equal by the
-dictionary's own comparer), the fresh key an added entry gets, what a new list
+reference, a duplicate: serialized the same as another key under the owning
+document's serializer or equal by the rebuilt dictionary type's default
+comparer, or a key that document cannot serialize), the fresh key an added entry gets, what a new list
 element, dictionary value or union pick may be, and how an integer edit clamps
 to its type. Edits work on a copy (`CultInspectorEdit`): a refused upsert
 leaves the cached object unchanged. The Studio is one lowering of that model
