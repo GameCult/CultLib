@@ -170,21 +170,13 @@ namespace GameCult.Unity.Caching.Editor
                 GUILayout.MaxHeight(Mathf.Max(textArea.MaxLines, textArea.MinLines, 1) * EditorGUIUtility.singleLineHeight));
         }
 
-        private static object DrawInteger(string label, Type type, object value, CultInspectorMetadata metadata)
+        private object DrawInteger(string label, Type type, object value, CultInspectorMetadata metadata)
         {
             var current = value == null ? 0L : Convert.ToInt64(value);
             if (type == typeof(int) && metadata.Range != null)
                 return EditorGUILayout.IntSlider(label, (int)current, Mathf.RoundToInt(metadata.Range.Min), Mathf.RoundToInt(metadata.Range.Max));
             var next = EditorGUILayout.LongField(label, current);
-            if (next == current) return value ?? Activator.CreateInstance(type);
-            try
-            {
-                return Convert.ChangeType(next, type);
-            }
-            catch (OverflowException)
-            {
-                return value ?? Activator.CreateInstance(type);
-            }
+            return next == current && value != null ? value : Model.NarrowInteger(type, next);
         }
 
         private object DrawRecordRef(string label, Type type, object value)
@@ -257,13 +249,13 @@ namespace GameCult.Unity.Caching.Editor
                 changed = true;
             }
 
-            if (GUILayout.Button("Add"))
+            if (Add(shape.ValueType, path, out var created))
             {
                 var fresh = Model.FreshKey(shape.Type, entries.Select(e => e.Key).ToArray(), Records, out var notice);
                 Notice(path, notice);
                 if (fresh != null)
                 {
-                    entries.Add(new KeyValuePair<object, object>(fresh, Model.CreateDefault(shape.ValueType)));
+                    entries.Add(new KeyValuePair<object, object>(fresh, created));
                     changed = true;
                 }
             }
@@ -310,29 +302,13 @@ namespace GameCult.Unity.Caching.Editor
                 changed = true;
             }
 
-            var elementShape = Model.ShapeOf(element);
-            if (elementShape.Kind == CultInspectorValueKind.Union)
+            if (Add(element, path, out var created))
             {
-                var picked = EditorGUILayout.Popup("Add", 0, elementShape.UnionChoices.Select(u => u.Name).Prepend("...").ToArray());
-                if (picked > 0)
-                {
-                    try
-                    {
-                        items.Add(Model.CreateUnionValue(element, elementShape.UnionChoices[picked - 1]));
-                        changed = true;
-                    }
-                    catch (InvalidOperationException exception)
-                    {
-                        Debug.LogError(exception.Message);
-                    }
-                }
-            }
-            else if (GUILayout.Button("Add"))
-            {
-                items.Add(Model.CreateDefault(element));
+                items.Add(created);
                 changed = true;
             }
 
+            DrawNotice(path);
             EditorGUI.indentLevel--;
             return changed ? Model.BuildList(shape.Type, items) : value;
         }
@@ -354,17 +330,13 @@ namespace GameCult.Unity.Caching.Editor
                 EditorGUI.indentLevel = indent;
                 if (picked != index)
                 {
-                    try
-                    {
-                        value = picked == 0 ? null : Model.CreateUnionValue(shape.Type, choices[picked - 1]);
-                    }
-                    catch (InvalidOperationException exception)
-                    {
-                        Debug.LogError(exception.Message);
-                    }
+                    string notice = null;
+                    value = picked == 0 ? null : Model.CreateElement(shape.Type, choices[picked - 1], out notice) ?? value;
+                    Notice(path, notice);
                 }
             }
 
+            DrawNotice(path);
             if (!expanded || value == null) return value;
             EditorGUI.indentLevel++;
             DrawMembers(value, value.GetType(), path);
@@ -407,6 +379,29 @@ namespace GameCult.Unity.Caching.Editor
             GUI.changed = changed;
             _foldouts[path] = expanded;
             return expanded;
+        }
+
+        // The add control under a list or dictionary: a button when the model offers the element type itself, a popup of
+        // a union's declared subtypes otherwise. True with the model's new value once one is picked and made.
+        private bool Add(Type elementType, string path, out object created)
+        {
+            created = null;
+            var choices = Model.ElementChoices(elementType);
+            Type choice;
+            if (choices.Count == 1 && choices[0] == elementType)
+            {
+                choice = GUILayout.Button("Add") ? elementType : null;
+            }
+            else
+            {
+                var picked = EditorGUILayout.Popup("Add", 0, choices.Select(c => c.Name).Prepend("...").ToArray());
+                choice = picked > 0 ? choices[picked - 1] : null;
+            }
+
+            if (choice == null) return false;
+            created = Model.CreateElement(elementType, choice, out var notice);
+            Notice(path, notice);
+            return notice == null;
         }
 
         // The model's notice for the control at path, kept until that control's next answer.

@@ -353,13 +353,32 @@ namespace GameCult.Caching
             return type.IsAbstract || type.IsInterface || type.GetConstructor(Type.EmptyTypes) == null ? null : Activator.CreateInstance(type);
         }
 
-        public object CreateUnionValue(Type unionType, Type subtype)
+        // What a new value for a slot of elementType (a list element, a dictionary value, a union pick) may be: a union's
+        // declared subtypes, or elementType itself.
+        public IReadOnlyList<Type> ElementChoices(Type elementType)
         {
-            if (!ShapeOf(unionType).UnionChoices.Contains(subtype))
-                throw new InvalidOperationException($"{subtype.Name} is not a declared [Union] subtype of {unionType.Name}.");
-            if (subtype.GetConstructor(Type.EmptyTypes) == null)
-                throw new InvalidOperationException($"{subtype.Name} has no parameterless constructor.");
-            return Activator.CreateInstance(subtype)!;
+            var shape = ShapeOf(elementType);
+            return shape.Kind == CultInspectorValueKind.Union ? shape.UnionChoices : new[] { elementType };
+        }
+
+        // A new value of choice for a slot of elementType, or null with a notice when choice cannot be made.
+        public object? CreateElement(Type elementType, Type choice, out string? notice)
+        {
+            if (!ElementChoices(elementType).Contains(choice))
+                throw new ArgumentException($"{choice.Name} is not a choice for {elementType.Name}.", nameof(choice));
+            notice = choice == elementType || choice.GetConstructor(Type.EmptyTypes) != null
+                ? null
+                : $"{choice.Name} has no parameterless constructor; nothing was created.";
+            return notice != null ? null : choice == elementType ? CreateDefault(elementType) : Activator.CreateInstance(choice);
+        }
+
+        // An integer edit as a value of integerType, clamped to that type's range instead of overflowing.
+        public object NarrowInteger(Type integerType, long value)
+        {
+            if (!IntegerTypes.Contains(integerType))
+                throw new ArgumentException($"{integerType.Name} is not an integer the inspector edits.", nameof(integerType));
+            long Bound(string name) => Convert.ToInt64(integerType.GetField(name)!.GetValue(null));
+            return Convert.ChangeType(Math.Max(Bound("MinValue"), Math.Min(Bound("MaxValue"), value)), integerType);
         }
 
         // A new collection holding items; the value it replaces is never mutated.

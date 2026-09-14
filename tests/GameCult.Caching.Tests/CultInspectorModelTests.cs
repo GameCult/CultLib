@@ -65,15 +65,34 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void UnionChoicesAreTheDeclaredSubtypesOnly()
+        public void ElementChoicesAreTheDeclaredUnionSubtypesOrTheTypeItself()
         {
             var model = Model();
-            var shape = model.ShapeOf(typeof(InspectShape));
 
-            Assert.That(shape.Kind, Is.EqualTo(CultInspectorValueKind.Union));
-            Assert.That(shape.UnionChoices, Is.EqualTo(new[] { typeof(InspectCircle) }));
-            Assert.That(model.CreateUnionValue(typeof(InspectShape), typeof(InspectCircle)), Is.InstanceOf<InspectCircle>());
-            Assert.That(() => model.CreateUnionValue(typeof(InspectShape), typeof(InspectSquare)), Throws.InvalidOperationException);
+            Assert.That(model.ShapeOf(typeof(InspectShape)).Kind, Is.EqualTo(CultInspectorValueKind.Union));
+            Assert.That(model.ElementChoices(typeof(InspectShape)), Is.EqualTo(new[] { typeof(InspectCircle) }));
+            Assert.That(model.CreateElement(typeof(InspectShape), typeof(InspectCircle), out var made), Is.InstanceOf<InspectCircle>());
+            Assert.That(made, Is.Null);
+            Assert.That(() => model.CreateElement(typeof(InspectShape), typeof(InspectSquare), out _), Throws.ArgumentException,
+                "an undeclared subtype is not a choice");
+
+            Assert.That(model.ElementChoices(typeof(List<int>)), Is.EqualTo(new[] { typeof(List<int>) }));
+            Assert.That(model.CreateElement(typeof(List<int>), typeof(List<int>), out _), Is.EqualTo(new List<int>()));
+
+            Assert.That(model.CreateElement(typeof(InspectPicky), typeof(InspectNeedsArgs), out var refused), Is.Null);
+            Assert.That(refused, Does.Contain("parameterless"));
+        }
+
+        [Test]
+        public void IntegerEditsClampToTheirType()
+        {
+            var model = Model();
+
+            Assert.That(model.NarrowInteger(typeof(byte), 300), Is.TypeOf<byte>().And.EqualTo(byte.MaxValue));
+            Assert.That(model.NarrowInteger(typeof(sbyte), -300), Is.TypeOf<sbyte>().And.EqualTo(sbyte.MinValue));
+            Assert.That(model.NarrowInteger(typeof(uint), -1), Is.TypeOf<uint>().And.EqualTo(0u));
+            Assert.That(model.NarrowInteger(typeof(int), 42), Is.TypeOf<int>().And.EqualTo(42));
+            Assert.That(() => model.NarrowInteger(typeof(float), 1), Throws.ArgumentException);
         }
 
         [Test]
@@ -298,6 +317,18 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)]
             public new string Value = string.Empty;
+        }
+
+        [Union(0, typeof(InspectNeedsArgs))]
+        public abstract class InspectPicky
+        {
+        }
+
+        public sealed class InspectNeedsArgs : InspectPicky
+        {
+            public InspectNeedsArgs(int side)
+            {
+            }
         }
 
         public struct InspectOpenStruct
