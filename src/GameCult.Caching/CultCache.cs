@@ -1398,7 +1398,7 @@ namespace GameCult.Caching
             return true;
         });
 
-        // soft is dead. CultCacheStudioWindow reflects on FlushAsync(bool) until Cut 6 rewrites it.
+        // soft is ignored.
         public Task FlushAsync(bool soft = false)
         {
             FlushAllBackingStores();

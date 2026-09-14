@@ -2,9 +2,6 @@ using System;
 
 namespace GameCult.Unity.Caching
 {
-    /// <summary>
-    /// Overrides the label shown for a CultCache document member in Unity editor tooling.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property | AttributeTargets.Class, Inherited = true)]
     public sealed class CultInspectorLabelAttribute : Attribute
     {
@@ -16,25 +13,17 @@ namespace GameCult.Unity.Caching
         public string Label { get; }
     }
 
-    /// <summary>
-    /// Hides a CultCache document member from Unity editor tooling.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorHiddenAttribute : Attribute
     {
     }
 
-    /// <summary>
-    /// Shows a CultCache document member without allowing editor mutation.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorReadOnlyAttribute : Attribute
     {
     }
 
-    /// <summary>
-    /// Controls member ordering in Unity editor tooling. Lower values appear first.
-    /// </summary>
+    // Lower values appear first; members without it keep their key order.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorOrderAttribute : Attribute
     {
@@ -46,9 +35,6 @@ namespace GameCult.Unity.Caching
         public int Order { get; }
     }
 
-    /// <summary>
-    /// Draws a string member as a multi-line text area.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorTextAreaAttribute : Attribute
     {
@@ -62,9 +48,6 @@ namespace GameCult.Unity.Caching
         public int MaxLines { get; }
     }
 
-    /// <summary>
-    /// Draws numeric members with a slider.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorRangeAttribute : Attribute
     {
@@ -78,9 +61,6 @@ namespace GameCult.Unity.Caching
         public float Max { get; }
     }
 
-    /// <summary>
-    /// Draws a string member as a Unity asset path picker.
-    /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
     public sealed class CultInspectorAssetPathAttribute : Attribute
     {
@@ -90,5 +70,18 @@ namespace GameCult.Unity.Caching
         }
 
         public Type AssetType { get; }
+    }
+
+    // Marks an editor class implementing ICultInspectorDrawer as the drawer for every member of MemberType,
+    // or of any closed form when MemberType is an open generic definition. It wins over the built-in drawers.
+    [AttributeUsage(AttributeTargets.Class, Inherited = false)]
+    public sealed class CultInspectorDrawerAttribute : Attribute
+    {
+        public CultInspectorDrawerAttribute(Type memberType)
+        {
+            MemberType = memberType ?? throw new ArgumentNullException(nameof(memberType));
+        }
+
+        public Type MemberType { get; }
     }
 }
