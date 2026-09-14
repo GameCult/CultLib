@@ -91,7 +91,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(26, compared.Count);
+        Assert.Equal(25, compared.Count);
     }
 
     private static int Components(Type t) => t.GetFields().Count(f => f.FieldType == typeof(float) && !f.IsStatic);

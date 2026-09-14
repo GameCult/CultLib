@@ -48,6 +48,23 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
+        public void Samples_on_the_isovalue_emit_finite_normals()
+        {
+            var samples = new float[2, 2, 2];
+            for (var y = 0; y < 2; y++)
+            for (var z = 0; z < 2; z++)
+            {
+                samples[0, y, z] = 0f;
+                samples[1, y, z] = 1f;
+            }
+
+            var mesh = CultGeometryIsoSurface.Extract(samples);
+
+            mesh.TriangleCount.Should().BeGreaterThan(0);
+            mesh.Normals.Should().OnlyContain(value => float.IsFinite(value));
+        }
+
+        [Test]
         public void Extraction_is_deterministic_and_applies_origin_and_cell_size()
         {
             var samples = new float[2, 2, 2];

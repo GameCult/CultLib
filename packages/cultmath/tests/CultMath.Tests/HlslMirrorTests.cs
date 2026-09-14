@@ -31,7 +31,6 @@ public sealed class HlslMirrorTests
             "cultmath_smootherstep",
             "cultmath_lengthsq",
             "cultmath_distance",
-            "cultmath_normalize",
             "cultmath_reflect",
             "cultmath_rotate",
             "cultmath_csum",
@@ -54,8 +53,8 @@ public sealed class HlslMirrorTests
             Assert.Contains(symbol, include);
         }
 
-        Assert.Contains("CULTMATH_NORMALIZE_EPSILON", include);
-        Assert.Contains("max(length(value), CULTMATH_NORMALIZE_EPSILON)", include);
+        // HLSL's normalize intrinsic is the contract; a mirror copy would only restate it.
+        Assert.DoesNotContain("cultmath_normalize", include);
     }
 
     private static string GetCultMathRoot()

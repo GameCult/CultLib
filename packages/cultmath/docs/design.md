@@ -60,6 +60,14 @@ That makes these HLSL rules, not options:
   zero; numeric to bool is `!= 0` (`fcmp une`, so NaN is true); bool to numeric
   is 0 or 1. DXIL leaves float-to-int undefined for NaN and out-of-range values,
   and so does C#; CultMath does not pin them.
+- `normalize(x)` is `x * Rsqrt(Dot(x, x))`, which is how dxc lowers it, and
+  DXIL.rst defines `Rsqrt` as `1 / sqrt(src)`. A zero vector therefore
+  normalizes to NaN (`0 * inf`), and a NaN component makes every component NaN.
+  (The special-value table under `Rsqrt` in DXIL.rst is a copy of the `Round`
+  table and contradicts that definition, so CultMath follows the definition.)
+  `length` and `distance` are `Sqrt` of the summed squares, so a zero vector
+  gives 0. Callers that can meet zero-length vectors guard them before calling
+  `normalize`.
 - dxc demotes double `frac`, `exp`, `lerp`, and `floor` to float. CultMath's
   double overloads keep double precision instead: `frac(double)` is
   `x - floor(x)` in double. That is a deliberate divergence for CPU simulation
@@ -75,9 +83,7 @@ GPU. Because `min`, `max`, and `saturate` return the non-NaN operand, some
 functions turn NaN or infinity into numbers: `smoothstep(a, a, a)` is 0;
 infinite inputs to `smoothstep` and the intercept helpers give numbers; the
 bezier, `smoothstep01`, and `smootherstep` functions return finite values for
-NaN input; and `normalize((NaN, 2.41))` is `(NaN, 2.41e20)`, because the NaN
-length is clamped to the epsilon and the other component is divided by it.
-Callers that must detect bad data should check `isnan` before calling these
+NaN input. Callers that must detect bad data should check `isnan` before calling these
 functions.
 
 Deferred until a consumer needs them: `float4x4`, `transpose`, `determinant`,
@@ -115,8 +121,7 @@ itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
-Unity.Mathematics: `normalize` is safe (divides by `max(length, 1e-20)`),
-`hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped
+Unity.Mathematics: `hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped
 helpers that HLSL lacks (`float2x2.Rotate`, `float3x3.Euler`, `quaternion`,
 `snoise`) enter only when a consumer needs them, with their semantics stated in
 code.

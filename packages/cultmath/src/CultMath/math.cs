@@ -213,9 +213,10 @@ public static partial class math
     public static float distance(float3 left, float3 right) => length(left - right);
     public static float distance(float4 left, float4 right) => length(left - right);
 
-    public static float2 normalize(float2 value) => value / max(length(value), 1.0e-20f);
-    public static float3 normalize(float3 value) => value / max(length(value), 1.0e-20f);
-    public static float4 normalize(float4 value) => value / max(length(value), 1.0e-20f);
+    // dxc lowers normalize(x) to x * Rsqrt(Dot(x, x)), and DXIL Rsqrt is 1 / sqrt(src): a zero vector is 0 * inf = NaN.
+    public static float2 normalize(float2 value) => value * (1.0f / MathF.Sqrt(dot(value, value)));
+    public static float3 normalize(float3 value) => value * (1.0f / MathF.Sqrt(dot(value, value)));
+    public static float4 normalize(float4 value) => value * (1.0f / MathF.Sqrt(dot(value, value)));
     public static quaternion normalize(quaternion value)
     {
         var length = MathF.Sqrt(value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w);

@@ -31,8 +31,7 @@ shader semantics.
   deterministic value-noise primitives
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
-  exposes `cultmath_*` functions for shared semantics, including CultMath's
-  safe `normalize` contract.
+  exposes `cultmath_*` functions for shared semantics HLSL does not provide.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
@@ -59,7 +58,7 @@ float grain = math.value_noise_bicubic(math.float2(12.0f, 3.5f));
 ```hlsl
 #include "CultMath.hlsl"
 
-float3 normal = cultmath_normalize(float3(0.25, 1.0, -0.1));
+float3 normal = normalize(float3(0.25, 1.0, -0.1));
 float rim = cultmath_saturate(1.0 - dot(normal, float3(0.0, 0.0, -1.0)));
 float glow = cultmath_smoothstep(0.2, 1.0, rim);
 float grain = cultmath_value_noise_bicubic(float2(12.0, 3.5));

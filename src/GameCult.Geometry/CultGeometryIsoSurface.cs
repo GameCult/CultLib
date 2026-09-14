@@ -172,7 +172,9 @@ namespace GameCult.Geometry
                 normal = -normal;
             }
 
-            normal = math.normalize(normal);
+            // A degenerate triangle (an inside vertex exactly on the isovalue) has no area and gets a zero
+            // normal; normalize follows HLSL and would return NaN for it.
+            normal = math.dot(normal, normal) > 0f ? math.normalize(normal) : float3.zero;
             var firstIndex = (uint)(positions.Count / 3);
             Append(a, positions);
             Append(b, positions);

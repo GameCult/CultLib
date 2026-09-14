@@ -187,6 +187,28 @@ public sealed class HlslSemanticsTests
         Assert.Equal(DoubleBits(-0.0), DoubleBits(math.max(-0.0, 0.0)));
         Assert.Equal(DoubleBits(0.0), DoubleBits(math.min(-0.0, 0.0)));
 
+        // dxc: normalize(x) is x * Rsqrt(Dot(x, x)); length and distance are Sqrt of the summed squares.
+        static bool AllNaN(float4 value) =>
+            float.IsNaN(value.x) && float.IsNaN(value.y) && float.IsNaN(value.z) && float.IsNaN(value.w);
+        var n2 = math.normalize(float2.zero);
+        Assert.True(float.IsNaN(n2.x) && float.IsNaN(n2.y));
+        var n3 = math.normalize(float3.zero);
+        Assert.True(float.IsNaN(n3.x) && float.IsNaN(n3.y) && float.IsNaN(n3.z));
+        Assert.True(AllNaN(math.normalize(float4.zero)));
+        var nanX = math.normalize(new float2(float.NaN, 2.41f));
+        Assert.True(float.IsNaN(nanX.x) && float.IsNaN(nanX.y));
+        Assert.True(AllNaN(math.normalize(new float4(1.0f, float.NaN, 2.41f, 1.0f))));
+        var skew = new float3(0.25f, 1.0f, -0.1f);
+        var inverseLength = 1.0f / MathF.Sqrt(skew.x * skew.x + skew.y * skew.y + skew.z * skew.z);
+        var normalized = math.normalize(skew);
+        Assert.Equal(Bits(skew.x * inverseLength), Bits(normalized.x));
+        Assert.Equal(Bits(skew.y * inverseLength), Bits(normalized.y));
+        Assert.Equal(Bits(skew.z * inverseLength), Bits(normalized.z));
+        Assert.Equal(Bits(0.0f), Bits(math.length(float2.zero)));
+        Assert.Equal(Bits(0.0f), Bits(math.length(float3.zero)));
+        Assert.Equal(Bits(0.0f), Bits(math.length(float4.zero)));
+        Assert.Equal(Bits(0.0f), Bits(math.distance(new float3(1.0f, 2.0f, 3.0f), new float3(1.0f, 2.0f, 3.0f))));
+
         Assert.Equal(0, math.sign(float.NaN));
         Assert.Equal(-1, math.sign(-0.5f));
         Assert.Equal(new int3(-1, 0, 1), math.sign(new float3(-2.0f, 0.0f, 4.0f)));

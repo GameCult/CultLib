@@ -11,7 +11,6 @@
 static const float CULTMATH_PI = 3.14159265358979323846;
 static const float CULTMATH_TAU = 6.28318530717958647692;
 static const float CULTMATH_HALF_PI = 1.57079632679489661923;
-static const float CULTMATH_NORMALIZE_EPSILON = 1.0e-20;
 
 float cultmath_radians(float degrees_value) { return degrees_value * (CULTMATH_PI / 180.0); }
 float cultmath_degrees(float radians_value) { return radians_value * (180.0 / CULTMATH_PI); }
@@ -170,10 +169,6 @@ float cultmath_lengthsq(float4 value) { return dot(value, value); }
 float cultmath_distance(float2 left, float2 right) { return length(left - right); }
 float cultmath_distance(float3 left, float3 right) { return length(left - right); }
 float cultmath_distance(float4 left, float4 right) { return length(left - right); }
-
-float2 cultmath_normalize(float2 value) { return value / max(length(value), CULTMATH_NORMALIZE_EPSILON); }
-float3 cultmath_normalize(float3 value) { return value / max(length(value), CULTMATH_NORMALIZE_EPSILON); }
-float4 cultmath_normalize(float4 value) { return value / max(length(value), CULTMATH_NORMALIZE_EPSILON); }
 
 float2 cultmath_reflect(float2 incident, float2 normal_value)
 {
