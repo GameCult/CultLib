@@ -645,9 +645,9 @@ namespace GameCult.Caching.Tests
                 File.Delete(Path.Combine(recordsPath, ".commit.lock"));
                 var committed = new System.Collections.Generic.List<CultRecordKey>();
                 // The writer is another cache, so it commits from another thread: a thread holds one cache's gate at a time.
+                // It commits under every unleased read, so only a retry that takes the lease its commit created can settle.
                 readerStore.UnleasedManifestRead = () =>
                 {
-                    if (committed.Count > 0) return;
                     Task.Run(async () =>
                     {
                         using var writer = CultCacheMessagePack.Create(filePath, new CultCacheOpenOptions { UseDirectoryStore = true });
@@ -661,8 +661,42 @@ namespace GameCult.Caching.Tests
 
                 await reader.PullAllBackingStoresAsync();
 
-                Assert.That(committed, Has.Count.EqualTo(1), "the writer committed mid-load");
+                Assert.That(committed, Has.Count.EqualTo(1), "the writer committed once; the retry held the lease");
                 Assert.That(reader.Get<NamedTestEntry>(committed[0])?.Value, Is.EqualTo("after"), "the reader reloaded the writer's generation");
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task DirectoryMessagePackBackingStore_UnlockedLoad_Throws_Corruption_Under_An_Unmoved_Manifest()
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                using (var seed = await CultCacheMessagePack.OpenAsync(filePath, new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    await seed.UpsertAsync(new NamedTestEntry { Name = "copied", Value = "before" });
+                    await seed.FlushAsync();
+                }
+
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var reader = new CultCache();
+                reader.AddBackingStore(readerStore);
+                File.Delete(Path.Combine(recordsPath, ".commit.lock"));
+                File.WriteAllBytes(Directory.GetFiles(recordsPath, "*.msgpack").Single(), new byte[] { 1, 2, 3 });
+                var loads = 0;
+                readerStore.UnleasedManifestRead = () => loads++;
+
+                var thrown = Assert.CatchAsync(() => reader.PullAllBackingStoresAsync())!;
+
+                Assert.That(loads, Is.EqualTo(1), "corruption is not retried as a race");
+                Assert.That(thrown.ToString(), Does.Contain("does not match its committed content hash").And.Not.Contain("did not settle"));
             }
             finally
             {

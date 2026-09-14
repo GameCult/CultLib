@@ -68,7 +68,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             reports.Clear();
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
             // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
-            // load stands only if its manifest is still current and every page it named read back; otherwise it reloads.
+            // load stands only if its manifest is still current; if the manifest moved it reloads, under the lease the
+            // writer created. A page that fails under an unmoved manifest is corruption, not a race.
             using var lease = AcquireCommitLease(wait: true, create: false);
             var manifestBytes = ReadManifestBytes();
             var manifest = ParseManifest(manifestBytes);
@@ -89,7 +90,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     break;
                 }
             }
-            catch (Exception exception) when (lease == null && IsTornGeneration(exception))
+            catch (Exception exception) when (lease == null && IsTornGeneration(exception) && !SameBytes(manifestBytes, ReadManifestBytes()))
             {
                 if (attempt == UnleasedLoadAttempts)
                     throw Unsettled(exception);
@@ -385,11 +386,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private static bool SameBytes(byte[]? first, byte[]? second) =>
         first == null ? second == null : second != null && first.SequenceEqual(second);
 
-    // A page the manifest named that vanished or was replaced: a writer committed mid-load.
+    // A page the manifest named that vanished or was replaced. It is a writer committing mid-load only when the manifest
+    // moved too; under an unchanged manifest the same failure is corruption and is thrown as it is.
     private static bool IsTornGeneration(Exception exception) =>
         exception is AggregateException aggregate
             ? aggregate.Flatten().InnerExceptions.All(IsTornGeneration)
-            : exception is InvalidDataException or FileNotFoundException;
+            : exception is InvalidDataException or FileNotFoundException or DirectoryNotFoundException;
 
     private InvalidOperationException Unsettled(Exception? last) => new(
         $"Directory store {_manifestFile.FullName} changed under every one of {UnleasedLoadAttempts} unlocked loads; it did not settle.", last);
