@@ -13,7 +13,9 @@ namespace GameCult.Unity.Caching.Editor
         private const string LastPathKey = "GameCult.CultCacheStudio.LastPath";
 
         private CultCache _cache;
+        private CultInspectorModel _model;
         private CultInspector _inspector;
+        private CultInspectorEdit _edit;
         private CultStoredDocument[] _records = Array.Empty<CultStoredDocument>();
         private string _path = string.Empty;
         private bool _directory;
@@ -21,8 +23,6 @@ namespace GameCult.Unity.Caching.Editor
         private string _search = string.Empty;
         private Type _selectedType;
         private string _selectedKey;
-        private CultStoredDocument _editSource;
-        private object _editCopy;
         private Vector2 _typeScroll;
         private Vector2 _recordScroll;
         private Vector2 _inspectorScroll;
@@ -30,6 +30,8 @@ namespace GameCult.Unity.Caching.Editor
         private MessageType _statusType = MessageType.Info;
 
         private bool ReadOnly => _cache.BackingStores.Any(store => store.IsReadOnly);
+
+        private static string ProjectRoot => Path.GetDirectoryName(Path.GetFullPath(Application.dataPath));
 
         [MenuItem("GameCult/CultCache Studio")]
         public static void Open()
@@ -80,6 +82,7 @@ namespace GameCult.Unity.Caching.Editor
                             EditorStyles.toolbarButton, GUILayout.Width(40)))
                         Browse(true);
                 }
+
                 using (new EditorGUI.DisabledScope(_cache == null))
                 {
                     if (GUILayout.Button("Reload", EditorStyles.toolbarButton, GUILayout.Width(52)) && ConfirmDiscard()) OpenStore(_path, false);
@@ -163,7 +166,7 @@ namespace GameCult.Unity.Caching.Editor
                 else
                 {
                     var records = _records.Where(r => _selectedType.IsAssignableFrom(r.Descriptor.DocumentType))
-                        .Select(r => (Record: r, Label: CultInspector.RecordLabel(r)))
+                        .Select(r => (Record: r, Label: CultInspectorModel.RecordLabel(r)))
                         .OrderBy(r => r.Label, StringComparer.OrdinalIgnoreCase)
                         .ToArray();
                     if (descriptor.IsGlobal && records.Length == 0)
@@ -203,26 +206,17 @@ namespace GameCult.Unity.Caching.Editor
                 EditorGUILayout.LabelField(record.Descriptor.SchemaName + "  " + record.Descriptor.DocumentType.Name, EditorStyles.boldLabel);
                 EditorGUILayout.SelectableLabel("Key " + record.Key.Value + "   Stored " + record.StoredAt, EditorStyles.miniLabel, GUILayout.Height(EditorGUIUtility.singleLineHeight));
                 _inspectorScroll = EditorGUILayout.BeginScrollView(_inspectorScroll);
-                // Drawers edit a copy. The cached object changes only through an admitted upsert; after any upsert
-                // attempt the copy is dropped and re-cloned from whatever the cache now holds.
-                var type = record.Descriptor.DocumentType;
-                if (!ReferenceEquals(_editSource, record))
-                {
-                    _editSource = record;
-                    _editCopy = Clone(record.Document, type);
-                }
 
+                // Drawers edit the edit's private copy. A commit spends the edit, admitted or refused, and the next frame
+                // begins a new one from whatever record the cache then holds.
+                if (_edit == null || !_edit.IsFor(record)) _edit = _model.BeginEdit(record);
                 var readOnly = ReadOnly;
                 using (new EditorGUI.DisabledScope(readOnly))
                 {
                     EditorGUI.BeginChangeCheck();
-                    _inspector.DrawDocument(_editCopy, type, record.Key.Value);
-                    if (EditorGUI.EndChangeCheck() && !readOnly)
-                    {
-                        var edited = _editCopy;
-                        _editSource = null;
-                        Run(null, () => _cache.UpsertAsync(type, edited, record.Key).GetAwaiter().GetResult());
-                    }
+                    _inspector.DrawDocument(_edit);
+                    if (EditorGUI.EndChangeCheck() && !readOnly && !_edit.Commit(_cache, out var error))
+                        SetStatus(error, MessageType.Error);
                 }
 
                 EditorGUILayout.EndScrollView();
@@ -234,10 +228,12 @@ namespace GameCult.Unity.Caching.Editor
             return _selectedKey == null ? null : _records.FirstOrDefault(r => r.Key.Value == _selectedKey);
         }
 
+        // Dialogs start in the last store's folder, or the project root; never under Assets.
         private void Browse(bool create)
         {
             if (!ConfirmDiscard()) return;
-            var directory = string.IsNullOrEmpty(_path) ? Application.dataPath : Path.GetDirectoryName(_path);
+            var last = string.IsNullOrEmpty(_path) ? null : Path.GetDirectoryName(FullPathOrNull(_path) ?? string.Empty);
+            var directory = !string.IsNullOrEmpty(last) && Directory.Exists(last) && !InsideAssets(last) ? last : ProjectRoot;
             var path = create
                 ? EditorUtility.SaveFilePanel("New CultCache store", directory, "GameData", "cc")
                 : EditorUtility.OpenFilePanel("Open CultCache store", directory, _directory ? "" : "cc");
@@ -245,15 +241,22 @@ namespace GameCult.Unity.Caching.Editor
             GUIUtility.ExitGUI();
         }
 
-        // New writes an empty single-file store and never touches an existing path; directory stores and read-only
-        // opens are refused because neither can write a store on creation.
+        // New writes an empty single-file store outside Assets and never touches an existing path; directory stores and
+        // read-only opens are refused because neither writes a store on creation. Game data never lives under Assets:
+        // Unity would import and manage it, and CultCache exists so Unity does not manage game data.
         private void OpenStore(string path, bool create)
         {
             var exists = File.Exists(path) || Directory.Exists(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path));
+            var insideAssets = InsideAssets(path);
             string refusal = null;
-            if (create && (_readOnly || _directory)) refusal = "New creates writable single-file stores only; turn off Read Only and Directory. Nothing was created.";
-            else if (create && exists) refusal = path + " already exists; nothing was created or replaced. Use Open to edit it.";
-            else if (!create && !File.Exists(path)) refusal = "No store at " + path + ".";
+            if (create && (_readOnly || _directory))
+                refusal = "New creates writable single-file stores only; turn off Read Only and Directory. Nothing was created.";
+            else if (create && insideAssets)
+                refusal = "New refuses " + path + ": game data does not live under Assets, where Unity imports and manages files, and CultCache exists so Unity does not manage game data. Choose a folder outside " + Application.dataPath + ". Nothing was created.";
+            else if (create && exists)
+                refusal = path + " already exists; nothing was created or replaced. Use Open to edit it.";
+            else if (!create && !File.Exists(path))
+                refusal = "No store at " + path + ".";
             if (refusal != null)
             {
                 SetStatus(refusal, MessageType.Error);
@@ -270,10 +273,18 @@ namespace GameCult.Unity.Caching.Editor
                     if (!File.Exists(path)) throw new IOException("the store wrote no file");
                 }
 
-                _inspector = new CultInspector(_cache);
+                var registry = _cache.Registry;
+                _model = new CultInspectorModel(registry,
+                    (value, type) => CultDocumentMessagePackSerialization.SerializeUntyped(value, type, registry),
+                    (type, bytes) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry));
+                _inspector = new CultInspector(_model);
                 _path = path;
                 EditorPrefs.SetString(LastPathKey, path);
-                SetStatus((create ? "Created " : "Opened ") + path + (_cache.BackingStores[0] is DirectoryMessagePackBackingStore ? " (directory store)." : "."), MessageType.Info);
+                var opened = (create ? "Created " : "Opened ") + path + (_cache.BackingStores[0] is DirectoryMessagePackBackingStore ? " (directory store)." : ".");
+                if (insideAssets)
+                    SetStatus(opened + " This store is under Assets, where Unity imports and manages files; game data belongs outside Assets.", MessageType.Warning);
+                else
+                    SetStatus(opened, MessageType.Info);
             }
             catch (Exception exception)
             {
@@ -282,15 +293,36 @@ namespace GameCult.Unity.Caching.Editor
             }
         }
 
+        private static bool InsideAssets(string path)
+        {
+            var full = FullPathOrNull(path);
+            var assets = FullPathOrNull(Application.dataPath)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return full != null && assets != null &&
+                   (full.Equals(assets, StringComparison.OrdinalIgnoreCase) ||
+                    full.StartsWith(assets + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string FullPathOrNull(string path)
+        {
+            try
+            {
+                return Path.GetFullPath(path);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private void CloseStore()
         {
             _cache?.Dispose();
             _cache = null;
+            _model = null;
             _inspector = null;
+            _edit = null;
             _records = Array.Empty<CultStoredDocument>();
             _selectedKey = null;
-            _editSource = null;
-            _editCopy = null;
         }
 
         private bool ConfirmDiscard()
@@ -314,17 +346,14 @@ namespace GameCult.Unity.Caching.Editor
         private void Duplicate(CultStoredDocument record)
         {
             var type = record.Descriptor.DocumentType;
-            Run("Duplicated " + CultInspector.RecordLabel(record) + ".", () =>
-                _selectedKey = _cache.UpsertAsync(type, Clone(record.Document, type)).GetAwaiter().GetResult().Value);
+            Run("Duplicated " + CultInspectorModel.RecordLabel(record) + ".", () =>
+                _selectedKey = _cache.UpsertAsync(type, _model.Clone(record.Document, type)).GetAwaiter().GetResult().Value);
             GUIUtility.ExitGUI();
         }
 
-        private object Clone(object document, Type type) =>
-            CultDocumentMessagePackSerialization.DeserializeUntyped(type, CultDocumentMessagePackSerialization.SerializeUntyped(document, type, _cache.Registry), _cache.Registry);
-
         private void Delete(CultStoredDocument record)
         {
-            var label = CultInspector.RecordLabel(record);
+            var label = CultInspectorModel.RecordLabel(record);
             if (!EditorUtility.DisplayDialog("CultCache Studio", "Delete " + label + "?", "Delete", "Cancel")) return;
             Run("Deleted " + label + ".", () =>
             {

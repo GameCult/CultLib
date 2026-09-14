@@ -4,109 +4,118 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using GameCult.Caching;
-using GameCult.Caching.MessagePack;
-using MessagePack;
 using UnityEditor;
 using UnityEngine;
-using CM = CultMath;
 using Object = UnityEngine.Object;
 
 namespace GameCult.Unity.Caching.Editor
 {
-    // Returns the member's next value; mutate reference values in place or return a new one.
+    // An IMGUI drawer claimed through [CultInspectorDrawer]. Returns the value's next value; a reference value may be
+    // mutated in place (it is always the edit's private copy). type is the value's declared type. member is the member
+    // the value belongs to, also for list elements and dictionary keys and values, and null for a bare value.
+    // inspector.DrawDefault hands the value back to built-in drawing; inspector.DrawValue draws a sub-value with claims.
     public interface ICultInspectorDrawer
     {
-        object Draw(string label, object value, MemberInfo member);
+        object Draw(CultInspector inspector, string label, Type type, object value, MemberInfo member);
     }
 
-    internal sealed class CultInspector
+    // The IMGUI lowering of CultInspectorModel. The model decides members, metadata, shapes, drawer claims and edit
+    // rules; this class draws them and hands every change back through the model.
+    public sealed class CultInspector
     {
-        private static Dictionary<Type, ICultInspectorDrawer> _drawers;
-        private static Dictionary<Type, string> _conflicts;
-        private static readonly Dictionary<Type, MemberInfo> NameMembers = new Dictionary<Type, MemberInfo>();
+        private static CultInspectorDrawerClaims _claims;
+        private static readonly Dictionary<Type, ICultInspectorDrawer> DrawerInstances = new Dictionary<Type, ICultInspectorDrawer>();
         private static GUIStyle _errorStyle;
 
-        private readonly CultCache _cache;
         private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>(StringComparer.Ordinal);
-        private readonly Dictionary<Type, MemberInfo[]> _members = new Dictionary<Type, MemberInfo[]>();
         private readonly Dictionary<string, string> _notices = new Dictionary<string, string>(StringComparer.Ordinal);
+        private string _path = string.Empty;
 
-        public CultInspector(CultCache cache)
+        internal CultInspector(CultInspectorModel model)
         {
-            _cache = cache;
+            Model = model;
         }
 
-        public CultStoredDocument[] Records { get; set; } = Array.Empty<CultStoredDocument>();
+        public CultInspectorModel Model { get; }
+
+        public IReadOnlyList<CultStoredDocument> Records { get; internal set; } = Array.Empty<CultStoredDocument>();
 
         private static GUIStyle ErrorStyle => _errorStyle ??= new GUIStyle(EditorStyles.label) { normal = { textColor = new Color(1f, .35f, .3f) } };
 
-        private static Dictionary<Type, ICultInspectorDrawer> Drawers
+        private static CultInspectorDrawerClaims Claims
         {
             get
             {
-                if (_drawers != null) return _drawers;
-                _drawers = new Dictionary<Type, ICultInspectorDrawer>();
-                _conflicts = new Dictionary<Type, string>();
-                foreach (var type in TypeCache.GetTypesWithAttribute<CultInspectorDrawerAttribute>())
-                {
-                    var memberType = type.GetCustomAttribute<CultInspectorDrawerAttribute>().MemberType;
-                    if (!typeof(ICultInspectorDrawer).IsAssignableFrom(type) || type.IsAbstract || type.GetConstructor(Type.EmptyTypes) == null)
-                    {
-                        Debug.LogError($"{type.FullName} is marked [CultInspectorDrawer] but is not a concrete ICultInspectorDrawer with a parameterless constructor.");
-                        continue;
-                    }
-
-                    // A contested type is claimed by nobody: it draws the red row until one claimant is removed.
-                    if (_drawers.TryGetValue(memberType, out var claimed))
-                    {
-                        _drawers.Remove(memberType);
-                        _conflicts[memberType] = claimed.GetType().FullName;
-                    }
-
-                    if (_conflicts.TryGetValue(memberType, out var claimants))
-                    {
-                        _conflicts[memberType] = claimants + ", " + type.FullName;
-                        Debug.LogError($"{_conflicts[memberType]} all draw {memberType.FullName}; none of them is used.");
-                    }
-                    else
-                    {
-                        _drawers[memberType] = (ICultInspectorDrawer)Activator.CreateInstance(type);
-                    }
-                }
-
-                return _drawers;
+                if (_claims != null) return _claims;
+                _claims = new CultInspectorDrawerClaims(TypeCache.GetTypesWithAttribute<CultInspectorDrawerAttribute>(), typeof(ICultInspectorDrawer));
+                foreach (var error in _claims.Errors) Debug.LogError(error);
+                return _claims;
             }
         }
 
-        public static string RecordLabel(CultStoredDocument record)
+        internal void DrawDocument(CultInspectorEdit edit)
         {
-            var type = record.Descriptor.DocumentType;
-            if (!NameMembers.TryGetValue(type, out var member))
+            DrawMembers(edit.Document, edit.Source.Descriptor.DocumentType, edit.Source.Key.Value);
+        }
+
+        // Draws a sub-value of the value being drawn, claims applied.
+        public object DrawValue(string label, Type type, object value, MemberInfo member)
+        {
+            return DrawValue(label, type, value, member, _path + "/" + label);
+        }
+
+        // Built-in drawing for a value, ignoring drawer claims on it.
+        public object DrawDefault(string label, Type type, object value, MemberInfo member)
+        {
+            var shape = Model.ShapeOf(type);
+            var metadata = Model.MetadataOf(member);
+            switch (shape.Kind)
             {
-                member = record.Descriptor.NameMember == null
-                    ? null
-                    : type.GetMember(record.Descriptor.NameMember, BindingFlags.Public | BindingFlags.Instance).FirstOrDefault();
-                NameMembers[type] = member;
+                case CultInspectorValueKind.String:
+                    return DrawString(label, value as string, metadata);
+                case CultInspectorValueKind.Integer:
+                    return DrawInteger(label, type, value, metadata);
+                case CultInspectorValueKind.Float:
+                    if (type == typeof(double)) return EditorGUILayout.DoubleField(label, value is double d ? d : 0d);
+                    var f = value is float single ? single : 0f;
+                    return metadata.Range == null ? EditorGUILayout.FloatField(label, f) : EditorGUILayout.Slider(label, f, metadata.Range.Min, metadata.Range.Max);
+                case CultInspectorValueKind.Bool:
+                    return EditorGUILayout.Toggle(label, value is bool b && b);
+                case CultInspectorValueKind.Enum:
+                    var current = value as Enum ?? (Enum)Enum.ToObject(type, 0);
+                    return type.IsDefined(typeof(FlagsAttribute), false) ? EditorGUILayout.EnumFlagsField(label, current) : EditorGUILayout.EnumPopup(label, current);
+                case CultInspectorValueKind.Composite:
+                    return DrawComposite(label, shape, value);
+                case CultInspectorValueKind.RecordRef:
+                    return DrawRecordRef(label, type, value);
+                case CultInspectorValueKind.List:
+                    return DrawList(label, shape, value, member);
+                case CultInspectorValueKind.Dictionary:
+                    return DrawDictionary(label, shape, value as IDictionary, member);
+                case CultInspectorValueKind.Union:
+                    return DrawUnion(label, shape, value);
+                case CultInspectorValueKind.Nested:
+                    return DrawNested(label, type, value);
+                default:
+                    return typeof(Object).IsAssignableFrom(type)
+                        ? EditorGUILayout.ObjectField(label, value as Object, type, false)
+                        : ErrorRow(label, shape.Reason, value);
             }
-
-            var name = member == null ? null : Get(member, record.Document)?.ToString();
-            return string.IsNullOrWhiteSpace(name) ? record.Key.Value : name;
         }
 
-        // Draws into the document it is given and mutates it in place; the caller hands over a working copy.
-        public void DrawDocument(object document, Type type, string key)
+        private object DrawValue(string label, Type type, object value, MemberInfo member, string path)
         {
-            DrawMembers(document, type, key);
-        }
-
-        public object DrawValue(string label, Type type, object value, MemberInfo member, string path)
-        {
-            if (Drawers.TryGetValue(type, out var drawer) || type.IsGenericType && Drawers.TryGetValue(type.GetGenericTypeDefinition(), out drawer))
+            var outer = _path;
+            _path = path;
+            try
             {
+                var claim = Claims.Resolve(type, member);
+                if (claim.Conflict != null) return ErrorRow(label, "no drawer: " + claim.Conflict, value);
+                if (claim.Drawer == null) return DrawDefault(label, type, value, member);
                 var changed = GUI.changed;
                 try
                 {
-                    return drawer.Draw(label, value, member);
+                    return Drawer(claim.Drawer).Draw(this, label, type, value, member);
                 }
                 catch (ExitGUIException)
                 {
@@ -115,141 +124,47 @@ namespace GameCult.Unity.Caching.Editor
                 catch (Exception exception)
                 {
                     GUI.changed = changed;
-                    return ErrorRow(label, drawer.GetType().Name + " failed: " + exception.Message, value);
+                    return ErrorRow(label, claim.Drawer.Name + " failed: " + exception.Message, value);
                 }
             }
-
-            if (_conflicts.TryGetValue(type, out var claimants) || type.IsGenericType && _conflicts.TryGetValue(type.GetGenericTypeDefinition(), out claimants))
-                return ErrorRow(label, "no drawer for " + type.FullName + " (contested by " + claimants + ")", value);
-            if (type.IsArray && type.GetArrayRank() != 1)
-                return ErrorRow(label, type.Name + " is a multi-dimensional array; the Studio cannot edit it", value);
-
-            if (type == typeof(string)) return DrawString(label, value as string, member);
-            var range = member?.GetCustomAttribute<CultInspectorRangeAttribute>();
-            if (type == typeof(int))
-                return range == null
-                    ? EditorGUILayout.IntField(label, As<int>(value))
-                    : EditorGUILayout.IntSlider(label, As<int>(value), Mathf.RoundToInt(range.Min), Mathf.RoundToInt(range.Max));
-            if (type == typeof(float))
-                return range == null
-                    ? EditorGUILayout.FloatField(label, As<float>(value))
-                    : EditorGUILayout.Slider(label, As<float>(value), range.Min, range.Max);
-            if (type == typeof(bool)) return EditorGUILayout.Toggle(label, As<bool>(value));
-            if (type == typeof(double)) return EditorGUILayout.DoubleField(label, As<double>(value));
-            if (type == typeof(long)) return EditorGUILayout.LongField(label, As<long>(value));
-            if (type == typeof(uint)) return (uint)Math.Min(uint.MaxValue, Math.Max(0L, EditorGUILayout.LongField(label, As<uint>(value))));
-            if (type == typeof(short)) return (short)Mathf.Clamp(EditorGUILayout.IntField(label, As<short>(value)), short.MinValue, short.MaxValue);
-            if (type == typeof(byte)) return (byte)Mathf.Clamp(EditorGUILayout.IntField(label, As<byte>(value)), 0, 255);
-            if (type.IsEnum)
+            finally
             {
-                var current = value as Enum ?? (Enum)Enum.ToObject(type, 0);
-                return type.IsDefined(typeof(FlagsAttribute), false)
-                    ? EditorGUILayout.EnumFlagsField(label, current)
-                    : EditorGUILayout.EnumPopup(label, current);
+                _path = outer;
             }
+        }
 
-            if (type == typeof(CM.float2)) { var v = As<CM.float2>(value); var r = EditorGUILayout.Vector2Field(label, new Vector2(v.x, v.y)); return new CM.float2(r.x, r.y); }
-            if (type == typeof(CM.float3)) { var v = As<CM.float3>(value); var r = EditorGUILayout.Vector3Field(label, new Vector3(v.x, v.y, v.z)); return new CM.float3(r.x, r.y, r.z); }
-            if (type == typeof(CM.float4)) { var v = As<CM.float4>(value); var r = EditorGUILayout.Vector4Field(label, new Vector4(v.x, v.y, v.z, v.w)); return new CM.float4(r.x, r.y, r.z, r.w); }
-            if (type == typeof(CM.quaternion)) { var v = As<CM.quaternion>(value); var r = EditorGUILayout.Vector4Field(label, new Vector4(v.x, v.y, v.z, v.w)); return new CM.quaternion(r.x, r.y, r.z, r.w); }
-            if (type == typeof(CM.int2)) { var v = As<CM.int2>(value); var r = EditorGUILayout.Vector2IntField(label, new Vector2Int(v.x, v.y)); return new CM.int2(r.x, r.y); }
-            if (type == typeof(CM.double2)) { var v = As<CM.double2>(value); var r = DrawDoubles(label, v.x, v.y); return new CM.double2(r[0], r[1]); }
-            if (type == typeof(CM.double3)) { var v = As<CM.double3>(value); var r = DrawDoubles(label, v.x, v.y, v.z); return new CM.double3(r[0], r[1], r[2]); }
-            if (type == typeof(CM.bool2)) return DrawBool2(label, As<CM.bool2>(value));
-            if (type == typeof(CM.rect))
-            {
-                var v = As<CM.rect>(value);
-                var r = EditorGUILayout.RectField(label, Rect.MinMaxRect(v.min.x, v.min.y, v.max.x, v.max.y));
-                return new CM.rect(r.xMin, r.yMin, r.xMax, r.yMax);
-            }
-
-            if (type == typeof(CM.Color32))
-            {
-                var v = As<CM.Color32>(value);
-                Color32 c = EditorGUILayout.ColorField(label, new Color32(v.r, v.g, v.b, v.a));
-                return new CM.Color32(c.r, c.g, c.b, c.a);
-            }
-
-            if (type == typeof(Vector2)) return EditorGUILayout.Vector2Field(label, As<Vector2>(value));
-            if (type == typeof(Vector3)) return EditorGUILayout.Vector3Field(label, As<Vector3>(value));
-            if (type == typeof(Color)) return EditorGUILayout.ColorField(label, value is Color color ? color : Color.white);
-            if (typeof(Object).IsAssignableFrom(type)) return EditorGUILayout.ObjectField(label, value as Object, type, false);
-
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>)) return DrawRecordRef(label, type, value);
-            var dictionary = DictionaryArguments(type);
-            if (dictionary != null) return DrawDictionary(label, type, dictionary, value as IDictionary, member, path);
-            var element = ListElement(type);
-            if (element != null) return DrawList(label, type, element, value, member, path);
-            if (type.IsAbstract || type.IsInterface) return DrawUnion(label, type, value, path);
-            if (type.IsClass || type.IsValueType && !type.IsPrimitive) return DrawNested(label, type, value, path);
-            return ErrorRow(label, "no drawer for " + type.FullName, value);
+        private static ICultInspectorDrawer Drawer(Type type)
+        {
+            if (!DrawerInstances.TryGetValue(type, out var drawer))
+                DrawerInstances[type] = drawer = (ICultInspectorDrawer)Activator.CreateInstance(type);
+            return drawer;
         }
 
         private void DrawMembers(object target, Type type, string path)
         {
-            foreach (var member in MembersOf(type))
+            foreach (var member in Model.MembersOf(type))
             {
-                if (member.GetCustomAttribute<CultInspectorHiddenAttribute>() != null) continue;
-                var current = Get(member, target);
-                var readOnly = !Writable(member) || member.GetCustomAttribute<CultInspectorReadOnlyAttribute>() != null;
-                using (new EditorGUI.DisabledScope(readOnly))
+                if (member.Metadata.Hidden) continue;
+                using (new EditorGUI.DisabledScope(member.IsReadOnly))
                 {
                     EditorGUI.BeginChangeCheck();
-                    var next = DrawValue(LabelOf(member), TypeOf(member), current, member, path + "." + member.Name);
-                    if (EditorGUI.EndChangeCheck() && !readOnly) Set(member, target, next);
+                    var next = DrawValue(LabelOf(member), member.ValueType, member.GetValue(target), member.Member, path + "." + member.Name);
+                    if (EditorGUI.EndChangeCheck() && !member.IsReadOnly) member.SetValue(target, next);
                 }
             }
         }
 
-        // Document members come from the registry's catalog; nested members are the MessagePack-keyed ones,
-        // or the public fields of an unkeyed struct.
-        private MemberInfo[] MembersOf(Type type)
+        private static string DrawString(string label, string value, CultInspectorMetadata metadata)
         {
-            if (_members.TryGetValue(type, out var cached)) return cached;
-            var candidates = type.GetMembers(BindingFlags.Public | BindingFlags.Instance)
-                .Where(m => m is FieldInfo || m is PropertyInfo p && p.CanRead && p.GetIndexParameters().Length == 0)
-                .Where(m => m.GetCustomAttribute<IgnoreMemberAttribute>() == null)
-                .ToArray();
-
-            IEnumerable<(MemberInfo Member, int Slot)> slotted;
-            if (type.IsDefined(typeof(CultDocumentAttribute), false))
+            if (metadata.AssetPath != null)
             {
-                var slots = _cache.Registry.GetRequired(type).ToCatalogEntry().Members.ToDictionary(m => m.MemberName, m => m.Slot);
-                slotted = candidates.Where(m => slots.ContainsKey(m.Name)).Select(m => (m, slots[m.Name]));
-            }
-            else if (candidates.Any(m => m.IsDefined(typeof(KeyAttribute), true)))
-            {
-                slotted = candidates.Where(m => m.IsDefined(typeof(KeyAttribute), true))
-                    .Select(m => (m, m.GetCustomAttribute<KeyAttribute>().IntKey ?? int.MaxValue));
-            }
-            else
-            {
-                slotted = type.IsValueType
-                    ? candidates.OfType<FieldInfo>().Select(f => ((MemberInfo)f, f.MetadataToken))
-                    : Enumerable.Empty<(MemberInfo, int)>();
-            }
-
-            cached = slotted
-                .OrderBy(s => s.Member.GetCustomAttribute<CultInspectorOrderAttribute>()?.Order ?? s.Slot)
-                .ThenBy(s => s.Slot)
-                .Select(s => s.Member)
-                .ToArray();
-            _members[type] = cached;
-            return cached;
-        }
-
-        private static string DrawString(string label, string value, MemberInfo member)
-        {
-            var assetPath = member?.GetCustomAttribute<CultInspectorAssetPathAttribute>();
-            if (assetPath != null)
-            {
-                var assetType = assetPath.AssetType != null && typeof(Object).IsAssignableFrom(assetPath.AssetType) ? assetPath.AssetType : typeof(Object);
+                var assetType = metadata.AssetPath.AssetType != null && typeof(Object).IsAssignableFrom(metadata.AssetPath.AssetType) ? metadata.AssetPath.AssetType : typeof(Object);
                 var asset = string.IsNullOrEmpty(value) ? null : AssetDatabase.LoadAssetAtPath(value, assetType);
                 var next = EditorGUILayout.ObjectField(label, asset, assetType, false);
                 return next == asset ? value : next == null ? string.Empty : AssetDatabase.GetAssetPath(next);
             }
 
-            var textArea = member?.GetCustomAttribute<CultInspectorTextAreaAttribute>();
+            var textArea = metadata.TextArea;
             if (textArea == null) return EditorGUILayout.TextField(label, value ?? string.Empty);
             EditorGUILayout.LabelField(label);
             return EditorGUILayout.TextArea(value ?? string.Empty,
@@ -257,19 +172,85 @@ namespace GameCult.Unity.Caching.Editor
                 GUILayout.MaxHeight(Mathf.Max(textArea.MaxLines, textArea.MinLines, 1) * EditorGUIUtility.singleLineHeight));
         }
 
+        private static object DrawInteger(string label, Type type, object value, CultInspectorMetadata metadata)
+        {
+            var current = value == null ? 0L : Convert.ToInt64(value);
+            if (type == typeof(int) && metadata.Range != null)
+                return EditorGUILayout.IntSlider(label, (int)current, Mathf.RoundToInt(metadata.Range.Min), Mathf.RoundToInt(metadata.Range.Max));
+            var next = EditorGUILayout.LongField(label, current);
+            if (next == current) return value ?? Activator.CreateInstance(type);
+            try
+            {
+                return Convert.ChangeType(next, type);
+            }
+            catch (OverflowException)
+            {
+                return value ?? Activator.CreateInstance(type);
+            }
+        }
+
+        // Scalar components draw on one row; anything else folds out. A change composes a new value.
+        private object DrawComposite(string label, CultInspectorShape shape, object value)
+        {
+            var path = _path;
+            value = value ?? Model.CreateDefault(shape.Type);
+            var components = shape.Members;
+            var values = components.Select(component => component.GetValue(value)).ToArray();
+            var changed = false;
+            if (components.All(component => Model.ShapeOf(component.ValueType).Kind is CultInspectorValueKind.Float or CultInspectorValueKind.Integer or CultInspectorValueKind.Bool))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.PrefixLabel(label);
+                    var indent = EditorGUI.indentLevel;
+                    var labelWidth = EditorGUIUtility.labelWidth;
+                    EditorGUI.indentLevel = 0;
+                    EditorGUIUtility.labelWidth = 8 + 7 * components.Max(component => component.Name.Length);
+                    for (var i = 0; i < components.Count; i++)
+                    {
+                        EditorGUI.BeginChangeCheck();
+                        var next = DrawDefault(components[i].Name, components[i].ValueType, values[i], null);
+                        if (!EditorGUI.EndChangeCheck()) continue;
+                        values[i] = next;
+                        changed = true;
+                    }
+
+                    EditorGUIUtility.labelWidth = labelWidth;
+                    EditorGUI.indentLevel = indent;
+                }
+            }
+            else
+            {
+                if (!Foldout(path, label)) return value;
+                EditorGUI.indentLevel++;
+                for (var i = 0; i < components.Count; i++)
+                {
+                    EditorGUI.BeginChangeCheck();
+                    var next = DrawValue(LabelOf(components[i]), components[i].ValueType, values[i], components[i].Member, path + "." + components[i].Name);
+                    if (!EditorGUI.EndChangeCheck()) continue;
+                    values[i] = next;
+                    changed = true;
+                }
+
+                EditorGUI.indentLevel--;
+            }
+
+            return changed ? Model.Compose(shape, values) : value;
+        }
+
         private object DrawRecordRef(string label, Type type, object value)
         {
-            var target = type.GetGenericArguments()[0];
-            var key = value == null ? string.Empty : ((CultRecordKey)type.GetProperty(nameof(CultRecordRef<object>.Key)).GetValue(value)).Value ?? string.Empty;
-            var candidates = Records.Where(r => target.IsInstanceOfType(r.Document))
-                .Select(r => (Record: r, Label: RecordLabel(r)))
-                .OrderBy(c => c.Label, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            var index = Array.FindIndex(candidates, c => c.Record.Key.Value == key) + 1;
-            var names = new string[candidates.Length + 1];
-            names[0] = index == 0 && key.Length > 0 ? "Missing " + key : "None";
-            for (var i = 0; i < candidates.Length; i++) names[i + 1] = candidates[i].Label;
+            var key = CultInspectorModel.RecordKey(value);
+            var candidates = Model.RecordCandidates(type, Records);
+            var index = 0;
+            var names = new string[candidates.Count + 1];
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                names[i + 1] = CultInspectorModel.RecordLabel(candidates[i]);
+                if (candidates[i].Key.Value == key) index = i + 1;
+            }
 
+            names[0] = index == 0 && key.Length > 0 ? "Missing " + key : "None";
             var next = key;
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -278,20 +259,21 @@ namespace GameCult.Unity.Caching.Editor
                 EditorGUI.indentLevel = 0;
                 var typed = EditorGUILayout.DelayedTextField(key, GUILayout.Width(120));
                 EditorGUI.indentLevel = indent;
-                if (picked != index) next = picked == 0 ? string.Empty : candidates[picked - 1].Record.Key.Value;
+                if (picked != index) next = picked == 0 ? string.Empty : candidates[picked - 1].Key.Value;
                 else if (typed != key) next = typed;
             }
 
-            return next == key ? value : Activator.CreateInstance(type, new CultRecordKey(next));
+            return next == key ? value : Model.CreateRecordRef(type, next);
         }
 
-        private object DrawDictionary(string label, Type type, Type[] arguments, IDictionary dictionary, MemberInfo member, string path)
+        private object DrawDictionary(string label, CultInspectorShape shape, IDictionary dictionary, MemberInfo member)
         {
-            var entries = new List<DictionaryEntry>();
+            var path = _path;
+            var entries = new List<KeyValuePair<object, object>>();
             if (dictionary != null)
             {
                 var enumerator = dictionary.GetEnumerator();
-                while (enumerator.MoveNext()) entries.Add(enumerator.Entry);
+                while (enumerator.MoveNext()) entries.Add(new KeyValuePair<object, object>(enumerator.Key, enumerator.Value));
             }
 
             if (!Foldout(path, label + " (" + entries.Count + ")")) return dictionary;
@@ -305,30 +287,23 @@ namespace GameCult.Unity.Caching.Editor
                     using (new EditorGUILayout.VerticalScope())
                     {
                         EditorGUI.BeginChangeCheck();
-                        var key = DrawValue("Key", arguments[0], entries[i].Key, null, path + "{" + i + "}.key");
-                        var item = DrawValue("Value", arguments[1], entries[i].Value, member, path + "{" + i + "}.value");
+                        var key = DrawValue("Key", shape.KeyType, entries[i].Key, member, path + "{" + i + "}.key");
+                        var item = DrawValue("Value", shape.ValueType, entries[i].Value, member, path + "{" + i + "}.value");
                         if (EditorGUI.EndChangeCheck())
                         {
                             var index = i;
-                            var identity = KeyIdentity(key);
-                            if (identity != KeyIdentity(entries[i].Key))
+                            var refusal = Model.RefuseKey(key, entries[i].Key, entries.Where((_, j) => j != index).Select(e => e.Key));
+                            if (refusal != null)
                             {
-                                var refusal = identity == null ? "a null key"
-                                    : identity == EmptyRefIdentity ? "an empty record reference as a key"
-                                    : entries.Where((_, j) => j != index).Any(e => KeyIdentity(e.Key) == identity) ? "a duplicate key"
-                                    : null;
-                                if (refusal != null)
-                                {
-                                    _notices[path] = "Refused " + refusal + " on entry " + i + "; its key was kept.";
-                                    key = entries[i].Key;
-                                }
-                                else
-                                {
-                                    _notices.Remove(path);
-                                }
+                                _notices[path] = "Refused " + refusal + " on entry " + i + "; its key was kept.";
+                                key = entries[i].Key;
+                            }
+                            else
+                            {
+                                _notices.Remove(path);
                             }
 
-                            entries[i] = new DictionaryEntry(key, item);
+                            entries[i] = new KeyValuePair<object, object>(key, item);
                             changed = true;
                         }
                     }
@@ -345,14 +320,14 @@ namespace GameCult.Unity.Caching.Editor
 
             if (GUILayout.Button("Add"))
             {
-                var fresh = FreshKey(arguments[0], entries);
+                var fresh = Model.FreshKey(shape.KeyType, entries.Select(e => e.Key), Records);
                 if (fresh == null)
                 {
-                    _notices[path] = "No unused " + arguments[0].Name + " key is available; nothing was added.";
+                    _notices[path] = "No unused " + shape.KeyType.Name + " key is available; nothing was added.";
                 }
                 else
                 {
-                    entries.Add(new DictionaryEntry(fresh, CreateDefault(arguments[1])));
+                    entries.Add(new KeyValuePair<object, object>(fresh, Model.CreateDefault(shape.ValueType)));
                     _notices.Remove(path);
                     changed = true;
                 }
@@ -360,50 +335,13 @@ namespace GameCult.Unity.Caching.Editor
 
             if (_notices.TryGetValue(path, out var notice)) EditorGUILayout.HelpBox(notice, MessageType.Warning);
             EditorGUI.indentLevel--;
-            if (!changed) return dictionary;
-            var result = dictionary ?? (IDictionary)Activator.CreateInstance(type.IsInterface || type.IsAbstract
-                ? typeof(Dictionary<,>).MakeGenericType(arguments)
-                : type);
-            result.Clear();
-            foreach (var entry in entries) result.Add(entry.Key, entry.Value);
-            return result;
+            return changed ? Model.BuildDictionary(shape.Type, entries) : dictionary;
         }
 
-        private const string EmptyRefIdentity = "ref:";
-
-        // Keys are the same key when they serialize the same; a CultRecordRef<T> is its key string, null and "" alike.
-        private static string KeyIdentity(object key)
+        private object DrawList(string label, CultInspectorShape shape, object value, MemberInfo member)
         {
-            if (key == null) return null;
-            var type = key.GetType();
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>)) return EmptyRefIdentity + key;
-            try
-            {
-                return Convert.ToBase64String(MessagePackSerializer.Serialize(type, key, CultDocumentMessagePackSerialization.Options));
-            }
-            catch (Exception)
-            {
-                return type.FullName + ":" + key;
-            }
-        }
-
-        // A record-reference key takes the first record of its type not already used; nothing else invents a key.
-        private object FreshKey(Type type, List<DictionaryEntry> entries)
-        {
-            var used = new HashSet<string>(entries.Select(e => KeyIdentity(e.Key)), StringComparer.Ordinal);
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>))
-            {
-                var target = type.GetGenericArguments()[0];
-                var record = Records.FirstOrDefault(r => target.IsInstanceOfType(r.Document) && r.Key.Value.Length > 0 && !used.Contains(EmptyRefIdentity + r.Key.Value));
-                return record == null ? null : Activator.CreateInstance(type, new CultRecordKey(record.Key.Value));
-            }
-
-            var fresh = CreateDefault(type);
-            return fresh == null || used.Contains(KeyIdentity(fresh)) ? null : fresh;
-        }
-
-        private object DrawList(string label, Type type, Type element, object value, MemberInfo member, string path)
-        {
+            var path = _path;
+            var element = shape.ElementType;
             var items = new List<object>();
             if (value is IEnumerable enumerable)
                 foreach (var item in enumerable) items.Add(item);
@@ -437,43 +375,39 @@ namespace GameCult.Unity.Caching.Editor
                 changed = true;
             }
 
-            if (element.IsAbstract || element.IsInterface)
+            var elementShape = Model.ShapeOf(element);
+            if (elementShape.Kind == CultInspectorValueKind.Union)
             {
-                var unions = UnionsOf(element);
-                var picked = EditorGUILayout.Popup("Add", 0, unions.Select(u => u.Name).Prepend("...").ToArray());
-                if (picked > 0 && unions[picked - 1].GetConstructor(Type.EmptyTypes) != null)
+                var picked = EditorGUILayout.Popup("Add", 0, elementShape.UnionChoices.Select(u => u.Name).Prepend("...").ToArray());
+                if (picked > 0)
                 {
-                    items.Add(Activator.CreateInstance(unions[picked - 1]));
-                    changed = true;
+                    try
+                    {
+                        items.Add(Model.CreateUnionValue(element, elementShape.UnionChoices[picked - 1]));
+                        changed = true;
+                    }
+                    catch (InvalidOperationException exception)
+                    {
+                        Debug.LogError(exception.Message);
+                    }
                 }
             }
             else if (GUILayout.Button("Add"))
             {
-                items.Add(CreateDefault(element));
+                items.Add(Model.CreateDefault(element));
                 changed = true;
             }
 
             EditorGUI.indentLevel--;
-            if (!changed) return value;
-            if (type.IsArray)
-            {
-                var array = Array.CreateInstance(element, items.Count);
-                for (var i = 0; i < items.Count; i++) array.SetValue(items[i], i);
-                return array;
-            }
-
-            var list = value as IList ?? (IList)Activator.CreateInstance(type);
-            list.Clear();
-            foreach (var item in items) list.Add(item);
-            return list;
+            return changed ? Model.BuildList(shape.Type, items) : value;
         }
 
-        private object DrawUnion(string label, Type type, object value, string path)
+        private object DrawUnion(string label, CultInspectorShape shape, object value)
         {
-            var unions = UnionsOf(type);
-            if (unions.Length == 0) return ErrorRow(label, type.Name + " declares no [Union] subtypes", value);
-            var index = value == null ? 0 : Array.IndexOf(unions, value.GetType()) + 1;
-            var names = unions.Select(u => u.Name).Prepend(value == null || index > 0 ? "None" : value.GetType().Name + " (not a declared union)").ToArray();
+            var path = _path;
+            var choices = shape.UnionChoices;
+            var index = value == null ? 0 : IndexOf(choices, value.GetType()) + 1;
+            var names = choices.Select(u => u.Name).Prepend(value == null || index > 0 ? "None" : value.GetType().Name + " (not a declared union)").ToArray();
 
             bool expanded;
             using (new EditorGUILayout.HorizontalScope())
@@ -485,9 +419,14 @@ namespace GameCult.Unity.Caching.Editor
                 EditorGUI.indentLevel = indent;
                 if (picked != index)
                 {
-                    if (picked == 0) value = null;
-                    else if (unions[picked - 1].GetConstructor(Type.EmptyTypes) != null) value = Activator.CreateInstance(unions[picked - 1]);
-                    else Debug.LogError(unions[picked - 1].FullName + " has no parameterless constructor.");
+                    try
+                    {
+                        value = picked == 0 ? null : Model.CreateUnionValue(shape.Type, choices[picked - 1]);
+                    }
+                    catch (InvalidOperationException exception)
+                    {
+                        Debug.LogError(exception.Message);
+                    }
                 }
             }
 
@@ -498,16 +437,16 @@ namespace GameCult.Unity.Caching.Editor
             return value;
         }
 
-        private object DrawNested(string label, Type type, object value, string path)
+        private object DrawNested(string label, Type type, object value)
         {
-            if (MembersOf(type).Length == 0) return ErrorRow(label, "no drawer for " + type.FullName, value);
+            var path = _path;
             if (value == null)
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     EditorGUILayout.LabelField(label, "null");
-                    if (type.GetConstructor(Type.EmptyTypes) != null && GUILayout.Button("Create", GUILayout.Width(56)))
-                        value = Activator.CreateInstance(type);
+                    var created = Model.CreateDefault(type);
+                    if (created != null && GUILayout.Button("Create", GUILayout.Width(56))) value = created;
                 }
 
                 return value;
@@ -518,36 +457,6 @@ namespace GameCult.Unity.Caching.Editor
             DrawMembers(value, type, path);
             EditorGUI.indentLevel--;
             return value;
-        }
-
-        private static double[] DrawDoubles(string label, params double[] values)
-        {
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                EditorGUILayout.PrefixLabel(label);
-                var indent = EditorGUI.indentLevel;
-                EditorGUI.indentLevel = 0;
-                for (var i = 0; i < values.Length; i++) values[i] = EditorGUILayout.DoubleField(values[i]);
-                EditorGUI.indentLevel = indent;
-            }
-
-            return values;
-        }
-
-        private static CM.bool2 DrawBool2(string label, CM.bool2 value)
-        {
-            bool x, y;
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                EditorGUILayout.PrefixLabel(label);
-                var indent = EditorGUI.indentLevel;
-                EditorGUI.indentLevel = 0;
-                x = EditorGUILayout.ToggleLeft("X", value.x, GUILayout.Width(36));
-                y = EditorGUILayout.ToggleLeft("Y", value.y, GUILayout.Width(36));
-                EditorGUI.indentLevel = indent;
-            }
-
-            return new CM.bool2(x, y);
         }
 
         // Foldouts stay usable inside disabled scopes so read-only data can still be browsed. Expanding is view state:
@@ -571,49 +480,13 @@ namespace GameCult.Unity.Caching.Editor
             return value;
         }
 
-        private static Type[] UnionsOf(Type type) =>
-            type.GetCustomAttributes<UnionAttribute>(false).OrderBy(u => u.Key).Select(u => u.SubType).ToArray();
-
-        private static Type[] DictionaryArguments(Type type) =>
-            type.GetInterfaces().Prepend(type)
-                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IDictionary<,>))
-                ?.GetGenericArguments();
-
-        private static Type ListElement(Type type)
+        private static int IndexOf(IReadOnlyList<Type> types, Type type)
         {
-            if (type.IsArray) return type.GetArrayRank() == 1 ? type.GetElementType() : null;
-            return type.IsGenericType && !type.IsAbstract && !type.IsInterface && typeof(IList).IsAssignableFrom(type)
-                ? type.GetGenericArguments()[0]
-                : null;
+            for (var i = 0; i < types.Count; i++)
+                if (types[i] == type) return i;
+            return -1;
         }
 
-        private static object CreateDefault(Type type)
-        {
-            if (type == typeof(string)) return string.Empty;
-            if (type.IsValueType) return Activator.CreateInstance(type);
-            if (type.IsArray) return Array.CreateInstance(type.GetElementType(), 0);
-            return type.IsAbstract || type.IsInterface || type.GetConstructor(Type.EmptyTypes) == null ? null : Activator.CreateInstance(type);
-        }
-
-        private static T As<T>(object value) => value is T typed ? typed : default;
-
-        private static string LabelOf(MemberInfo member)
-        {
-            var label = member.GetCustomAttribute<CultInspectorLabelAttribute>();
-            return label == null || string.IsNullOrWhiteSpace(label.Label) ? ObjectNames.NicifyVariableName(member.Name) : label.Label;
-        }
-
-        private static Type TypeOf(MemberInfo member) => member is FieldInfo field ? field.FieldType : ((PropertyInfo)member).PropertyType;
-
-        private static object Get(MemberInfo member, object target) => member is FieldInfo field ? field.GetValue(target) : ((PropertyInfo)member).GetValue(target);
-
-        private static void Set(MemberInfo member, object target, object value)
-        {
-            if (member is FieldInfo field) field.SetValue(target, value);
-            else ((PropertyInfo)member).SetValue(target, value);
-        }
-
-        private static bool Writable(MemberInfo member) =>
-            member is FieldInfo field ? !field.IsInitOnly && !field.IsLiteral : ((PropertyInfo)member).GetSetMethod() != null;
+        private static string LabelOf(CultInspectorMember member) => member.Metadata.Label ?? ObjectNames.NicifyVariableName(member.Name);
     }
 }
