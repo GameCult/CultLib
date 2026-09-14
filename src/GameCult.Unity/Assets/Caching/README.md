@@ -39,19 +39,22 @@ reloading scripts drops unsaved edits.
 ## Inspection Model
 
 `CultInspectorModel` is engine-free and lives beside the inspector attributes
-in `GameCult.Caching`. Given a registry and the store's document codec it gives
-the member list of a type (registry catalog slots, `CultInspector*` metadata,
-whether a member is assignable), the shape of any value (string, integer,
-float, bool, enum, `CultRecordRef<T>` with its candidate records, rank-1 list
-or array, dictionary, `[Union]` with only its declared subtypes, nested keyed
-object, struct edited in place through its public fields, or unsupported with
-a reason), drawer claim resolution
-(`CultInspectorDrawerClaims`), dictionary key identity and refusal (null keys,
-empty record references and duplicates), and edits that work on a copy
-(`CultInspectorEdit`): a refused upsert leaves the cached object unchanged. The
-Studio is one lowering of that model and owns only widgets and layout; a
-runtime CultUI panel needs only its own renderer and drawers to show and edit
-the same documents under the same rules.
+in `GameCult.Caching`; `CultCacheMessagePack.CreateInspectorModel` builds it
+over a `.cc` store's codec. It gives the member list of a type (registry
+catalog slots, `CultInspector*` metadata, whether a member is assignable), the
+shape of any value (string, integer, float, bool, enum, `CultRecordRef<T>` with
+its candidate records, rank-1 list or array, dictionary, `[Union]` with only
+its declared subtypes, nested keyed object, struct edited in place through its
+public fields, or unsupported with a reason), drawer claim resolution
+(`CultInspectorDrawerClaims`), and the edit decisions: the key a dictionary
+entry keeps and the notice when a key is refused (null, an empty record
+reference, or a duplicate: serialized the same as another key or equal by the
+dictionary's own comparer), the fresh key an added entry gets, what a new list
+element, dictionary value or union pick may be, and how an integer edit clamps
+to its type. Edits work on a copy (`CultInspectorEdit`): a refused upsert
+leaves the cached object unchanged. The Studio is one lowering of that model
+and owns only widgets and layout; a runtime CultUI panel needs only its own
+renderer and drawers to show and edit the same documents under the same rules.
 
 ## Drawers
 
@@ -66,8 +69,13 @@ A project adds or overrides a drawer with an editor class. `Claimed` is either
 a value type (an open generic definition claims every closed form) or an
 attribute type, which claims every member carrying it. Attribute claims win
 over type claims, which win over built-in drawing. A claim two drawers make is
-used by neither: both are logged and the member shows the error row. A drawer
-that throws draws an error row and leaves the value unchanged.
+used by neither: both are logged and the member shows the error row.
+
+A drawer returns the new value and lets its IMGUI controls set `GUI.changed`;
+only a frame that reports a change is saved. Mutating the value in place
+without reporting a change is not saved reliably. A drawer that throws shows
+an error row and discards that frame's edit copy, so nothing edited in that
+frame is saved.
 
 ```csharp
 using System;
@@ -77,20 +85,22 @@ using GameCult.Unity.Caching.Editor;
 using UnityEditor;
 using UnityEngine;
 
+// Lives beside the documents; an attribute needs no Unity reference.
 public sealed class ColorAttribute : Attribute
 {
 }
 
+// Draws a "#RRGGBBAA" string member as a color field.
 [CultInspectorDrawer(typeof(ColorAttribute))]
 public sealed class ColorDrawer : ICultInspectorDrawer
 {
     public object Draw(CultInspector inspector, string label, Type type, object value, MemberInfo member)
     {
-        if (type != typeof(CultMath.float3))
+        if (type != typeof(string))
             return inspector.DrawDefault(label, type, value, member);
-        var v = (CultMath.float3)value;
-        var c = EditorGUILayout.ColorField(label, new Color(v.x, v.y, v.z));
-        return new CultMath.float3(c.r, c.g, c.b);
+        ColorUtility.TryParseHtmlString(value as string ?? string.Empty, out var color);
+        var next = EditorGUILayout.ColorField(label, color);
+        return next == color ? value : "#" + ColorUtility.ToHtmlStringRGBA(next);
     }
 }
 ```
