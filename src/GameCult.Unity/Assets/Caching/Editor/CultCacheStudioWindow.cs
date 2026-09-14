@@ -110,7 +110,6 @@ namespace GameCult.Unity.Caching.Editor
             using (new EditorGUILayout.VerticalScope(GUILayout.Width(240)))
             {
                 _search = EditorGUILayout.TextField(_search, EditorStyles.toolbarSearchField);
-                var counts = _records.GroupBy(r => r.Descriptor.DocumentType).ToDictionary(g => g.Key, g => g.Count());
                 _typeScroll = EditorGUILayout.BeginScrollView(_typeScroll);
                 foreach (var descriptor in _cache.Registry.AllDescriptors)
                 {
@@ -120,7 +119,7 @@ namespace GameCult.Unity.Caching.Editor
                         type.Name.IndexOf(_search, StringComparison.OrdinalIgnoreCase) < 0)
                         continue;
 
-                    var count = counts.Where(c => type.IsAssignableFrom(c.Key)).Sum(c => c.Value);
+                    var count = _model.RecordCandidates(typeof(CultRecordRef<>).MakeGenericType(type), _records).Count;
                     var label = descriptor.SchemaName + (descriptor.IsGlobal ? count == 0 ? " (absent)" : " (global)" : " (" + count + ")");
                     if (GUILayout.Toggle(_selectedType == type, label, EditorStyles.miniButton) && _selectedType != type)
                     {
@@ -139,10 +138,9 @@ namespace GameCult.Unity.Caching.Editor
             {
                 var descriptor = _selectedType == null ? null : _cache.Registry.GetRequired(_selectedType);
                 var selected = Selected();
-                var constructible = _selectedType != null && _selectedType.GetConstructor(Type.EmptyTypes) != null;
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    using (new EditorGUI.DisabledScope(descriptor == null || descriptor.IsGlobal || ReadOnly || !constructible))
+                    using (new EditorGUI.DisabledScope(descriptor == null || descriptor.IsGlobal || ReadOnly))
                     {
                         if (GUILayout.Button("Add", EditorStyles.miniButtonLeft)) Add();
                     }
@@ -165,24 +163,22 @@ namespace GameCult.Unity.Caching.Editor
                 }
                 else
                 {
-                    var records = _records.Where(r => _selectedType.IsAssignableFrom(r.Descriptor.DocumentType))
-                        .Select(r => (Record: r, Label: CultInspectorModel.RecordLabel(r)))
-                        .OrderBy(r => r.Label, StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                    if (descriptor.IsGlobal && records.Length == 0)
+                    var records = _model.RecordCandidates(typeof(CultRecordRef<>).MakeGenericType(_selectedType), _records);
+                    if (descriptor.IsGlobal && records.Count == 0)
                     {
                         using (new EditorGUILayout.HorizontalScope())
                         {
                             EditorGUILayout.LabelField("Global is absent.");
-                            using (new EditorGUI.DisabledScope(ReadOnly || !constructible))
+                            using (new EditorGUI.DisabledScope(ReadOnly))
                             {
                                 if (GUILayout.Button("Create", GUILayout.Width(56))) Add();
                             }
                         }
                     }
 
-                    foreach (var (record, label) in records)
+                    foreach (var record in records)
                     {
+                        var label = CultInspectorModel.RecordLabel(record);
                         var text = record.Descriptor.DocumentType == _selectedType ? label : label + "  <" + record.Descriptor.DocumentType.Name + ">";
                         if (GUILayout.Toggle(_selectedKey == record.Key.Value, text, EditorStyles.miniButton)) _selectedKey = record.Key.Value;
                     }
@@ -343,7 +339,9 @@ namespace GameCult.Unity.Caching.Editor
         private void Add()
         {
             var type = _selectedType;
-            Run("Added " + type.Name + ".", () => _selectedKey = _cache.UpsertAsync(type, Activator.CreateInstance(type)).GetAwaiter().GetResult().Value);
+            // The model decides whether the type can be made; its notice is the refusal.
+            Run("Added " + type.Name + ".", () => _selectedKey = _cache.UpsertAsync(type,
+                _model.CreateElement(type, type, out var notice) ?? throw new InvalidOperationException(notice)).GetAwaiter().GetResult().Value);
             GUIUtility.ExitGUI();
         }
 
