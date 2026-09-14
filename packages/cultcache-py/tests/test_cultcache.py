@@ -5,6 +5,7 @@ import threading
 import unittest
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from cultcache_py.backing_store import CultCacheEnvelope
 from cultcache_py.cache import CultCacheError
 from cultcache_py import (
     CultCache,
@@ -627,6 +628,107 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(len(on_disk), 1)
             self.assertEqual(on_disk[0].payload, cache.get_required_envelope(settings, CultCache.GLOBAL_KEY).payload)
             self.assertEqual(cache.get_required_global(settings), {"theme": "second"})
+
+    @staticmethod
+    def _envelope(document, key: str, value) -> CultCacheEnvelope:
+        catalog_entry = document.catalog_entry()
+        return CultCacheEnvelope.create(
+            key=key,
+            type=document.type,
+            payload=document.encode_payload(value),
+            schema_id=catalog_entry.schema_id,
+            catalog_entry=catalog_entry,
+        )
+
+    def test_legacy_key_global_loads_without_writing_and_first_write_leaves_one_global(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            path = Path(tmp) / "generic.cc"
+
+            def build() -> CultCache:
+                return CultCache.builder().register_document_type(settings).add_generic_store(
+                    SingleFileMessagePackBackingStore(path)
+                ).build()
+
+            SingleFileMessagePackBackingStore(path).push(self._envelope(settings, "legacy", {"theme": "old"}))
+            stored_bytes = path.read_bytes()
+
+            cache = build()
+            cache.pull_all_backing_stores()
+            self.assertEqual(cache.get_global(settings), {"theme": "old"})
+            self.assertEqual(cache.get(settings, CultCache.GLOBAL_KEY), {"theme": "old"})
+            self.assertEqual(path.read_bytes(), stored_bytes)
+
+            cache.put_global(settings, {"theme": "new"})
+            self.assertEqual([e.key for e in SingleFileMessagePackBackingStore(path).pull_all()], [CultCache.GLOBAL_KEY])
+            reloaded = build()
+            reloaded.pull_all_backing_stores()
+            self.assertEqual(reloaded.get_required_global(settings), {"theme": "new"})
+
+    def test_deleting_a_legacy_key_global_removes_the_legacy_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            path = Path(tmp) / "generic.cc"
+            SingleFileMessagePackBackingStore(path).push(self._envelope(settings, "legacy", {"theme": "old"}))
+            cache = CultCache.builder().register_document_type(settings).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.pull_all_backing_stores()
+
+            cache.delete_global(settings)
+            self.assertEqual(SingleFileMessagePackBackingStore(path).pull_all(), [])
+            self.assertIsNone(cache.get_global(settings))
+
+    def test_two_globals_of_one_type_on_disk_are_refused_under_any_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = define_document_type("settings", global_document=True)
+            for keys in (["one", "two"], ["legacy", CultCache.GLOBAL_KEY]):
+                path = Path(tmp) / f"{keys[0]}.cc"
+                store = SingleFileMessagePackBackingStore(path)
+                store.push_all([self._envelope(settings, key, {"theme": key}) for key in keys])
+                cache = CultCache.builder().register_document_type(settings).add_generic_store(store).build()
+                with self.assertRaisesRegex(CultCacheError, "Duplicate global document for type: settings"):
+                    cache.pull_all_backing_stores()
+                self.assertIsNone(cache.get_global(settings))
+
+    def test_decoder_writing_during_pull_raises_and_changes_neither_store_nor_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "generic.cc"
+            holder: dict[str, CultCache] = {}
+
+            def decode(raw):
+                holder["cache"].put(item, "side", {"name": "side"})
+                return raw
+
+            item = define_document_type("item", decode=decode, encode=lambda value: value)
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(self._envelope(item, "a", {"name": "a"}))
+            stored_bytes = path.read_bytes()
+            cache = holder["cache"] = CultCache.builder().register_document_type(item).add_generic_store(store).build()
+
+            with self.assertRaisesRegex(CultCacheError, "re-entrant put"):
+                cache.pull_all_backing_stores()
+            self.assertEqual(path.read_bytes(), stored_bytes)
+            self.assertEqual(cache.snapshot_envelopes(), [])
+            self.assertIsNone(cache.get(item, "side"))
+            # The refusal released the cache: an ordinary write still works.
+            cache.put(item, "b", {"name": "b"})
+            self.assertEqual(cache.get(item, "b"), {"name": "b"})
+
+    def test_index_extractor_writing_during_register_index_raises_and_installs_nothing(self) -> None:
+        thing = define_document_type("thing")
+        cache = CultCache.builder().register_document_type(thing).build()
+        cache.put(thing, "k1", {"n": "one", "cat": "x"})
+
+        def category(value: dict) -> str:
+            cache.put(thing, "k2", {"n": "two", "cat": "y"})
+            return value["cat"]
+
+        with self.assertRaisesRegex(CultCacheError, "re-entrant put"):
+            cache.register_index(thing, "cat", category)
+        self.assertIsNone(cache.get(thing, "k2"))
+        self.assertNotIn("thing", cache._state.index_extractors)
+        self.assertIsNone(cache.get_key_by_index(thing, "cat", "x"))
 
     def test_put_envelope_refuses_a_global_under_another_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

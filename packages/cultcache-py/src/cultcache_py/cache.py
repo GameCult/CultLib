@@ -2,7 +2,7 @@
 
 import functools
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Generic, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
@@ -14,13 +14,35 @@ GLOBAL_KEY = "__global__"
 
 
 def _locked(method: F) -> F:
-    """Runs the method holding the cache's lock, so its validation, store I/O and apply cannot
-    interleave with another thread's attach, pull, registration, write or delete."""
+    """Runs a read holding the cache's lock. Reads are reentrant and may run inside a mutation."""
 
     @functools.wraps(method)
     def wrapper(self: "CultCache", *args: Any, **kwargs: Any) -> Any:
         with self._lock:
             return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _mutating(method: F) -> F:
+    """Runs an attach, pull, registration, write or delete holding the cache's lock, so its validation,
+    store I/O and apply cannot interleave with another thread's. One started on a thread that is already
+    inside a mutation of this cache (from a store call, decoder, encoder, extractor or updater) raises
+    before touching anything."""
+
+    @functools.wraps(method)
+    def wrapper(self: "CultCache", *args: Any, **kwargs: Any) -> Any:
+        if self._mutating_thread == threading.get_ident():
+            raise CultCacheError(
+                f"CultCache refuses a re-entrant {method.__name__}: a mutation cannot start from inside a store call, "
+                "decoder, encoder, extractor or updater of another mutation on the same cache"
+            )
+        with self._lock:
+            self._mutating_thread = threading.get_ident()
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self._mutating_thread = None
 
     return wrapper  # type: ignore[return-value]
 
@@ -44,6 +66,11 @@ class _State:
     # The name and index values each held record produced when it was admitted. Removing a
     # record reads these and runs no extractor, so removal has no fallible step.
     lookup_keys: dict[str, dict[str, "_LookupKeys"]] = field(default_factory=dict)
+    # Load compatibility shim: a global persisted under a key other than GLOBAL_KEY is held as that
+    # type's global under GLOBAL_KEY, and its persisted key is kept here so the first write or delete
+    # of that global removes it from the home store. Remove once no store holds a global under a key
+    # other than GLOBAL_KEY.
+    legacy_global_keys: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -98,14 +125,19 @@ class CultCache:
 
     def __init__(self) -> None:
         self._state = _State()
-        # Reentrant: extractors, decoders and updaters may read or write this cache from inside a
-        # held call. Single-structure reads (get, get_all, get_envelope, key lookups) stay unlocked:
-        # each reads one dict under the GIL, and every write installs a record's value, envelope and
-        # lookups before releasing the lock, so they never observe a store/cache split.
+        # Mutations hold this lock and refuse to start on the thread already inside one (see _mutating).
+        # It is reentrant so a mutation's extractors, decoders and updaters may still read the cache.
+        # Single-structure reads (get, get_all, get_envelope, key lookups) stay unlocked. The guarantee is
+        # per call: each reads one dict under the GIL and sees it wholly before or after a write's install.
+        # Two unlocked calls can straddle a write or pull, and see different states.
         self._lock = threading.RLock()
+        self._mutating_thread: int | None = None
 
-    @_locked
+    @_mutating
     def register_document_type(self, document: DocumentDefinition[Any]) -> None:
+        self._register_document_type(document)
+
+    def _register_document_type(self, document: DocumentDefinition[Any]) -> None:
         if document.type in self._state.documents:
             raise CultCacheError(f"Document type already registered: {document.type}")
         schema_name = document.catalog_entry().schema_name
@@ -121,19 +153,19 @@ class CultCache:
         self._state.documents[document.type] = document
         self._state.documents_by_schema_name[schema_name] = document
 
-    @_locked
+    @_mutating
     def register_registry(self, documents: list[DocumentDefinition[Any]] | tuple[DocumentDefinition[Any], ...]) -> None:
         for document in documents:
-            self.register_document_type(document)
+            self._register_document_type(document)
 
-    @_locked
+    @_mutating
     def register_name_lookup(self, document: DocumentDefinition[Any], extractor: str | Any) -> None:
         self._assert_registered(document)
         name_extractors = dict(self._state.name_extractors)
         name_extractors[document.type] = extractor
         self._install_lookups(name_extractors, self._state.index_extractors)
 
-    @_locked
+    @_mutating
     def register_index(self, document: DocumentDefinition[Any], index: str, extractor: str | Any) -> None:
         self._assert_registered(document)
         index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
@@ -154,7 +186,7 @@ class CultCache:
             self._state.lookup_keys,
         ) = (name_extractors, index_extractors, names, indexes, lookup_keys)
 
-    @_locked
+    @_mutating
     def add_backing_store(self, store: BackingStore, types: list[str] | tuple[str, ...] | set[str]) -> None:
         """Makes the store home to the given types, or the generic store when there are none.
 
@@ -162,7 +194,7 @@ class CultCache:
         """
         types = list(types)
         if not types:
-            self.add_generic_store(store)
+            self._add_generic_store(store)
             return
         for type in types:
             if type in self._state.stores_by_type:
@@ -174,9 +206,12 @@ class CultCache:
         self._refuse_home_moves(routes, self._state.generic_store)
         self._state.stores_by_type = routes
 
-    @_locked
+    @_mutating
     def add_generic_store(self, store: BackingStore) -> None:
         """Makes the store home to every type no other store claims. A cache has at most one."""
+        self._add_generic_store(store)
+
+    def _add_generic_store(self, store: BackingStore) -> None:
         if self._state.generic_store is not None:
             raise CultCacheError(
                 "Backing store would be a second generic store; name the types it is home to"
@@ -204,13 +239,14 @@ class CultCache:
             return "the generic store"
         return "the store routed to " + ", ".join(sorted(type for type, routed in routes.items() if routed is store))
 
-    @_locked
+    @_mutating
     def pull_all_backing_stores(self) -> None:
         """Builds the complete next state (values, envelopes, name and index lookups) in local
         structures, running every check and every user extractor; the cache's state is replaced
         only once that build finishes, so a refused load admits nothing."""
         loaded_values: dict[str, dict[str, Any]] = {}
         loaded_envelopes: dict[str, dict[str, CultCacheEnvelope]] = {}
+        loaded_legacy_global_keys: dict[str, str] = {}
         routes, generic = self._state.stores_by_type, self._state.generic_store
         seen_globals: set[str] = set()
         stores: list[BackingStore] = []
@@ -241,6 +277,9 @@ class CultCache:
                     if envelope.type in seen_globals:
                         raise CultCacheError(f"Duplicate global document for type: {envelope.type}")
                     seen_globals.add(envelope.type)
+                    if envelope.key != GLOBAL_KEY:
+                        loaded_legacy_global_keys[envelope.type] = envelope.key
+                        envelope = replace(envelope, key=GLOBAL_KEY)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
@@ -254,7 +293,8 @@ class CultCache:
             self._state.names,
             self._state.indexes,
             self._state.lookup_keys,
-        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes, loaded_lookup_keys)
+            self._state.legacy_global_keys,
+        ) = (loaded_values, loaded_envelopes, loaded_names, loaded_indexes, loaded_lookup_keys, loaded_legacy_global_keys)
 
     def get(self, document: DocumentDefinition[T], key: str) -> T | None:
         self._assert_registered(document)
@@ -310,8 +350,11 @@ class CultCache:
         key = self.get_key_by_index(document, index, value)
         return None if key is None else self.get(document, key)
 
-    @_locked
+    @_mutating
     def put(self, document: DocumentDefinition[T], key: str, value: T) -> None:
+        self._put(document, key, value)
+
+    def _put(self, document: DocumentDefinition[T], key: str, value: T) -> None:
         self._assert_registered(document)
         if document.global_document and key != GLOBAL_KEY:
             raise CultCacheError(f"Global document {document.type} must use key {GLOBAL_KEY}")
@@ -325,7 +368,7 @@ class CultCache:
         )
         self._write(document, [(envelope, value)], batch=False)
 
-    @_locked
+    @_mutating
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
         self._check_envelope(document, envelope)
@@ -333,7 +376,7 @@ class CultCache:
         self._write(document, [(envelope, value)], batch=False)
         return value
 
-    @_locked
+    @_mutating
     def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
         self._assert_registered(document)
         values: list[T] = []
@@ -367,11 +410,15 @@ class CultCache:
             for envelope, value in records
         ]
         store = self._store_for_type(type)
+        legacy_key = self._state.legacy_global_keys.get(type)
         if store is not None:
             if batch:
                 store.push_all([envelope for envelope, _ in records])
             else:
                 store.push(records[0][0])
+            if legacy_key is not None:
+                self._retire_legacy_global(store, type, legacy_key)
+        self._state.legacy_global_keys.pop(type, None)
         values = self._state.values.setdefault(type, {})
         envelopes = self._state.envelopes.setdefault(type, {})
         lookup_keys = self._state.lookup_keys.setdefault(type, {})
@@ -385,29 +432,51 @@ class CultCache:
             for index, index_value in keys.indexes.items():
                 self._state.indexes[(type, index, index_value)] = envelope.key
 
-    @_locked
+    @staticmethod
+    def _retire_legacy_global(store: BackingStore, type: str, legacy_key: str) -> None:
+        """The first write of a global loaded from a legacy key removes that record in the same write. If
+        the removal fails, the new record is taken back out, so the store keeps only the legacy record."""
+        try:
+            store.delete(type, legacy_key)
+        except BaseException:
+            try:
+                store.delete(type, GLOBAL_KEY)
+            except Exception:  # noqa: BLE001 - the removal failure is the error reported
+                pass
+            raise
+
+    @_mutating
     def put_global(self, document: DocumentDefinition[T], value: T) -> None:
         self._assert_global(document)
-        self.put(document, GLOBAL_KEY, value)
+        self._put(document, GLOBAL_KEY, value)
 
-    @_locked
+    @_mutating
     def update(self, document: DocumentDefinition[T], key: str, updater: Any) -> T:
+        return self._update(document, key, updater)
+
+    def _update(self, document: DocumentDefinition[T], key: str, updater: Any) -> T:
         current = self.get_required(document, key)
         updated = updater(current)
-        self.put(document, key, updated)
+        self._put(document, key, updated)
         return updated
 
-    @_locked
+    @_mutating
     def update_global(self, document: DocumentDefinition[T], updater: Any) -> T:
         self._assert_global(document)
-        return self.update(document, GLOBAL_KEY, updater)
+        return self._update(document, GLOBAL_KEY, updater)
 
-    @_locked
+    @_mutating
     def delete(self, document: DocumentDefinition[Any], key: str) -> None:
+        self._delete(document, key)
+
+    def _delete(self, document: DocumentDefinition[Any], key: str) -> None:
         self._assert_registered(document)
         store = self._store_for_type(document.type)
+        legacy_key = self._state.legacy_global_keys.get(document.type) if key == GLOBAL_KEY else None
         if store is not None:
-            store.delete(document.type, key)
+            store.delete(document.type, key if legacy_key is None else legacy_key)
+        if legacy_key is not None:
+            del self._state.legacy_global_keys[document.type]
         self._remove_lookups(document.type, key)
         for by_type in (self._state.values, self._state.envelopes, self._state.lookup_keys):
             held = by_type.get(document.type)
@@ -416,10 +485,10 @@ class CultCache:
                 if not held:
                     by_type.pop(document.type, None)
 
-    @_locked
+    @_mutating
     def delete_global(self, document: DocumentDefinition[Any]) -> None:
         self._assert_global(document)
-        self.delete(document, GLOBAL_KEY)
+        self._delete(document, GLOBAL_KEY)
 
     # Snapshots iterate dicts a concurrent write would resize mid-iteration, so they hold the lock.
     @_locked
