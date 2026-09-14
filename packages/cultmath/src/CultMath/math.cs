@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 
 namespace CultMath;
 
-public static class math
+public static partial class math
 {
     public const float PI = MathF.PI;
     public const float TAU = MathF.PI * 2.0f;
@@ -30,13 +30,10 @@ public static class math
     public static bool2 bool2(bool value) => new(value, value);
     public static int2 int2(int x, int y) => new(x, y);
     public static int2 int2(int value) => new(value, value);
+    // Mixed constructor functions (float4(float2, float2), ...) are generated in Swizzles.g.cs.
     public static float3 float3(float x, float y, float z) => new(x, y, z);
-    public static float3 float3(float2 xy, float z) => new(xy, z);
     public static float3 float3(float value) => new(value, value, value);
     public static float4 float4(float x, float y, float z, float w) => new(x, y, z, w);
-    public static float4 float4(float2 xy, float z, float w) => new(xy, z, w);
-    public static float4 float4(float3 xyz, float w) => new(xyz, w);
-    public static float4 float4(float x, float3 yzw) => new(x, yzw);
     public static float4 float4(float value) => new(value, value, value, value);
     public static bool3 bool3(bool x, bool y, bool z) => new(x, y, z);
     public static bool3 bool3(bool value) => new(value, value, value);
@@ -79,11 +76,20 @@ public static class math
     public static float2 abs(float2 value) => new(abs(value.x), abs(value.y));
     public static float3 abs(float3 value) => new(abs(value.x), abs(value.y), abs(value.z));
     public static float4 abs(float4 value) => new(abs(value.x), abs(value.y), abs(value.z), abs(value.w));
+    public static int abs(int value) => Math.Abs(value);
+    public static int2 abs(int2 value) => new(abs(value.x), abs(value.y));
+    public static int3 abs(int3 value) => new(abs(value.x), abs(value.y), abs(value.z));
+    public static int4 abs(int4 value) => new(abs(value.x), abs(value.y), abs(value.z), abs(value.w));
 
-    public static float sign(float value) => MathF.Sign(value);
-    public static float2 sign(float2 value) => new(sign(value.x), sign(value.y));
-    public static float3 sign(float3 value) => new(sign(value.x), sign(value.y), sign(value.z));
-    public static float4 sign(float4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
+    // HLSL sign returns int. NaN compares false both ways, so it yields 0 instead of throwing.
+    public static int sign(float value) => value > 0.0f ? 1 : value < 0.0f ? -1 : 0;
+    public static int2 sign(float2 value) => new(sign(value.x), sign(value.y));
+    public static int3 sign(float3 value) => new(sign(value.x), sign(value.y), sign(value.z));
+    public static int4 sign(float4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
+    public static int sign(int value) => value > 0 ? 1 : value < 0 ? -1 : 0;
+    public static int2 sign(int2 value) => new(sign(value.x), sign(value.y));
+    public static int3 sign(int3 value) => new(sign(value.x), sign(value.y), sign(value.z));
+    public static int4 sign(int4 value) => new(sign(value.x), sign(value.y), sign(value.z), sign(value.w));
 
     public static float floor(float value) => MathF.Floor(value);
     public static float2 floor(float2 value) => new(floor(value.x), floor(value.y));
@@ -105,12 +111,18 @@ public static class math
     public static float2 min(float2 left, float2 right) => new(min(left.x, right.x), min(left.y, right.y));
     public static float3 min(float3 left, float3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
     public static float4 min(float4 left, float4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
+    public static int2 min(int2 left, int2 right) => new(min(left.x, right.x), min(left.y, right.y));
+    public static int3 min(int3 left, int3 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z));
+    public static int4 min(int4 left, int4 right) => new(min(left.x, right.x), min(left.y, right.y), min(left.z, right.z), min(left.w, right.w));
 
     public static float max(float left, float right) => MathF.Max(left, right);
     public static int max(int left, int right) => Math.Max(left, right);
     public static float2 max(float2 left, float2 right) => new(max(left.x, right.x), max(left.y, right.y));
     public static float3 max(float3 left, float3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
     public static float4 max(float4 left, float4 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z), max(left.w, right.w));
+    public static int2 max(int2 left, int2 right) => new(max(left.x, right.x), max(left.y, right.y));
+    public static int3 max(int3 left, int3 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z));
+    public static int4 max(int4 left, int4 right) => new(max(left.x, right.x), max(left.y, right.y), max(left.z, right.z), max(left.w, right.w));
 
     public static float clamp(float value, float minimum, float maximum) => min(max(value, minimum), maximum);
     public static float2 clamp(float2 value, float2 minimum, float2 maximum) => min(max(value, minimum), maximum);
@@ -138,7 +150,8 @@ public static class math
     public static double2 unlerp(double2 start, double2 end, double2 value) => (value - start) / (end - start);
     public static double3 unlerp(double3 start, double3 end, double3 value) => (value - start) / (end - start);
 
-    public static float step(float edge, float value) => value < edge ? 0.0f : 1.0f;
+    // HLSL: step(y, x) = x >= y ? 1 : 0, so a NaN on either side yields 0.
+    public static float step(float edge, float value) => value >= edge ? 1.0f : 0.0f;
     public static float2 step(float2 edge, float2 value) => new(step(edge.x, value.x), step(edge.y, value.y));
     public static float3 step(float3 edge, float3 value) => new(step(edge.x, value.x), step(edge.y, value.y), step(edge.z, value.z));
     public static float4 step(float4 edge, float4 value) => new(step(edge.x, value.x), step(edge.y, value.y), step(edge.z, value.z), step(edge.w, value.w));
@@ -395,6 +408,20 @@ public static class math
     public static bool all(bool2 value) => value.x && value.y;
     public static bool all(bool3 value) => value.x && value.y && value.z;
     public static bool all(bool4 value) => value.x && value.y && value.z && value.w;
+
+    // HLSL any/all on numeric vectors test components against zero (NaN != 0 counts as true).
+    public static bool any(float2 value) => value.x != 0.0f || value.y != 0.0f;
+    public static bool any(float3 value) => value.x != 0.0f || value.y != 0.0f || value.z != 0.0f;
+    public static bool any(float4 value) => value.x != 0.0f || value.y != 0.0f || value.z != 0.0f || value.w != 0.0f;
+    public static bool all(float2 value) => value.x != 0.0f && value.y != 0.0f;
+    public static bool all(float3 value) => value.x != 0.0f && value.y != 0.0f && value.z != 0.0f;
+    public static bool all(float4 value) => value.x != 0.0f && value.y != 0.0f && value.z != 0.0f && value.w != 0.0f;
+    public static bool any(int2 value) => value.x != 0 || value.y != 0;
+    public static bool any(int3 value) => value.x != 0 || value.y != 0 || value.z != 0;
+    public static bool any(int4 value) => value.x != 0 || value.y != 0 || value.z != 0 || value.w != 0;
+    public static bool all(int2 value) => value.x != 0 && value.y != 0;
+    public static bool all(int3 value) => value.x != 0 && value.y != 0 && value.z != 0;
+    public static bool all(int4 value) => value.x != 0 && value.y != 0 && value.z != 0 && value.w != 0;
 
     // HLSL 2021 argument order: select(condition, whenTrue, whenFalse).
     // Unity.Mathematics' select(falseValue, trueValue, condition) is the reverse.

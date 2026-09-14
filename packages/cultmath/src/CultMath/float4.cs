@@ -2,7 +2,7 @@ using System;
 
 namespace CultMath;
 
-public struct float4 : IEquatable<float4>
+public partial struct float4 : IEquatable<float4>
 {
     public static readonly float4 zero = new(0.0f, 0.0f, 0.0f, 0.0f);
     public static readonly float4 one = new(1.0f, 1.0f, 1.0f, 1.0f);
@@ -18,64 +18,6 @@ public struct float4 : IEquatable<float4>
         this.y = y;
         this.z = z;
         this.w = w;
-    }
-
-    public float4(float2 xy, float z, float w)
-        : this(xy.x, xy.y, z, w)
-    {
-    }
-
-    public float4(float3 xyz, float w)
-        : this(xyz.x, xyz.y, xyz.z, w)
-    {
-    }
-
-    public float4(float x, float3 yzw)
-        : this(x, yzw.x, yzw.y, yzw.z)
-    {
-    }
-
-    public float2 xy
-    {
-        readonly get => new(x, y);
-        set
-        {
-            x = value.x;
-            y = value.y;
-        }
-    }
-
-    public float3 xyz
-    {
-        readonly get => new(x, y, z);
-        set
-        {
-            x = value.x;
-            y = value.y;
-            z = value.z;
-        }
-    }
-
-    public float3 xyw
-    {
-        readonly get => new(x, y, w);
-        set
-        {
-            x = value.x;
-            y = value.y;
-            w = value.z;
-        }
-    }
-
-    public float3 yzx
-    {
-        readonly get => new(y, z, x);
-        set
-        {
-            y = value.x;
-            z = value.y;
-            x = value.z;
-        }
     }
 
     public float this[int index]

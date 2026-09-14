@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Xunit;
 
 namespace CultMath.Tests;
@@ -82,6 +82,93 @@ public sealed class HlslSemanticsTests
         var d = source;
         d.yzx = new float3(7.0f, 8.0f, 9.0f);
         Assert.Equal(new float4(9.0f, 7.0f, 8.0f, 4.0f), d);
+    }
+
+    [Fact]
+    public void GeneratedSwizzlesCoverRepeatsColorNamesAndAllVectorFamilies()
+    {
+        var v = new float4(1.0f, 2.0f, 3.0f, 4.0f);
+        Assert.Equal(new float4(4.0f, 4.0f, 1.0f, 2.0f), v.wwxy);
+        Assert.Equal(new float3(3.0f, 2.0f, 1.0f), v.bgr);
+        Assert.Equal(4.0f, v.a);
+        Assert.Equal(new float4(2.0f, 2.0f, 2.0f, 2.0f), new float2(1.0f, 2.0f).yyyy);
+
+        v.wx = new float2(9.0f, 8.0f);
+        Assert.Equal(new float4(8.0f, 2.0f, 3.0f, 9.0f), v);
+        v.r = 0.5f;
+        v.gb += new float2(1.0f, 1.0f);
+        Assert.Equal(new float4(0.5f, 3.0f, 4.0f, 9.0f), v);
+
+        Assert.Equal(new int3(3, 1, 1), new int3(1, 2, 3).zxx);
+        Assert.Equal(new bool2(false, true), new bool4(true, false, false, true).zw);
+        Assert.Equal(new double2(2.0, 1.0), new double3(1.0, 2.0, 3.0).yx);
+
+        var cell = new int4(1, 2, 3, 4);
+        cell.xyz = new int3(7, 8, 9);
+        Assert.Equal(new int4(7, 8, 9, 4), cell);
+    }
+
+    [Fact]
+    public void MixedConstructorsMatchHlsl()
+    {
+        var xy = new float2(1.0f, 2.0f);
+        var zw = new float2(3.0f, 4.0f);
+        var expected = new float4(1.0f, 2.0f, 3.0f, 4.0f);
+
+        Assert.Equal(expected, math.float4(xy, zw));
+        Assert.Equal(expected, math.float4(1.0f, new float3(2.0f, 3.0f, 4.0f)));
+        Assert.Equal(expected, math.float4(new float3(1.0f, 2.0f, 3.0f), 4.0f));
+        Assert.Equal(expected, math.float4(xy, 3.0f, 4.0f));
+        Assert.Equal(expected, math.float4(1.0f, 2.0f, zw));
+        Assert.Equal(expected, math.float4(1.0f, new float2(2.0f, 3.0f), 4.0f));
+        Assert.Equal(expected, new float4(xy, zw));
+        Assert.Equal(new float3(1.0f, 2.0f, 3.0f), math.float3(1.0f, zw - 1.0f));
+        Assert.Equal(new int4(1, 2, 3, 4), math.int4(new int2(1, 2), new int2(3, 4)));
+        Assert.Equal(new bool3(true, false, true), math.bool3(true, new bool2(false, true)));
+        Assert.Equal(new double3(1.0, 2.0, 3.0), new double3(new double2(1.0, 2.0), 3.0));
+    }
+
+    [Fact]
+    public void MatrixRowElementsAreWritable()
+    {
+        var m = float3x3.identity;
+        m[1][2] = 5.0f;
+        m[2].x = 7.0f;
+        m._m00 = 2.0f;
+
+        Assert.Equal(5.0f, m._m12);
+        Assert.Equal(7.0f, m._m20);
+        Assert.Equal(math.float3x3(2.0f, 0.0f, 0.0f, 0.0f, 1.0f, 5.0f, 7.0f, 0.0f, 1.0f), m);
+        Assert.Equal(float3x3.identity, math.float3x3(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f));
+
+        var r = float2x2.identity;
+        r[0][1] = 3.0f;
+        Assert.Equal(math.float2x2(1.0f, 3.0f, 0.0f, 1.0f), r);
+        Assert.Equal(new float2(0.0f, 1.0f), float2x2.identity[1]);
+    }
+
+    [Fact]
+    public void IntrinsicEdgeCasesFollowHlsl()
+    {
+        Assert.True(math.any(new float3(0.0f, 0.0f, -2.0f)));
+        Assert.False(math.any(float4.zero));
+        Assert.True(math.all(new int2(1, -1)));
+        Assert.False(math.all(new int3(1, 0, 1)));
+        Assert.True(math.any(new float2(float.NaN, 0.0f)));
+
+        Assert.Equal(new int3(1, 2, 3), math.min(new int3(1, 5, 3), new int3(4, 2, 6)));
+        Assert.Equal(new int2(4, 5), math.max(new int2(1, 5), new int2(4, 2)));
+        Assert.Equal(new int4(1, 2, 0, 3), math.abs(new int4(-1, 2, 0, -3)));
+        Assert.Equal(7, math.abs(-7));
+
+        Assert.Equal(0.0f, math.step(1.0f, float.NaN));
+        Assert.Equal(0.0f, math.step(float.NaN, 1.0f));
+        Assert.Equal(1.0f, math.step(1.0f, 1.0f));
+
+        Assert.Equal(0, math.sign(float.NaN));
+        Assert.Equal(-1, math.sign(-0.5f));
+        Assert.Equal(new int3(-1, 0, 1), math.sign(new float3(-2.0f, 0.0f, 4.0f)));
+        Assert.Equal(new int2(1, -1), math.sign(new int2(9, -9)));
     }
 
     [Fact]

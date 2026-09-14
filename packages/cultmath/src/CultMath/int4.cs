@@ -2,7 +2,7 @@ using System;
 
 namespace CultMath;
 
-public struct int4 : IEquatable<int4>
+public partial struct int4 : IEquatable<int4>
 {
     public static readonly int4 zero = new(0, 0, 0, 0);
     public static readonly int4 one = new(1, 1, 1, 1);

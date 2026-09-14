@@ -2,7 +2,7 @@ using System;
 
 namespace CultMath;
 
-public struct float3 : IEquatable<float3>
+public partial struct float3 : IEquatable<float3>
 {
     public static readonly float3 zero = new(0.0f, 0.0f, 0.0f);
     public static readonly float3 one = new(1.0f, 1.0f, 1.0f);
@@ -16,105 +16,6 @@ public struct float3 : IEquatable<float3>
         this.x = x;
         this.y = y;
         this.z = z;
-    }
-
-    public float3(float2 xy, float z)
-        : this(xy.x, xy.y, z)
-    {
-    }
-
-    public float2 xy
-    {
-        readonly get => new(x, y);
-        set
-        {
-            x = value.x;
-            y = value.y;
-        }
-    }
-
-    public float2 xz
-    {
-        readonly get => new(x, z);
-        set
-        {
-            x = value.x;
-            z = value.y;
-        }
-    }
-
-    public float2 yx
-    {
-        readonly get => new(y, x);
-        set
-        {
-            y = value.x;
-            x = value.y;
-        }
-    }
-
-    public float2 yz
-    {
-        readonly get => new(y, z);
-        set
-        {
-            y = value.x;
-            z = value.y;
-        }
-    }
-
-    public float2 zy
-    {
-        readonly get => new(z, y);
-        set
-        {
-            z = value.x;
-            y = value.y;
-        }
-    }
-
-    public float3 xyz
-    {
-        readonly get => new(x, y, z);
-        set
-        {
-            x = value.x;
-            y = value.y;
-            z = value.z;
-        }
-    }
-
-    public float3 xzy
-    {
-        readonly get => new(x, z, y);
-        set
-        {
-            x = value.x;
-            z = value.y;
-            y = value.z;
-        }
-    }
-
-    public float3 yzx
-    {
-        readonly get => new(y, z, x);
-        set
-        {
-            y = value.x;
-            z = value.y;
-            x = value.z;
-        }
-    }
-
-    public float3 zyx
-    {
-        readonly get => new(z, y, x);
-        set
-        {
-            z = value.x;
-            y = value.y;
-            x = value.z;
-        }
     }
 
     public float this[int index]

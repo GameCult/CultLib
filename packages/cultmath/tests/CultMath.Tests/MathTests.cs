@@ -170,10 +170,10 @@ public sealed class MathTests
     [Fact]
     public void SignIsComponentWiseForSimulationVectors()
     {
-        Assert.Equal(-1.0f, math.sign(-12.0f));
-        Assert.Equal(0.0f, math.sign(0.0f));
-        Assert.Equal(1.0f, math.sign(12.0f));
-        Assert.Equal(new float3(-1.0f, 0.0f, 1.0f), math.sign(new float3(-2.0f, 0.0f, 4.0f)));
+        Assert.Equal(-1, math.sign(-12.0f));
+        Assert.Equal(0, math.sign(0.0f));
+        Assert.Equal(1, math.sign(12.0f));
+        Assert.Equal(new int3(-1, 0, 1), math.sign(new float3(-2.0f, 0.0f, 4.0f)));
     }
 
     [Fact]

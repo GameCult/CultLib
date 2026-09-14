@@ -2,7 +2,7 @@ using System;
 
 namespace CultMath;
 
-public struct float2 : IEquatable<float2>
+public partial struct float2 : IEquatable<float2>
 {
     public static readonly float2 zero = new(0.0f, 0.0f);
     public static readonly float2 one = new(1.0f, 1.0f);
@@ -14,16 +14,6 @@ public struct float2 : IEquatable<float2>
     {
         this.x = x;
         this.y = y;
-    }
-
-    public float2 yx
-    {
-        readonly get => new(y, x);
-        set
-        {
-            y = value.x;
-            x = value.y;
-        }
     }
 
     public float this[int index]

@@ -2,7 +2,7 @@ using System;
 
 namespace CultMath;
 
-public struct bool3 : IEquatable<bool3>
+public partial struct bool3 : IEquatable<bool3>
 {
     public static readonly bool3 @false = new(false, false, false);
     public static readonly bool3 @true = new(true, true, true);
