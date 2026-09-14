@@ -619,6 +619,58 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A store copied without its lock gives a reader no lease; a writer then commits between the reader's manifest read
+        // and its page reads, either replacing a page the reader named (it vanishes) or only adding a key (the manifest moves).
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task DirectoryMessagePackBackingStore_UnlockedLoad_Reloads_When_A_Writer_Commits_Mid_Load(bool replaceReadPage)
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"cultlib-tests-{Guid.NewGuid():N}.cc");
+            var recordsPath = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(filePath);
+
+            try
+            {
+                CultRecordKey seeded;
+                using (var seed = await CultCacheMessagePack.OpenAsync(filePath, new CultCacheOpenOptions { UseDirectoryStore = true }))
+                {
+                    seeded = (await seed.UpsertAsync(new NamedTestEntry { Name = "copied", Value = "before" })).Key;
+                    await seed.FlushAsync();
+                }
+
+                // Attached while the lock exists, so the only unleased load is the pull below.
+                var readerStore = new DirectoryMessagePackBackingStore(filePath, recordsPath);
+                var reader = new CultCache();
+                reader.AddBackingStore(readerStore);
+                await reader.PullAllBackingStoresAsync();
+                File.Delete(Path.Combine(recordsPath, ".commit.lock"));
+                var committed = new System.Collections.Generic.List<CultRecordKey>();
+                // The writer is another cache, so it commits from another thread: a thread holds one cache's gate at a time.
+                readerStore.UnleasedManifestRead = () =>
+                {
+                    if (committed.Count > 0) return;
+                    Task.Run(async () =>
+                    {
+                        using var writer = CultCacheMessagePack.Create(filePath, new CultCacheOpenOptions { UseDirectoryStore = true });
+                        var document = new NamedTestEntry { Name = "writer", Value = "after" };
+                        committed.Add(replaceReadPage
+                            ? await writer.UpsertAsync(typeof(NamedTestEntry), document, seeded)
+                            : (await writer.UpsertAsync(document)).Key);
+                        await writer.FlushAsync();
+                    }).GetAwaiter().GetResult();
+                };
+
+                await reader.PullAllBackingStoresAsync();
+
+                Assert.That(committed, Has.Count.EqualTo(1), "the writer committed mid-load");
+                Assert.That(reader.Get<NamedTestEntry>(committed[0])?.Value, Is.EqualTo("after"), "the reader reloaded the writer's generation");
+            }
+            finally
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                if (Directory.Exists(recordsPath)) Directory.Delete(recordsPath, recursive: true);
+            }
+        }
+
         [Test]
         public async Task DirectoryMessagePackBackingStore_Deletion_Commits_While_Locked_Old_Page_Remains_An_Orphan()
         {

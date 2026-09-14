@@ -15,6 +15,8 @@ namespace GameCult.Caching.MessagePack;
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
+    // An unleased load that has not settled after this many attempts throws.
+    private const int UnleasedLoadAttempts = 5;
     private readonly FileInfo _manifestFile;
     private readonly DirectoryInfo _recordDirectory;
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
@@ -35,6 +37,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     public static string DefaultRecordDirectoryPath(string manifestPath) => manifestPath + ".records";
+
+    // Test seam: runs between an unleased load's manifest read and its page reads.
+    internal Action? UnleasedManifestRead { get; set; }
 
     public override string ToString() => _manifestFile.FullName;
 
@@ -57,18 +62,42 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
         CultSchemaCatalogEntry[] catalog;
-        using (AcquireCommitLease(wait: true, create: false))
+        for (var attempt = 1; ; attempt++)
         {
-            // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded.
-            var manifest = ReadManifest();
+            loaded.Clear();
+            reports.Clear();
+            // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
+            // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
+            // load stands only if its manifest is still current and every page it named read back; otherwise it reloads.
+            using var lease = AcquireCommitLease(wait: true, create: false);
+            var manifestBytes = ReadManifestBytes();
+            var manifest = ParseManifest(manifestBytes);
             Trace($"manifest records={manifest.Records.Length}");
-            catalog = manifest.SchemaCatalog;
-            LoadRecordPages(
-                manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
-                manifest.SchemaCatalog,
-                loaded,
-                reports);
-            Trace($"indexed-pages loaded={loaded.Count}");
+            try
+            {
+                if (lease == null)
+                    UnleasedManifestRead?.Invoke();
+                LoadRecordPages(
+                    manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
+                    manifest.SchemaCatalog,
+                    loaded,
+                    reports);
+                if (lease != null || SameBytes(manifestBytes, ReadManifestBytes()))
+                {
+                    catalog = manifest.SchemaCatalog;
+                    Trace($"indexed-pages loaded={loaded.Count}");
+                    break;
+                }
+            }
+            catch (Exception exception) when (lease == null && IsTornGeneration(exception))
+            {
+                if (attempt == UnleasedLoadAttempts)
+                    throw Unsettled(exception);
+                continue;
+            }
+
+            if (attempt == UnleasedLoadAttempts)
+                throw Unsettled(null);
         }
 
         bool Staged(string key) => _dirtyKeys.ContainsKey(key) || _deletedKeys.ContainsKey(key);
@@ -349,10 +378,26 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Payload = HashPayload(pagePayload)
     };
 
+    private CultPersistedStoreSnapshot ReadManifest() => ParseManifest(ReadManifestBytes());
+
+    private byte[]? ReadManifestBytes() => File.Exists(_manifestFile.FullName) ? ReadAllBytesShared(_manifestFile.FullName) : null;
+
+    private static bool SameBytes(byte[]? first, byte[]? second) =>
+        first == null ? second == null : second != null && first.SequenceEqual(second);
+
+    // A page the manifest named that vanished or was replaced: a writer committed mid-load.
+    private static bool IsTornGeneration(Exception exception) =>
+        exception is AggregateException aggregate
+            ? aggregate.Flatten().InnerExceptions.All(IsTornGeneration)
+            : exception is InvalidDataException or FileNotFoundException;
+
+    private InvalidOperationException Unsettled(Exception? last) => new(
+        $"Directory store {_manifestFile.FullName} changed under every one of {UnleasedLoadAttempts} unlocked loads; it did not settle.", last);
+
     // A missing manifest is an empty store. An existing manifest in any other format is refused.
-    private CultPersistedStoreSnapshot ReadManifest()
+    private CultPersistedStoreSnapshot ParseManifest(byte[]? manifestBytes)
     {
-        if (!File.Exists(_manifestFile.FullName))
+        if (manifestBytes == null)
         {
             return new CultPersistedStoreSnapshot
             {
@@ -362,7 +407,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             };
         }
 
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(ReadAllBytesShared(_manifestFile.FullName));
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
         if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
@@ -470,8 +515,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         return buffer.ToArray();
     }
 
-    // Only a writer creates the records folder and the lock. A reader opens an existing lock; with none, no writer has ever
-    // committed here, so there is nothing to exclude and opening the store creates nothing.
+    // Only a writer creates the records folder and the lock, so opening the store creates nothing. A reader opens an
+    // existing lock and returns null when there is none; that does not mean no writer committed (a store may be copied
+    // without its lock, and a first writer may create it mid-load), so an unleased load checks that it settled.
     private FileStream? AcquireCommitLease(bool wait, bool create)
     {
         if (create)

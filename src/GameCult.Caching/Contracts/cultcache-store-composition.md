@@ -195,6 +195,12 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
   flush first.
 - Single-file stores lock a sidecar `<path>.lock` opened exclusively. Directory
   stores use their existing commit lease.
+- A directory store with no `.commit.lock` (no writer has created it yet, or
+  the store was copied without it) gives a pull no lease, and opening it
+  creates none. Such a pull re-reads the manifest after loading its pages and
+  reloads when the manifest changed or a page it named was missing or did not
+  match its content address, at most five times; a pull that has not settled
+  by then throws.
 
 **A plain flush and an unconditional commit are last-writer-wins: per file for
 single-file stores, per key for directory stores.** Both run

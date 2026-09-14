@@ -8,5 +8,6 @@
     <ProjectReference Include="..\GameCult.Caching\GameCult.Caching.csproj" />
     <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="MessagePackAnalyzer" Version="3.1.7" PrivateAssets="all" />
+    <InternalsVisibleTo Include="GameCult.Caching.Tests" />
   </ItemGroup>
 </Project>
