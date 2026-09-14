@@ -105,6 +105,9 @@ public static partial class math
     public static float2 frac(float2 value) => value - floor(value);
     public static float3 frac(float3 value) => value - floor(value);
     public static float4 frac(float4 value) => value - floor(value);
+    // dxc has no double Frc: it demotes to float, as it does for exp and lerp. CultMath's double
+    // overloads keep double precision instead, so frac(double) is x - floor(x) in double.
+    public static double frac(double value) => value - Math.Floor(value);
 
     // dxc lowers float min/max/clamp to DXIL FMin/FMax (saturate to Saturate, defined as FMin(1, FMax(0, x))).
     // DXIL.rst: FMin(a, b) is a < b ? a : b, FMax(a, b) is a >= b ? a : b, and a NaN operand returns the other.
@@ -130,6 +133,11 @@ public static partial class math
     public static float2 clamp(float2 value, float2 minimum, float2 maximum) => min(max(value, minimum), maximum);
     public static float3 clamp(float3 value, float3 minimum, float3 maximum) => min(max(value, minimum), maximum);
     public static float4 clamp(float4 value, float4 minimum, float4 maximum) => min(max(value, minimum), maximum);
+    // dxc lowers int clamp to IMin(IMax(x, a), b): inverted bounds return b rather than throwing like Math.Clamp.
+    public static int clamp(int value, int minimum, int maximum) => min(max(value, minimum), maximum);
+    public static int2 clamp(int2 value, int2 minimum, int2 maximum) => min(max(value, minimum), maximum);
+    public static int3 clamp(int3 value, int3 minimum, int3 maximum) => min(max(value, minimum), maximum);
+    public static int4 clamp(int4 value, int4 minimum, int4 maximum) => min(max(value, minimum), maximum);
 
     // DXIL Saturate is FMin(1, FMax(0, x)); that operand order, unlike clamp(x, 0, 1), maps -0 to +0.
     public static float saturate(float value) => min(1.0f, max(0.0f, value));

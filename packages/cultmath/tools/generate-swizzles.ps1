@@ -21,6 +21,19 @@ $families = @(
     @{ Scalar = "bool"; Sizes = @(2, 3, 4); Functions = $true },
     @{ Scalar = "double"; Sizes = @(2, 3); Functions = $false }
 )
+# Same-size vector conversions, as dxc lowers them: float to int is fptosi (toward zero; NaN
+# and out-of-range are undefined in DXIL), int to float is sitofp, numeric to bool is `!= 0`
+# (fcmp une, so NaN is true), bool to numeric is 0 or 1. Keyed "target<-source"; {0} is a
+# source component. Identity forms (intN(intN), ...) come from the composition loop, which
+# also keeps an int vector argument off the lossy intN(floatN) overload.
+$conversions = [ordered]@{
+    "float<-int" = "{0}"
+    "float<-bool" = "{0} ? 1.0f : 0.0f"
+    "int<-float" = "(int){0}"
+    "int<-bool" = "{0} ? 1 : 0"
+    "bool<-float" = "{0} != 0.0f"
+    "bool<-int" = "{0} != 0"
+}
 $componentFields = @("x", "y", "z", "w")
 $namings = @(@("x", "y", "z", "w"), @("r", "g", "b", "a"))
 
@@ -84,6 +97,20 @@ foreach ($family in $families) {
                 $names = @($parameters | ForEach-Object { ($_ -split " ")[1] })
                 $functionLines.Add("    public static $type $type($parameterList) => new($($names -join ', '));")
             }
+        }
+
+        foreach ($source in @("float", "int", "bool")) {
+            $expression = $conversions["$scalar<-$source"]
+            if (-not $expression) { continue }
+            $converted = for ($i = 0; $i -lt $size; $i++) { $expression -f "value.$($componentFields[$i])" }
+            Line "    public $type($source$size value) : this($($converted -join ', ')) { }"
+            if ($family.Functions) {
+                $functionLines.Add("    public static $type $type($source$size value) => new(value);")
+            }
+        }
+        if ($scalar -eq "float" -and $family.Functions) {
+            # floatN(int) splat: without it floatN(0) is ambiguous between floatN(float) and floatN(intN).
+            $functionLines.Add("    public static $type $type(int value) => new($((@('value') * $size) -join ', '));")
         }
 
         # Single-component color aliases; x/y/z/w are the fields themselves.

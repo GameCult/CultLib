@@ -7,6 +7,8 @@ namespace CultMath;
 public partial struct float2
 {
     public float2(float2 xy) : this(xy.x, xy.y) { }
+    public float2(int2 value) : this(value.x, value.y) { }
+    public float2(bool2 value) : this(value.x ? 1.0f : 0.0f, value.y ? 1.0f : 0.0f) { }
     public float r { readonly get => x; set => x = value; }
     public float g { readonly get => y; set => y = value; }
     public readonly float2 xx => new(x, x);
@@ -72,6 +74,8 @@ public partial struct float3
     public float3(float x, float2 yz) : this(x, yz.x, yz.y) { }
     public float3(float2 xy, float z) : this(xy.x, xy.y, z) { }
     public float3(float3 xyz) : this(xyz.x, xyz.y, xyz.z) { }
+    public float3(int3 value) : this(value.x, value.y, value.z) { }
+    public float3(bool3 value) : this(value.x ? 1.0f : 0.0f, value.y ? 1.0f : 0.0f, value.z ? 1.0f : 0.0f) { }
     public float r { readonly get => x; set => x = value; }
     public float g { readonly get => y; set => y = value; }
     public float b { readonly get => z; set => z = value; }
@@ -320,6 +324,8 @@ public partial struct float4
     public float4(float2 xy, float2 zw) : this(xy.x, xy.y, zw.x, zw.y) { }
     public float4(float3 xyz, float w) : this(xyz.x, xyz.y, xyz.z, w) { }
     public float4(float4 xyzw) : this(xyzw.x, xyzw.y, xyzw.z, xyzw.w) { }
+    public float4(int4 value) : this(value.x, value.y, value.z, value.w) { }
+    public float4(bool4 value) : this(value.x ? 1.0f : 0.0f, value.y ? 1.0f : 0.0f, value.z ? 1.0f : 0.0f, value.w ? 1.0f : 0.0f) { }
     public float r { readonly get => x; set => x = value; }
     public float g { readonly get => y; set => y = value; }
     public float b { readonly get => z; set => z = value; }
@@ -1001,6 +1007,8 @@ public partial struct float4
 public partial struct int2
 {
     public int2(int2 xy) : this(xy.x, xy.y) { }
+    public int2(float2 value) : this((int)value.x, (int)value.y) { }
+    public int2(bool2 value) : this(value.x ? 1 : 0, value.y ? 1 : 0) { }
     public int r { readonly get => x; set => x = value; }
     public int g { readonly get => y; set => y = value; }
     public readonly int2 xx => new(x, x);
@@ -1066,6 +1074,8 @@ public partial struct int3
     public int3(int x, int2 yz) : this(x, yz.x, yz.y) { }
     public int3(int2 xy, int z) : this(xy.x, xy.y, z) { }
     public int3(int3 xyz) : this(xyz.x, xyz.y, xyz.z) { }
+    public int3(float3 value) : this((int)value.x, (int)value.y, (int)value.z) { }
+    public int3(bool3 value) : this(value.x ? 1 : 0, value.y ? 1 : 0, value.z ? 1 : 0) { }
     public int r { readonly get => x; set => x = value; }
     public int g { readonly get => y; set => y = value; }
     public int b { readonly get => z; set => z = value; }
@@ -1314,6 +1324,8 @@ public partial struct int4
     public int4(int2 xy, int2 zw) : this(xy.x, xy.y, zw.x, zw.y) { }
     public int4(int3 xyz, int w) : this(xyz.x, xyz.y, xyz.z, w) { }
     public int4(int4 xyzw) : this(xyzw.x, xyzw.y, xyzw.z, xyzw.w) { }
+    public int4(float4 value) : this((int)value.x, (int)value.y, (int)value.z, (int)value.w) { }
+    public int4(bool4 value) : this(value.x ? 1 : 0, value.y ? 1 : 0, value.z ? 1 : 0, value.w ? 1 : 0) { }
     public int r { readonly get => x; set => x = value; }
     public int g { readonly get => y; set => y = value; }
     public int b { readonly get => z; set => z = value; }
@@ -1995,6 +2007,8 @@ public partial struct int4
 public partial struct bool2
 {
     public bool2(bool2 xy) : this(xy.x, xy.y) { }
+    public bool2(float2 value) : this(value.x != 0.0f, value.y != 0.0f) { }
+    public bool2(int2 value) : this(value.x != 0, value.y != 0) { }
     public bool r { readonly get => x; set => x = value; }
     public bool g { readonly get => y; set => y = value; }
     public readonly bool2 xx => new(x, x);
@@ -2060,6 +2074,8 @@ public partial struct bool3
     public bool3(bool x, bool2 yz) : this(x, yz.x, yz.y) { }
     public bool3(bool2 xy, bool z) : this(xy.x, xy.y, z) { }
     public bool3(bool3 xyz) : this(xyz.x, xyz.y, xyz.z) { }
+    public bool3(float3 value) : this(value.x != 0.0f, value.y != 0.0f, value.z != 0.0f) { }
+    public bool3(int3 value) : this(value.x != 0, value.y != 0, value.z != 0) { }
     public bool r { readonly get => x; set => x = value; }
     public bool g { readonly get => y; set => y = value; }
     public bool b { readonly get => z; set => z = value; }
@@ -2308,6 +2324,8 @@ public partial struct bool4
     public bool4(bool2 xy, bool2 zw) : this(xy.x, xy.y, zw.x, zw.y) { }
     public bool4(bool3 xyz, bool w) : this(xyz.x, xyz.y, xyz.z, w) { }
     public bool4(bool4 xyzw) : this(xyzw.x, xyzw.y, xyzw.z, xyzw.w) { }
+    public bool4(float4 value) : this(value.x != 0.0f, value.y != 0.0f, value.z != 0.0f, value.w != 0.0f) { }
+    public bool4(int4 value) : this(value.x != 0, value.y != 0, value.z != 0, value.w != 0) { }
     public bool r { readonly get => x; set => x = value; }
     public bool g { readonly get => y; set => y = value; }
     public bool b { readonly get => z; set => z = value; }
@@ -3102,9 +3120,15 @@ public partial struct double3
 public static partial class math
 {
     public static float2 float2(float2 xy) => new(xy);
+    public static float2 float2(int2 value) => new(value);
+    public static float2 float2(bool2 value) => new(value);
+    public static float2 float2(int value) => new(value, value);
     public static float3 float3(float x, float2 yz) => new(x, yz);
     public static float3 float3(float2 xy, float z) => new(xy, z);
     public static float3 float3(float3 xyz) => new(xyz);
+    public static float3 float3(int3 value) => new(value);
+    public static float3 float3(bool3 value) => new(value);
+    public static float3 float3(int value) => new(value, value, value);
     public static float4 float4(float x, float y, float2 zw) => new(x, y, zw);
     public static float4 float4(float x, float2 yz, float w) => new(x, yz, w);
     public static float4 float4(float x, float3 yzw) => new(x, yzw);
@@ -3112,10 +3136,17 @@ public static partial class math
     public static float4 float4(float2 xy, float2 zw) => new(xy, zw);
     public static float4 float4(float3 xyz, float w) => new(xyz, w);
     public static float4 float4(float4 xyzw) => new(xyzw);
+    public static float4 float4(int4 value) => new(value);
+    public static float4 float4(bool4 value) => new(value);
+    public static float4 float4(int value) => new(value, value, value, value);
     public static int2 int2(int2 xy) => new(xy);
+    public static int2 int2(float2 value) => new(value);
+    public static int2 int2(bool2 value) => new(value);
     public static int3 int3(int x, int2 yz) => new(x, yz);
     public static int3 int3(int2 xy, int z) => new(xy, z);
     public static int3 int3(int3 xyz) => new(xyz);
+    public static int3 int3(float3 value) => new(value);
+    public static int3 int3(bool3 value) => new(value);
     public static int4 int4(int x, int y, int2 zw) => new(x, y, zw);
     public static int4 int4(int x, int2 yz, int w) => new(x, yz, w);
     public static int4 int4(int x, int3 yzw) => new(x, yzw);
@@ -3123,10 +3154,16 @@ public static partial class math
     public static int4 int4(int2 xy, int2 zw) => new(xy, zw);
     public static int4 int4(int3 xyz, int w) => new(xyz, w);
     public static int4 int4(int4 xyzw) => new(xyzw);
+    public static int4 int4(float4 value) => new(value);
+    public static int4 int4(bool4 value) => new(value);
     public static bool2 bool2(bool2 xy) => new(xy);
+    public static bool2 bool2(float2 value) => new(value);
+    public static bool2 bool2(int2 value) => new(value);
     public static bool3 bool3(bool x, bool2 yz) => new(x, yz);
     public static bool3 bool3(bool2 xy, bool z) => new(xy, z);
     public static bool3 bool3(bool3 xyz) => new(xyz);
+    public static bool3 bool3(float3 value) => new(value);
+    public static bool3 bool3(int3 value) => new(value);
     public static bool4 bool4(bool x, bool y, bool2 zw) => new(x, y, zw);
     public static bool4 bool4(bool x, bool2 yz, bool w) => new(x, yz, w);
     public static bool4 bool4(bool x, bool3 yzw) => new(x, yzw);
@@ -3134,4 +3171,6 @@ public static partial class math
     public static bool4 bool4(bool2 xy, bool2 zw) => new(xy, zw);
     public static bool4 bool4(bool3 xyz, bool w) => new(xyz, w);
     public static bool4 bool4(bool4 xyzw) => new(xyzw);
+    public static bool4 bool4(float4 value) => new(value);
+    public static bool4 bool4(int4 value) => new(value);
 }

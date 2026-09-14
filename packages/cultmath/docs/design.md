@@ -52,7 +52,18 @@ That makes these HLSL rules, not options:
   operand returns the other (so `saturate(NaN)` is 0), `clamp(x, a, b)` is
   `min(max(x, a), b)`, and `saturate(x)` is `min(1, max(0, x))`, which maps -0
   to +0; `any`/`all` accept numeric vectors (a component is true when it is
-  not 0); `min`, `max`, and `abs` on int vectors return int vectors.
+  not 0); `min`, `max`, and `abs` on int vectors return int vectors; int
+  `clamp` is `IMin(IMax(x, a), b)`, so inverted bounds return `b`.
+- Same-size vector conversions (`intN(floatN)`, `floatN(intN)`, `boolN(floatN)`,
+  `boolN(intN)`, `floatN(boolN)`, `intN(boolN)`) exist as constructors and
+  `math` functions and follow dxc: float to int is `fptosi`, truncating toward
+  zero; numeric to bool is `!= 0` (`fcmp une`, so NaN is true); bool to numeric
+  is 0 or 1. DXIL leaves float-to-int undefined for NaN and out-of-range values,
+  and so does C#; CultMath does not pin them.
+- dxc demotes double `frac`, `exp`, `lerp`, and `floor` to float. CultMath's
+  double overloads keep double precision instead: `frac(double)` is
+  `x - floor(x)` in double. That is a deliberate divergence for CPU simulation
+  time, which shaders do not carry.
 
 dxc marks float arithmetic and compares `fast` (no NaNs) unless a value is
 `precise`, so drivers may optimize NaN handling away and NaN results on real

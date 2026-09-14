@@ -312,6 +312,43 @@ public sealed class HlslSemanticsTests
     }
 
     [Fact]
+    public void VectorConversionsFollowDxc()
+    {
+        // fptosi truncates toward zero; NaN and out-of-range inputs are undefined in DXIL and not pinned.
+        Assert.Equal(new int2(-1, 2), math.int2(new float2(-1.7f, 2.9f)));
+        Assert.Equal(new int3(0, 0, 3), new int3(new float3(-0.5f, 0.5f, 3.99f)));
+        Assert.Equal(new float4(1.0f, -2.0f, 3.0f, 0.0f), math.float4(new int4(1, -2, 3, 0)));
+        // Numeric to bool is `!= 0` (fcmp une for float, so NaN is true); bool to numeric is 0 or 1.
+        Assert.Equal(new bool2(true, false), math.bool2(new float2(float.NaN, -0.0f)));
+        Assert.Equal(new bool3(false, true, true), math.bool3(new int3(0, 5, -1)));
+        Assert.Equal(new float2(1.0f, 0.0f), math.float2(new bool2(true, false)));
+        Assert.Equal(new int4(0, 1, 1, 0), math.int4(new bool4(false, true, true, false)));
+        // intN(intN) is exact; it must not promote through float and lose 2^24 + 1.
+        Assert.Equal(new int2(16777217, -16777217), math.int2(new int2(16777217, -16777217)));
+        float2 splat = math.float2(0);
+        Assert.Equal(float2.zero, splat);
+    }
+
+    [Fact]
+    public void FracAndIntegerClampFollowHlsl()
+    {
+        // frac(double) keeps double precision; a float frac of 1e9 + 0.25 would return 0.
+        Assert.Equal(0.25, math.frac(1.0e9 + 0.25));
+        Assert.Equal(0.75, math.frac(-0.25));
+        Assert.Equal(0.5f, math.frac(2.5f));
+
+        // IMin(IMax(x, a), b): the result stays int, and inverted bounds return b.
+        int clamped = math.clamp(7, -1, 3);
+        Assert.Equal(3, clamped);
+        Assert.Equal(-1, math.clamp(-5, -1, 3));
+        Assert.Equal(0, math.clamp(1, 3, 0));
+        Assert.Equal(new int2(0, 3), math.clamp(new int2(-4, 9), 0, 3));
+        Assert.Equal(new int3(1, 2, 3), math.clamp(new int3(1, 2, 3), new int3(0, 0, 0), new int3(5, 5, 5)));
+        Assert.Equal(new int4(2, 2, 4, 4), math.clamp(new int4(1, 2, 5, 4), new int4(2), new int4(4)));
+        Assert.Equal(1.0f, math.clamp(2.0f, -1, 1));
+    }
+
+    [Fact]
     public void MatrixMulFollowsHlslRowMajorConvention()
     {
         var m = math.float2x2(1.0f, 2.0f, 3.0f, 4.0f);
