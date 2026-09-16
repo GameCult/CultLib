@@ -366,14 +366,16 @@ export function isLoopbackEndpoint(value: string): boolean {
  * scheme containing "quic", over a string `System.Uri` parses at all.
  *
  * `refusedByCSharpUriShape` runs first here for the same reason it runs first in
- * `isLoopbackEndpoint`, and it matters more: `URL` repairs eleven spellings
+ * `isLoopbackEndpoint`, and it matters more: `URL` accepts eleven spellings
  * `System.Uri` refuses outright, and every one of them would be *protected* here
- * and unprotected in C#. `wss:x`, `wss:host`, `wss:host:8443`, `wss:/host` and
- * `wss:///host` have no authority for `System.Uri` to accept; `wss://host\path`
- * and `wss://host:8443\` carry a backslash; `wss://ho\tst/m`, `wss://host\t/m`,
- * `quic://ho\tst` carry a tab and `wss://host\r\n/m` a CR/LF, which `URL`
- * deletes. Letting any of them answer true would clear the channel-protection
- * gate on a route C# refuses.
+ * and unprotected in C#. Only four of the eleven are repairs in the sense of
+ * `URL` rewriting the host: `wss://ho\tst/m`, `wss://host\t/m` and
+ * `quic://ho\tst` carry a tab and `wss://host\r\n/m` a CR/LF, all of which `URL`
+ * deletes. The other seven `URL` simply admits as written: `wss:x`, `wss:host`,
+ * `wss:host:8443`, `wss:/host` and `wss:///host` have no authority for
+ * `System.Uri` to accept, and `wss://host\path` and `wss://host:8443\` carry a
+ * backslash. Letting any of the eleven answer true would clear the
+ * channel-protection gate on a route C# refuses.
  *
  * Two spellings of Soul's 71 still disagree, both the safe way round: C# calls
  * them protected and this answers false, so a route is refused rather than

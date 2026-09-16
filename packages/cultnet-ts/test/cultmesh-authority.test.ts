@@ -390,12 +390,18 @@ const CSHARP_PROTECTED_ANSWERS: readonly (readonly [string, boolean])[] = [
 
 // The eleven of the 71 where the two sides still differ, every one of them the
 // safe way round: C# calls the endpoint protected and TypeScript does not, so a
-// route is refused rather than admitted. `refusedByCSharpUriShape` is stricter
-// than `System.Uri.TryCreate` on purpose — it also refuses the host repairs that
-// would make `isLoopbackEndpoint` lie — and a zone id and a non-breaking-space
-// host throw in `URL` before any rule of ours runs. None of them is dialable as
-// a browser CultMesh route. Pinned exactly, not merely excluded: if one of these
-// starts answering true, or a twelfth spelling joins them, this fails.
+// route is refused rather than admitted. They are not one shape. Three carry a
+// backslash (`wss:\\host/m`, `wss://host:8443/\`, `QUIC:\\host`) and two have no
+// authority for `System.Uri` to accept (`quic:host`, `quic:`); those five
+// `refusedByCSharpUriShape` refuses on the raw string, before any host exists to
+// repair. Four are host repairs `URL` would make and C# would not — a trailing
+// dot on `wss://host./m` and `wss://127.0.0.1./m`, a fullwidth host on the other
+// two — which is the same reason that pre-check runs first in
+// `isLoopbackEndpoint`. The last two throw in `URL` before any rule of ours
+// runs: an IPv6 zone id and a non-breaking space in the host. None of the eleven
+// is dialable as a browser CultMesh route. Pinned exactly, not merely excluded:
+// if one of these starts answering true, or a twelfth spelling joins them, this
+// fails.
 const STRICTER_THAN_CSHARP: readonly string[] = [
   "wss:\\\\host/m",
   "wss://host./m",
