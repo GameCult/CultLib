@@ -109,6 +109,15 @@ jobs:
       - name: Verify the browser client against the shared TypeScript verifier
         run: npm run test --workspace packages/cultmesh-browser
 
+      # The realtime frame codec. Its byte parity rests on two vector files,
+      # contracts/cultmesh/realtime-frame-vectors.json written by the C#
+      # reference and decoded by this step, and realtime-frame-vectors.ts-written.json
+      # written by this codec and decoded by the C# step below. Neither half ran
+      # in CI on any OS until these two steps existed, so a codec that agreed
+      # only with itself would have gone green.
+      - name: Verify the realtime frame codec with the TypeScript codec
+        run: npm run test --workspace packages/cultmesh-ts
+
       # Both directions of the CultMesh authority vectors: the C#-written
       # file (contracts/cultmesh/authority-route-vectors.json) and the
       # TypeScript-signed file (authority-route-vectors.ts-signed.json) are
@@ -119,4 +128,13 @@ jobs:
         run: >-
           dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
           --filter FullyQualifiedName~AuthorityProof
+          --logger "console;verbosity=minimal"
+
+      # The other half of the frame parity: the C# reference decodes and
+      # re-encodes the vector file the TypeScript codec wrote. A fixture
+      # authored on one side alone would only agree with itself.
+      - name: Verify the realtime frame vectors with the C# reference
+        run: >-
+          dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
+          --filter FullyQualifiedName~RealtimeWireProtocol
           --logger "console;verbosity=minimal"
