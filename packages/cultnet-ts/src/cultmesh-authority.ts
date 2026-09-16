@@ -205,7 +205,7 @@ export function canonicalRoute(route: CultMeshAuthorityRouteView): Uint8Array {
     route.verseId,
     authorityRuntimeId,
     endpoint,
-    cleanProtocolIds(route.protocolIds).join(""),
+    cleanProtocolIds(route.protocolIds).join("\u001f"),
     String(route.priority ?? 0),
     // A blank generation is not blank in C#: the route constructor substitutes
     // the runtime id and endpoint, already cleaned, joined by "@".

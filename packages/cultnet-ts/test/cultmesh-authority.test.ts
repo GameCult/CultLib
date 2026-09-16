@@ -278,7 +278,7 @@ test("protocol ids are sorted ordinally into the transcript, whatever order the 
     route.verseId,
     route.authorityRuntimeId,
     route.endpoint,
-    "cultmesh.content.v1cultmesh.documents.v1cultmesh.realtime.v1",
+    "cultmesh.content.v1\u001fcultmesh.documents.v1\u001fcultmesh.realtime.v1",
     "0",
     route.generation,
     certificate.providerKey.keyId,
@@ -654,4 +654,23 @@ test("padding and duplication the C# constructors clean still verify against the
 test("the shared module keeps the browser-safe surface: no node: import", () => {
   const source = readFileSync(join(__dirname, "..", "..", "src", "cultmesh-authority.ts"), "utf8");
   assert.doesNotMatch(source, /from "node:|require\("node:/);
+});
+
+// The transcript separator is U+001F, and it sat in these two files as a literal
+// byte: invisible in every editor and diff, indistinguishable from the empty
+// string in `join("")`. The bytes were right, which is why nothing caught it.
+// Any control character in a string literal has the same problem, so none of
+// them may be spelled literally here; a backslash-u escape is the only spelling.
+for (const [label, path] of [
+  ["the shared module", join(__dirname, "..", "..", "src", "cultmesh-authority.ts")],
+  ["this test", join(__dirname, "..", "..", "test", "cultmesh-authority.test.ts")],
+] as const) test(`${label} spells control characters as escapes, never as literal bytes`, () => {
+  const bytes = readFileSync(path);
+  const offenders: string[] = [];
+  for (const [offset, byte] of bytes.entries()) {
+    if (byte >= 0x20 || byte === 0x0a || byte === 0x0d) continue;
+    const line = bytes.subarray(0, offset).toString("utf8").split("\n").length;
+    offenders.push(`0x${byte.toString(16).padStart(2, "0")} at byte ${offset} (line ${line})`);
+  }
+  assert.deepEqual(offenders, []);
 });
