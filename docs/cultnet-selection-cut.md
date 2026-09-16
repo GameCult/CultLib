@@ -1177,8 +1177,22 @@ they govern.
   and untagged-free, and can be added later without breaking A, which is
   why adding it now is premature. Depends: the schema files and both
   runtimes' predicate types.
-- **Q-K. Family names for abstract bases on the wire.** **A, not now**
-  (recommended): an abstract type has no `[CultDocument]`, no schema name
+- **Q-K. Family names for abstract bases on the wire. PARKED, 2026-09-17,
+  and Self's reason was wrong.** The operator: this was possible when
+  CultCache was a single file, so it is odd that it is hard now; not
+  load bearing either way. That is correct. In-process a family is one
+  assignability check, because the runtime holds the hierarchy. Over the
+  wire there is no type system, only schema names, and an abstract type
+  carries no `[CultDocument]` so it never gets one. **The hardness is not
+  modelling, it is that nothing publishes the hierarchy where a remote
+  caller can see it.** The honest cost is therefore a catalog addition,
+  each leaf's entry naming its base chain, after which a family is the
+  leaves whose chain contains the name asked for. Small work — but it moves
+  the catalog's shape, and this cut's whole claim to being cheap is that it
+  moves neither the catalog's shape nor its hashes. So it is **deferred to a
+  cut that is already touching the catalog**, not deferred because there is
+  nothing to name. Superseded reasoning, kept as history:
+  an abstract type has no `[CultDocument]`, no schema name
   and no catalog entry, so there is nothing to name; a caller who wants
   "every crafted item" enumerates the leaves from the schema catalog it
   already reads. **B**, a `[CultDocumentFamily]` declaration plus a catalog
@@ -1193,7 +1207,11 @@ they govern.
   cut. Under A, the read-side refusal is the only thing standing between a
   corrupt edge and a wrong answer, which is why it refuses instead of
   skipping.
-- **Q-M. The `(schema, key)` cross product.** **A, state the limit**
+- **Q-M. The `(schema, key)` cross product. RULED A, 2026-09-17**, in the
+  operator's words: once per schema. The cross product stays, the limit is
+  stated, and a caller needing exact pairs asks once per schema. No third
+  addressing list and no rule for combining three of them.
+  Original options: **A, state the limit**
   (recommended): `schemas` × `keys` stays a cross product; a caller needing
   exact pairs asks once per schema or verifies what it declared, as
   `CultNetRawSnapshotQuery` already does. **B**, allow a `refs:
