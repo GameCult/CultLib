@@ -160,9 +160,18 @@ enum cultmesh_quic_stream_kind {
  *
  * This mapping exists because `QUIC_STATUS` itself is not portable: it is a
  * negative HRESULT on Windows and a positive errno on POSIX, so a host that
- * checked for a negative value saw every Linux failure as success. The mapping
- * is one-way by construction — a bridge code is always negative and always
- * outside the raw status space — and diagnostics go through `last_status`.
+ * checked for a negative value saw every Linux failure as success.
+ *
+ * What the mapping makes portable is the sign, and only the sign. A failure is
+ * negative everywhere, and that is what a host may branch on. The magnitude of a
+ * <= -1000 code is diagnostic and platform-specific: the same MsQuic failure
+ * carries different numbers on different platforms (a TLS error is -12032 on
+ * win32-x64 and -1126 on linux-x64; an ALPN already in use is -1009 against
+ * -1091), and the 16-bit mask can give two distinct statuses the same code
+ * (`QUIC_STATUS_USER_CANCELED` and `QUIC_STATUS_FILE_NOT_FOUND` are both -1002
+ * on Windows). Switching on a particular code is therefore not portable and not
+ * a reliable identification of the failure. Report it, log it, and read
+ * `cultmesh_quic_last_status` and `cultmesh_quic_last_error` beside it.
  * --------------------------------------------------------------------------- */
 
 #define CULTMESH_QUIC_RESULT_BAD_CALL (-1)
@@ -295,7 +304,8 @@ CULTMESH_QUIC_API int32_t cultmesh_quic_last_error(
 
 /* The raw platform `QUIC_STATUS` behind the last <= -1000 return, as its own
  * bits: a negative HRESULT on Windows, a positive errno on POSIX. Diagnostics
- * only — the portable answer is the return code. 0 when nothing has failed. */
+ * only; what is portable about the return code is its sign, not its value. 0
+ * when nothing has failed. */
 CULTMESH_QUIC_API int32_t cultmesh_quic_last_status(void* runtime);
 
 #if defined(__cplusplus)
