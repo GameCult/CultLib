@@ -1191,7 +1191,43 @@ they govern.
   the catalog's shape, and this cut's whole claim to being cheap is that it
   moves neither the catalog's shape nor its hashes. So it is **deferred to a
   cut that is already touching the catalog**, not deferred because there is
-  nothing to name. Superseded reasoning, kept as history:
+  nothing to name.
+
+  **Trigger named, 2026-09-17: the source-generator campaign needs it first.**
+  The operator's position is that any project using CultNet wants the types it
+  touches native, and that where the hierarchy is not being declared in
+  parallel by hand, a generator should build it. That generator runs against
+  **published schemas**, with C# authoring and the schema as the contract,
+  which is what the reference-runtime rule already says.
+
+  The obstacle is the same missing fact. `CultCache.cs:847,887,966` walks the
+  base types while collecting members and then discards the hierarchy, and
+  `ToCatalogEntry` (`:152-177`) publishes a schema id, the canonical schema,
+  the compatible ids and a flat member list carrying slot, name, type,
+  reference-ness, many-ness, target and alias. **Nothing records what a type
+  inherits from.** So a generator fed published schemas alone emits one flat
+  class per leaf with the inherited members copied into each — exactly the
+  hierarchy the operator wants built for them, and unbuildable from what is
+  published today.
+
+  So the base chain in the catalog is a **prerequisite of the generator
+  campaign**, and family names fall out of it for free once it exists. Until
+  then a family expands at the call site into its leaf schema names, which the
+  generator can emit as a constant, costing the protocol nothing. The honest
+  limit of call-site expansion, to be stated wherever it lands: it is
+  closed-world per compilation, so a leaf declared where the caller does not
+  compile leaves the list silently short, and an open-world caller must ask the
+  catalog at run time instead.
+
+  The generator is **its own campaign, mapped after this cut lands** (operator,
+  2026-09-17: "definitely later"), because its value is emitting against a
+  shape that is settled and this cut is what settles it. It is also where the
+  query sugar comes from: typed per-kind builders make filtering a document by
+  another kind's field a compile error rather than an empty page. **No source
+  generator exists in CultLib today** — no Roslyn generator anywhere in the
+  repository, and `src/GameCult.Caching/emitted/` is empty.
+
+  Superseded reasoning, kept as history:
   an abstract type has no `[CultDocument]`, no schema name
   and no catalog entry, so there is nothing to name; a caller who wants
   "every crafted item" enumerates the leaves from the schema catalog it
