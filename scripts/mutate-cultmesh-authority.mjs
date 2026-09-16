@@ -59,13 +59,34 @@ const mutations = [
   },
   {
     rule: "isUnsignedCertificate treats a whitespace signature as unsigned",
-    old: 'return !certificate || certificate.signature.trim() === "";',
+    old: "return !certificate || isNullOrWhiteSpaceCSharp(certificate.signature);",
     new: 'return !certificate || certificate.signature === "";',
   },
   {
     rule: "isUnsignedCertificate treats an empty signature as unsigned",
-    old: 'return !certificate || certificate.signature.trim() === "";',
+    old: "return !certificate || isNullOrWhiteSpaceCSharp(certificate.signature);",
     new: "return !certificate;",
+  },
+  {
+    rule: "the whitespace set is C#'s char.IsWhiteSpace, not String.prototype.trim",
+    old: "return !certificate || isNullOrWhiteSpaceCSharp(certificate.signature);",
+    new: 'return !certificate || certificate.signature.trim() === "";',
+  },
+  {
+    rule: "U+0085 is whitespace to C# (String.prototype.trim disagrees)",
+    old: "code === 0x85 || ",
+    new: "",
+  },
+  {
+    rule: "the two non-verifying signature refusals keep their own C# messages",
+    old: '    throw new Error("The Odin route signature is not base64.");\n' +
+      "  }\n" +
+      "  if (signatureBytes.byteLength !== 64) {\n" +
+      '    throw new Error("The Odin route signature is not IEEE P1363 P-256.");\n',
+    new: '    throw new Error("The Odin route certificate signature is invalid.");\n' +
+      "  }\n" +
+      "  if (signatureBytes.byteLength !== 64) {\n" +
+      '    throw new Error("The Odin route certificate signature is invalid.");\n',
   },
   {
     rule: "root lookup precedes the validity window",

@@ -20,8 +20,11 @@ import {
   canonicalFields,
   canonicalRoute,
   canonicalSession,
+  isCSharpWhiteSpace,
   isLoopbackEndpoint,
   isProtectedEndpoint,
+  isUnsignedCertificate,
+  trimCSharp,
   verifyAuthorityRoute,
   verifyP256,
   verifyProviderSessionProof,
@@ -219,10 +222,30 @@ test("a signature that is not 64 P1363 bytes is refused", async () => {
         { ...route, certificate: { ...route.certificate!, signature: bytesToBase64(wrong) } },
         remoteTrust(odin.publicKey),
       ),
-      /signature is invalid/,
+      /not IEEE P1363 P-256/,
     );
   }
   assert.equal(await verifyP256(odin.publicKey, canonicalRoute(route), "not base64!"), false);
+});
+
+// The C# `Verify` has three signature refusals with three texts. Collapsing any
+// two of them loses a distinction the reference draws, so each is pinned by its
+// exact C# string, not by a fragment.
+test("the three signature refusals carry the C# reference's exact messages", async () => {
+  const { route, odin } = signedRoute();
+  const certificate = route.certificate!;
+  const cases: readonly (readonly [string, string])[] = [
+    ["not base64!", "The Odin route signature is not base64."],
+    [bytesToBase64(base64ToBytes(certificate.signature).subarray(0, 63)), "The Odin route signature is not IEEE P1363 P-256."],
+    [bytesToBase64(new Uint8Array(64)), "The Odin route certificate signature is invalid."],
+  ];
+  for (const [signature, message] of cases) {
+    await assert.rejects(
+      verifyAuthorityRoute({ ...route, certificate: { ...certificate, signature } }, remoteTrust(odin.publicKey)),
+      (error: Error) => error.message === message,
+      message,
+    );
+  }
 });
 
 test("verifyP256 reads exactly the viewed bytes: a Uint8Array, a pooled Buffer and a subarray of a large allocation verify alike", async () => {
@@ -304,6 +327,49 @@ test("isLoopbackEndpoint is the C# System.Uri.IsLoopback set", () => {
   ]) {
     assert.equal(isLoopbackEndpoint(remote), false, remote);
   }
+});
+
+// `char.IsWhiteSpace` as .NET 10 answered for each of these code points on
+// 2026-09-16, through `CultMeshAuthorityTrustPolicy` over a signature of that
+// one character. `String.prototype.trim` disagrees on two of them: U+0085,
+// which .NET counts and JavaScript does not, and U+FEFF, which JavaScript
+// counts and .NET does not.
+const CSHARP_WHITESPACE_ANSWERS: readonly (readonly [number, boolean])[] = [
+  [0x0000, false], [0x0009, true], [0x000a, true], [0x000b, true], [0x000c, true], [0x000d, true],
+  [0x001c, false], [0x001d, false], [0x001e, false], [0x001f, false], [0x0020, true],
+  [0x0085, true], [0x00a0, true], [0x1680, true], [0x180e, false],
+  [0x2000, true], [0x2001, true], [0x2002, true], [0x2003, true], [0x2004, true], [0x2005, true],
+  [0x2006, true], [0x2007, true], [0x2008, true], [0x2009, true], [0x200a, true],
+  [0x200b, false], [0x200c, false], [0x2028, true], [0x2029, true],
+  [0x202f, true], [0x205f, true], [0x3000, true], [0xfeff, false],
+];
+
+test("the whitespace set is C#'s char.IsWhiteSpace, not String.prototype.trim", async () => {
+  assert.equal(CSHARP_WHITESPACE_ANSWERS.length, 34);
+  const { route, odin } = signedRoute("ws://127.0.0.1:4050/mesh");
+  for (const [code, csharp] of CSHARP_WHITESPACE_ANSWERS) {
+    const character = String.fromCharCode(code);
+    const label = `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
+    assert.equal(isCSharpWhiteSpace(character), csharp, label);
+    const padded = `${character}a${character}`;
+    assert.equal(trimCSharp(padded), csharp ? "a" : padded, label);
+    // The same answer where the rule is actually consumed: a certificate whose
+    // whole signature is this one character is unsigned exactly when C# says so.
+    const certificate = { ...route.certificate!, signature: character };
+    assert.equal(isUnsignedCertificate(certificate), csharp, label);
+    const blank = { ...route, certificate };
+    const trust = { ...remoteTrust(odin.publicKey), mode: "local-development" as const };
+    if (csharp) {
+      await verifyAuthorityRoute(blank, trust);
+    } else {
+      await assert.rejects(verifyAuthorityRoute(blank, trust), /not base64|not IEEE P1363/, label);
+    }
+  }
+  // The two code points where `trim` would have answered differently.
+  assert.equal("".trim().length, 1);
+  assert.equal(isCSharpWhiteSpace(""), true);
+  assert.equal("﻿".trim().length, 0);
+  assert.equal(isCSharpWhiteSpace("﻿"), false);
 });
 
 test("base64 helpers round-trip across the 32 KiB chunk boundary", () => {

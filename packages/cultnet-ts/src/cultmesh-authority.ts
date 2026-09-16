@@ -44,13 +44,45 @@ export interface CultMeshAuthorityTrustPolicy {
   now?: () => number;
 }
 
+/**
+ * `char.IsWhiteSpace` in .NET: Unicode Zs, plus Zl (U+2028), Zp (U+2029),
+ * U+0009-U+000D and U+0085.
+ *
+ * `String.prototype.trim` is a different set and cannot stand in for it:
+ * JavaScript counts U+FEFF, which .NET does not, and skips U+0085, which .NET
+ * counts. U+200B and U+180E are whitespace to neither (U+180E left Zs in
+ * Unicode 6.3). Wherever the C# reference writes `IsNullOrWhiteSpace` or
+ * `Trim()`, this is the set it means, so this is the set the TypeScript rules
+ * use.
+ */
+export function isCSharpWhiteSpace(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code === 0x20 || (code >= 0x09 && code <= 0x0d) || code === 0x85 || code === 0xa0 ||
+    code === 0x1680 || (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f || code === 0x3000;
+}
+
+/** `string.Trim()` in .NET, over `isCSharpWhiteSpace`. */
+export function trimCSharp(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isCSharpWhiteSpace(value[start]!)) start += 1;
+  while (end > start && isCSharpWhiteSpace(value[end - 1]!)) end -= 1;
+  return value.slice(start, end);
+}
+
+/** `string.IsNullOrWhiteSpace` in .NET, over `isCSharpWhiteSpace`. */
+export function isNullOrWhiteSpaceCSharp(value: string | undefined | null): boolean {
+  return value === undefined || value === null || trimCSharp(value).length === 0;
+}
+
 // A missing certificate, or one whose signature is empty or whitespace, is an
 // unsigned route (`CultMeshRouteCertificate` trims the signature; `Verify`
 // treats a whitespace signature as no certificate). The verifier and the
 // browser's session-proof short-circuit share this one reading, as the C#
 // `Verify` and `IsLocalDevelopment` do.
 export function isUnsignedCertificate(certificate: CultMeshAuthorityRouteCertificate | undefined): boolean {
-  return !certificate || certificate.signature.trim() === "";
+  return !certificate || isNullOrWhiteSpaceCSharp(certificate.signature);
 }
 
 // Rule for rule, this is `CultMeshAuthorityTrustPolicy.Verify` in the C#
@@ -67,7 +99,7 @@ export async function verifyAuthorityRoute(
     if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint)) return;
     throw new Error("Remote CultMesh routes require an Odin-signed authority certificate.");
   }
-  const signature = certificate.signature.trim();
+  const signature = trimCSharp(certificate.signature);
   if (!isProtectedEndpoint(route.endpoint) && !(trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint))) {
     throw new Error("Authenticated remote CultMesh routes require TLS or QUIC channel protection.");
   }
@@ -76,6 +108,21 @@ export async function verifyAuthorityRoute(
   const now = trust.now?.() ?? Date.now();
   if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {
     throw new Error("The Odin route certificate is not currently valid.");
+  }
+  // Three refusals, not one. `Verify` in the C# reference decodes the signature
+  // itself and names each failure separately: `Convert.FromBase64String` throwing
+  // is "not base64", a decoded length other than 64 is "not IEEE P1363 P-256",
+  // and only a decoded-but-wrong signature is "invalid". `VerifySession` is the
+  // silent path: it returns false for all three, which is why `verifyP256` keeps
+  // its own checks.
+  let signatureBytes: Uint8Array;
+  try {
+    signatureBytes = base64ToBytes(signature);
+  } catch {
+    throw new Error("The Odin route signature is not base64.");
+  }
+  if (signatureBytes.byteLength !== 64) {
+    throw new Error("The Odin route signature is not IEEE P1363 P-256.");
   }
   if (!await verifyP256(root, canonicalRoute(route), signature)) {
     throw new Error("The Odin route certificate signature is invalid.");
