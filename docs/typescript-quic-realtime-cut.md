@@ -5,7 +5,8 @@ Date: 2026-09-16
 Status: Imagination output for the target in
 `docs/typescript-quic-realtime-target.md` (operator-accepted 2026-09-16). No
 code in this document has been written. Nothing here is committed by
-Imagination; the root agent commits.
+Imagination; the root agent commits. Q5, Q6 and Q7 were ruled the same day
+(section 13, Rulings); no operator question is open. Cut 1 has not started.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `f2cd2eb4641269c653977bdba9b4bce2a26d870c`. Every `file:line` below is read
@@ -1000,6 +1001,25 @@ the forks the probes surfaced.
 Not asked, because the target already decided them: datagrams stay out (Q4);
 no TLS on TCP planes (Q1); Windows x64 and Linux x64 only (Q3); the verifier
 moves to a shared browser-safe module (Q2, section 6 names the module).
+
+### Rulings, 2026-09-16
+
+The operator took all three recommendations the same day the map was written.
+Each is now a standing ruling; the options above are history.
+
+- **Q5 ruled A.** `cultnet-ts` and `cultmesh-ts` publish under their existing
+  unscoped names. Only the two native platform packages are scoped:
+  `@gamecult/cultmesh-quic-native-win32-x64` and
+  `@gamecult/cultmesh-quic-native-linux-x64`. No consumer import changes.
+- **Q6 ruled A.** The Linux release artifact is built by GitHub Actions on
+  `ubuntu-latest` inside `container: debian:13`, published by the workflow,
+  and verified by the operator smoke on Yggdrasil in cut 6. The Docker
+  `debian:13` engine on the workstation is the development loop only; nothing
+  it produces is a release artifact. No compiler is installed on Yggdrasil.
+- **Q7 ruled A.** Cut 4 ships the `ICultMeshRealtimeLookupSource` port and a
+  static source. The Node Odin WebSocket rendezvous is parked with a note in
+  cut 7's ledger; it moves into `cultnet-ts` beside the verifier in a later
+  pipeline, once a Node consumer that discovers through Odin exists.
 
 ## 14. Subtraction estimate
 
