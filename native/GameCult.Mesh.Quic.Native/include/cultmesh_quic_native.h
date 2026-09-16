@@ -198,10 +198,12 @@ enum cultmesh_quic_stream_kind {
  * `cultmesh_quic_runtime_close` quiesces before it tears anything down. It marks
  * the runtime closing, wakes every blocked `cultmesh_quic_next_event`, and waits
  * for every in-flight export to return before it closes a handle or frees a
- * byte. No host call may begin after `cultmesh_quic_runtime_close` starts: a
- * call that arrives during or after it is refused with -1 and touches nothing.
- * The host is responsible for that ordering; the refusal is a guard rail, not a
- * licence to race.
+ * byte. No host call may begin after `cultmesh_quic_runtime_close` starts. That
+ * ordering is the host's, and it is a prohibition rather than a race the bridge
+ * arbitrates: once the close returns, the handle names freed memory, and a call
+ * made with it has nothing left to refuse it. A call that races the start of the
+ * close, while it is still running, is refused with -1 and touches nothing; that
+ * narrows one mis-ordering and does not make the prohibition optional.
  * --------------------------------------------------------------------------- */
 
 /* ---------------------------------------------------------------------------
@@ -280,8 +282,9 @@ CULTMESH_QUIC_API void cultmesh_quic_stream_shutdown(
 /* The one blocking crossing.
  *
  *   0   nothing within `timeout_ms`. A poller already blocked here when
- *       `cultmesh_quic_runtime_close` starts is woken and returns 0; one that
- *       arrives after it starts is refused with -1 like any other call.
+ *       `cultmesh_quic_runtime_close` starts is woken and returns 0. A poll that
+ *       begins after the close starts is forbidden by section 4, and is not a
+ *       case this return code covers.
  *   1   `*out_event` filled and up to `payload_capacity` payload bytes copied;
  *       `*out_required` is the payload size
  *   2   `payload_capacity` is too small. Nothing is consumed and nothing is
