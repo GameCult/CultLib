@@ -15,7 +15,36 @@ question is open. **Cut 1 landed** at `e234a64` (shared verifier, tests,
 C#-written vectors), `66286b9` (browser copy deleted, −143 net) and
 `062a5c6` (mutation runner; twelve killed, one equivalent), then three
 Soul passes and three fix batches; **closed 2026-09-16**, three residuals
-carried into Cut 2's Hands pass. **Cut 2 in Hands.**
+landed at `c64a2da`, `6c933d0`, `fe2555d`.
+
+**Cut 2 landed** at `6cbc73f` (the codec, 178 lines; C#-written and
+TypeScript-written frame vectors, each decoded by the other side, the C#
+test reading both with the reference alone) and `ae29910` (37 entries as a
+third runner target; 72 of 72 across the three targets killed, one
+equivalent named). Soul in flight. Hands' discrepancies, kept: the
+65,535-byte identity and 64 MiB payload ceilings recorded as a build rule
+plus the digest of the whole encoding rather than half a megabyte of
+literal text; the Body has five refusal messages where the spec listed six
+(negative length and length-sum mismatch share one); three refusals added
+that C#'s type system gives free, among them **a real divergence found by
+the test: `TextDecoder` deletes a leading U+FEFF where
+`Encoding.UTF8.GetString` keeps it, and U+FEFF is not .NET whitespace, so
+such an identity passes `Validate` and reaches the wire**, closed with
+`ignoreBOM`; C# sums lengths under `checked` and TS covers the overflow
+with its length refusal, unreachable from either encoder. Residual 1's
+exact-equality verification could not hold as written: applying the
+pre-check leaves eleven stricter-than-C# spellings, all the safe direction,
+pinned by name, because exact agreement needs .NET's registered-scheme
+table. The no-control-byte test caught a literal U+001F the Write tool put
+into its own introducing comment.
+
+Two items for Self's ruling, both taken: **`npm run test:ts` and `build:ts`
+have been broken since `8dd5a45` (2026-09-14)** because
+`scripts/run-typescript-workspaces.mjs:9` names the old unscoped
+`cultcache-ts`; one-word fix, lands in Cut 2's fix batch. **The runner is
+still named `mutate-cultmesh-authority.mjs`** while carrying a codec
+target; it is renamed `scripts/mutate-cultmesh.mjs` in the same batch and
+this map's references follow.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
