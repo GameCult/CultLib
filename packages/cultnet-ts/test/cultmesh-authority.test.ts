@@ -311,22 +311,105 @@ test("isProtectedEndpoint is the C# rule: wss, https, or any scheme containing q
   }
 });
 
-// The accepted and refused hosts here are what `System.Uri.IsLoopback` answered
-// through `CultMeshAuthorityTrustPolicy` on 2026-09-16; keep them in step.
-test("isLoopbackEndpoint is the C# System.Uri.IsLoopback set", () => {
-  for (const loopback of [
-    "ws://localhost:4050/mesh", "wss://LOCALHOST/mesh", "ws://loopback:4050/mesh", "ws://LoopBack:4050/mesh",
-    "ws://127.0.0.1:4050/mesh", "ws://127.0.0.2/mesh", "ws://127.255.255.254/mesh", "ws://127.1/mesh", "ws://0x7f000001/mesh", "ws://2130706433/mesh",
-    "ws://[::1]:4050/mesh", "ws://[0:0:0:0:0:0:0:1]:4050/mesh", "ws://[::ffff:127.0.0.1]/mesh", "ws://[::ffff:7f00:1]/mesh",
-  ]) {
-    assert.equal(isLoopbackEndpoint(loopback), true, loopback);
+// Every endpoint Soul put to both sides on 2026-09-16, with the answer
+// `System.Uri.IsLoopback` gave through `CultMeshAuthorityTrustPolicy` as the
+// expectation. Six of the probe's 88 are left out and named in the doc comment
+// on `isLoopbackEndpoint` instead, because they are unreachable as browser
+// CultMesh routes: the four IPv6 zone-id spellings, `file://localhost/mesh`
+// and `mailto:localhost`.
+const CSHARP_LOOPBACK_ANSWERS: readonly (readonly [string, boolean])[] = [
+  ["ws://127.0.0.1:4050/mesh", true],
+  ["ws://127.0.0.2:4050/mesh", true],
+  ["ws://127.255.255.254:4050/mesh", true],
+  ["ws://127.1:4050/mesh", true],
+  ["ws://0x7f000001:4050/mesh", true],
+  ["ws://2130706433:4050/mesh", true],
+  ["ws://[::1]:4050/mesh", true],
+  ["ws://[0:0:0:0:0:0:0:1]:4050/mesh", true],
+  ["ws://[::ffff:127.0.0.1]:4050/mesh", true],
+  ["ws://[::ffff:7f00:1]:4050/mesh", true],
+  ["ws://[::ffff:127.0.0.2]:4050/mesh", false],
+  ["ws://localhost:4050/mesh", true],
+  ["ws://LOCALHOST:4050/mesh", true],
+  ["ws://loopback:4050/mesh", true],
+  ["ws://LoopBack:4050/mesh", true],
+  ["ws://localhost.:4050/mesh", false],
+  ["ws://localhost.localdomain:4050/mesh", false],
+  ["ws://0.0.0.0:4050/mesh", false],
+  ["ws://[::]:4050/mesh", false],
+  ["ws://192.0.2.10:4050/mesh", false],
+  ["ws://provider.example:4050/mesh", false],
+  ["ws://127.0.0.1.:4050/mesh", false],
+  ["ws://127.0.0.1.", false],
+  ["ws://[::FFFF:127.0.0.1]:4050/mesh", true],
+  ["ws://[::FFFF:7F00:1]:4050/mesh", true],
+  ["ws://0177.0.0.1:4050/mesh", true],
+  ["ws://0177.0.0.1", true],
+  ["ws://127.0.0.1:0", true],
+  ["ws://127.0.0.1:0/mesh", true],
+  ["ws://LOCALHOST", true],
+  ["ws://localhost:8443", true],
+  ["ws://localhost:8443/", true],
+  ["ws://localhost:8443/mesh/path", true],
+  ["wss://[::1]/mesh", true],
+  ["wss://[fe80::1]/mesh", false],
+  ["wss://[::1]:8443", true],
+  ["ws://[::FFFF:7F00:1]", true],
+  ["ws://user:pw@127.0.0.1:4050/mesh", true],
+  ["ws://user@localhost/mesh", true],
+  ["ws://user:pw@provider.example/mesh", false],
+  ["ws://127.0.0.1@provider.example/mesh", false],
+  ["ws://provider.example@127.0.0.1/mesh", true],
+  ["ws://127.00.0.1/mesh", true],
+  ["ws://127.0.0.256/mesh", false],
+  ["ws://127.0.1/mesh", true],
+  ["ws://127/mesh", false],
+  ["ws://0x7F.0.0.1/mesh", true],
+  ["ws://127.0.0.01/mesh", true],
+  ["ws://LOCALHOST./mesh", false],
+  ["ws://[::0:1]/mesh", true],
+  ["ws://[0::1]/mesh", true],
+  ["ws://[::ffff:0:7f00:1]/mesh", false],
+  ["ws://[64:ff9b::7f00:1]/mesh", false],
+  ["ws://127.0.0.1%20/mesh", false],
+  ["ws://localhost%20/mesh", false],
+  ["ws://127.0.0.1 /mesh", false],
+  ["ws://loopback./mesh", false],
+  ["ws:127.0.0.1/mesh", false],
+  ["ws:/127.0.0.1/mesh", false],
+  ["ws:///127.0.0.1/mesh", false],
+  ["WS://127.0.0.1/mesh", true],
+  ["ws://127.0.0.1", true],
+  ["ws://127.0.0.1/", true],
+  ["ws://127.0.0.1?x=1", true],
+  ["ws://127.0.0.1#f", true],
+  ["ws://[::1]", true],
+  ["ws://[::1]/", true],
+  ["ws://localhost.localhost/mesh", false],
+  ["ws://localhost/../mesh", true],
+  ["ws://127.0.0.1\\mesh", false],
+  ["ws://127.0.0.1/mesh\n", true],
+  [" ws://127.0.0.1/mesh", true],
+  ["ws://127.0.0.1/mesh ", true],
+  ["ws://１２７.0.0.1/mesh", false],
+  ["ws://ｌｏｃａｌｈｏｓｔ/mesh", false],
+  ["ws://localhost\t/mesh", false],
+  ["ws://[::ffff:127.0.0.1]", true],
+  ["ws://[::ffff:7f00:0001]/mesh", true],
+  ["ws://[0:0:0:0:0:ffff:7f00:1]/mesh", true],
+  ["http://127.0.0.1/mesh", true],
+  ["cultmesh-state+quic://127.0.0.1:4433/", true],
+  ["ws://127.0.0.1:99999/mesh", false],
+];
+
+test("isLoopbackEndpoint answers as System.Uri.IsLoopback did, over every reachable endpoint Soul probed", () => {
+  assert.equal(CSHARP_LOOPBACK_ANSWERS.length, 82);
+  const disagreements: string[] = [];
+  for (const [endpoint, csharp] of CSHARP_LOOPBACK_ANSWERS) {
+    if (isLoopbackEndpoint(endpoint) !== csharp) disagreements.push(`${JSON.stringify(endpoint)} (C# said ${csharp})`);
   }
-  for (const remote of [
-    "ws://192.0.2.10:4050/mesh", "wss://provider.example/mesh", "ws://[::ffff:127.0.0.2]/mesh", "ws://localhost./mesh",
-    "ws://localhost.localdomain/mesh", "ws://127.example/mesh", "ws://0.0.0.0/mesh", "ws://[::]/mesh", "not a url",
-  ]) {
-    assert.equal(isLoopbackEndpoint(remote), false, remote);
-  }
+  assert.deepEqual(disagreements, []);
+  assert.equal(isLoopbackEndpoint("not a url"), false);
 });
 
 // `char.IsWhiteSpace` as .NET 10 answered for each of these code points on
@@ -366,10 +449,10 @@ test("the whitespace set is C#'s char.IsWhiteSpace, not String.prototype.trim", 
     }
   }
   // The two code points where `trim` would have answered differently.
-  assert.equal("".trim().length, 1);
-  assert.equal(isCSharpWhiteSpace(""), true);
-  assert.equal("﻿".trim().length, 0);
-  assert.equal(isCSharpWhiteSpace("﻿"), false);
+  assert.equal("\u0085".trim().length, 1);
+  assert.equal(isCSharpWhiteSpace("\u0085"), true);
+  assert.equal("\ufeff".trim().length, 0);
+  assert.equal(isCSharpWhiteSpace("\ufeff"), false);
 });
 
 test("base64 helpers round-trip across the 32 KiB chunk boundary", () => {
@@ -414,12 +497,12 @@ test("padding and duplication the C# constructors clean still verify against the
   const protocolIds = route.protocolIds!;
   const accepted: readonly (readonly [string, CultMeshAuthorityRouteView])[] = [
     ["a duplicated protocol id", { ...route, protocolIds: [...protocolIds, protocolIds[0]!] }],
-    ["a padded protocol id", { ...route, protocolIds: [` ${protocolIds[0]!}`, ...protocolIds.slice(1)] }],
+    ["a padded protocol id", { ...route, protocolIds: [` ${protocolIds[0]!}\u0085`, ...protocolIds.slice(1)] }],
     ["a blank protocol id", { ...route, protocolIds: [...protocolIds, "  "] }],
     ["the protocol ids reversed", { ...route, protocolIds: [...protocolIds].reverse() }],
-    ["a padded generation", { ...route, generation: ` ${route.generation}　` }],
+    ["a padded generation", { ...route, generation: ` ${route.generation}\u3000` }],
     ["a padded endpoint", { ...route, endpoint: ` ${route.endpoint} ` }],
-    ["a padded Odin key id", { ...route, certificate: { ...certificate, odinKeyId: ` ${certificate.odinKeyId} ` } }],
+    ["a padded Odin key id", { ...route, certificate: { ...certificate, odinKeyId: `\u00a0${certificate.odinKeyId} ` } }],
     ["a padded provider key id", {
       ...route,
       certificate: { ...certificate, providerKey: { ...certificate.providerKey, keyId: ` ${certificate.providerKey.keyId} ` } },

@@ -189,6 +189,26 @@ const mutations = [
     new: "",
   },
   {
+    rule: "a trailing dot on the host is refused, as System.Uri refuses it",
+    old: ' || host.endsWith(".");',
+    new: ";",
+  },
+  {
+    rule: "a scheme not followed by // and an authority is refused",
+    old: "  if (!shape) return true;",
+    new: "  if (!shape) return false;",
+  },
+  {
+    rule: "a backslash in the endpoint is refused",
+    old: '  if (raw.includes("\\\\")) return true;\n',
+    new: "",
+  },
+  {
+    rule: "a non-ASCII host is refused, so URL cannot fold a fullwidth form to ASCII",
+    old: "  return /[^\\u0021-\\u007e]/.test(host)",
+    new: "  return false",
+  },
+  {
     rule: "protected scheme: any scheme containing quic",
     old: 'scheme.includes("quic")',
     new: 'scheme === "quic"',

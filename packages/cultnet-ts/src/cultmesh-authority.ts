@@ -297,14 +297,61 @@ function ownedBytes(view: Uint8Array): ArrayBuffer {
 }
 
 /**
+ * `System.Uri` refuses spellings that WHATWG `URL` repairs, and a repaired
+ * spelling would be loopback here and not in C#. This is that refusal, on the
+ * raw string, before `URL` sees it: the scheme must be followed by `//` and a
+ * non-empty authority, the string carries no backslash, and the host is ASCII,
+ * free of whitespace, and does not end in a dot.
+ *
+ * Each clause answers one spelling Soul found `System.Uri` refusing and `URL`
+ * accepting on 2026-09-16: `ws://127.0.0.1.` (the trailing dot, which `URL`
+ * drops), `ws:127.0.0.1`, `ws:/127.0.0.1` and `ws:///127.0.0.1` (the missing or
+ * empty authority, which `URL` infers), `ws://127.0.0.1\mesh` (the backslash,
+ * which `URL` reads as a path separator), `ws://１２７.0.0.1` and
+ * `ws://ｌｏｃａｌｈｏｓｔ` (fullwidth forms, which `URL` folds to ASCII), and
+ * `ws://localhost\t/mesh` (the tab, which `URL` deletes).
+ *
+ * Leading and trailing C0 control characters and spaces around the whole
+ * endpoint are stripped first, because `URL` strips them and `System.Uri`
+ * accepts them: " ws://127.0.0.1/mesh" is loopback to both.
+ */
+function refusedByCSharpUriShape(value: string): boolean {
+  const raw = value.replace(/^[ - ]+|[ - ]+$/g, "");
+  if (raw.includes("\\")) return true;
+  const shape = /^[A-Za-z][A-Za-z0-9+\-.]*:\/\/([^/?#]+)/.exec(raw);
+  if (!shape) return true;
+  const authority = shape[1]!;
+  const afterUserInfo = authority.slice(authority.lastIndexOf("@") + 1);
+  const host = afterUserInfo.startsWith("[")
+    ? afterUserInfo.slice(0, afterUserInfo.indexOf("]") + 1)
+    : afterUserInfo.split(":")[0]!;
+  if (host.length === 0) return true;
+  // eslint-disable-next-line no-control-regex
+  return /[^!-~]/.test(host) || host.endsWith(".");
+}
+
+/**
  * The C# rule (`CultMeshAuthorityProof.cs`, `IsLoopback`): `System.Uri.IsLoopback`,
  * which is any `127.0.0.0/8` IPv4 host, `::1`, the IPv4-mapped `::ffff:127.0.0.1`
  * (and only `.1`), and the host names `localhost` and `loopback`, case-insensitively.
  * WHATWG `URL` already normalises `127.1`, `0x7f000001` and `2130706433` to
  * `127.0.0.1` and serialises the mapped form as `::ffff:7f00:1`, as `System.Uri`
  * does on its side. `localhost.` is not loopback on either side.
+ *
+ * This is not `System.Uri.IsLoopback`, and the spellings where it still differs
+ * are named rather than claimed away. `URL` repairs seven spellings `System.Uri`
+ * refuses, and `refusedByCSharpUriShape` refuses those first. Two divergences
+ * remain, both unreachable from a browser CultMesh route:
+ *
+ * - An IPv6 zone id (`ws://[::1%eth0]`, `%25`-escaped or not) is loopback to
+ *   `System.Uri` and throws in `URL`, so this answers false. A zone id is a
+ *   host-local interface name; it cannot be dialled from a browser socket.
+ * - `file://localhost/mesh` and `mailto:localhost` are loopback to `System.Uri`
+ *   and have no host in `URL`, so this answers false. Neither is a CultMesh
+ *   route: `openSocket` refuses any scheme but `ws:` and `wss:`.
  */
 export function isLoopbackEndpoint(value: string): boolean {
+  if (refusedByCSharpUriShape(value)) return false;
   try {
     const host = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
     return host === "localhost" || host === "loopback" || host === "::1" || host === "::ffff:7f00:1" ||
