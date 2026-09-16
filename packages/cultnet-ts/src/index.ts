@@ -70,6 +70,7 @@ export {
   canonicalSession,
   isLoopbackEndpoint,
   isProtectedEndpoint,
+  isUnsignedCertificate,
   verifyAuthorityRoute,
   verifyP256,
   verifyProviderSessionProof,

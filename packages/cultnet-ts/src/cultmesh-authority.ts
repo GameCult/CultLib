@@ -44,23 +44,30 @@ export interface CultMeshAuthorityTrustPolicy {
   now?: () => number;
 }
 
+// A missing certificate, or one whose signature is empty or whitespace, is an
+// unsigned route (`CultMeshRouteCertificate` trims the signature; `Verify`
+// treats a whitespace signature as no certificate). The verifier and the
+// browser's session-proof short-circuit share this one reading, as the C#
+// `Verify` and `IsLocalDevelopment` do.
+export function isUnsignedCertificate(certificate: CultMeshAuthorityRouteCertificate | undefined): boolean {
+  return !certificate || certificate.signature.trim() === "";
+}
+
 // Rule for rule, this is `CultMeshAuthorityTrustPolicy.Verify` in the C#
 // reference, in the same order: unsigned, channel protection, root lookup,
 // validity window, signature. The same input yields the same refusal on both
-// sides. A certificate whose signature is empty or whitespace is unsigned
-// (`CultMeshRouteCertificate` trims the signature; `Verify` treats a
-// whitespace signature as no certificate).
+// sides.
 export async function verifyAuthorityRoute(
   route: CultMeshAuthorityRouteView,
   trust: CultMeshAuthorityTrustPolicy,
 ): Promise<void> {
   const roots = trustedOdinRoots(trust);
   const certificate = route.certificate;
-  const signature = certificate?.signature.trim() ?? "";
-  if (!certificate || signature === "") {
+  if (!certificate || isUnsignedCertificate(certificate)) {
     if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint)) return;
     throw new Error("Remote CultMesh routes require an Odin-signed authority certificate.");
   }
+  const signature = certificate.signature.trim();
   if (!isProtectedEndpoint(route.endpoint) && !(trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint))) {
     throw new Error("Authenticated remote CultMesh routes require TLS or QUIC channel protection.");
   }

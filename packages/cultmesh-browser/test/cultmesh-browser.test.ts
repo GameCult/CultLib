@@ -236,6 +236,37 @@ test("browser client rejects a credential-free authority impersonator", async ()
   );
 });
 
+test("browser client opens an unsigned-certificate loopback session under local-development without a provider proof, as in C#", async () => {
+  const connect = (route: CultMeshBrowserRoute, trust: { mode: "local-development" | "authenticated-remote"; odinRoots: CultMeshBrowserP256PublicKey[] }) =>
+    CultMeshBrowserClient.connect({
+      ...route,
+      runtimeId: "browser-unsigned-certificate-test",
+      rendezvous: { resolve: async () => route },
+      trust,
+      socketFactory: () => handshakeOnlySocket(route),
+    });
+  const blank = (route: CultMeshBrowserRoute) => ({ ...route, certificate: { ...route.certificate!, signature: "" } });
+
+  const loopback = await createSignedRoute("ws://127.0.0.1:4501/mesh");
+  const localTrust = { mode: "local-development" as const, odinRoots: [loopback.odinPublic] };
+  const client = await connect(blank(loopback.route), localTrust);
+  assert.equal(client.state, "connected");
+  await client.dispose();
+  // A signed loopback certificate is an authenticated route even under
+  // local-development; the provider must still prove its key.
+  await assert.rejects(connect(loopback.route, localTrust), /did not prove possession/);
+
+  const remote = await createSignedRoute("wss://provider.example/mesh");
+  await assert.rejects(
+    connect(blank(remote.route), { mode: "local-development", odinRoots: [remote.odinPublic] }),
+    /Odin-signed authority certificate/,
+  );
+  await assert.rejects(
+    connect(blank(remote.route), { mode: "authenticated-remote", odinRoots: [remote.odinPublic] }),
+    /Odin-signed authority certificate/,
+  );
+});
+
 test("browser client rejects a mutated or expired signed route before opening a provider socket", async () => {
   const fixture = await createSignedRoute("wss://provider.example/mesh");
   let opened = false;

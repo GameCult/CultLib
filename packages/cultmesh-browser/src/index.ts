@@ -19,6 +19,7 @@ import {
   base64ToBytes,
   bytesToBase64,
   isLoopbackEndpoint,
+  isUnsignedCertificate,
   verifyAuthorityRoute,
   verifyProviderSessionProof,
   type CultMeshAuthorityIdentity,
@@ -912,7 +913,11 @@ async function validateSessionAcceptance(
       `expected '${request.verseId}/${request.authorityRuntimeId}/${protocolId}/${route.generation}'.`,
     );
   }
-  if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint) && !route.certificate) return undefined;
+  // `CultMeshVerifiedAuthorityRoute.IsLocalDevelopment` in C#: an unsigned
+  // loopback route under local-development needs no provider session proof.
+  if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint) && isUnsignedCertificate(route.certificate)) {
+    return undefined;
+  }
   const providerKey = route.certificate?.providerKey;
   if (!providerKey || message.providerKeyId !== providerKey.keyId || !message.providerSignature) {
     return new Error("CultMesh authority did not prove possession of the Odin-certified provider key.");

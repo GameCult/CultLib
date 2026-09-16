@@ -58,9 +58,14 @@ const mutations = [
     new: "const root = [...roots.values()][0];",
   },
   {
-    rule: "empty or whitespace signature is an unsigned route",
-    old: 'if (!certificate || signature === "") {',
-    new: "if (!certificate) {",
+    rule: "isUnsignedCertificate treats a whitespace signature as unsigned",
+    old: 'return !certificate || certificate.signature.trim() === "";',
+    new: 'return !certificate || certificate.signature === "";',
+  },
+  {
+    rule: "isUnsignedCertificate treats an empty signature as unsigned",
+    old: 'return !certificate || certificate.signature.trim() === "";',
+    new: "return !certificate;",
   },
   {
     rule: "root lookup precedes the validity window",
