@@ -132,7 +132,14 @@ build for Debian.
   "runtime-neutral" and the cut's own negative grep.
 - **C. Providers Linux-only.** Cheapest; kills the Windows FFI smoke the
   cut requires and the Windows provider lanes Cuts 4 and 5 need.
-**Recommended: A.**
+**Recommended: A. Ruled A, 2026-09-16** ("A"). The Windows pin moves to
+`Microsoft.Native.Quic.MsQuic.OpenSSL` 2.5.9 in `build-quic-native.ps1`
+with its digest; Q8's committed tree price is restated at about 11.6 MB;
+the Unity plugin's `msquic.dll` stays Schannel until the operator's
+rebuild, recorded in section 15, and the v1 client path is verified under
+both flavours. The spec's "one credential type for Schannel and OpenSSL"
+sentence in section 8 is withdrawn: the header declares the type and only
+the OpenSSL provider implements it.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
