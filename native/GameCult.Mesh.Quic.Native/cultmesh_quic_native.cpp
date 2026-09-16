@@ -71,6 +71,31 @@
 #define CULTMESH_QUIC_ASSERT_QUIESCED(count) ((void)0)
 #endif
 
+// Development builds only, and never in a shipped binary: the seam the scenario
+// runner drives the quiesce through. A scenario that only sleeps and hopes its
+// pollers are inside the library cannot tell a bridge that counts host calls
+// from one that does not, so the bridge says so itself:
+//
+//  - PEAK raises the high-water mark of calls counted inside, so a scenario can
+//    assert that the calls it launched were counted rather than assumed.
+//  - AT_CLOSE records how many were counted when the close began its wait, which
+//    is the number the wait exists for.
+//  - HELD parks a call inside the library until the scenario releases it, so the
+//    close races calls that are genuinely there for as long as the scenario
+//    wants them there, instead of for as long as the schedule happens to give.
+//    It returns true when it parked, and touches nothing afterwards: a bridge
+//    that frees the runtime out from under a held call is then reported by the
+//    scenario rather than crashing inside it.
+#if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
+#define CULTMESH_QUIC_DEBUG_PEAK(count) DebugRaisePeak(count)
+#define CULTMESH_QUIC_DEBUG_AT_CLOSE(count) DebugRecordCallsAtClose(count)
+#define CULTMESH_QUIC_DEBUG_HELD(lock) DebugHoldCall(lock)
+#else
+#define CULTMESH_QUIC_DEBUG_PEAK(count) ((void)0)
+#define CULTMESH_QUIC_DEBUG_AT_CLOSE(count) ((void)0)
+#define CULTMESH_QUIC_DEBUG_HELD(lock) (false)
+#endif
+
 namespace {
 
 constexpr uint32_t kApiVersion = 2;
@@ -203,6 +228,36 @@ struct Runtime {
     int active_calls = 0;
 };
 
+#if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
+// The development seam behind the three CULTMESH_QUIC_DEBUG_ macros. None of it
+// is compiled into a shipped library.
+std::atomic<int> debug_peak_calls{0};
+std::atomic<int> debug_calls_at_close{-1};
+std::mutex debug_hold_gate;
+std::condition_variable debug_hold_signal;
+bool debug_hold_armed = false;
+
+void DebugRaisePeak(int count) {
+    int peak = debug_peak_calls.load(std::memory_order_relaxed);
+    while (count > peak && !debug_peak_calls.compare_exchange_weak(peak, count)) {
+    }
+}
+
+void DebugRecordCallsAtClose(int count) { debug_calls_at_close.store(count); }
+
+// Parks the calling host thread inside the library until the scenario releases
+// it. The runtime gate is dropped first, so nothing else is blocked behind the
+// held call, and it is never retaken: the call is still counted, because its
+// CallScope is still alive, and that is the whole point.
+bool DebugHoldCall(std::unique_lock<std::mutex>& lock) {
+    std::unique_lock<std::mutex> hold(debug_hold_gate);
+    if (!debug_hold_armed) return false;
+    lock.unlock();
+    debug_hold_signal.wait(hold, [] { return !debug_hold_armed; });
+    return true;
+}
+#endif
+
 // Every host-facing export enters through this. It refuses once
 // `cultmesh_quic_runtime_close` has started, and otherwise holds the runtime
 // open for the length of the call.
@@ -213,6 +268,7 @@ public:
         std::lock_guard<std::mutex> lock(runtime_->gate);
         if (runtime_->closing) return;
         ++runtime_->active_calls;
+        CULTMESH_QUIC_DEBUG_PEAK(runtime_->active_calls);
         entered_ = true;
     }
     // The notify stays under `gate`, and that is the whole point of it. Released
@@ -817,6 +873,7 @@ CULTMESH_API void cultmesh_quic_runtime_close(void* handle) {
         if (runtime->closing) return;
         runtime->closing = true;
         runtime->signal.notify_all();
+        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);
         runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });
         CULTMESH_QUIC_ASSERT_QUIESCED(runtime->active_calls);
         for (auto& entry : runtime->streams) streams.push_back(std::move(entry.second));
@@ -1117,6 +1174,10 @@ CULTMESH_API int32_t cultmesh_quic_next_event(
     if (runtime->events.empty() && timeout_ms > 0) {
         runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),
             [runtime] { return !runtime->events.empty() || runtime->closing; });
+        // Development builds only; a no-op unless a scenario has armed the hold.
+        // A held call returns the same 0 an empty queue would have, and touches
+        // the runtime no further.
+        if (CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;
     }
     if (runtime->events.empty()) return 0;
 
@@ -1371,3 +1432,28 @@ CULTMESH_API void cultmesh_quic_close(V1Client* client) {
 }
 
 #endif // _WIN32
+
+#if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
+// The development seam's three exports. They exist only in a build configured
+// with CULTMESH_QUIC_DEBUG_ASSERTS; a shipped library exports neither these nor
+// the counters behind them. See section 7 of the header.
+CULTMESH_API void cultmesh_quic_debug_hold_calls(int32_t hold) {
+    if (hold != 0) {
+        debug_peak_calls.store(0);
+        debug_calls_at_close.store(-1);
+    }
+    {
+        std::lock_guard<std::mutex> lock(debug_hold_gate);
+        debug_hold_armed = hold != 0;
+    }
+    debug_hold_signal.notify_all();
+}
+
+CULTMESH_API int32_t cultmesh_quic_debug_peak_calls(void) {
+    return debug_peak_calls.load();
+}
+
+CULTMESH_API int32_t cultmesh_quic_debug_calls_at_close(void) {
+    return debug_calls_at_close.load();
+}
+#endif

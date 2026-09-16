@@ -73,6 +73,12 @@ if(CULTMESH_QUIC_BUILD_TESTS)
   # The header only. The scenarios drive the bridge as a host does, so they get
   # no more of it than a host has.
   target_link_libraries(cultmesh_quic_native_tests PRIVATE gamecult_mesh_quic_native)
+  # The scenarios see the development seam (section 7 of the header) exactly when
+  # the library has one, so `holdclose` compiles out of the same builds the
+  # bridge's own assertions compile out of.
+  if(CULTMESH_QUIC_DEBUG_ASSERTS)
+    target_compile_definitions(cultmesh_quic_native_tests PRIVATE CULTMESH_QUIC_DEBUG_ASSERTS)
+  endif()
   set_target_properties(cultmesh_quic_native_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
   if(NOT WIN32)

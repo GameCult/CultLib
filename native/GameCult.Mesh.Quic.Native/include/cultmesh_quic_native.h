@@ -308,6 +308,38 @@ CULTMESH_QUIC_API int32_t cultmesh_quic_last_error(
  * when nothing has failed. */
 CULTMESH_QUIC_API int32_t cultmesh_quic_last_status(void* runtime);
 
+/* ---------------------------------------------------------------------------
+ * 7. The development seam
+ *
+ * Present only in a library configured with `CULTMESH_QUIC_DEBUG_ASSERTS`, which
+ * a shipped build never is. It exists for the runtime-lifetime scenarios: the
+ * quiesce is a promise about host calls that are inside the library, and a
+ * scenario that can only sleep and hope cannot tell a bridge that counts them
+ * from one that does not.
+ *
+ * It is process-wide, not per-runtime, because the numbers outlive the runtime
+ * they describe: `cultmesh_quic_runtime_close` frees the runtime, and the count
+ * it waited on is read afterwards. The scenarios open one runtime at a time.
+ * --------------------------------------------------------------------------- */
+#if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
+
+/* Non-zero arms the hold and resets both counters: every call that reaches the
+ * blocking wait in `cultmesh_quic_next_event` parks inside the library instead
+ * of returning. Zero releases every held call and disarms it. A held call
+ * returns 0 and touches the runtime no further. */
+CULTMESH_QUIC_API void cultmesh_quic_debug_hold_calls(int32_t hold);
+
+/* The high-water mark of host calls counted inside the library since the hold
+ * was armed. Zero means no call was ever counted. */
+CULTMESH_QUIC_API int32_t cultmesh_quic_debug_peak_calls(void);
+
+/* How many host calls were counted inside the library when the last
+ * `cultmesh_quic_runtime_close` began its wait, or -1 if no close has begun one
+ * since the hold was armed. This is the number the wait exists for. */
+CULTMESH_QUIC_API int32_t cultmesh_quic_debug_calls_at_close(void);
+
+#endif /* CULTMESH_QUIC_DEBUG_ASSERTS */
+
 #if defined(__cplusplus)
 }
 #endif
