@@ -6,7 +6,11 @@ if (!command) throw new Error("Usage: node scripts/run-typescript-workspaces.mjs
 
 const npmCli = process.env.npm_execpath ??
   join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-const workspaces = ["cultcache-ts", "cultnet-ts", "cultmesh-ts", "cultmesh-browser"];
+// npm resolves a workspace by its manifest name, not its directory, so this list
+// moves when a package is scoped: `8cb3b72` renamed `cultcache-ts` to
+// `@gamecult/cultcache-ts` and left this entry behind, which broke `build:ts` and
+// `test:ts` for every workspace from that commit on.
+const workspaces = ["@gamecult/cultcache-ts", "cultnet-ts", "cultmesh-ts", "cultmesh-browser"];
 const childEnv = process.platform === "win32"
   ? {
       ...process.env,

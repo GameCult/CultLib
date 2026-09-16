@@ -1,6 +1,7 @@
-// Mutation check for the CultMesh route verification rules.
+// Mutation check for the CultMesh rules TypeScript owns: route verification and
+// the realtime frame codec.
 //
-// Two files own those rules and each is one target here. `shared` is
+// Two files own the route rules and each is one target here. `shared` is
 // `packages/cultnet-ts/src/cultmesh-authority.ts`, the one verifier, killed by
 // `npm run test --workspace packages/cultnet-ts`. `browser` is
 // `packages/cultmesh-browser/src/index.ts`, which must *call* the shared rules
@@ -20,7 +21,10 @@
 // that sidecar by the next run, not by git. After the final restore each
 // package is rebuilt so `dist/` never carries the last mutant.
 //
-//   node scripts/mutate-cultmesh-authority.mjs
+// `realtime` is `packages/cultmesh-ts/src/realtime-wire.ts`, the frame codec,
+// killed by `npm run test --workspace packages/cultmesh-ts`.
+//
+//   node scripts/mutate-cultmesh.mjs
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
