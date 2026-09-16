@@ -13,9 +13,9 @@ ledger are remapped under C (landed 2026-09-16, same day). Q8 is ruled:
 the built binaries are committed to the tree (section 11.2). No operator
 question is open. **Cut 1 landed** at `e234a64` (shared verifier, tests,
 C#-written vectors), `66286b9` (browser copy deleted, −143 net) and
-`062a5c6` (mutation runner; twelve killed, one equivalent). Soul's pass
-found the verifier and the C#-to-TypeScript bridge sound and proved the
-other direction by probe; a fix batch is in Hands for the six findings below.
+`062a5c6` (mutation runner; twelve killed, one equivalent), then three
+Soul passes and three fix batches; **closed 2026-09-16**, three residuals
+carried into Cut 2's Hands pass. **Cut 2 in Hands.**
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
@@ -155,8 +155,39 @@ diff the whole file as a rewrite, escaped at `dfe582e`. Residuals named,
 not guessed at: `isProtectedEndpoint` did not get the pre-check and no
 probe covers protected-scheme spellings; a negative priority throws in C#
 and transcribes in TS, unreachable while only C# signs; two browser
-mutations survive because the verifier refuses those routes first. Closing
-Soul pass in flight.
+mutations survive because the verifier refuses those routes first.
+
+**Third Soul pass, closing.** Held: all 34 whitespace code points in the
+browser path too, with C#'s `VerifySessionProof` answer as the
+expectation; the three signature refusals byte-identical; cleaning parity
+in both directions with fresh keys (nine of nine each way, a padded
+`verseId` refused cross-wise, C# confirmed not to trim it); 88 loopback
+spellings with only the documented unreachable disagreements; the runner's
+control writing through the same path as its mutations; CI's job, matrix,
+triggers and setup order as promised; every suite, the closure smoke, both
+greps. **Cut 1 is closed; Cut 2 may start.** Three residuals go with Cut 2's
+Hands pass:
+
+- **`isProtectedEndpoint` lacks the raw-shape pre-check** that
+  `isLoopbackEndpoint` got, so eleven spellings C# refuses as unparseable
+  are accepted and dialled after repair by `URL`. A trusted signer would
+  have to emit a malformed endpoint, so security holds and the parity
+  invariant does not. Five lines. Low-medium.
+- **A literal U+001F byte sits in the separator string** in source and
+  twice in the tests, where C# spells it ``; git does not treat it as
+  binary, but any editor that strips C0 controls changes every signature
+  with no visible diff. The NUL scar one rank lower.
+- **The sidecar footgun is narrowed, not removed**: a SIGKILL still leaves
+  it, and an edit made before the next run is overwritten by the repair.
+  Repair must refuse when the file matches neither the sidecar nor the
+  mutant.
+
+Two corrections to this map's own record of the batch: **the NUL scar was
+overstated**, since the byte sat past git's binary sniff and no whole-file
+rewrite exists in history, only the normalisation path saw it and the blob
+was LF-only anyway; and **CI was not green throughout the batch**, two of
+its commits failing an unrelated Eve checkpoint job before the authority
+steps existed, green from `0dfef0e`.
 
 Seen by Hands, recorded for section 15: `packages/cultnet-ts/src/generated/swarm-contracts.generated.ts`
 is rewritten with LF by every build while the tree is `autocrlf=true`, so
