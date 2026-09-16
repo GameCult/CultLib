@@ -11,7 +11,9 @@ campaign, registry publication parked for a later pass by choice. Cut 6,
 section 5.4, the binary-resolution and dependency lines of Cut 4, and Cut 7's
 ledger are remapped under C (landed 2026-09-16, same day). Q8 is ruled:
 the built binaries are committed to the tree (section 11.2). No operator
-question is open. Cut 1 is in Hands.
+question is open. **Cut 1 landed** at `e234a64` (shared verifier, tests,
+C#-written vectors), `66286b9` (browser copy deleted, −143 net) and
+`062a5c6` (mutation runner; twelve killed, one equivalent). Soul in flight.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
