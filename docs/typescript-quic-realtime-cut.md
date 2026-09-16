@@ -21,7 +21,8 @@ landed at `c64a2da`, `6c933d0`, `fe2555d`.
 TypeScript-written frame vectors, each decoded by the other side, the C#
 test reading both with the reference alone) and `ae29910` (37 entries as a
 third runner target; 72 of 72 across the three targets killed, one
-equivalent named). Soul in flight. Hands' discrepancies, kept: the
+equivalent named). Closed 2026-09-16 after Soul's pass and one fix batch.
+Hands' discrepancies, kept: the
 65,535-byte identity and 64 MiB payload ceilings recorded as a build rule
 plus the digest of the whole encoding rather than half a megabyte of
 literal text; the Body has five refusal messages where the spec listed six
@@ -112,7 +113,7 @@ the committed MIT text; the deb ships no unversioned `.so` symlink, so the
 script creates one; four Linux runtime libraries are load-bearing and now
 in the README. Soul in flight.
 
-**Q9, the one fork Cut 3 hit, undecided until the operator rules.** The
+**Q9, the one fork Cut 3 hit, ruled A on 2026-09-16 (detail below).** The
 pinned Windows MsQuic is the Schannel flavour, and Schannel does not
 implement `QUIC_CREDENTIAL_TYPE_CERTIFICATE_PKCS12`: `ConfigurationLoadCredential`
 returns `QUIC_STATUS_NOT_SUPPORTED`, so the provider role cannot open a
@@ -213,7 +214,55 @@ the batch: the Unity plugin's `msquic.dll` is still Schannel until the
 package build runs; the Schannel dependency cache is orphaned; the v1
 return-code values changed while the zero-versus-nonzero contract held.
 Bridge 302,080 bytes / `f4c5f644…` (win32-x64, static CRT), 108,128 /
-`61d5b96e…` (linux-x64). Soul rerun in flight.
+`61d5b96e…` (linux-x64).
+
+**Soul's second pass on the fix batch** (Fable; `soul3b-*` in the session
+scratchpad, its C consumer extended with close, re-entry and completion-race
+scenarios, ThreadSanitizer and AddressSanitizer on linux-x64 in the
+workstation's Docker `debian:13`). Held: the lifetime model, race 400×20 with
+zero crashes on both targets and ASan clean on every mode; 16,384 of 16,384
+frames under stress with none lost or reordered; one completion event per
+frame with cancellation distinct; the completion event uniform at the end of
+every connection, with its mutant killed on both targets; negative return
+codes everywhere; the null-payload refusal; the header compiling clean as
+both C and C++ under maximum warnings on two compilers with no padding and
+no implicit conversion; no C runtime import; the OpenSSL pin re-downloaded
+and both digests equal; the version-one gate green beside either flavour of
+the library. **The cut does not close at `c729dff`.** Findings:
+
+- **The quiesce is one line short, and it is a use-after-free.** `~CallScope`
+  decrements the call count under the lock, releases it, and only then
+  notifies. The closer's predicate is already true, so if that last poller is
+  preempted in between, the runtime is destroyed and the notify lands on a
+  freed condition variable. ThreadSanitizer caught it on the **unmutated**
+  bridge, so the previous batch's model was right in shape and wrong by one
+  line. Confirmed, medium, and the blocker.
+- **The header oversells the return code.** It is portably negative, not
+  portably meaningful: the same failure is −12032 on Windows and −1126 on
+  Linux, and the Windows mask collides two distinct statuses onto −1002. The
+  sign is the contract; the magnitude is diagnostic. Low, wording.
+- **The previous batch's own README claims a rebuild reproduces the committed
+  Unity plugin.** It does not: that plugin is the older Schannel build at
+  40,448 bytes with a C runtime import, against 302,080 bytes without one
+  today. Low, and exactly the stale-artifact trap. The current build does
+  reproduce itself.
+- **A Windows status sign-extends in diagnostics**, printing sixteen hex
+  digits. Trivial.
+
+**L3 is ruled: it becomes killable, it is not accepted as unfalsifiable.**
+Soul established the survival was a harness limit rather than a proof of
+correctness. Under AddressSanitizer with pollers blocked mid-copy of large
+frames, deleting the quiesce wait hit use-after-free four times in
+forty-eight attempts, while the release scenario never observed it. So a
+dev-only assertion now aborts when the call count is non-zero after the
+quiesce block, which fires deterministically with enough blocked pollers and
+makes the mutation die by the existing scenario; the sanitizer run stays as
+the second check. That assertion does not cover the defect above, where the
+count has already reached zero. **Two mutations are honest only on the
+sanitizer target:** the pop-then-copy one and the closed-handle one survive
+on Windows release and kill three times of three under AddressSanitizer, so
+the entries table must say which target each is honest on. A mutation whose
+kill depends on the target is not killed until it runs there.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
