@@ -139,7 +139,47 @@ the Unity plugin's `msquic.dll` stays Schannel until the operator's
 rebuild, recorded in section 15, and the v1 client path is verified under
 both flavours. The spec's "one credential type for Schannel and OpenSSL"
 sentence in section 8 is withdrawn: the header declares the type and only
-the OpenSSL provider implements it.
+the OpenSSL provider implements it. *(Digest correction, Soul: `FEE9A664…`
+is the NuGet zip, 19,179,817 bytes; the DLL is `c17c6581…`, 4,181,856
+bytes. Hands' report and this map's first record had the zip's digest on
+the DLL.)*
+
+**Soul's pass on Cut 3** (Fable; `soul3-*` in the session scratchpad,
+including a C consumer of the ABI that is not koffi and an ASan build of
+the bridge) held the Cut 2 fixes entire, the export counts, the greps, the
+clean-container Linux rebuild byte-identical to the manifest, the four
+load-bearing Linux runtime libraries, the stress at 16,384 frames with
+zero lost or reordered on both targets, both hang mutations dying by
+timeout, and both of Q9's load-bearing claims (Schannel refuses the PKCS12
+credential with not-supported; the identical bridge passes 15 of 15 beside
+the OpenSSL DLL; the v1 gate passes beside either). **Cut 3 does not
+close.** Found, in a fix batch (Opus):
+
+- **A use-after-free between the host thread and MsQuic's worker** (high):
+  the id lookups drop the lock and return a raw pointer, the worker frees
+  the object on shutdown-complete, and the host's next send dereferences
+  it. One in three release runs crashes on each target under an ordinary
+  peer-driven stream teardown; three of three under ASan. The fix is an
+  object kept alive across the call, not a guard.
+- **Event 7 is not one per frame send**: the kind-byte send completes as
+  its own event with nothing to tell it apart, six events for five frames.
+- **The initiator of a shutdown never learns its connection is gone**:
+  MsQuic gives it only shutdown-complete, which the bridge swallows.
+- **Return codes invert by platform**: `QUIC_STATUS` is a negative HRESULT
+  on Windows and a positive errno on POSIX, so a Linux host checking for a
+  negative code misses every failure; the README promised negative.
+- **`runtime_close` wakes a blocked poller into freed memory**; the wake
+  makes the pattern look supported. Close must quiesce.
+- **No host-facing header**: the struct layout and the twelve signatures
+  live in the `.cpp` and the spec; Soul wrote its C consumer from the spec.
+- Smaller: an unbounded per-connection trace string from the v1
+  diagnostics; a listener config failure leaving a dead handle in the map;
+  a stream emplaced after start; a partial listener open leaving an entry;
+  a null-payload poll consuming the event; the DLL importing the VC
+  runtime with the README silent.
+
+The Q9 pin change and the manifest's stale commit line ride in the same
+batch.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
