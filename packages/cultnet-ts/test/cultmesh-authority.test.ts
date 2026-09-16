@@ -17,6 +17,7 @@ import type { CultMeshSessionOpenMessage } from "../src/contracts";
 import {
   base64ToBytes,
   bytesToBase64,
+  canonicalFields,
   canonicalRoute,
   canonicalSession,
   isLoopbackEndpoint,
@@ -120,6 +121,22 @@ test("an unsigned loopback route is accepted only under local-development", asyn
   await assert.rejects(verifyAuthorityRoute(unsigned, { mode: "authenticated-remote" }), /Odin-signed authority certificate/);
 });
 
+test("a certificate whose signature is empty or whitespace is an unsigned route, as in C#", async () => {
+  for (const signature of ["", "   ", "\n\t "]) {
+    const remote = signedRoute();
+    const remoteBlank = { ...remote.route, certificate: { ...remote.route.certificate!, signature } };
+    await assert.rejects(verifyAuthorityRoute(remoteBlank, remoteTrust(remote.odin.publicKey)), /Odin-signed authority certificate/);
+    await assert.rejects(
+      verifyAuthorityRoute(remoteBlank, { ...remoteTrust(remote.odin.publicKey), mode: "local-development" }),
+      /Odin-signed authority certificate/,
+    );
+    const loopback = signedRoute("ws://127.0.0.1:4050/mesh");
+    const loopbackBlank = { ...loopback.route, certificate: { ...loopback.route.certificate!, signature } };
+    await verifyAuthorityRoute(loopbackBlank, { ...remoteTrust(loopback.odin.publicKey), mode: "local-development" });
+    await assert.rejects(verifyAuthorityRoute(loopbackBlank, remoteTrust(loopback.odin.publicKey)), /Odin-signed authority certificate/);
+  }
+});
+
 test("a certified route on an unprotected scheme is refused unless it is loopback under local-development", async () => {
   const remote = signedRoute("ws://provider.example/mesh");
   await assert.rejects(verifyAuthorityRoute(remote.route, remoteTrust(remote.odin.publicKey)), /channel protection/);
@@ -154,6 +171,31 @@ test("an Odin root the consumer does not trust is refused before any signature c
   await assert.rejects(verifyAuthorityRoute(route, remoteTrust(stranger.publicKey)), /signature is invalid/);
 });
 
+test("the root lookup precedes the validity window, so an expired route under an unknown root is refused as untrusted (C# order)", async () => {
+  const { route, odin } = signedRoute();
+  const expired = route.certificate!.expiresAtUnixMilliseconds + 1;
+  await assert.rejects(verifyAuthorityRoute(route, remoteTrust(odin.publicKey, expired)), /not currently valid/);
+  await assert.rejects(
+    verifyAuthorityRoute(route, { mode: "authenticated-remote", odinRoots: [{ ...odin.publicKey, keyId: "other-root" }], now: () => expired }),
+    /is not trusted/,
+  );
+});
+
+test("a trust policy listing one Odin key id twice is refused before any route is judged, as the C# constructor throws", async () => {
+  const { route, odin } = signedRoute();
+  const twin = { ...keyPair("odin-root-1").publicKey };
+  for (const odinRoots of [[odin.publicKey, twin], [twin, odin.publicKey], [odin.publicKey, odin.publicKey]]) {
+    await assert.rejects(
+      verifyAuthorityRoute(route, { mode: "authenticated-remote", odinRoots, now: () => NOW }),
+      /'odin-root-1' is listed more than once/,
+    );
+  }
+  await assert.rejects(
+    verifyAuthorityRoute({ ...route, endpoint: "ws://127.0.0.1:4050/mesh", certificate: undefined }, { mode: "local-development", odinRoots: [twin, twin] }),
+    /listed more than once/,
+  );
+});
+
 test("a mutated endpoint invalidates the Odin signature", async () => {
   const { route, odin } = signedRoute();
   await assert.rejects(
@@ -177,6 +219,50 @@ test("a signature that is not 64 P1363 bytes is refused", async () => {
   assert.equal(await verifyP256(odin.publicKey, canonicalRoute(route), "not base64!"), false);
 });
 
+test("verifyP256 reads exactly the viewed bytes: a Uint8Array, a pooled Buffer and a subarray of a large allocation verify alike", async () => {
+  const { route, odin } = signedRoute();
+  const payload = canonicalRoute(route);
+  const signature = route.certificate!.signature;
+  const pooled = Buffer.from(payload);
+  const large = Buffer.alloc(16 * 1024, 0xa5);
+  const subarray = large.subarray(1000, 1000 + payload.byteLength);
+  subarray.set(payload);
+  const offsetView = new Uint8Array(new ArrayBuffer(payload.byteLength + 64), 32, payload.byteLength);
+  offsetView.set(payload);
+  for (const view of [payload, pooled, subarray, offsetView]) {
+    assert.equal(await verifyP256(odin.publicKey, view, signature), true, `${view.constructor.name} byteOffset=${view.byteOffset}`);
+  }
+  const signatureBytes = base64ToBytes(signature);
+  const sigLarge = Buffer.alloc(16 * 1024, 0x5a);
+  sigLarge.set(signatureBytes, 4000);
+  const sigView = sigLarge.subarray(4000, 4064);
+  assert.equal(await verifyP256(odin.publicKey, payload, bytesToBase64(sigView)), true);
+  assert.equal(await verifyP256(odin.publicKey, Buffer.from(payload.subarray(1)), signature), false);
+});
+
+test("protocol ids are sorted ordinally into the transcript, whatever order the route lists them in", () => {
+  const { route } = signedRoute();
+  const unsorted = { ...route, protocolIds: ["cultmesh.realtime.v1", "cultmesh.content.v1", "cultmesh.documents.v1"] };
+  const certificate = route.certificate!;
+  const expected = canonicalFields(
+    "gamecult.cultmesh.route-certificate.v1",
+    route.verseId,
+    route.authorityRuntimeId,
+    route.endpoint,
+    "cultmesh.content.v1cultmesh.documents.v1cultmesh.realtime.v1",
+    "0",
+    route.generation,
+    certificate.providerKey.keyId,
+    certificate.providerKey.x,
+    certificate.providerKey.y,
+    certificate.odinKeyId,
+    String(certificate.issuedAtUnixMilliseconds),
+    String(certificate.expiresAtUnixMilliseconds),
+  );
+  assert.deepEqual(canonicalRoute(unsorted), expected);
+  assert.deepEqual(canonicalRoute({ ...unsorted, protocolIds: [...unsorted.protocolIds!].reverse() }), expected);
+});
+
 test("the provider session proof binds the nonce, the endpoint and the certified key", async () => {
   const { route, provider } = signedRoute();
   const open = request();
@@ -196,11 +282,20 @@ test("isProtectedEndpoint is the C# rule: wss, https, or any scheme containing q
   }
 });
 
-test("isLoopbackEndpoint recognises localhost, 127.0.0.1 and ::1 only", () => {
-  for (const loopback of ["ws://localhost:4050/mesh", "ws://127.0.0.1:4050/mesh", "ws://[::1]:4050/mesh", "wss://LOCALHOST/mesh"]) {
+// The accepted and refused hosts here are what `System.Uri.IsLoopback` answered
+// through `CultMeshAuthorityTrustPolicy` on 2026-09-16; keep them in step.
+test("isLoopbackEndpoint is the C# System.Uri.IsLoopback set", () => {
+  for (const loopback of [
+    "ws://localhost:4050/mesh", "wss://LOCALHOST/mesh", "ws://loopback:4050/mesh", "ws://LoopBack:4050/mesh",
+    "ws://127.0.0.1:4050/mesh", "ws://127.0.0.2/mesh", "ws://127.255.255.254/mesh", "ws://127.1/mesh", "ws://0x7f000001/mesh", "ws://2130706433/mesh",
+    "ws://[::1]:4050/mesh", "ws://[0:0:0:0:0:0:0:1]:4050/mesh", "ws://[::ffff:127.0.0.1]/mesh", "ws://[::ffff:7f00:1]/mesh",
+  ]) {
     assert.equal(isLoopbackEndpoint(loopback), true, loopback);
   }
-  for (const remote of ["ws://192.0.2.10:4050/mesh", "wss://provider.example/mesh", "ws://127.0.0.2/mesh", "not a url"]) {
+  for (const remote of [
+    "ws://192.0.2.10:4050/mesh", "wss://provider.example/mesh", "ws://[::ffff:127.0.0.2]/mesh", "ws://localhost./mesh",
+    "ws://localhost.localdomain/mesh", "ws://127.example/mesh", "ws://0.0.0.0/mesh", "ws://[::]/mesh", "not a url",
+  ]) {
     assert.equal(isLoopbackEndpoint(remote), false, remote);
   }
 });

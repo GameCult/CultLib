@@ -43,8 +43,43 @@ const mutations = [
   },
   {
     rule: "Odin root lookup by key id",
-    old: "candidate => candidate.keyId === certificate.odinKeyId",
-    new: "candidate => true",
+    old: "const root = roots.get(certificate.odinKeyId);",
+    new: "const root = [...roots.values()][0];",
+  },
+  {
+    rule: "empty or whitespace signature is an unsigned route",
+    old: 'if (!certificate || signature === "") {',
+    new: "if (!certificate) {",
+  },
+  {
+    rule: "root lookup precedes the validity window",
+    old: "  const root = roots.get(certificate.odinKeyId);\n" +
+      "  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);\n" +
+      "  const now = trust.now?.() ?? Date.now();\n" +
+      "  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {\n" +
+      '    throw new Error("The Odin route certificate is not currently valid.");\n' +
+      "  }\n",
+    new: "  const now = trust.now?.() ?? Date.now();\n" +
+      "  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {\n" +
+      '    throw new Error("The Odin route certificate is not currently valid.");\n' +
+      "  }\n" +
+      "  const root = roots.get(certificate.odinKeyId);\n" +
+      "  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);\n",
+  },
+  {
+    rule: "duplicate Odin root key ids refuse the policy",
+    old: "    if (roots.has(root.keyId)) throw new Error(`Odin root key id '${root.keyId}' is listed more than once in the trust policy.`);\n",
+    new: "",
+  },
+  {
+    rule: "protocol ids are sorted into the transcript",
+    old: "].sort().join(",
+    new: "].join(",
+  },
+  {
+    rule: "verifyP256 copies the viewed payload bytes, not the pool behind a Buffer",
+    old: "      ownedBytes(payload),",
+    new: "      payload.slice().buffer as ArrayBuffer,",
   },
   {
     rule: "route transcript field order",
@@ -75,6 +110,21 @@ const mutations = [
     new: 'host === "::2"',
   },
   {
+    rule: "loopback is all of 127.0.0.0/8",
+    old: "/^127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$/.test(host)",
+    new: 'host === "127.0.0.1"',
+  },
+  {
+    rule: "loopback recognises the host name loopback",
+    old: 'host === "loopback" || ',
+    new: "",
+  },
+  {
+    rule: "loopback recognises the IPv4-mapped ::ffff:127.0.0.1",
+    old: 'host === "::ffff:7f00:1" ||',
+    new: "",
+  },
+  {
     rule: "protected scheme: any scheme containing quic",
     old: 'scheme.includes("quic")',
     new: 'scheme === "quic"',
@@ -89,6 +139,11 @@ const mutations = [
 const original = readFileSync(target);
 const originalText = original.toString("utf8");
 const originalDigest = digest(original);
+
+// Anchors are written with "\n"; the checkout may be CRLF (autocrlf). Match
+// the file's own line ending so a multi-line anchor cannot silently miss.
+const eol = originalText.includes("\r\n") ? "\r\n" : "\n";
+const withEol = text => text.replace(/\r?\n/g, eol);
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -128,11 +183,12 @@ try {
   if (!controlPass) failed = true;
   else {
     for (const mutation of mutations) {
-      const count = occurrences(originalText, mutation.old);
+      const [old, replacement] = [withEol(mutation.old), withEol(mutation.new)];
+      const count = occurrences(originalText, old);
       if (count !== 1) {
         throw new Error(`anchor for '${mutation.rule}' matched ${count} times, expected exactly 1`);
       }
-      writeFileSync(target, Buffer.from(originalText.replace(mutation.old, mutation.new), "utf8"));
+      writeFileSync(target, Buffer.from(originalText.replace(old, replacement), "utf8"));
       const pass = testsPass();
       restore();
       results.push({ rule: mutation.rule, outcome: pass ? "SURVIVED" : "killed" });
