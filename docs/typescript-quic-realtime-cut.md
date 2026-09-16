@@ -39,12 +39,43 @@ table. The no-control-byte test caught a literal U+001F the Write tool put
 into its own introducing comment.
 
 Two items for Self's ruling, both taken: **`npm run test:ts` and `build:ts`
-have been broken since `8dd5a45` (2026-09-14)** because
-`scripts/run-typescript-workspaces.mjs:9` names the old unscoped
-`cultcache-ts`; one-word fix, lands in Cut 2's fix batch. **The runner is
-still named `mutate-cultmesh-authority.mjs`** while carrying a codec
-target; it is renamed `scripts/mutate-cultmesh.mjs` in the same batch and
-this map's references follow.
+have been broken since `8cb3b72`** (the scoped rename; Hands first
+attributed it to `8dd5a45`, which only bumped a version, and Soul
+corrected it) because `scripts/run-typescript-workspaces.mjs:9` names the
+old unscoped `cultcache-ts`; one-word fix, lands in Cut 2's fix batch.
+**The runner is still named `mutate-cultmesh-authority.mjs`** while
+carrying a codec target; it is renamed `scripts/mutate-cultmesh.mjs` in
+the same batch and this map's references follow.
+
+**Soul's pass on Cut 2** (Fable; probes `probe-cs/`, `parity.mjs`,
+`symmetric.mjs` and others in the session scratchpad) held byte parity in
+both directions over its own thirty-nine encode specs and thirty
+hand-built byte strings: identical digests, identical refusal messages,
+identical U+FFFD counts on invalid UTF-8, the byte-order mark round trip,
+all four digest ceilings regenerated from their build rules on both sides,
+the five decode refusals in the same order, and every symmetric two-site
+mutant dead. **Cut 2 does not close as promised**, on three small findings
+in the fix batch:
+
+- **The mutant Hands called equivalent is not.** A 37-byte frame whose
+  identity lengths cancel a negative payload length sums to exactly 37 and
+  decodes to blank identities where C# refuses. The clause is right; nothing
+  defended it. Medium.
+- **The decoded payload aliases the frame when the input is a Node
+  `Buffer`**, because `Buffer.prototype.slice` is a view; the test used only
+  a `Uint8Array`. The same trap the repo recorded for `verifyP256`. Medium
+  for the bridge, nil today.
+- **Neither half of the frame parity runs in CI**; a C# codec change leaves
+  everything green. The Cut 1 scar, repeated. Medium.
+
+Recorded, not defects: the reference encoder writes delivery values its
+own decoder refuses (a cast on the enum), where TypeScript refuses at
+encode, the stricter side; an overflow near `int.MaxValue` is reachable
+from hostile bytes and refused on both sides with different words; the
+runner's sentinel detects only the last mutant by design, and the sidecar
+repair names the mutation a dead run was inside. **Cut 3 may start in
+parallel**, provided the first two land before the bridge hands the codec
+a `Buffer`; both are in the same Hands pass ahead of it.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
