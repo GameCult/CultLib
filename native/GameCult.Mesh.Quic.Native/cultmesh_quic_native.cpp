@@ -1,8 +1,29 @@
-#include <windows.h>
-#include <wincrypt.h>
-#include <bcrypt.h>
+// The CultMesh MsQuic bridge: one MsQuic body, two roles, two platforms.
+//
+// This file owns MsQuic registration, configuration, listener, connection and
+// stream handles, TLS credential loading, the 1-byte-kind plus 4-byte-LE-length
+// QUIC stream framing, and a single event queue per runtime. It owns transport
+// only. It never decodes a CultMesh frame, never decides delivery semantics,
+// never coalesces, never reconnects, and in the v2 path never accepts a
+// certificate on its own: the host answers, through
+// `cultmesh_quic_connection_certificate_complete`.
+//
+// No host callbacks. Every crossing is the host calling in, including the one
+// blocking wait (`cultmesh_quic_next_event`). MsQuic's worker threads only ever
+// push onto the queue and wake that wait, so the bridge is runtime-neutral: it
+// includes no Node headers, no Unity headers, and nothing platform-specific
+// outside the `_WIN32` block at the bottom of this file.
+//
+// Two ABIs live here. v2 is the queue API above, for any host. v1 is the five
+// exports the Unity managed connector already imports by name
+// (`CultMeshNativeQuicRealtimeTransport.cs`, `NativeMethods`), kept Windows-only
+// and implemented on top of a private v2 runtime. v1 is the only place a
+// certificate pin is compared in C, because that is the contract Unity was
+// shipped with; it delegates everything else and decides nothing new.
+
 #include <msquic.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -13,13 +34,30 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#if defined(GAMECULT_MESH_QUIC_NATIVE_EXPORTS)
+#if defined(_WIN32)
 #define CULTMESH_API extern "C" __declspec(dllexport)
 #else
-#define CULTMESH_API extern "C" __declspec(dllimport)
+#define CULTMESH_API extern "C" __attribute__((visibility("default")))
 #endif
+
+// The event struct crosses the ABI by layout, not by header: hosts describe it
+// in their own FFI. Keep it exactly 64 bytes with no implicit padding.
+extern "C" struct cultmesh_quic_event {
+    uint32_t type;
+    uint32_t stream_kind;
+    uint64_t listener_id;
+    uint64_t connection_id;
+    uint64_t stream_id;
+    uint64_t code;
+    int32_t status;
+    int32_t payload_length;
+    uint8_t reserved[16];
+};
+static_assert(sizeof(cultmesh_quic_event) == 64, "the event struct is a 64-byte ABI contract");
+static_assert(offsetof(cultmesh_quic_event, payload_length) == 44, "event field offsets are an ABI contract");
 
 namespace {
 
@@ -31,6 +69,903 @@ constexpr uint8_t kLatestOnlyStream = 2;
 constexpr uint32_t kMaximumEncodedFrameBytes = (64u * 1024u * 1024u) + 37u + (3u * 65535u);
 constexpr char kAlpn[] = "cultmesh-state-v1";
 
+// Mirrors the C# server and connector: CultMeshQuicRealtimeTransport.cs:77,:202
+// for the stream ceiling, and the idle/keep-alive pair the v1 bridge already
+// used (:335-338).
+constexpr uint32_t kIdleTimeoutMs = 30000;
+constexpr uint32_t kKeepAliveIntervalMs = 5000;
+constexpr uint16_t kPeerUnidiStreamCount = 1024;
+// If the host never answers the certificate event, this is what closes the
+// connection instead of leaking it: MsQuic's own handshake timeout fires and
+// the shutdown arrives as event 4.
+constexpr uint32_t kHandshakeIdleTimeoutMs = 10000;
+
+enum EventType : uint32_t {
+    kEventListenerNewConnection = 1,
+    kEventConnectionConnected = 2,
+    kEventConnectionCertificateReceived = 3,
+    kEventConnectionShutdown = 4,
+    kEventStreamStarted = 5,
+    kEventStreamFrame = 6,
+    kEventStreamSendComplete = 7,
+    kEventStreamShutdown = 8,
+    kEventListenerStopped = 9,
+};
+
+struct Runtime;
+struct Connection;
+
+struct QueuedEvent {
+    cultmesh_quic_event header{};
+    std::vector<uint8_t> payload;
+};
+
+struct Stream {
+    Runtime* runtime = nullptr;
+    Connection* owner = nullptr;
+    HQUIC handle = nullptr;
+    uint64_t id = 0;
+    uint8_t kind = 0;
+    bool inbound = false;
+    bool has_kind = false;
+    // Inbound reassembly only. MsQuic delivers stream bytes in arbitrary
+    // chunks, so the length prefix and the frame it introduces can arrive in
+    // separate receives.
+    std::vector<uint8_t> buffered;
+};
+
+struct Connection {
+    Runtime* runtime = nullptr;
+    HQUIC handle = nullptr;
+    uint64_t id = 0;
+    uint64_t listener_id = 0;
+    bool inbound = false;
+    bool closing = false;
+    // Two paths can reach `ConnectionClose`: the shutdown-complete callback and
+    // `cultmesh_quic_runtime_close`, which cannot lean on the callback because a
+    // silent shutdown produces none. Whoever gets here first closes; the other
+    // does nothing. MsQuic treats a second close of the same handle as a bug.
+    std::atomic<bool> handle_closed{false};
+    // v1 only. A connection carrying a pin has its certificate answered in C
+    // against that pin; a v2 connection never sets this and is always answered
+    // by the host. Nothing outside the `_WIN32` block below ever sets it.
+    bool has_pin = false;
+    std::array<uint8_t, 32> pin{};
+    // v1 diagnostics: the MsQuic event sequence, which the v1 error string
+    // reports and nothing in v2 reads.
+    std::string trace;
+};
+
+struct Listener {
+    Runtime* runtime = nullptr;
+    HQUIC handle = nullptr;
+    HQUIC configuration = nullptr;
+    uint64_t id = 0;
+    bool stopped = false;
+};
+
+struct Runtime {
+    const QUIC_API_TABLE* api = nullptr;
+    HQUIC registration = nullptr;
+    // One client configuration serves every outbound connection: the ALPN,
+    // settings and credential flags are identical for all of them.
+    HQUIC client_configuration = nullptr;
+
+    std::mutex gate;
+    std::condition_variable signal;
+    std::deque<QueuedEvent> events;
+    std::unordered_map<uint64_t, std::unique_ptr<Listener>> listeners;
+    std::unordered_map<uint64_t, std::unique_ptr<Connection>> connections;
+    std::unordered_map<uint64_t, std::unique_ptr<Stream>> streams;
+    uint64_t next_id = 1;
+    std::string error;
+    bool closing = false;
+};
+
+// Every send buffer outlives its `StreamSend` call: MsQuic reads the bytes
+// asynchronously and only releases them at SEND_COMPLETE, where this is freed.
+struct SendRequest {
+    QUIC_BUFFER buffer{};
+    std::vector<uint8_t> bytes;
+};
+
+std::string Hex(uint64_t value) {
+    std::ostringstream text;
+    text << "0x" << std::hex << std::uppercase << value;
+    return text.str();
+}
+
+void SetError(Runtime* runtime, const std::string& message) {
+    if (runtime == nullptr) return;
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    runtime->error = message;
+}
+
+// The only way anything reaches the host. Callers must not hold `gate`.
+void Publish(Runtime* runtime, const cultmesh_quic_event& header, const uint8_t* payload, size_t payload_length) {
+    QueuedEvent queued;
+    queued.header = header;
+    queued.header.payload_length = static_cast<int32_t>(payload_length);
+    if (payload != nullptr && payload_length > 0)
+        queued.payload.assign(payload, payload + payload_length);
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        if (runtime->closing) return;
+        runtime->events.push_back(std::move(queued));
+    }
+    runtime->signal.notify_all();
+}
+
+void PublishSimple(Runtime* runtime, uint32_t type, uint64_t listener_id, uint64_t connection_id,
+                   uint64_t stream_id, uint64_t code, int32_t status, uint32_t stream_kind = 0) {
+    cultmesh_quic_event header{};
+    header.type = type;
+    header.stream_kind = stream_kind;
+    header.listener_id = listener_id;
+    header.connection_id = connection_id;
+    header.stream_id = stream_id;
+    header.code = code;
+    header.status = status;
+    Publish(runtime, header, nullptr, 0);
+}
+
+void AppendTrace(Connection* connection, const std::string& event) {
+    if (connection == nullptr) return;
+    std::lock_guard<std::mutex> lock(connection->runtime->gate);
+    if (!connection->trace.empty()) connection->trace += ",";
+    connection->trace += event;
+}
+
+uint32_t ReadUInt32LittleEndian(const uint8_t* value) {
+    return static_cast<uint32_t>(value[0]) |
+        (static_cast<uint32_t>(value[1]) << 8) |
+        (static_cast<uint32_t>(value[2]) << 16) |
+        (static_cast<uint32_t>(value[3]) << 24);
+}
+
+void WriteUInt32LittleEndian(uint8_t* destination, uint32_t value) {
+    destination[0] = static_cast<uint8_t>(value & 0xff);
+    destination[1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    destination[2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    destination[3] = static_cast<uint8_t>((value >> 24) & 0xff);
+}
+
+uint64_t NextId(Runtime* runtime) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    return runtime->next_id++;
+}
+
+Listener* FindListener(Runtime* runtime, uint64_t id) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    const auto found = runtime->listeners.find(id);
+    return found == runtime->listeners.end() ? nullptr : found->second.get();
+}
+
+Connection* FindConnection(Runtime* runtime, uint64_t id) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    const auto found = runtime->connections.find(id);
+    return found == runtime->connections.end() ? nullptr : found->second.get();
+}
+
+Stream* FindStream(Runtime* runtime, uint64_t id) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    const auto found = runtime->streams.find(id);
+    return found == runtime->streams.end() ? nullptr : found->second.get();
+}
+
+void ShutdownConnectionForProtocolFault(Connection* connection, const std::string& message) {
+    if (connection == nullptr) return;
+    SetError(connection->runtime, message);
+    if (connection->runtime->api != nullptr && connection->handle != nullptr)
+        connection->runtime->api->ConnectionShutdown(
+            connection->handle, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, kStreamAbortCode);
+}
+
+// Reassembles whole encoded frames out of the stream byte sequence and
+// publishes one event 6 per frame, length prefix stripped. The first byte of an
+// inbound stream is its kind, which becomes event 5.
+bool ConsumeFrames(Stream* stream) {
+    Runtime* runtime = stream->runtime;
+    auto& bytes = stream->buffered;
+    if (!stream->has_kind) {
+        if (bytes.empty()) return true;
+        stream->kind = bytes.front();
+        bytes.erase(bytes.begin());
+        stream->has_kind = true;
+        if (stream->kind != kReliableStream && stream->kind != kLatestOnlyStream) {
+            ShutdownConnectionForProtocolFault(stream->owner, "CultMesh QUIC stream kind is invalid.");
+            return false;
+        }
+        PublishSimple(runtime, kEventStreamStarted, stream->owner->listener_id, stream->owner->id,
+                      stream->id, 0, 0, stream->kind);
+    }
+
+    while (bytes.size() >= sizeof(uint32_t)) {
+        const uint32_t length = ReadUInt32LittleEndian(bytes.data());
+        if (length == 0 || length > kMaximumEncodedFrameBytes) {
+            ShutdownConnectionForProtocolFault(stream->owner, "CultMesh QUIC frame length is invalid.");
+            return false;
+        }
+        const size_t framed_length = sizeof(uint32_t) + static_cast<size_t>(length);
+        if (bytes.size() < framed_length) return true;
+
+        cultmesh_quic_event header{};
+        header.type = kEventStreamFrame;
+        header.stream_kind = stream->kind;
+        header.listener_id = stream->owner->listener_id;
+        header.connection_id = stream->owner->id;
+        header.stream_id = stream->id;
+        Publish(runtime, header, bytes.data() + sizeof(uint32_t), length);
+
+        bytes.erase(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(framed_length));
+    }
+    return true;
+}
+
+void DestroyStream(Runtime* runtime, uint64_t stream_id) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    runtime->streams.erase(stream_id);
+}
+
+QUIC_STATUS QUIC_API StreamCallback(HQUIC handle, void* context, QUIC_STREAM_EVENT* event) {
+    auto* stream = static_cast<Stream*>(context);
+    Runtime* runtime = stream->runtime;
+    switch (event->Type) {
+    case QUIC_STREAM_EVENT_RECEIVE:
+        for (uint32_t index = 0; index < event->RECEIVE.BufferCount; ++index) {
+            const auto& buffer = event->RECEIVE.Buffers[index];
+            stream->buffered.insert(stream->buffered.end(), buffer.Buffer, buffer.Buffer + buffer.Length);
+        }
+        ConsumeFrames(stream);
+        break;
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        delete static_cast<SendRequest*>(event->SEND_COMPLETE.ClientContext);
+        PublishSimple(runtime, kEventStreamSendComplete, stream->owner->listener_id, stream->owner->id,
+                      stream->id, 0, 0, stream->kind);
+        break;
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+        if (!stream->buffered.empty())
+            ShutdownConnectionForProtocolFault(stream->owner, "CultMesh QUIC stream ended with a truncated frame.");
+        break;
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        const uint64_t stream_id = stream->id;
+        const uint64_t connection_id = stream->owner->id;
+        const uint64_t listener_id = stream->owner->listener_id;
+        const uint32_t kind = stream->kind;
+        if (!event->SHUTDOWN_COMPLETE.AppCloseInProgress) runtime->api->StreamClose(handle);
+        DestroyStream(runtime, stream_id);
+        PublishSimple(runtime, kEventStreamShutdown, listener_id, connection_id, stream_id, 0, 0, kind);
+        break;
+    }
+    default:
+        break;
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
+void DestroyConnection(Runtime* runtime, uint64_t connection_id) {
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    for (auto it = runtime->streams.begin(); it != runtime->streams.end();)
+        it = it->second->owner != nullptr && it->second->owner->id == connection_id
+            ? runtime->streams.erase(it)
+            : std::next(it);
+    runtime->connections.erase(connection_id);
+}
+
+#if defined(_WIN32)
+// Declared here, defined in the v1 block at the bottom: the pin comparison is
+// the one piece of the certificate path that is Windows-only and v1-only.
+bool CertificateMatchesPin(Connection* connection, QUIC_CERTIFICATE* certificate);
+#endif
+
+QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNECTION_EVENT* event) {
+    auto* connection = static_cast<Connection*>(context);
+    Runtime* runtime = connection->runtime;
+    AppendTrace(connection, "event=" + std::to_string(static_cast<int>(event->Type)));
+    switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_CONNECTED:
+        PublishSimple(runtime, kEventConnectionConnected, connection->listener_id, connection->id, 0, 0, 0);
+        break;
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+        auto stream = std::make_unique<Stream>();
+        stream->runtime = runtime;
+        stream->owner = connection;
+        stream->handle = event->PEER_STREAM_STARTED.Stream;
+        stream->inbound = true;
+        stream->id = NextId(runtime);
+        Stream* raw = stream.get();
+        {
+            std::lock_guard<std::mutex> lock(runtime->gate);
+            runtime->streams.emplace(raw->id, std::move(stream));
+        }
+        runtime->api->SetCallbackHandler(
+            event->PEER_STREAM_STARTED.Stream, reinterpret_cast<void*>(StreamCallback), raw);
+        break;
+    }
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+        const auto* encoded = reinterpret_cast<const QUIC_BUFFER*>(event->PEER_CERTIFICATE_RECEIVED.Certificate);
+        AppendTrace(connection, "certificate-status=" +
+            Hex(static_cast<uint64_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus)));
+#if defined(_WIN32)
+        if (connection->has_pin) {
+            // The v1 contract: the pin decision is made here, in C, and the host
+            // is never asked. Only `cultmesh_quic_open` sets `has_pin`.
+            const bool matches = CertificateMatchesPin(
+                connection, event->PEER_CERTIFICATE_RECEIVED.Certificate);
+            if (!matches)
+                SetError(runtime,
+                    "CultMesh QUIC provider certificate does not match the advertised SHA-256 pin.");
+            const auto completion = runtime->api->ConnectionCertificateValidationComplete(
+                handle,
+                matches ? static_cast<BOOLEAN>(1) : static_cast<BOOLEAN>(0),
+                matches ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
+            if (QUIC_FAILED(completion)) {
+                SetError(runtime, "CultMesh QUIC certificate validation completion failed (status=" +
+                    Hex(static_cast<uint64_t>(completion)) + ").");
+                return completion;
+            }
+            return QUIC_STATUS_PENDING;
+        }
+#endif
+        // v2: the DER goes to the host and the handshake waits. Nothing here
+        // decides trust. If the host never answers, MsQuic's handshake timeout
+        // closes the connection and event 4 reports it.
+        cultmesh_quic_event header{};
+        header.type = kEventConnectionCertificateReceived;
+        header.listener_id = connection->listener_id;
+        header.connection_id = connection->id;
+        header.status = static_cast<int32_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus);
+        const uint8_t* der = (encoded != nullptr) ? encoded->Buffer : nullptr;
+        const size_t der_length = (encoded != nullptr) ? encoded->Length : 0;
+        Publish(runtime, header, der, der_length);
+        return QUIC_STATUS_PENDING;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+        const std::string reason = "CultMesh QUIC connection was shut down by the transport (status=" +
+            Hex(static_cast<uint64_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) + ", error=" +
+            Hex(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode) + ").";
+        cultmesh_quic_event header{};
+        header.type = kEventConnectionShutdown;
+        header.listener_id = connection->listener_id;
+        header.connection_id = connection->id;
+        header.code = event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
+        header.status = static_cast<int32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
+        Publish(runtime, header, reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
+        break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+        const std::string reason = "CultMesh QUIC connection was shut down by the peer.";
+        cultmesh_quic_event header{};
+        header.type = kEventConnectionShutdown;
+        header.listener_id = connection->listener_id;
+        header.connection_id = connection->id;
+        header.code = event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
+        Publish(runtime, header, reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
+        break;
+    }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+        const uint64_t connection_id = connection->id;
+        if (!event->SHUTDOWN_COMPLETE.AppCloseInProgress && !connection->handle_closed.exchange(true))
+            runtime->api->ConnectionClose(handle);
+        DestroyConnection(runtime, connection_id);
+        break;
+    }
+    default:
+        break;
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
+QUIC_STATUS QUIC_API ListenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT* event) {
+    auto* listener = static_cast<Listener*>(context);
+    Runtime* runtime = listener->runtime;
+    switch (event->Type) {
+    case QUIC_LISTENER_EVENT_NEW_CONNECTION: {
+        auto connection = std::make_unique<Connection>();
+        connection->runtime = runtime;
+        connection->handle = event->NEW_CONNECTION.Connection;
+        connection->inbound = true;
+        connection->listener_id = listener->id;
+        connection->id = NextId(runtime);
+        Connection* raw = connection.get();
+        {
+            std::lock_guard<std::mutex> lock(runtime->gate);
+            runtime->connections.emplace(raw->id, std::move(connection));
+        }
+        runtime->api->SetCallbackHandler(
+            event->NEW_CONNECTION.Connection, reinterpret_cast<void*>(ConnectionCallback), raw);
+        const auto status = runtime->api->ConnectionSetConfiguration(
+            event->NEW_CONNECTION.Connection, listener->configuration);
+        if (QUIC_FAILED(status)) {
+            SetError(runtime, "CultMesh QUIC inbound connection configuration failed (status=" +
+                Hex(static_cast<uint64_t>(status)) + ").");
+            return status;
+        }
+        PublishSimple(runtime, kEventListenerNewConnection, listener->id, raw->id, 0, 0, 0);
+        break;
+    }
+    case QUIC_LISTENER_EVENT_STOP_COMPLETE:
+        PublishSimple(runtime, kEventListenerStopped, listener->id, 0, 0, 0, 0);
+        break;
+    default:
+        break;
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
+void FillSettings(QUIC_SETTINGS& settings) {
+    settings.IdleTimeoutMs = kIdleTimeoutMs;
+    settings.IsSet.IdleTimeoutMs = 1;
+    settings.KeepAliveIntervalMs = kKeepAliveIntervalMs;
+    settings.IsSet.KeepAliveIntervalMs = 1;
+    settings.PeerUnidiStreamCount = kPeerUnidiStreamCount;
+    settings.IsSet.PeerUnidiStreamCount = 1;
+    settings.HandshakeIdleTimeoutMs = kHandshakeIdleTimeoutMs;
+    settings.IsSet.HandshakeIdleTimeoutMs = 1;
+}
+
+QUIC_BUFFER AlpnBuffer() {
+    return QUIC_BUFFER{
+        static_cast<uint32_t>(sizeof(kAlpn) - 1),
+        reinterpret_cast<uint8_t*>(const_cast<char*>(kAlpn))
+    };
+}
+
+// Opened once per runtime, on first outbound connection.
+QUIC_STATUS EnsureClientConfiguration(Runtime* runtime) {
+    if (runtime->client_configuration != nullptr) return QUIC_STATUS_SUCCESS;
+
+    QUIC_SETTINGS settings{};
+    FillSettings(settings);
+    QUIC_BUFFER alpn = AlpnBuffer();
+    HQUIC configuration = nullptr;
+    auto status = runtime->api->ConfigurationOpen(
+        runtime->registration, &alpn, 1, &settings, sizeof(settings), nullptr, &configuration);
+    if (QUIC_FAILED(status)) return status;
+
+    QUIC_CREDENTIAL_CONFIG credentials{};
+    credentials.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+        QUIC_CREDENTIAL_FLAG_CLIENT |
+        QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED |
+        QUIC_CREDENTIAL_FLAG_DEFER_CERTIFICATE_VALIDATION |
+        QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES);
+    status = runtime->api->ConfigurationLoadCredential(configuration, &credentials);
+    if (QUIC_FAILED(status)) {
+        runtime->api->ConfigurationClose(configuration);
+        return status;
+    }
+    runtime->client_configuration = configuration;
+    return QUIC_STATUS_SUCCESS;
+}
+
+// `pin` is the v1 shim's and nothing else passes it. It must be attached before
+// `ConnectionStart`, not after it returns: the handshake runs on an MsQuic
+// worker thread and reaches the certificate event immediately on loopback, so a
+// pin applied afterwards loses the race, the connection takes the v2 path, and
+// the handshake stalls waiting for an answer from a host that was never told to
+// give one.
+int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64_t* out_connection_id,
+                       Connection** out_connection, const std::array<uint8_t, 32>* pin) {
+    if (runtime == nullptr || host == nullptr || *host == '\0' || port == 0 || out_connection_id == nullptr)
+        return -1;
+    *out_connection_id = 0;
+
+    auto status = EnsureClientConfiguration(runtime);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC client configuration failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+
+    auto connection = std::make_unique<Connection>();
+    connection->runtime = runtime;
+    connection->id = NextId(runtime);
+    if (pin != nullptr) {
+        connection->has_pin = true;
+        connection->pin = *pin;
+    }
+    Connection* raw = connection.get();
+
+    status = runtime->api->ConnectionOpen(runtime->registration, ConnectionCallback, raw, &raw->handle);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC connection open failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->connections.emplace(raw->id, std::move(connection));
+    }
+
+    status = runtime->api->ConnectionStart(
+        raw->handle, runtime->client_configuration, QUIC_ADDRESS_FAMILY_UNSPEC, host, port);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC connection start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        runtime->api->ConnectionClose(raw->handle);
+        DestroyConnection(runtime, raw->id);
+        return static_cast<int32_t>(status);
+    }
+
+    *out_connection_id = raw->id;
+    if (out_connection != nullptr) *out_connection = raw;
+    return 0;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// C ABI v2: the runtime-neutral bridge.
+// ---------------------------------------------------------------------------
+
+CULTMESH_API int32_t cultmesh_quic_runtime_open(const char* app_name, void** out_runtime) {
+    if (out_runtime == nullptr) return -1;
+    *out_runtime = nullptr;
+    auto runtime = std::make_unique<Runtime>();
+
+    auto status = MsQuicOpenVersion(kApiVersion, reinterpret_cast<const void**>(&runtime->api));
+    if (QUIC_FAILED(status)) return static_cast<int32_t>(status);
+
+    const QUIC_REGISTRATION_CONFIG registration_config = {
+        (app_name != nullptr && *app_name != '\0') ? app_name : "GameCult.Mesh.Quic.Native",
+        QUIC_EXECUTION_PROFILE_TYPE_REAL_TIME
+    };
+    status = runtime->api->RegistrationOpen(&registration_config, &runtime->registration);
+    if (QUIC_FAILED(status)) {
+        MsQuicClose(runtime->api);
+        return static_cast<int32_t>(status);
+    }
+
+    *out_runtime = runtime.release();
+    return 0;
+}
+
+CULTMESH_API void cultmesh_quic_runtime_close(void* handle) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->closing = true;
+    }
+    runtime->signal.notify_all();
+
+    // Bottom-up, and by the app's own hand. `RegistrationClose` blocks until
+    // every child handle the app opened has been closed *by the app*, and a
+    // silent shutdown delivers no shutdown events at all, so leaning on the
+    // callbacks to do the closing deadlocks the caller forever. Connections are
+    // closed here; MsQuic cascades that to their streams, which arrive at
+    // `StreamCallback` with `AppCloseInProgress` set.
+    //
+    // The handles are copied out from under the lock and closed without it: a
+    // callback running concurrently takes the same lock, and `ConnectionClose`
+    // does not return until those callbacks have finished.
+    std::vector<HQUIC> connections;
+    std::vector<HQUIC> listeners;
+    std::vector<HQUIC> configurations;
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        for (auto& entry : runtime->connections)
+            if (entry.second->handle != nullptr && !entry.second->handle_closed.exchange(true))
+                connections.push_back(entry.second->handle);
+        for (auto& entry : runtime->listeners) {
+            if (entry.second->handle != nullptr) listeners.push_back(entry.second->handle);
+            if (entry.second->configuration != nullptr) configurations.push_back(entry.second->configuration);
+        }
+    }
+    for (HQUIC connection : connections) {
+        runtime->api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, kConnectionCloseCode);
+        runtime->api->ConnectionClose(connection);
+    }
+    for (HQUIC listener : listeners) runtime->api->ListenerClose(listener);
+    for (HQUIC configuration : configurations) runtime->api->ConfigurationClose(configuration);
+    if (runtime->client_configuration != nullptr) {
+        runtime->api->ConfigurationClose(runtime->client_configuration);
+        runtime->client_configuration = nullptr;
+    }
+
+    // No callback can be running past this point, so the tracking maps are safe
+    // to drop.
+    if (runtime->registration != nullptr) {
+        runtime->api->RegistrationClose(runtime->registration);
+        runtime->registration = nullptr;
+    }
+    runtime->streams.clear();
+    runtime->connections.clear();
+    runtime->listeners.clear();
+    if (runtime->api != nullptr) {
+        MsQuicClose(runtime->api);
+        runtime->api = nullptr;
+    }
+    delete runtime;
+}
+
+CULTMESH_API int32_t cultmesh_quic_listener_open(
+    void* handle, const char* host, uint16_t port,
+    const uint8_t* pkcs12, int32_t pkcs12_len, const char* password,
+    uint64_t* out_listener_id, uint16_t* out_bound_port) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr || pkcs12 == nullptr || pkcs12_len <= 0 || out_listener_id == nullptr)
+        return -1;
+    *out_listener_id = 0;
+    if (out_bound_port != nullptr) *out_bound_port = 0;
+
+    auto listener = std::make_unique<Listener>();
+    listener->runtime = runtime;
+    listener->id = NextId(runtime);
+
+    QUIC_SETTINGS settings{};
+    FillSettings(settings);
+    QUIC_BUFFER alpn = AlpnBuffer();
+    auto status = runtime->api->ConfigurationOpen(
+        runtime->registration, &alpn, 1, &settings, sizeof(settings), nullptr, &listener->configuration);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC listener configuration failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+
+    // PKCS12 is the one credential type Schannel and OpenSSL both take, which
+    // is why the provider ships a PKCS12 rather than a platform store handle.
+    QUIC_CERTIFICATE_PKCS12 pkcs12_certificate{};
+    pkcs12_certificate.Asn1Blob = pkcs12;
+    pkcs12_certificate.Asn1BlobLength = static_cast<uint32_t>(pkcs12_len);
+    pkcs12_certificate.PrivateKeyPassword = (password != nullptr && *password != '\0') ? password : nullptr;
+
+    QUIC_CREDENTIAL_CONFIG credentials{};
+    credentials.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_PKCS12;
+    credentials.CertificatePkcs12 = &pkcs12_certificate;
+    credentials.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+    status = runtime->api->ConfigurationLoadCredential(listener->configuration, &credentials);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC listener certificate could not be loaded (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        runtime->api->ConfigurationClose(listener->configuration);
+        return static_cast<int32_t>(status);
+    }
+
+    Listener* raw = listener.get();
+    status = runtime->api->ListenerOpen(runtime->registration, ListenerCallback, raw, &raw->handle);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC listener open failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        runtime->api->ConfigurationClose(listener->configuration);
+        return static_cast<int32_t>(status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->listeners.emplace(raw->id, std::move(listener));
+    }
+
+    QUIC_ADDR address{};
+    QuicAddrSetFamily(&address, QUIC_ADDRESS_FAMILY_UNSPEC);
+    QuicAddrSetPort(&address, port);
+    if (host != nullptr && *host != '\0' && !QuicAddrFromString(host, port, &address)) {
+        SetError(runtime, "CultMesh QUIC listener host is not an IP address.");
+        return -2;
+    }
+
+    QUIC_BUFFER listener_alpn = AlpnBuffer();
+    status = runtime->api->ListenerStart(raw->handle, &listener_alpn, 1, &address);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC listener start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+
+    // Port 0 means "pick one"; the host needs the chosen port to advertise it.
+    QUIC_ADDR bound{};
+    uint32_t bound_size = sizeof(bound);
+    status = runtime->api->GetParam(raw->handle, QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &bound_size, &bound);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC listener address could not be read (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+    if (out_bound_port != nullptr) *out_bound_port = QuicAddrGetPort(&bound);
+    *out_listener_id = raw->id;
+    return 0;
+}
+
+CULTMESH_API void cultmesh_quic_listener_close(void* handle, uint64_t listener_id) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return;
+    Listener* listener = FindListener(runtime, listener_id);
+    if (listener == nullptr || listener->stopped) return;
+    listener->stopped = true;
+    if (listener->handle != nullptr) runtime->api->ListenerClose(listener->handle);
+    if (listener->configuration != nullptr) runtime->api->ConfigurationClose(listener->configuration);
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    runtime->listeners.erase(listener_id);
+}
+
+CULTMESH_API int32_t cultmesh_quic_connection_open(
+    void* handle, const char* host, uint16_t port, uint64_t* out_connection_id) {
+    return OpenConnection(static_cast<Runtime*>(handle), host, port, out_connection_id, nullptr, nullptr);
+}
+
+CULTMESH_API int32_t cultmesh_quic_connection_certificate_complete(
+    void* handle, uint64_t connection_id, int32_t accept) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return -1;
+    Connection* connection = FindConnection(runtime, connection_id);
+    if (connection == nullptr) return -1;
+    const auto status = runtime->api->ConnectionCertificateValidationComplete(
+        connection->handle,
+        accept != 0 ? static_cast<BOOLEAN>(1) : static_cast<BOOLEAN>(0),
+        accept != 0 ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC certificate validation completion failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+    return 0;
+}
+
+CULTMESH_API void cultmesh_quic_connection_shutdown(void* handle, uint64_t connection_id, uint64_t code) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return;
+    Connection* connection = FindConnection(runtime, connection_id);
+    if (connection == nullptr || connection->closing) return;
+    connection->closing = true;
+    if (connection->handle != nullptr)
+        runtime->api->ConnectionShutdown(connection->handle, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, code);
+}
+
+CULTMESH_API int32_t cultmesh_quic_stream_open(
+    void* handle, uint64_t connection_id, uint8_t kind, uint64_t* out_stream_id) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr || out_stream_id == nullptr) return -1;
+    *out_stream_id = 0;
+    if (kind != kReliableStream && kind != kLatestOnlyStream) return -2;
+    Connection* connection = FindConnection(runtime, connection_id);
+    if (connection == nullptr) return -1;
+
+    auto stream = std::make_unique<Stream>();
+    stream->runtime = runtime;
+    stream->owner = connection;
+    stream->kind = kind;
+    stream->has_kind = true;
+    stream->id = NextId(runtime);
+    Stream* raw = stream.get();
+
+    auto status = runtime->api->StreamOpen(
+        connection->handle, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+        StreamCallback, raw, &raw->handle);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC stream open failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+    status = runtime->api->StreamStart(raw->handle, QUIC_STREAM_START_FLAG_IMMEDIATE);
+    if (QUIC_FAILED(status)) {
+        SetError(runtime, "CultMesh QUIC stream start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        runtime->api->StreamClose(raw->handle);
+        return static_cast<int32_t>(status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->streams.emplace(raw->id, std::move(stream));
+    }
+
+    // The kind byte is the first thing on the stream, which is what the peer's
+    // reassembly reads before any length prefix.
+    auto* request = new SendRequest();
+    request->bytes.assign(1, kind);
+    request->buffer.Buffer = request->bytes.data();
+    request->buffer.Length = 1;
+    status = runtime->api->StreamSend(raw->handle, &request->buffer, 1, QUIC_SEND_FLAG_NONE, request);
+    if (QUIC_FAILED(status)) {
+        delete request;
+        SetError(runtime, "CultMesh QUIC stream kind could not be sent (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+
+    *out_stream_id = raw->id;
+    return 0;
+}
+
+CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
+    void* handle, uint64_t stream_id, const uint8_t* encoded_frame, int32_t length, int32_t fin) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr || encoded_frame == nullptr || length <= 0) return -1;
+    if (static_cast<uint32_t>(length) > kMaximumEncodedFrameBytes) return -2;
+    Stream* stream = FindStream(runtime, stream_id);
+    if (stream == nullptr || stream->handle == nullptr) return -1;
+
+    // The bytes are copied because MsQuic reads them after this returns; the
+    // 4-byte LE length prefix is the QUIC stream framing, and it is added here
+    // so that framing lives in one place for both directions.
+    auto* request = new SendRequest();
+    request->bytes.resize(sizeof(uint32_t) + static_cast<size_t>(length));
+    WriteUInt32LittleEndian(request->bytes.data(), static_cast<uint32_t>(length));
+    std::memcpy(request->bytes.data() + sizeof(uint32_t), encoded_frame, static_cast<size_t>(length));
+    request->buffer.Buffer = request->bytes.data();
+    request->buffer.Length = static_cast<uint32_t>(request->bytes.size());
+
+    const auto flags = (fin != 0) ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE;
+    const auto status = runtime->api->StreamSend(stream->handle, &request->buffer, 1, flags, request);
+    if (QUIC_FAILED(status)) {
+        delete request;
+        SetError(runtime, "CultMesh QUIC frame send failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
+        return static_cast<int32_t>(status);
+    }
+    return 0;
+}
+
+CULTMESH_API void cultmesh_quic_stream_shutdown(void* handle, uint64_t stream_id, uint64_t code) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return;
+    Stream* stream = FindStream(runtime, stream_id);
+    if (stream == nullptr || stream->handle == nullptr) return;
+    runtime->api->StreamShutdown(stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, code);
+}
+
+// The one blocking crossing. Returns 0 on timeout, 1 with the event filled and
+// its payload copied, 2 when `payload_capacity` is too small (the event stays at
+// the head of the queue and `out_required` is set), negative on a bad call. This
+// is the v1 two-phase poll convention applied to a queue of typed events.
+CULTMESH_API int32_t cultmesh_quic_next_event(
+    void* handle, int32_t timeout_ms, cultmesh_quic_event* out_event,
+    uint8_t* payload, int32_t payload_capacity, int32_t* out_required) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr || out_event == nullptr || out_required == nullptr || payload_capacity < 0)
+        return -1;
+    *out_required = 0;
+
+    std::unique_lock<std::mutex> lock(runtime->gate);
+    if (runtime->events.empty() && timeout_ms > 0) {
+        runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+            [runtime] { return !runtime->events.empty() || runtime->closing; });
+    }
+    if (runtime->events.empty()) return 0;
+
+    const QueuedEvent& queued = runtime->events.front();
+    const auto required = static_cast<int32_t>(queued.payload.size());
+    if (required > payload_capacity) {
+        *out_required = required;
+        return 2;
+    }
+    *out_event = queued.header;
+    if (required > 0 && payload != nullptr)
+        std::memcpy(payload, queued.payload.data(), static_cast<size_t>(required));
+    *out_required = required;
+    runtime->events.pop_front();
+    return 1;
+}
+
+CULTMESH_API int32_t cultmesh_quic_last_error(void* handle, char* destination, int32_t capacity) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr || destination == nullptr || capacity <= 0) return -1;
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    const size_t count = (std::min)(runtime->error.size(), static_cast<size_t>(capacity - 1));
+    std::memcpy(destination, runtime->error.data(), count);
+    destination[count] = '\0';
+    return static_cast<int32_t>(count);
+}
+
+// ---------------------------------------------------------------------------
+// C ABI v1: the Unity shim. Windows only, by the same construction as its only
+// caller (`CultMeshNativeQuicRealtimeTransport.CanConnect` is Windows-gated).
+//
+// These five exports are the contract the shipped Unity package imports by
+// name. They are preserved byte for byte in signature and behaviour, and they
+// decide nothing the v2 path does not: a v1 client is a private runtime with one
+// connection. The single exception is the pin, which v1 compares here in C
+// because that is what the managed connector was built against.
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+
+#include <windows.h>
+#include <wincrypt.h>
+#include <bcrypt.h>
+
+namespace {
+
 enum class ClientState : int32_t {
     Connecting = 0,
     Connected = 1,
@@ -38,50 +973,34 @@ enum class ClientState : int32_t {
     Closed = 3,
 };
 
-struct Client;
-
-struct StreamContext {
-    explicit StreamContext(Client* client) : owner(client) {}
-    Client* owner;
-    std::vector<uint8_t> buffered;
-    uint8_t kind = 0;
-    bool has_kind = false;
-};
-
-struct Client {
-    const QUIC_API_TABLE* api = nullptr;
-    HQUIC registration = nullptr;
-    HQUIC configuration = nullptr;
-    HQUIC connection = nullptr;
-    std::array<uint8_t, 32> certificate_pin{};
-    std::atomic<ClientState> state{ClientState::Connecting};
-    std::atomic<bool> closing{false};
-    std::mutex gate;
-    std::deque<std::vector<uint8_t>> received;
+struct V1Client {
+    Runtime* runtime = nullptr;
+    Connection* connection = nullptr;
+    uint64_t connection_id = 0;
+    ClientState state = ClientState::Connecting;
+    std::deque<std::vector<uint8_t>> frames;
     std::string error;
-    std::string trace;
+    bool closing = false;
+    // The managed connector polls `state` and `poll` from its own loop and may
+    // read `error` from the caller's thread, so the drain and everything it
+    // mutates sit behind one lock. Held only around `Pump` and the fields; it is
+    // always taken before the runtime's, never after.
+    std::mutex gate;
 };
 
-void AppendTrace(Client* client, const std::string& event) {
-    if (client == nullptr || client->state.load() == ClientState::Connected) return;
-    std::lock_guard<std::mutex> lock(client->gate);
-    if (!client->trace.empty()) client->trace += ",";
-    client->trace += event;
-}
-
-std::string TraceSnapshot(Client* client) {
-    if (client == nullptr) return "none";
-    std::lock_guard<std::mutex> lock(client->gate);
-    return client->trace.empty() ? "none" : client->trace;
-}
-
-void SetFailure(Client* client, const std::string& message) {
-    if (client == nullptr || client->closing.load()) return;
-    {
-        std::lock_guard<std::mutex> lock(client->gate);
-        if (client->error.empty()) client->error = message;
-    }
-    client->state.store(ClientState::Failed);
+std::string LoadedMsQuicPath() {
+    const auto module = GetModuleHandleW(L"msquic.dll");
+    if (module == nullptr) return "unresolved";
+    std::array<wchar_t, 32768> path{};
+    const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return "unresolved";
+    const auto required = WideCharToMultiByte(
+        CP_UTF8, 0, path.data(), static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    if (required <= 0) return "unresolved";
+    std::string utf8(static_cast<size_t>(required), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, path.data(), static_cast<int>(length), utf8.data(), required, nullptr, nullptr);
+    return utf8;
 }
 
 bool ParseHexNibble(char value, uint8_t& nibble) {
@@ -104,337 +1023,146 @@ bool ParsePin(const char* value, std::array<uint8_t, 32>& pin) {
     return true;
 }
 
-uint32_t ReadUInt32LittleEndian(const uint8_t* value) {
-    return static_cast<uint32_t>(value[0]) |
-        (static_cast<uint32_t>(value[1]) << 8) |
-        (static_cast<uint32_t>(value[2]) << 16) |
-        (static_cast<uint32_t>(value[3]) << 24);
-}
+// Drains the runtime's event queue into the v1 client's own shape: frames for
+// `poll`, a state for `state`, an error string for `error`. This is where the
+// v1 contract is reconstructed from v2 events, and the only place it is.
+void Pump(V1Client* client) {
+    cultmesh_quic_event header{};
+    std::vector<uint8_t> payload;
+    for (;;) {
+        int32_t required = 0;
+        auto result = cultmesh_quic_next_event(
+            client->runtime, 0, &header,
+            payload.empty() ? nullptr : payload.data(),
+            static_cast<int32_t>(payload.size()), &required);
+        if (result == 2) {
+            payload.resize(static_cast<size_t>(required));
+            continue;
+        }
+        if (result != 1) break;
 
-void FailStream(StreamContext* stream, const char* message) {
-    SetFailure(stream->owner, message);
-    if (stream->owner != nullptr && stream->owner->api != nullptr && stream->owner->connection != nullptr)
-        stream->owner->api->ConnectionShutdown(
-            stream->owner->connection,
-            QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
-            kStreamAbortCode);
-}
-
-bool ConsumeFrames(StreamContext* stream) {
-    auto& bytes = stream->buffered;
-    if (!stream->has_kind) {
-        if (bytes.empty()) return true;
-        stream->kind = bytes.front();
-        bytes.erase(bytes.begin());
-        stream->has_kind = true;
-        if (stream->kind != kReliableStream && stream->kind != kLatestOnlyStream) {
-            FailStream(stream, "CultMesh QUIC stream kind is invalid.");
-            return false;
+        switch (header.type) {
+        case kEventConnectionConnected:
+            if (client->state == ClientState::Connecting) client->state = ClientState::Connected;
+            break;
+        case kEventStreamFrame:
+            client->frames.emplace_back(payload.begin(), payload.begin() + header.payload_length);
+            break;
+        case kEventConnectionShutdown:
+            if (client->closing) {
+                client->state = ClientState::Closed;
+            } else if (client->state != ClientState::Failed) {
+                client->state = ClientState::Failed;
+                if (client->error.empty()) {
+                    char runtime_error[1024]{};
+                    cultmesh_quic_last_error(client->runtime, runtime_error, sizeof(runtime_error));
+                    // The pin refusal is the runtime's, and the managed
+                    // connector matches on its wording; anything else is the
+                    // transport's own reason plus where msquic came from.
+                    client->error = runtime_error[0] != '\0'
+                        ? std::string(runtime_error)
+                        : std::string(reinterpret_cast<const char*>(payload.data()),
+                                      static_cast<size_t>(header.payload_length));
+                    client->error += " (msquic=" + LoadedMsQuicPath() + ")";
+                }
+            }
+            break;
+        default:
+            break;
         }
     }
-
-    while (bytes.size() >= sizeof(uint32_t)) {
-        const uint32_t length = ReadUInt32LittleEndian(bytes.data());
-        if (length == 0 || length > kMaximumEncodedFrameBytes) {
-            FailStream(stream, "CultMesh QUIC frame length is invalid.");
-            return false;
-        }
-        const size_t framed_length = sizeof(uint32_t) + static_cast<size_t>(length);
-        if (bytes.size() < framed_length) return true;
-        std::vector<uint8_t> frame(length);
-        std::memcpy(frame.data(), bytes.data() + sizeof(uint32_t), length);
-        {
-            std::lock_guard<std::mutex> lock(stream->owner->gate);
-            stream->owner->received.emplace_back(std::move(frame));
-        }
-        bytes.erase(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(framed_length));
-        if (stream->kind == kLatestOnlyStream && !bytes.empty()) {
-            FailStream(stream, "CultMesh latest-only QUIC stream carried multiple frames.");
-            return false;
-        }
-    }
-    return true;
 }
 
-QUIC_STATUS QUIC_API StreamCallback(HQUIC stream_handle, void* context, QUIC_STREAM_EVENT* event) {
-    auto* stream = static_cast<StreamContext*>(context);
-    switch (event->Type) {
-    case QUIC_STREAM_EVENT_RECEIVE:
-        for (uint32_t index = 0; index < event->RECEIVE.BufferCount; ++index) {
-            const auto& buffer = event->RECEIVE.Buffers[index];
-            stream->buffered.insert(stream->buffered.end(), buffer.Buffer, buffer.Buffer + buffer.Length);
-        }
-        ConsumeFrames(stream);
-        break;
-    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
-        if (!stream->buffered.empty())
-            FailStream(stream, "CultMesh QUIC stream ended with a truncated frame.");
-        break;
-    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
-        if (!event->SHUTDOWN_COMPLETE.AppCloseInProgress)
-            stream->owner->api->StreamClose(stream_handle);
-        delete stream;
-        break;
-    default:
-        break;
-    }
-    return QUIC_STATUS_SUCCESS;
-}
-
-bool CertificateMatchesPin(Client* client, QUIC_CERTIFICATE* certificate) {
+bool CertificateMatchesPin(Connection* connection, QUIC_CERTIFICATE* certificate) {
     if (certificate == nullptr) return false;
     const auto* encoded = reinterpret_cast<const QUIC_BUFFER*>(certificate);
     if (encoded->Buffer == nullptr || encoded->Length == 0) return false;
     BYTE digest[32]{};
     DWORD digest_length = sizeof(digest);
     if (!CryptHashCertificate2(
-            BCRYPT_SHA256_ALGORITHM,
-            0,
-            nullptr,
-            encoded->Buffer,
-            encoded->Length,
-            digest,
-            &digest_length) || digest_length != sizeof(digest))
+            BCRYPT_SHA256_ALGORITHM, 0, nullptr,
+            encoded->Buffer, encoded->Length, digest, &digest_length) ||
+        digest_length != sizeof(digest))
         return false;
-    return std::memcmp(digest, client->certificate_pin.data(), sizeof(digest)) == 0;
-}
-
-std::string Hex(uint64_t value) {
-    std::ostringstream text;
-    text << "0x" << std::hex << std::uppercase << value;
-    return text.str();
-}
-
-std::string LoadedMsQuicPath() {
-    const auto module = GetModuleHandleW(L"msquic.dll");
-    if (module == nullptr) return "unresolved";
-    std::array<wchar_t, 32768> path{};
-    const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0 || length >= path.size()) return "unresolved";
-    const auto required = WideCharToMultiByte(
-        CP_UTF8, 0, path.data(), static_cast<int>(length), nullptr, 0, nullptr, nullptr);
-    if (required <= 0) return "unresolved";
-    std::string utf8(static_cast<size_t>(required), '\0');
-    WideCharToMultiByte(
-        CP_UTF8, 0, path.data(), static_cast<int>(length), utf8.data(), required, nullptr, nullptr);
-    return utf8;
-}
-
-QUIC_STATUS QUIC_API ConnectionCallback(HQUIC connection, void* context, QUIC_CONNECTION_EVENT* event) {
-    auto* client = static_cast<Client*>(context);
-    AppendTrace(client, "event=" + std::to_string(static_cast<int>(event->Type)));
-    switch (event->Type) {
-    case QUIC_CONNECTION_EVENT_CONNECTED:
-        client->state.store(ClientState::Connected);
-        break;
-    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
-        auto* stream = new (std::nothrow) StreamContext(client);
-        if (stream == nullptr) return QUIC_STATUS_OUT_OF_MEMORY;
-        client->api->SetCallbackHandler(
-            event->PEER_STREAM_STARTED.Stream,
-            reinterpret_cast<void*>(StreamCallback),
-            stream);
-        break;
-    }
-    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED:
-    {
-        AppendTrace(
-            client,
-            "certificate-status=" +
-            Hex(static_cast<uint64_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus)));
-        const auto matches = CertificateMatchesPin(
-            client,
-            event->PEER_CERTIFICATE_RECEIVED.Certificate);
-        if (!matches) {
-            SetFailure(client, "CultMesh QUIC provider certificate does not match the advertised SHA-256 pin.");
-        }
-        const auto completion = client->api->ConnectionCertificateValidationComplete(
-            connection,
-            matches ? TRUE : FALSE,
-            matches ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
-        if (QUIC_FAILED(completion)) {
-            SetFailure(
-                client,
-                "CultMesh QUIC certificate validation completion failed (status=" +
-                Hex(static_cast<uint64_t>(completion)) + ").");
-            return completion;
-        }
-        return QUIC_STATUS_PENDING;
-    }
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-        if (!client->closing.load()) {
-            SetFailure(
-                client,
-                "CultMesh QUIC connection was shut down by the transport "
-                "(status=" + Hex(static_cast<uint64_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) +
-                ", error=" + Hex(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode) +
-                ", msquic=" + LoadedMsQuicPath() +
-                ", events=" + TraceSnapshot(client) + ").");
-        }
-        break;
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
-        if (!client->closing.load())
-            SetFailure(client, "CultMesh QUIC connection was shut down by the provider.");
-        break;
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-        if (client->closing.load()) client->state.store(ClientState::Closed);
-        break;
-    default:
-        break;
-    }
-    return QUIC_STATUS_SUCCESS;
-}
-
-void CloseHandles(Client* client) {
-    if (client->connection != nullptr) {
-        client->api->ConnectionClose(client->connection);
-        client->connection = nullptr;
-    }
-    if (client->configuration != nullptr) {
-        client->api->ConfigurationClose(client->configuration);
-        client->configuration = nullptr;
-    }
-    if (client->registration != nullptr) {
-        client->api->RegistrationClose(client->registration);
-        client->registration = nullptr;
-    }
-    if (client->api != nullptr) {
-        MsQuicClose(client->api);
-        client->api = nullptr;
-    }
+    return std::memcmp(digest, connection->pin.data(), sizeof(digest)) == 0;
 }
 
 } // namespace
 
 CULTMESH_API int32_t cultmesh_quic_open(
-    const char* host,
-    uint16_t port,
-    const char* certificate_sha256,
-    Client** result) {
+    const char* host, uint16_t port, const char* certificate_sha256, V1Client** result) {
     if (host == nullptr || *host == '\0' || port == 0 || result == nullptr) return -1;
     *result = nullptr;
-    auto client = std::make_unique<Client>();
-    if (!ParsePin(certificate_sha256, client->certificate_pin)) return -2;
 
-    QUIC_STATUS status = MsQuicOpenVersion(
-        kApiVersion,
-        reinterpret_cast<const void**>(&client->api));
-    if (QUIC_FAILED(status)) return status;
+    std::array<uint8_t, 32> pin{};
+    if (!ParsePin(certificate_sha256, pin)) return -2;
 
-    const QUIC_REGISTRATION_CONFIG registration_config = {
-        "GameCult.Mesh.Quic.Native",
-        QUIC_EXECUTION_PROFILE_TYPE_REAL_TIME
-    };
-    status = client->api->RegistrationOpen(&registration_config, &client->registration);
-    if (QUIC_FAILED(status)) {
-        CloseHandles(client.get());
+    auto client = std::make_unique<V1Client>();
+    void* runtime_handle = nullptr;
+    const auto opened = cultmesh_quic_runtime_open("GameCult.Mesh.Quic.Native", &runtime_handle);
+    if (opened != 0) return opened;
+    client->runtime = static_cast<Runtime*>(runtime_handle);
+
+    // The pin goes in before the connection starts; see OpenConnection.
+    Connection* connection = nullptr;
+    const auto status = OpenConnection(client->runtime, host, port, &client->connection_id, &connection, &pin);
+    if (status != 0) {
+        cultmesh_quic_runtime_close(client->runtime);
         return status;
     }
-
-    QUIC_SETTINGS settings{};
-    settings.IdleTimeoutMs = 30000;
-    settings.IsSet.IdleTimeoutMs = TRUE;
-    settings.KeepAliveIntervalMs = 5000;
-    settings.IsSet.KeepAliveIntervalMs = TRUE;
-    settings.PeerUnidiStreamCount = 1024;
-    settings.IsSet.PeerUnidiStreamCount = TRUE;
-    const QUIC_BUFFER alpn = {
-        static_cast<uint32_t>(sizeof(kAlpn) - 1),
-        reinterpret_cast<uint8_t*>(const_cast<char*>(kAlpn))
-    };
-    status = client->api->ConfigurationOpen(
-        client->registration,
-        &alpn,
-        1,
-        &settings,
-        sizeof(settings),
-        nullptr,
-        &client->configuration);
-    if (QUIC_FAILED(status)) {
-        CloseHandles(client.get());
-        return status;
-    }
-
-    QUIC_CREDENTIAL_CONFIG credentials{};
-    credentials.Type = QUIC_CREDENTIAL_TYPE_NONE;
-    credentials.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
-        QUIC_CREDENTIAL_FLAG_CLIENT |
-        QUIC_CREDENTIAL_FLAG_INDICATE_CERTIFICATE_RECEIVED |
-        QUIC_CREDENTIAL_FLAG_DEFER_CERTIFICATE_VALIDATION |
-        QUIC_CREDENTIAL_FLAG_USE_PORTABLE_CERTIFICATES);
-    status = client->api->ConfigurationLoadCredential(client->configuration, &credentials);
-    if (QUIC_FAILED(status)) {
-        CloseHandles(client.get());
-        return status;
-    }
-
-    status = client->api->ConnectionOpen(
-        client->registration,
-        ConnectionCallback,
-        client.get(),
-        &client->connection);
-    if (QUIC_FAILED(status)) {
-        CloseHandles(client.get());
-        return status;
-    }
-    status = client->api->ConnectionStart(
-        client->connection,
-        client->configuration,
-        QUIC_ADDRESS_FAMILY_UNSPEC,
-        host,
-        port);
-    if (QUIC_FAILED(status)) {
-        CloseHandles(client.get());
-        return status;
-    }
+    client->connection = connection;
 
     *result = client.release();
     return 0;
 }
 
-CULTMESH_API int32_t cultmesh_quic_state(Client* client) {
+CULTMESH_API int32_t cultmesh_quic_state(V1Client* client) {
     if (client == nullptr) return static_cast<int32_t>(ClientState::Failed);
-    return static_cast<int32_t>(client->state.load());
+    std::lock_guard<std::mutex> lock(client->gate);
+    Pump(client);
+    return static_cast<int32_t>(client->state);
 }
 
 CULTMESH_API int32_t cultmesh_quic_poll(
-    Client* client,
-    uint8_t* destination,
-    int32_t destination_length,
-    int32_t* required_length) {
+    V1Client* client, uint8_t* destination, int32_t destination_length, int32_t* required_length) {
     if (client == nullptr || required_length == nullptr || destination_length < 0) return -1;
     std::lock_guard<std::mutex> lock(client->gate);
-    if (client->received.empty()) {
+    Pump(client);
+    if (client->frames.empty()) {
         *required_length = 0;
-        return client->state.load() == ClientState::Failed ? -2 : 0;
+        return client->state == ClientState::Failed ? -2 : 0;
     }
-    const auto& frame = client->received.front();
+    const auto& frame = client->frames.front();
     if (frame.size() > static_cast<size_t>(INT32_MAX)) return -3;
     *required_length = static_cast<int32_t>(frame.size());
     if (destination == nullptr || destination_length < *required_length) return 2;
     std::memcpy(destination, frame.data(), frame.size());
-    client->received.pop_front();
+    client->frames.pop_front();
     return 1;
 }
 
-CULTMESH_API int32_t cultmesh_quic_error(
-    Client* client,
-    char* destination,
-    int32_t destination_length) {
+CULTMESH_API int32_t cultmesh_quic_error(V1Client* client, char* destination, int32_t destination_length) {
     if (client == nullptr || destination == nullptr || destination_length <= 0) return -1;
     std::lock_guard<std::mutex> lock(client->gate);
+    Pump(client);
     const size_t count = (std::min)(client->error.size(), static_cast<size_t>(destination_length - 1));
     std::memcpy(destination, client->error.data(), count);
     destination[count] = '\0';
     return static_cast<int32_t>(count);
 }
 
-CULTMESH_API void cultmesh_quic_close(Client* client) {
+CULTMESH_API void cultmesh_quic_close(V1Client* client) {
     if (client == nullptr) return;
-    client->closing.store(true);
-    if (client->connection != nullptr && client->api != nullptr)
-        client->api->ConnectionShutdown(client->connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, kConnectionCloseCode);
-    CloseHandles(client);
-    client->state.store(ClientState::Closed);
+    {
+        std::lock_guard<std::mutex> lock(client->gate);
+        client->closing = true;
+    }
+    // `runtime_close` already shuts the connection down silently with the same
+    // CULT close code and then closes the handle, which is what v1 did before
+    // it delegated. Shutting it down here as well would only race that.
+    cultmesh_quic_runtime_close(client->runtime);
+    client->state = ClientState::Closed;
     delete client;
 }
+
+#endif // _WIN32
