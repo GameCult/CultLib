@@ -1190,9 +1190,19 @@ Verification:
   (P13), a client connection to it, answers event 3 with accept, sees event 2
   on both sides, opens a latest-only stream, sends one frame with `fin`, and
   reads event 6 on the server side with the identical bytes.
-- Linux, development loop: `docker run --rm -v F:\Projects\CultLib:/src debian:13 bash -lc "apt-get update && apt-get install -y cmake ninja-build g++ curl ca-certificates dpkg && /src/scripts/build-quic-native.sh"`
-  then the same FFI smoke under `node:24` in the container. This is a Linux
-  build on a Linux host; it is not the release artifact (Q6).
+- Linux, development loop: build the committed image
+  `scripts/quic-native-linux-dev.Dockerfile`, pinned to the same `debian:13`
+  digest as the release workflow, and follow the recipe in the bridge's own
+  README. The image carries the compiler, Ninja, Node, `setarch` and the
+  library's runtime dependencies, and the sanitizer configurations need the
+  container's default seccomp profile relaxed so randomisation can be
+  disabled. The README and the Dockerfile header own that recipe; this map
+  does not restate it. This is a Linux build on a Linux host; it is not the
+  release artifact (Q6). *(The earlier one-line `docker run` recipe here
+  installed no JavaScript runtime and could not run the mutation runner at
+  all, and said nothing about randomisation or seccomp, which is how the
+  Linux path came to be red for everyone but the agent that had found the
+  flags by hand.)*
 - Build economy: the only builds are the native CMake target and
   `tests/GameCult.Mesh.Quic.Native.Tests` (which pulls `GameCult.Mesh.Quic`,
   `GameCult.Mesh.Quic.Native`, `GameCult.Mesh`, `GameCult.Networking`,
