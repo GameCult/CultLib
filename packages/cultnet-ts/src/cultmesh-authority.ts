@@ -361,8 +361,28 @@ export function isLoopbackEndpoint(value: string): boolean {
   }
 }
 
-/** The C# rule (`CultMeshAuthorityProof.cs`, `IsProtected`): wss, https, or any scheme containing "quic". */
+/**
+ * The C# rule (`CultMeshAuthorityProof.cs`, `IsProtected`): wss, https, or any
+ * scheme containing "quic", over a string `System.Uri` parses at all.
+ *
+ * `refusedByCSharpUriShape` runs first here for the same reason it runs first in
+ * `isLoopbackEndpoint`, and it matters more: `URL` repairs eleven spellings
+ * `System.Uri` refuses outright, and every one of them would be *protected* here
+ * and unprotected in C#. `wss:x`, `wss:host`, `wss:host:8443`, `wss:/host` and
+ * `wss:///host` have no authority for `System.Uri` to accept; `wss://host\path`
+ * and `wss://host:8443\` carry a backslash; `wss://ho\tst/m`, `wss://host\t/m`,
+ * `quic://ho\tst` carry a tab and `wss://host\r\n/m` a CR/LF, which `URL`
+ * deletes. Letting any of them answer true would clear the channel-protection
+ * gate on a route C# refuses.
+ *
+ * Two spellings of Soul's 71 still disagree, both the safe way round: C# calls
+ * them protected and this answers false, so a route is refused rather than
+ * admitted. `wss://[::1%eth0]/m` (the IPv6 zone id) and `wss://host /m`
+ * (a non-breaking space in the host) both throw in `URL`, so they answered
+ * false before this pre-check existed too. Neither is dialable from a browser.
+ */
 export function isProtectedEndpoint(value: string): boolean {
+  if (refusedByCSharpUriShape(value)) return false;
   let scheme: string;
   try {
     scheme = new URL(value).protocol.slice(0, -1).toLowerCase();

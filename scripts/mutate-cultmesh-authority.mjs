@@ -234,6 +234,14 @@ const mutations = [
     new: 'scheme === "quic"',
   },
   {
+    // Only `isProtectedEndpoint`'s copy: `isLoopbackEndpoint` keeps its own, so
+    // this pins that the protection gate refuses the spellings `URL` repairs
+    // rather than inheriting the answer from the loopback rule.
+    rule: "isProtectedEndpoint refuses the raw shapes System.Uri refuses",
+    old: "  if (refusedByCSharpUriShape(value)) return false;\n  let scheme: string;\n",
+    new: "  let scheme: string;\n",
+  },
+  {
     rule: "protected scheme: https",
     old: 'scheme === "https" || ',
     new: "",

@@ -311,6 +311,124 @@ test("isProtectedEndpoint is the C# rule: wss, https, or any scheme containing q
   }
 });
 
+// Every raw-shape spelling Soul put to both sides on 2026-09-16, with the answer
+// `IsProtected` gave through `CultMeshAuthorityTrustPolicy` as the expectation.
+// The list is Soul's 71 verbatim, duplicate included.
+const CSHARP_PROTECTED_ANSWERS: readonly (readonly [string, boolean])[] = [
+  ["ws:x", false],
+  ["wss:x", false],
+  ["wss:/host", false],
+  ["wss:///host", false],
+  ["wss://host:8443\\", false],
+  ["wss://host\\path", false],
+  ["wss:\\\\host/m", true],
+  ["wss://host./m", true],
+  ["wss://\uff48\uff4f\uff53\uff54/m", true],
+  ["QUIC://host/m", true],
+  ["Quic+x://host/m", true],
+  ["cultmesh-state+quic://h:4433/?c=1", true],
+  ["wss://ho\tst/m", false],
+  ["wss://host\t/m", false],
+  ["\twss://host/m", true],
+  [" wss://host/m", true],
+  ["wss://host/m ", true],
+  ["wss://host/m\n", true],
+  ["wss://host:99999/m", false],
+  ["wss://[::1%eth0]/m", true],
+  ["wss://user:pw@host/m", true],
+  ["https://host/m", true],
+  ["HTTPS://host", true],
+  ["ws://host/m", false],
+  ["WS://host/m", false],
+  ["http://host/m", false],
+  ["quic:host", true],
+  ["quic:", true],
+  ["wss:", false],
+  ["wss://", false],
+  ["wss:///", false],
+  ["quic+wss://host", true],
+  ["x-quic://host", true],
+  ["xquicx://host", true],
+  ["wss ://host/m", false],
+  ["w ss://host/m", false],
+  ["wss://host:abc/m", false],
+  ["wss://\uff11\uff12\uff17.0.0.1/m", true],
+  ["wss://127.0.0.1./m", true],
+  ["not a url", false],
+  ["", false],
+  ["   ", false],
+  ["wss://host?x=1", true],
+  ["wss://host#f", true],
+  ["wss://[::1]/m", true],
+  ["wss://[::1", false],
+  ["wss://host/m\u0000", true],
+  ["wss://host/\u0085m", true],
+  ["\u0085wss://host/m", false],
+  ["\ufeffwss://host/m", false],
+  ["ws://127.0.0.1\\m", false],
+  ["ws:127.0.0.1", false],
+  ["ws:/127.0.0.1", false],
+  ["ws:///127.0.0.1", false],
+  ["ws://127.0.0.1./m", false],
+  ["ws://\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54/m", false],
+  ["ws://localhost\t/m", false],
+  ["wss://host:8443\\", false],
+  ["wss:host", false],
+  ["wss:host:8443", false],
+  ["wss://host:8443/\\", true],
+  ["wss://ho st/m", false],
+  ["wss://host%20/m", false],
+  ["wss://host\u00a0/m", true],
+  ["wss://host\r\n/m", false],
+  ["wss:// host/m", false],
+  ["wss://host /m", false],
+  ["quic://ho\tst", false],
+  ["QUIC:\\\\host", true],
+  ["ws://127.0.0.1:1/m\t", false],
+  ["wss://xn--80ak6aa92e.com/m", true],
+];
+
+// The eleven of the 71 where the two sides still differ, every one of them the
+// safe way round: C# calls the endpoint protected and TypeScript does not, so a
+// route is refused rather than admitted. `refusedByCSharpUriShape` is stricter
+// than `System.Uri.TryCreate` on purpose — it also refuses the host repairs that
+// would make `isLoopbackEndpoint` lie — and a zone id and a non-breaking-space
+// host throw in `URL` before any rule of ours runs. None of them is dialable as
+// a browser CultMesh route. Pinned exactly, not merely excluded: if one of these
+// starts answering true, or a twelfth spelling joins them, this fails.
+const STRICTER_THAN_CSHARP: readonly string[] = [
+  "wss:\\\\host/m",
+  "wss://host./m",
+  "wss://\uff48\uff4f\uff53\uff54/m",
+  "wss://[::1%eth0]/m",
+  "quic:host",
+  "quic:",
+  "wss://\uff11\uff12\uff17.0.0.1/m",
+  "wss://127.0.0.1./m",
+  "wss://host:8443/\\",
+  "wss://host\u00a0/m",
+  "QUIC:\\\\host",
+];
+
+test("isProtectedEndpoint is never more permissive than the C# IsProtected, over every raw-shape spelling Soul probed", () => {
+  assert.equal(CSHARP_PROTECTED_ANSWERS.length, 71);
+  const stricter = new Set(STRICTER_THAN_CSHARP);
+  // The invariant that matters: TypeScript must never call an endpoint protected
+  // that C# refuses, or the channel-protection gate opens on a route the
+  // reference would have closed. `URL` repairs eleven spellings `System.Uri`
+  // refuses outright, and every one of them used to land on the wrong side here.
+  const morePermissive: string[] = [];
+  const unexpectedlyStricter: string[] = [];
+  for (const [endpoint, csharp] of CSHARP_PROTECTED_ANSWERS) {
+    const ours = isProtectedEndpoint(endpoint);
+    if (ours && !csharp) morePermissive.push(JSON.stringify(endpoint));
+    if (!ours && csharp && !stricter.has(endpoint)) unexpectedlyStricter.push(JSON.stringify(endpoint));
+    if (stricter.has(endpoint)) assert.equal(ours, false, `${JSON.stringify(endpoint)} is listed as stricter`);
+  }
+  assert.deepEqual(morePermissive, []);
+  assert.deepEqual(unexpectedlyStricter, []);
+});
+
 // Every endpoint Soul put to both sides on 2026-09-16, with the answer
 // `System.Uri.IsLoopback` gave through `CultMeshAuthorityTrustPolicy` as the
 // expectation. Six of the probe's 88 are left out and named in the doc comment
