@@ -7,18 +7,29 @@
 // bytes with a digest check, never from git. A no-op control runs first through
 // the same write path so a false kill from the write itself cannot hide.
 //
+// The original bytes also live in `<target>.mutation-original` from the first
+// write until a verified restore; a run killed mid-mutation is repaired from
+// that sidecar by the next run, not by git. After the final restore the
+// package is rebuilt so `dist/` never carries the last mutant.
+//
 //   node scripts/mutate-cultmesh-authority.mjs
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const target = join(repoRoot, "packages", "cultnet-ts", "src", "cultmesh-authority.ts");
+const sidecar = `${target}.mutation-original`;
+const dist = join(repoRoot, "packages", "cultnet-ts", "dist", "cultmesh-authority.js");
 const npmCli = process.env.npm_execpath ??
   join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+// Present in the restored source and compiled verbatim into dist/; the last
+// mutation in the list removes it, which is what makes the post-rebuild check
+// distinguish a rebuilt dist/ from one still carrying that mutant.
+const sentinel = 'scheme === "https"';
 
 const mutations = [
   {
@@ -136,6 +147,12 @@ const mutations = [
   },
 ];
 
+if (existsSync(sidecar)) {
+  writeFileSync(target, readFileSync(sidecar));
+  unlinkSync(sidecar);
+  console.log(`repaired ${target} from ${sidecar}: a previous run stopped before restoring it`);
+}
+
 const original = readFileSync(target);
 const originalText = original.toString("utf8");
 const originalDigest = digest(original);
@@ -149,12 +166,16 @@ function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function npm(...args) {
+  execFileSync(process.execPath, [npmCli, ...args, "--workspace", "packages/cultnet-ts"], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 function testsPass() {
   try {
-    execFileSync(process.execPath, [npmCli, "run", "test", "--workspace", "packages/cultnet-ts"], {
-      cwd: repoRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    npm("run", "test");
     return true;
   } catch {
     return false;
@@ -176,6 +197,12 @@ function occurrences(text, needle) {
 const results = [];
 let failed = false;
 
+const last = mutations[mutations.length - 1];
+if (!originalText.includes(sentinel) || originalText.replace(withEol(last.old), withEol(last.new)).includes(sentinel)) {
+  throw new Error(`the sentinel '${sentinel}' must be in the source and removed by the last mutation ('${last.rule}')`);
+}
+
+writeFileSync(sidecar, original);
 try {
   writeFileSync(target, Buffer.from(originalText, "utf8"));
   const controlPass = testsPass();
@@ -198,7 +225,15 @@ try {
 } finally {
   restore();
 }
+unlinkSync(sidecar);
+
+// Every test run above rebuilt dist/ from a mutant; put the restored source back in it.
+npm("run", "build");
+if (!readFileSync(dist, "utf8").includes(sentinel)) {
+  throw new Error(`${dist} does not contain '${sentinel}' after the rebuild; it still carries a mutant`);
+}
 
 for (const result of results) console.log(`${result.outcome.padEnd(9)} ${result.rule}`);
 console.log(`restored ${target} sha256=${originalDigest}`);
+console.log(`rebuilt ${dist}`);
 process.exit(failed ? 1 : 0);
