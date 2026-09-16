@@ -125,6 +125,39 @@ real (in Hands):
   verify under current rules, and the TS test pins that the committed file
   verifies under the current module.
 
+**The edge-alignment batch landed** (Opus) at `e67e695` (C#'s whitespace
+set through three named helpers; the two signature refusals split to C#'s
+texts), `c4c2330` (route fields cleaned before the transcript as the C#
+constructors clean them: trim, drop blanks, distinct, sort; generation and
+key ids trimmed; a null or empty protocol list transcribes as `""`, and the
+TS default that wrote bytes the reference never writes is gone; `verseId`
+deliberately raw, because `CanonicalRoute` passes it raw), `803ee12` (a
+raw-endpoint pre-check refusing the spellings WHATWG `URL` repairs and
+`System.Uri` does not; loopback disagreements 15 → 6, all six documented
+unreachable), `dfe582e` (the browser's local reading of "unsigned" killed
+by a whitespace-signature session test; the runner mutates the browser
+target too, with per-target sidecar, control, sentinel and post-restore
+assertion) and `0dfef0e` (the TypeScript authority tests in CI on both
+operating systems). Soul's probes rerun: 88 endpoints, zero reachable
+disagreements; 34 code points, zero; five signature shapes, byte-identical
+messages; fifteen field tampers, zero mismatches against C#'s answers.
+Tests 77, 18, 79, 10; closure smoke four tarballs; 33 shared and one
+browser mutation killed.
+
+Two scars from the batch, both recorded because they are the kind a
+postmortem should carry: **the runner's sidecar bit twice**, a throw inside
+the mutation loop leaving it behind so the next run "repaired" from stale
+bytes and silently reverted two fixes Hands had just made (the sidecar is
+now removed in the `finally` immediately after the verified restore); and
+**a literal NUL byte was committed inside a regex** at `803ee12`, which made
+git classify the file as binary, stop normalising its line endings, and
+diff the whole file as a rewrite, escaped at `dfe582e`. Residuals named,
+not guessed at: `isProtectedEndpoint` did not get the pre-check and no
+probe covers protected-scheme spellings; a negative priority throws in C#
+and transcribes in TS, unreachable while only C# signs; two browser
+mutations survive because the verifier refuses those routes first. Closing
+Soul pass in flight.
+
 Seen by Hands, recorded for section 15: `packages/cultnet-ts/src/generated/swarm-contracts.generated.ts`
 is rewritten with LF by every build while the tree is `autocrlf=true`, so
 it shows modified with zero content diff after any build; the generator's
