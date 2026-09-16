@@ -51,6 +51,36 @@ a probe over adversarial inputs, which nothing in the repo yet pins. Found:
   ignores `exports`, so `cultnet-ts/authority` is unresolvable from that
   package until Cut 4 changes it; the root re-export covers it today.
 
+**The Cut 1 fix batch landed** at `c2ffc32` (`verifyP256` copies its bytes;
+empty or whitespace signature is unsigned; root lookup before the validity
+window; duplicate root key ids refuse at first use; the loopback set is
+C#'s, probed through the public policy: `127.0.0.0/8` in any spelling
+`URL` normalises, `::1`, the IPv4-mapped `::ffff:7f00:1`, `localhost`,
+`loopback`; `localhost.`, `0.0.0.0`, `::` and `::ffff:127.0.0.2` are not),
+`1590145` (`scripts/sign-cultmesh-authority-vectors.mjs` writes
+`contracts/cultmesh/authority-route-vectors.ts-signed.json` over adversarial
+inputs and a C# test verifies it; a one-character change to the committed
+signature fails that test), `cf1203a` (`cultmesh-portability.yml` runs
+`dotnet test --filter AuthorityProof` on both OSes on every push; the
+interop workflow was Windows-only and main-only) and `0e4f479` (the runner
+rebuilds `dist/` after the final restore and asserts a sentinel from the
+restored source; a sidecar of the original bytes is written first and
+repaired from at the next start). Twenty mutations, twenty killed. Tests
+74, 17, 10; closure smoke four tarballs.
+
+Scars from the batch: **the runner's two multi-line anchors matched nothing
+on a CRLF checkout** (the tree is `autocrlf=true`, HEAD is LF, the anchors
+were `\n`), so the runner would have thrown at those entries; the earlier
+"killed" claims for the transcript-order and nonce mutations came from an
+LF-on-disk state. Anchors are now normalised to the file's EOL. Fixes 1 and
+2 share one commit because Hands had made both before committing.
+**Still open after the batch:** the browser client's local-development
+short-circuit at `packages/cultmesh-browser/src/index.ts:915` tests
+`!route.certificate` where the shared verifier now treats an empty
+signature as unsigned, so such a route passes the verifier and is then
+asked for a provider proof, where C# would not ask. In Hands as a one-line
+alignment through a shared predicate.
+
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
 original anchor `f2cd2eb4` (`bf9f6f7`, `3c29fc9`, `8d8ad56`) touch only this
