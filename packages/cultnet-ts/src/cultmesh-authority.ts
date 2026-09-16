@@ -103,8 +103,9 @@ export async function verifyAuthorityRoute(
   if (!isProtectedEndpoint(route.endpoint) && !(trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint))) {
     throw new Error("Authenticated remote CultMesh routes require TLS or QUIC channel protection.");
   }
-  const root = roots.get(certificate.odinKeyId);
-  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);
+  const odinKeyId = certificateOdinKeyId(certificate);
+  const root = roots.get(odinKeyId);
+  if (!root) throw new Error(`Odin key '${odinKeyId}' is not trusted by this consumer.`);
   const now = trust.now?.() ?? Date.now();
   if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {
     throw new Error("The Odin route certificate is not currently valid.");
@@ -132,11 +133,15 @@ export async function verifyAuthorityRoute(
 // The C# policy is a dictionary keyed by Odin key id and its constructor
 // throws on a duplicate. A TypeScript policy is a plain object, so the same
 // refusal happens at the first use of the policy, before any route is judged.
+// The key is `CultMeshEcdsaP256PublicKey.KeyId`, which `Require` already
+// trimmed, so two roots whose ids differ only in padding are one duplicate here
+// too, and a padded certificate id still finds its root.
 function trustedOdinRoots(trust: CultMeshAuthorityTrustPolicy): Map<string, CultMeshP256PublicKey> {
   const roots = new Map<string, CultMeshP256PublicKey>();
   for (const root of trust.odinRoots ?? []) {
-    if (roots.has(root.keyId)) throw new Error(`Odin root key id '${root.keyId}' is listed more than once in the trust policy.`);
-    roots.set(root.keyId, root);
+    const keyId = requireNonEmptyCSharp(root.keyId, "keyId");
+    if (roots.has(keyId)) throw new Error(`Odin root key id '${keyId}' is listed more than once in the trust policy.`);
+    roots.set(keyId, root);
   }
   return roots;
 }
@@ -151,36 +156,87 @@ export function verifyProviderSessionProof(
   return verifyP256(providerKey, canonicalSession(request, endpoint), signatureBase64);
 }
 
+/**
+ * `CultMeshAuthorityRoute.Clean`: trim each protocol id, drop the blank ones,
+ * keep one of each ordinally, and sort ordinally. JavaScript's default sort is
+ * UTF-16 code-unit order, which is what `StringComparer.Ordinal` compares.
+ *
+ * A route that lists no protocol ids at all is `Array.Empty<string>()` in C#
+ * and transcribes as the empty string, so there is no substitute id here: the
+ * TypeScript route view carries a separate `protocolId` for the handshake, and
+ * reading it as a one-element list would transcribe bytes the reference never
+ * writes.
+ */
+function cleanProtocolIds(values: readonly string[] | undefined): string[] {
+  return [...new Set((values ?? []).filter(value => !isNullOrWhiteSpaceCSharp(value)).map(trimCSharp))].sort();
+}
+
+/** `RequireNonEmpty` and `Require` in the C# reference: one refusal, one trimmed value. */
+function requireNonEmptyCSharp(value: string | undefined, parameterName: string): string {
+  if (isNullOrWhiteSpaceCSharp(value)) throw new Error(`Value must be non-empty. (Parameter '${parameterName}')`);
+  return trimCSharp(value!);
+}
+
+/** `CultMeshRouteCertificate`: the Odin key identity is required, and trimmed. */
+function certificateOdinKeyId(certificate: CultMeshAuthorityRouteCertificate): string {
+  if (isNullOrWhiteSpaceCSharp(certificate.odinKeyId)) {
+    throw new Error("Odin key identity is required. (Parameter 'odinKeyId')");
+  }
+  return trimCSharp(certificate.odinKeyId);
+}
+
+/**
+ * The transcript the C# reference signs is over a *constructed* route, and the
+ * C# constructors clean every field on the way in. Cleaning at the transcript
+ * is where TypeScript gets the same bytes: a duplicated protocol id, a padded
+ * protocol id, a padded generation and a padded Odin key id all verify against
+ * a C#-written signature, because C# never saw the padding either.
+ *
+ * `verseId` is the exception. It is not a route field: `CanonicalRoute` passes
+ * the caller's string straight into `Canonical`, untrimmed, so padding it
+ * changes the bytes on both sides.
+ */
 export function canonicalRoute(route: CultMeshAuthorityRouteView): Uint8Array {
   const certificate = route.certificate!;
+  const authorityRuntimeId = requireNonEmptyCSharp(route.authorityRuntimeId, "authorityRuntimeId");
+  const endpoint = requireNonEmptyCSharp(route.endpoint, "endpoint");
   return canonicalFields(
     "gamecult.cultmesh.route-certificate.v1",
     route.verseId,
-    route.authorityRuntimeId,
-    route.endpoint,
-    [...(route.protocolIds ?? [route.protocolId ?? "cultmesh.documents.v1"])].sort().join(""),
+    authorityRuntimeId,
+    endpoint,
+    cleanProtocolIds(route.protocolIds).join(""),
     String(route.priority ?? 0),
-    route.generation,
-    certificate.providerKey.keyId,
-    certificate.providerKey.x,
-    certificate.providerKey.y,
-    certificate.odinKeyId,
+    // A blank generation is not blank in C#: the route constructor substitutes
+    // the runtime id and endpoint, already cleaned, joined by "@".
+    isNullOrWhiteSpaceCSharp(route.generation) ? `${authorityRuntimeId}@${endpoint}` : trimCSharp(route.generation),
+    requireNonEmptyCSharp(certificate.providerKey.keyId, "keyId"),
+    requireNonEmptyCSharp(certificate.providerKey.x, "x"),
+    requireNonEmptyCSharp(certificate.providerKey.y, "y"),
+    certificateOdinKeyId(certificate),
     String(certificate.issuedAtUnixMilliseconds),
     String(certificate.expiresAtUnixMilliseconds),
   );
 }
 
+/**
+ * `CanonicalSession` cleans nothing on the request: it substitutes the empty
+ * string for a null field and trims none of them, because the handshake message
+ * is what the wire carried, not a constructed route. The endpoint is the only
+ * cleaned field, because the one C# passes is `Route.Endpoint`, which the route
+ * constructor already required non-empty and trimmed.
+ */
 export function canonicalSession(request: CultMeshSessionOpenMessage, endpoint: string): Uint8Array {
   return canonicalFields(
     "gamecult.cultmesh.session-proof.v1",
-    request.clientNonce,
-    request.messageId,
-    request.sourceRuntimeId,
-    request.verseId,
-    request.authorityRuntimeId,
-    request.protocolId,
-    endpoint,
-    request.routeGeneration,
+    request.clientNonce ?? "",
+    request.messageId ?? "",
+    request.sourceRuntimeId ?? "",
+    request.verseId ?? "",
+    request.authorityRuntimeId ?? "",
+    request.protocolId ?? "",
+    requireNonEmptyCSharp(endpoint, "endpoint"),
+    request.routeGeneration ?? "",
   );
 }
 

@@ -54,7 +54,7 @@ const mutations = [
   },
   {
     rule: "Odin root lookup by key id",
-    old: "const root = roots.get(certificate.odinKeyId);",
+    old: "const root = roots.get(odinKeyId);",
     new: "const root = [...roots.values()][0];",
   },
   {
@@ -90,8 +90,9 @@ const mutations = [
   },
   {
     rule: "root lookup precedes the validity window",
-    old: "  const root = roots.get(certificate.odinKeyId);\n" +
-      "  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);\n" +
+    old: "  const odinKeyId = certificateOdinKeyId(certificate);\n" +
+      "  const root = roots.get(odinKeyId);\n" +
+      "  if (!root) throw new Error(`Odin key '${odinKeyId}' is not trusted by this consumer.`);\n" +
       "  const now = trust.now?.() ?? Date.now();\n" +
       "  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {\n" +
       '    throw new Error("The Odin route certificate is not currently valid.");\n' +
@@ -100,18 +101,19 @@ const mutations = [
       "  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {\n" +
       '    throw new Error("The Odin route certificate is not currently valid.");\n' +
       "  }\n" +
-      "  const root = roots.get(certificate.odinKeyId);\n" +
-      "  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);\n",
+      "  const odinKeyId = certificateOdinKeyId(certificate);\n" +
+      "  const root = roots.get(odinKeyId);\n" +
+      "  if (!root) throw new Error(`Odin key '${odinKeyId}' is not trusted by this consumer.`);\n",
   },
   {
     rule: "duplicate Odin root key ids refuse the policy",
-    old: "    if (roots.has(root.keyId)) throw new Error(`Odin root key id '${root.keyId}' is listed more than once in the trust policy.`);\n",
+    old: "    if (roots.has(keyId)) throw new Error(`Odin root key id '${keyId}' is listed more than once in the trust policy.`);\n",
     new: "",
   },
   {
     rule: "protocol ids are sorted into the transcript",
-    old: "].sort().join(",
-    new: "].join(",
+    old: ")].sort();",
+    new: ")];",
   },
   {
     rule: "verifyP256 copies the viewed payload bytes, not the pool behind a Buffer",
@@ -120,13 +122,38 @@ const mutations = [
   },
   {
     rule: "route transcript field order",
-    old: "    route.verseId,\n    route.authorityRuntimeId,\n",
-    new: "    route.authorityRuntimeId,\n    route.verseId,\n",
+    old: "    route.verseId,\n    authorityRuntimeId,\n",
+    new: "    authorityRuntimeId,\n    route.verseId,\n",
   },
   {
     rule: "session transcript binds the nonce",
-    old: "    request.clientNonce,\n",
+    old: '    request.clientNonce ?? "",\n',
     new: "",
+  },
+  {
+    rule: "protocol ids are deduplicated into the transcript",
+    old: "  return [...new Set(",
+    new: "  return [...(",
+  },
+  {
+    rule: "the generation is trimmed into the transcript",
+    old: ": trimCSharp(route.generation),",
+    new: ": route.generation,",
+  },
+  {
+    rule: "the provider key id is trimmed into the transcript",
+    old: '    requireNonEmptyCSharp(certificate.providerKey.keyId, "keyId"),',
+    new: "    certificate.providerKey.keyId,",
+  },
+  {
+    rule: "the Odin key id is trimmed before the root lookup",
+    old: "  const odinKeyId = certificateOdinKeyId(certificate);",
+    new: "  const odinKeyId = certificate.odinKeyId;",
+  },
+  {
+    rule: "blank protocol ids are dropped from the transcript",
+    old: "(values ?? []).filter(value => !isNullOrWhiteSpaceCSharp(value)).map(trimCSharp)",
+    new: "(values ?? []).map(trimCSharp)",
   },
   {
     rule: "length-prefix framing is big-endian",

@@ -383,7 +383,9 @@ for (const [label, path] of [["C# reference", VECTORS_PATH], ["TypeScript-signed
   await verifyAuthorityRoute(vectors.route, trust);
   await assert.rejects(verifyAuthorityRoute({ ...vectors.route, priority: 8 }, trust), /signature is invalid/);
   await assert.rejects(
-    verifyAuthorityRoute({ ...vectors.route, protocolIds: [...vectors.route.protocolIds!, "cultmesh.realtime.v1"] }, trust),
+    // An id the vector does not already list: one it does list would be a
+    // duplicate, and the C# `Clean` drops duplicates before the transcript.
+    verifyAuthorityRoute({ ...vectors.route, protocolIds: [...vectors.route.protocolIds!, "cultmesh.telemetry.v1"] }, trust),
     /signature is invalid/,
   );
 
@@ -396,6 +398,55 @@ for (const [label, path] of [["C# reference", VECTORS_PATH], ["TypeScript-signed
   assert.equal(
     await verifyProviderSessionProof({ ...proof.request, clientNonce: "replayed" }, vectors.route.endpoint, vectors.route.certificate!.providerKey, proof.providerSignature),
     false,
+  );
+});
+
+// Soul ran each of these against the C# reference on 2026-09-16 by tampering
+// with the committed vector and rerunning the C# test: C# accepted every one,
+// because its constructors clean the field before `CanonicalRoute` sees it.
+// TypeScript refused every one until it cleaned at the transcript too. The
+// signature here is the C#-written one; nothing is re-signed.
+test("padding and duplication the C# constructors clean still verify against the C#-written vector", async () => {
+  const vectors = JSON.parse(readFileSync(VECTORS_PATH, "utf8")) as Vectors;
+  const trust = { mode: "authenticated-remote" as const, odinRoots: [vectors.odinRoot], now: () => vectors.nowUnixMilliseconds };
+  const route = vectors.route;
+  const certificate = route.certificate!;
+  const protocolIds = route.protocolIds!;
+  const accepted: readonly (readonly [string, CultMeshAuthorityRouteView])[] = [
+    ["a duplicated protocol id", { ...route, protocolIds: [...protocolIds, protocolIds[0]!] }],
+    ["a padded protocol id", { ...route, protocolIds: [` ${protocolIds[0]!}`, ...protocolIds.slice(1)] }],
+    ["a blank protocol id", { ...route, protocolIds: [...protocolIds, "  "] }],
+    ["the protocol ids reversed", { ...route, protocolIds: [...protocolIds].reverse() }],
+    ["a padded generation", { ...route, generation: ` ${route.generation}　` }],
+    ["a padded endpoint", { ...route, endpoint: ` ${route.endpoint} ` }],
+    ["a padded Odin key id", { ...route, certificate: { ...certificate, odinKeyId: ` ${certificate.odinKeyId} ` } }],
+    ["a padded provider key id", {
+      ...route,
+      certificate: { ...certificate, providerKey: { ...certificate.providerKey, keyId: ` ${certificate.providerKey.keyId} ` } },
+    }],
+  ];
+  for (const [label, candidate] of accepted) {
+    await verifyAuthorityRoute(candidate, trust).catch((error: Error) => {
+      assert.fail(`${label} should verify as it does in C#, but: ${error.message}`);
+    });
+  }
+  // A padded Odin key id also has to find its root, as it does in the C#
+  // dictionary, whose keys `Require` already trimmed.
+  await verifyAuthorityRoute(
+    { ...route, certificate: { ...certificate, odinKeyId: ` ${certificate.odinKeyId} ` } },
+    { ...trust, odinRoots: [{ ...vectors.odinRoot, keyId: `\t${vectors.odinRoot.keyId}\t` }] },
+  );
+
+  // `verseId` is not a route field and C# does not clean it, so padding it
+  // changes the bytes on both sides.
+  await assert.rejects(verifyAuthorityRoute({ ...route, verseId: ` ${route.verseId} ` }, trust), /signature is invalid/);
+  // A route with no protocol ids transcribes the empty string, as C#'s
+  // `Array.Empty<string>()` does; there is no substituted default id.
+  await assert.rejects(verifyAuthorityRoute({ ...route, protocolIds: undefined }, trust), /signature is invalid/);
+  await assert.rejects(verifyAuthorityRoute({ ...route, protocolIds: [] }, trust), /signature is invalid/);
+  assert.deepEqual(
+    canonicalRoute({ ...route, protocolIds: undefined }),
+    canonicalRoute({ ...route, protocolIds: ["", "   "] }),
   );
 });
 
