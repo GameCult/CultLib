@@ -83,7 +83,47 @@ asked for a provider proof, where C# would not ask. **Landed** at `a801e0a`:
 verifier and the browser's session check, with a browser test for the
 blank-signature loopback route, the signed loopback route that still needs
 a proof, and the blank-signature remote refused in both modes. Twenty-one
-mutations, twenty-one killed. Tests 74, 18, 10. Second Soul pass in flight.
+mutations, twenty-one killed. Tests 74, 18, 10.
+
+**Second Soul pass, 2026-09-16.** Held: byte copy, root before window, duplicate
+root ids refusing on the unsigned path in either insertion order, the sort
+pinned, the U+001F separator on both sides, 33 of 39 field tampers failing the
+C# test with the survivors explained, the runner repairing itself after a
+SIGKILL and leaving `dist/` free of every mutant string, all 21 anchors
+matching once on both LF and CRLF copies, and every test and grep. Cut 1
+closes on its stated invariants. Four edge divergences from the C# rules
+remain, with one guard gap, to be fixed before Cut 4 makes a non-C# signer
+real (in Hands):
+
+- **`isLoopbackEndpoint` is not `Uri.IsLoopback`**: 15 of 90 probed
+  endpoints disagree. Seven are reachable and TS-wider (a trailing dot on
+  the host, `ws:` without `//`, a backslash separator, fullwidth characters,
+  a tab), because `URL` normalises what C# refuses; eight are C#-wider and
+  unreachable in the browser (zone ids the `URL` parser throws on,
+  `file:`/`mailto:` schemes the filter drops). The doc comment claimed
+  equivalence. Low: local-development only.
+- **`trim()` is not `char.IsWhiteSpace`** at U+0085 (C# whitespace, TS not)
+  and U+FEFF (TS trims, C# does not), so a signature of either is
+  "unsigned" on one side and "signed" on the other; both are carriable on
+  the rendezvous wire. Low, fail-open only where an absent certificate is
+  already accepted.
+- **C# cleans the route before the transcript and TS transcribes raw**:
+  duplicate or padded protocol ids, padded generation and padded key ids
+  verify in C# and refuse in TS, and an absent protocol list gets a default
+  in TS and `""` in C#. Latent while every signer is C#; live at the first
+  TS signer. Low-medium.
+- **Two C# refusals collapse into one TS message** (not base64; not P1363).
+  Low.
+- **A local `=== ""` shim beside the shared call in the browser survives
+  every test**, because no browser test uses a whitespace signature; the
+  name grep is silent by construction. Low-medium.
+- **No workflow runs the `cultnet-ts` tests on Linux**, and the interop
+  workflow is Windows-only and main-only; on a `codex/**` push only the C#
+  half of the vector check runs. Low.
+- Recorded, not a defect: the TS-signed vector is not reproducible
+  byte-for-byte (random `k`); the C# test pins that the committed bytes
+  verify under current rules, and the TS test pins that the committed file
+  verifies under the current module.
 
 Seen by Hands, recorded for section 15: `packages/cultnet-ts/src/generated/swarm-contracts.generated.ts`
 is rewritten with LF by every build while the tree is `autocrlf=true`, so
