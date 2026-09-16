@@ -1,5 +1,6 @@
-// Mutation check for the CultMesh rules TypeScript owns: route verification and
-// the realtime frame codec.
+// Mutation check for the CultMesh rules that are not proven by reading: the
+// route verifier, the realtime frame codec, and the native bridge's runtime
+// lifetime.
 //
 // Two files own the route rules and each is one target here. `shared` is
 // `packages/cultnet-ts/src/cultmesh-authority.ts`, the one verifier, killed by
@@ -24,17 +25,41 @@
 // `realtime` is `packages/cultmesh-ts/src/realtime-wire.ts`, the frame codec,
 // killed by `npm run test --workspace packages/cultmesh-ts`.
 //
-//   node scripts/mutate-cultmesh.mjs
+// `native` is `native/GameCult.Mesh.Quic.Native/cultmesh_quic_native.cpp`, and
+// its killer is the scenario runner in that project's `tests/`, built and run
+// through CMake rather than npm. It has no `dist/`, so it has no sentinel and no
+// post-run rebuild check; the verified restore covers it.
+//
+// A mutation is only killed on a target that can see it. Some of the native
+// rules are visible only under a sanitizer, and there is no ThreadSanitizer for
+// MSVC; a run on the wrong platform would otherwise report "killed" for a
+// mutation it never actually exercised. Every native entry therefore names the
+// platforms it is honest on, and a run elsewhere reports it as `skipped`, which
+// is not coverage. Soul's Cut 3 pass found this the hard way: `B1` and `L2` were
+// reported killed from a win32-x64 release run where both in fact survive, and
+// die deterministically only under linux-x64 AddressSanitizer.
+//
+// This script tests the platform it is running on. For the linux-x64 native
+// entries, run it inside the Debian 13 container the bridge is built in, with
+// cmake, ninja, a C++20 compiler and Node present; a Windows run reports those
+// entries as skipped and says so.
+//
+//   node scripts/mutate-cultmesh.mjs [target...]
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const npmCli = process.env.npm_execpath ??
   join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+
+// The platform this run can speak for. It is the target the native entries are
+// matched against, and it is named in the output so a report cannot be read as
+// covering a platform it never touched.
+const platform = process.platform === "win32" ? "win32-x64" : "linux-x64";
 
 // Each target's `sentinel` is present in its restored source and compiled
 // verbatim into its dist/; that target's last mutation removes it, which is
@@ -58,6 +83,10 @@ const targets = {
     file: join(repoRoot, "packages", "cultmesh-ts", "src", "realtime-wire.ts"),
     dist: join(repoRoot, "packages", "cultmesh-ts", "dist", "realtime-wire.js"),
     sentinel: "0x31545343",
+  },
+  native: {
+    file: join(repoRoot, "native", "GameCult.Mesh.Quic.Native", "cultmesh_quic_native.cpp"),
+    check: () => nativeScenariosPass(),
   },
 };
 
@@ -325,6 +354,68 @@ const mutations = [
   { target: "realtime", rule: "the decoded payload is a plain Uint8Array whatever the frame was", old: "    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),", new: "    payload: Uint8Array.prototype.slice.call(bytes, offset, offset + payloadLength)," },
   // Last, because it removes this target's sentinel.
   { target: "realtime", rule: "the frame magic is 0x31545343", old: "const MAGIC = 0x31545343;", new: "const MAGIC = 0x31545344;" },
+
+  // The native bridge's runtime lifetime. Each rule gets two mutations: the
+  // revert, which puts back the spelling that was wrong, and a loosening, which
+  // keeps the shape and gives away the guarantee. A rule that only the revert
+  // kills is pinned by accident.
+  //
+  // `honestOn` is load-bearing. There is no ThreadSanitizer for MSVC, so the
+  // notify rule cannot be seen on win32-x64 at all; the quiesce rule is visible
+  // on both, but only because the assertion build states it outright. Without
+  // the assertion it is visible on neither in any dependable way: Soul's Cut 3
+  // pass hit the use-after-free 4 times in 48 linux-x64 AddressSanitizer
+  // attempts with pollers blocked mid-copy of large frames, and never once on
+  // release.
+  {
+    target: "native",
+    honestOn: ["linux-x64"],
+    rule: "the call scope notifies under `gate` (revert: notify after the unlock)",
+    old: "        std::lock_guard<std::mutex> lock(runtime_->gate);\n" +
+      "        --runtime_->active_calls;\n" +
+      "        runtime_->signal.notify_all();\n",
+    new: "        {\n" +
+      "            std::lock_guard<std::mutex> lock(runtime_->gate);\n" +
+      "            --runtime_->active_calls;\n" +
+      "        }\n" +
+      "        runtime_->signal.notify_all();\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64"],
+    // The tempting spelling: notify only when this was the last call out, which
+    // looks like it narrows the window and does not close it at all. The closer's
+    // predicate is true the moment the count reaches zero, so this is the same
+    // race with a tidier face.
+    rule: "the call scope notifies under `gate` (loosening: notify outside it only when the count reaches zero)",
+    old: "        std::lock_guard<std::mutex> lock(runtime_->gate);\n" +
+      "        --runtime_->active_calls;\n" +
+      "        runtime_->signal.notify_all();\n",
+    new: "        bool last = false;\n" +
+      "        {\n" +
+      "            std::lock_guard<std::mutex> lock(runtime_->gate);\n" +
+      "            last = (--runtime_->active_calls == 0);\n" +
+      "        }\n" +
+      "        if (last) runtime_->signal.notify_all();\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the close waits for every in-flight call (revert: wake without the wait)",
+    old: "        runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });\n",
+    new: "",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // A bounded wait is the shape that survives review: it looks like the wait,
+    // it usually finishes, and it turns the contract into a hope. The assertion
+    // is what tells them apart.
+    rule: "the close waits for every in-flight call (loosening: a bounded wait that gives up)",
+    old: "        runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });",
+    new: "        runtime->signal.wait_for(lock, std::chrono::milliseconds(1),\n" +
+      "            [runtime] { return runtime->active_calls == 0; });",
+  },
 ];
 
 function digest(bytes) {
@@ -345,6 +436,102 @@ function testsPass(workspace) {
   } catch {
     return false;
   }
+}
+
+// The native killer. The bridge is a shared library, so "run the tests" is build
+// the scenario runner beside it and run the scenarios. There is no npm here and
+// no `dist/`; the artifacts live under artifacts/, which is git-ignored.
+//
+// Two configurations, because the two rules are visible to different things. The
+// assertion build states the quiesce invariant outright, which is what makes the
+// missing wait fail on the first close instead of on an unlucky one. The
+// ThreadSanitizer build is the only thing that sees a notify land on a destroyed
+// condition variable, and it exists on linux-x64 alone.
+const nativeConfigurations = platform === "linux-x64"
+  ? [
+      { name: "asserts", asserts: "ON", sanitizer: null },
+      { name: "tsan", asserts: "OFF", sanitizer: "thread" },
+    ]
+  : [{ name: "asserts", asserts: "ON", sanitizer: null }];
+
+function msquicArguments() {
+  if (platform === "win32-x64") {
+    const root = join(repoRoot, "artifacts", "dependencies", "msquic-openssl-2.5.9",
+      "package", "build", "native");
+    if (!existsSync(root))
+      throw new Error(`${root} is missing; run scripts/build-quic-native.ps1 once to fetch MsQuic`);
+    return {
+      configure: [`-DMSQUIC_ROOT=${root.replace(/\\/g, "/")}`, "-A", "x64"],
+      runtime: [[join(root, "bin", "x64", "msquic.dll"), "msquic.dll"]],
+    };
+  }
+  const cache = join(repoRoot, "artifacts", "dependencies", "msquic-linux-2.5.9");
+  const libraries = join(cache, "package", "usr", "lib", "x86_64-linux-gnu");
+  const versioned = join(libraries, "libmsquic.so.2.5.9");
+  if (!existsSync(versioned))
+    throw new Error(`${versioned} is missing; run scripts/build-quic-native.sh once to fetch MsQuic`);
+  // CMake links -lmsquic, which needs an unversioned name to resolve against;
+  // the deb ships only the versioned file.
+  writeFileSync(join(libraries, "libmsquic.so"), readFileSync(versioned));
+  return {
+    configure: [
+      `-DMSQUIC_INCLUDE_DIR=${join(cache, "include")}`,
+      `-DMSQUIC_LIB_DIR=${libraries}`,
+    ],
+    runtime: [[versioned, "libmsquic.so.2"]],
+  };
+}
+
+function nativeScenariosPass() {
+  const msquic = msquicArguments();
+  const source = join(repoRoot, "native", "GameCult.Mesh.Quic.Native");
+  for (const configuration of nativeConfigurations) {
+    const build = join(repoRoot, "artifacts", "quic-native-mutation", platform, configuration.name);
+    // From scratch each time: a stale object file would let a mutation be
+    // reported against a binary that does not contain it.
+    rmSync(build, { recursive: true, force: true });
+    const flags = configuration.sanitizer
+      ? [`-fsanitize=${configuration.sanitizer}`, "-fno-omit-frame-pointer", "-g"].join(" ")
+      : "";
+    // Multi-config generators (MSVC) put the binaries in a per-config directory;
+    // single-config ones (Ninja, Makefiles) do not.
+    const binaries = platform === "win32-x64"
+      ? join(build, "bin", "RelWithDebInfo")
+      : join(build, "bin");
+    try {
+      execFileSync("cmake", [
+        "-S", source, "-B", build,
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        `-DCMAKE_CXX_FLAGS=${flags}`,
+        `-DCMAKE_EXE_LINKER_FLAGS=${flags}`,
+        `-DCMAKE_SHARED_LINKER_FLAGS=${flags}`,
+        "-DCULTMESH_QUIC_BUILD_TESTS=ON",
+        `-DCULTMESH_QUIC_DEBUG_ASSERTS=${configuration.asserts}`,
+        ...msquic.configure,
+      ], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+      execFileSync("cmake", ["--build", build, "--config", "RelWithDebInfo"],
+        { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      // A mutation that does not compile is killed by the build, which is a
+      // legitimate kill: the rule it removed was load-bearing to the language.
+      return false;
+    }
+    for (const [from, name] of msquic.runtime) writeFileSync(join(binaries, name), readFileSync(from));
+    const runner = join(binaries,
+      platform === "win32-x64" ? "cultmesh_quic_native_tests.exe" : "cultmesh_quic_native_tests");
+    try {
+      execFileSync(runner, ["closerace", "20", "256"], {
+        cwd: binaries,
+        stdio: ["ignore", "pipe", "pipe"],
+        // Without this a reported race is printed and the run still exits 0,
+        // so every sanitizer mutation would survive.
+        env: { ...process.env, TSAN_OPTIONS: "halt_on_error=1", ASAN_OPTIONS: "halt_on_error=1" },
+      });
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function occurrences(text, needle) {
@@ -402,7 +589,17 @@ function repair(name, target, own, sidecar) {
 const results = [];
 let failed = false;
 
+// Named targets run only those; no argument runs all of them. The native target
+// is built and run inside the Debian 13 container for its linux-x64 entries,
+// where the TypeScript workspaces have no installed dependencies, so being able
+// to ask for one target is what makes that run possible at all.
+const requested = process.argv.slice(2);
+for (const name of requested) {
+  if (!(name in targets)) throw new Error(`unknown target '${name}'; known: ${Object.keys(targets).join(", ")}`);
+}
+
 for (const [name, target] of Object.entries(targets)) {
+  if (requested.length > 0 && !requested.includes(name)) continue;
   const own = mutations.filter(mutation => (mutation.target ?? "shared") === name);
   if (own.length === 0) throw new Error(`target '${name}' has no mutations`);
   const sidecar = `${target.file}.mutation-original`;
@@ -425,18 +622,25 @@ for (const [name, target] of Object.entries(targets)) {
     }
   };
 
-  const last = own[own.length - 1];
-  if (!originalText.includes(target.sentinel) ||
-      originalText.replace(withEol(last.old), withEol(last.new)).includes(target.sentinel)) {
-    throw new Error(
-      `the sentinel '${target.sentinel}' must be in ${target.file} and removed by its last mutation ('${last.rule}')`,
-    );
+  // A target with a compiled `dist/` carries a sentinel so the post-run rebuild
+  // check can tell a rebuilt output from one still holding the last mutant. The
+  // native target has no dist/ and so has neither.
+  if (target.dist) {
+    const last = own[own.length - 1];
+    if (!originalText.includes(target.sentinel) ||
+        originalText.replace(withEol(last.old), withEol(last.new)).includes(target.sentinel)) {
+      throw new Error(
+        `the sentinel '${target.sentinel}' must be in ${target.file} and removed by its last mutation ('${last.rule}')`,
+      );
+    }
   }
+
+  const check = target.check ?? (() => testsPass(target.workspace));
 
   writeFileSync(sidecar, original);
   try {
     writeFileSync(target.file, Buffer.from(originalText, "utf8"));
-    const controlPass = testsPass(target.workspace);
+    const controlPass = check();
     results.push({ target: name, outcome: controlPass ? "green" : "RED", rule: "control (no-op rewrite)" });
     if (!controlPass) failed = true;
     else {
@@ -446,8 +650,20 @@ for (const [name, target] of Object.entries(targets)) {
         if (count !== 1) {
           throw new Error(`anchor for '${mutation.rule}' matched ${count} times in ${target.file}, expected exactly 1`);
         }
+        // A mutation this platform cannot see is not run. Reporting it as killed
+        // from a run that never exercised it is the honesty failure these marks
+        // exist to prevent; the anchor is still checked above, so a rule whose
+        // spelling has moved fails here rather than going quiet.
+        if (mutation.honestOn && !mutation.honestOn.includes(platform)) {
+          results.push({
+            target: name,
+            outcome: "skipped",
+            rule: `${mutation.rule} — honest only on ${mutation.honestOn.join(", ")}, not ${platform}`,
+          });
+          continue;
+        }
         writeFileSync(target.file, Buffer.from(originalText.replace(old, replacement), "utf8"));
-        const pass = testsPass(target.workspace);
+        const pass = check();
         restore();
         results.push({ target: name, outcome: pass ? "SURVIVED" : "killed", rule: mutation.rule });
         if (pass) failed = true;
@@ -462,6 +678,11 @@ for (const [name, target] of Object.entries(targets)) {
     unlinkSync(sidecar);
   }
 
+  if (!target.dist) {
+    results.push({ target: name, outcome: "restored", rule: `${target.file} sha256=${originalDigest}` });
+    continue;
+  }
+
   // Every test run above rebuilt dist/ from a mutant; put the restored source back in it.
   npm(target.workspace, "run", "build");
   if (!readFileSync(target.dist, "utf8").includes(target.sentinel)) {
@@ -474,5 +695,6 @@ for (const [name, target] of Object.entries(targets)) {
   });
 }
 
+console.log(`build host and target: ${platform}`);
 for (const result of results) console.log(`${result.outcome.padEnd(9)} [${result.target}] ${result.rule}`);
 process.exit(failed ? 1 : 0);
