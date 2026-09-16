@@ -316,7 +316,7 @@ function ownedBytes(view: Uint8Array): ArrayBuffer {
  * accepts them: " ws://127.0.0.1/mesh" is loopback to both.
  */
 function refusedByCSharpUriShape(value: string): boolean {
-  const raw = value.replace(/^[ - ]+|[ - ]+$/g, "");
+  const raw = value.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
   if (raw.includes("\\")) return true;
   const shape = /^[A-Za-z][A-Za-z0-9+\-.]*:\/\/([^/?#]+)/.exec(raw);
   if (!shape) return true;
@@ -327,7 +327,7 @@ function refusedByCSharpUriShape(value: string): boolean {
     : afterUserInfo.split(":")[0]!;
   if (host.length === 0) return true;
   // eslint-disable-next-line no-control-regex
-  return /[^!-~]/.test(host) || host.endsWith(".");
+  return /[^\u0021-\u007e]/.test(host) || host.endsWith(".");
 }
 
 /**

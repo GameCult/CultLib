@@ -245,26 +245,43 @@ test("browser client opens an unsigned-certificate loopback session under local-
       trust,
       socketFactory: () => handshakeOnlySocket(route),
     });
-  const blank = (route: CultMeshBrowserRoute) => ({ ...route, certificate: { ...route.certificate!, signature: "" } });
+  const blank = (route: CultMeshBrowserRoute, signature: string) =>
+    ({ ...route, certificate: { ...route.certificate!, signature } });
 
   const loopback = await createSignedRoute("ws://127.0.0.1:4501/mesh");
   const localTrust = { mode: "local-development" as const, odinRoots: [loopback.odinPublic] };
-  const client = await connect(blank(loopback.route), localTrust);
-  assert.equal(client.state, "connected");
-  await client.dispose();
+  const remote = await createSignedRoute("wss://provider.example/mesh");
+
+  // Empty is the easy case. The whitespace signatures are the ones that catch a
+  // local re-reading of "unsigned" here: an inline `signature === ""` passes
+  // every other test in this file and fails these, and U+0085 also separates
+  // `String.prototype.trim` from the C# `char.IsWhiteSpace` the shared
+  // `isUnsignedCertificate` uses. Both sides of the session check have to read
+  // "unsigned" the same way, or the route verifier accepts a session the
+  // acceptance check then demands a provider proof for.
+  for (const signature of ["", "   ", "\u0085", "\u00a0\t\n"]) {
+    const label = JSON.stringify(signature);
+    const client = await connect(blank(loopback.route, signature), localTrust);
+    assert.equal(client.state, "connected", label);
+    await client.dispose();
+    await assert.rejects(
+      connect(blank(remote.route, signature), { mode: "local-development", odinRoots: [remote.odinPublic] }),
+      /Odin-signed authority certificate/,
+      label,
+    );
+    await assert.rejects(
+      connect(blank(remote.route, signature), { mode: "authenticated-remote", odinRoots: [remote.odinPublic] }),
+      /Odin-signed authority certificate/,
+      label,
+    );
+  }
+  // U+FEFF is whitespace to JavaScript and not to C#, so it is a signature, not
+  // an unsigned route, and the loopback route is refused for its bytes.
+  await assert.rejects(connect(blank(loopback.route, "\ufeff"), localTrust), /not base64|not IEEE P1363/);
+
   // A signed loopback certificate is an authenticated route even under
   // local-development; the provider must still prove its key.
   await assert.rejects(connect(loopback.route, localTrust), /did not prove possession/);
-
-  const remote = await createSignedRoute("wss://provider.example/mesh");
-  await assert.rejects(
-    connect(blank(remote.route), { mode: "local-development", odinRoots: [remote.odinPublic] }),
-    /Odin-signed authority certificate/,
-  );
-  await assert.rejects(
-    connect(blank(remote.route), { mode: "authenticated-remote", odinRoots: [remote.odinPublic] }),
-    /Odin-signed authority certificate/,
-  );
 });
 
 test("browser client rejects a mutated or expired signed route before opening a provider socket", async () => {
