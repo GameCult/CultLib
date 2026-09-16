@@ -6,7 +6,10 @@ Status: Imagination output for the target in
 `docs/typescript-quic-realtime-target.md` (operator-accepted 2026-09-16). No
 code in this document has been written. Nothing here is committed by
 Imagination; the root agent commits. Q5, Q6 and Q7 were ruled the same day
-(section 13, Rulings); no operator question is open. Cut 1 has not started.
+(section 13, Rulings); Q5 was then re-ruled from A to C because npmjs is
+unreachable from this network. **Cut 6 and the registry-dependent lines of
+Cuts 4 and 7 are being remapped under C**; until that lands, their text
+describes ruling A. No operator question is open. Cut 1 has not started.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `f2cd2eb4641269c653977bdba9b4bce2a26d870c`. Every `file:line` below is read
@@ -1007,10 +1010,20 @@ moves to a shared browser-safe module (Q2, section 6 names the module).
 The operator took all three recommendations the same day the map was written.
 Each is now a standing ruling; the options above are history.
 
-- **Q5 ruled A.** `cultnet-ts` and `cultmesh-ts` publish under their existing
-  unscoped names. Only the two native platform packages are scoped:
-  `@gamecult/cultmesh-quic-native-win32-x64` and
-  `@gamecult/cultmesh-quic-native-linux-x64`. No consumer import changes.
+- **Q5 ruled A, then re-ruled C the same day.** A had `cultnet-ts` and
+  `cultmesh-ts` publishing under their unscoped names with only the two native
+  platform packages scoped. It fell to a Body fact the map had not recorded,
+  in the operator's words: "we don't even have npm access and cannot get it
+  because our entire subnet is blocked." The publish job needs an `NPM_TOKEN`
+  minted on npmjs.com by a logged-in user; nobody on this network can mint
+  one, which is also why the existing `cultcache-ts` job has never run.
+  **C stands: no registry.** Consumers keep `file:` paths. The native binaries
+  ship inside the CultLib tree the deploy path already carries, and Q6's
+  Actions build attaches the Linux artifact to a GitHub Release instead of
+  publishing a package. Q5's naming question dissolves with it. Cut 6 is
+  remapped under C below; Cut 4's binary resolution and Cut 7's ledgers
+  follow it. Any line in this map that still says "publish", "registry" or
+  "platform package" describes A and is history.
 - **Q6 ruled A.** The Linux release artifact is built by GitHub Actions on
   `ubuntu-latest` inside `container: debian:13`, published by the workflow,
   and verified by the operator smoke on Yggdrasil in cut 6. The Docker
