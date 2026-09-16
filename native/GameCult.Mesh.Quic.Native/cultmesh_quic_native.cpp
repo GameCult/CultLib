@@ -86,31 +86,42 @@ struct QueuedEvent {
     std::vector<uint8_t> payload;
 };
 
+// Objects are shared-owned, and that is the whole lifetime model. The runtime's
+// maps hold one reference each; an export that names an id takes its own
+// reference under the lock and holds it for the entire MsQuic call. MsQuic's
+// worker, on shutdown-complete, drops the map's reference only. The handle
+// follows the object: it is closed exactly once, in the destructor, by whichever
+// holder drops last, under a one-shot exchange guard. See section 4 of
+// include/cultmesh_quic_native.h, which is where this is promised to hosts.
+
 struct Stream {
     Runtime* runtime = nullptr;
-    Connection* owner = nullptr;
+    // Shared, not raw: this is what keeps a connection's handle open for as long
+    // as any of its streams still exist, so stream handles always close first.
+    std::shared_ptr<Connection> owner;
     HQUIC handle = nullptr;
     uint64_t id = 0;
     uint8_t kind = 0;
     bool inbound = false;
     bool has_kind = false;
+    std::atomic<bool> handle_closed{false};
     // Inbound reassembly only. MsQuic delivers stream bytes in arbitrary
     // chunks, so the length prefix and the frame it introduces can arrive in
     // separate receives.
     std::vector<uint8_t> buffered;
+
+    ~Stream();
 };
 
-struct Connection {
+struct Connection : std::enable_shared_from_this<Connection> {
     Runtime* runtime = nullptr;
     HQUIC handle = nullptr;
     uint64_t id = 0;
     uint64_t listener_id = 0;
     bool inbound = false;
     bool closing = false;
-    // Two paths can reach `ConnectionClose`: the shutdown-complete callback and
-    // `cultmesh_quic_runtime_close`, which cannot lean on the callback because a
-    // silent shutdown produces none. Whoever gets here first closes; the other
-    // does nothing. MsQuic treats a second close of the same handle as a bug.
+    // Set when MsQuic is closing the handle itself (an app close already in
+    // progress), so the destructor's one-shot close stands down.
     std::atomic<bool> handle_closed{false};
     // v1 only. A connection carrying a pin has its certificate answered in C
     // against that pin; a v2 connection never sets this and is always answered
@@ -120,6 +131,8 @@ struct Connection {
     // v1 diagnostics: the MsQuic event sequence, which the v1 error string
     // reports and nothing in v2 reads.
     std::string trace;
+
+    ~Connection();
 };
 
 struct Listener {
@@ -127,7 +140,9 @@ struct Listener {
     HQUIC handle = nullptr;
     HQUIC configuration = nullptr;
     uint64_t id = 0;
-    bool stopped = false;
+    std::atomic<bool> handle_closed{false};
+
+    ~Listener();
 };
 
 struct Runtime {
@@ -140,13 +155,63 @@ struct Runtime {
     std::mutex gate;
     std::condition_variable signal;
     std::deque<QueuedEvent> events;
-    std::unordered_map<uint64_t, std::unique_ptr<Listener>> listeners;
-    std::unordered_map<uint64_t, std::unique_ptr<Connection>> connections;
-    std::unordered_map<uint64_t, std::unique_ptr<Stream>> streams;
+    std::unordered_map<uint64_t, std::shared_ptr<Listener>> listeners;
+    std::unordered_map<uint64_t, std::shared_ptr<Connection>> connections;
+    std::unordered_map<uint64_t, std::shared_ptr<Stream>> streams;
     uint64_t next_id = 1;
     std::string error;
     bool closing = false;
+    // Host calls currently inside the library. `cultmesh_quic_runtime_close`
+    // waits for this to reach zero before it touches a handle.
+    int active_calls = 0;
 };
+
+// Every host-facing export enters through this. It refuses once
+// `cultmesh_quic_runtime_close` has started, and otherwise holds the runtime
+// open for the length of the call.
+class CallScope {
+public:
+    explicit CallScope(Runtime* runtime) : runtime_(runtime) {
+        if (runtime_ == nullptr) return;
+        std::lock_guard<std::mutex> lock(runtime_->gate);
+        if (runtime_->closing) return;
+        ++runtime_->active_calls;
+        entered_ = true;
+    }
+    ~CallScope() {
+        if (!entered_) return;
+        {
+            std::lock_guard<std::mutex> lock(runtime_->gate);
+            --runtime_->active_calls;
+        }
+        runtime_->signal.notify_all();
+    }
+    CallScope(const CallScope&) = delete;
+    CallScope& operator=(const CallScope&) = delete;
+    bool entered() const { return entered_; }
+
+private:
+    Runtime* runtime_ = nullptr;
+    bool entered_ = false;
+};
+
+Stream::~Stream() {
+    if (handle != nullptr && runtime != nullptr && runtime->api != nullptr &&
+        !handle_closed.exchange(true))
+        runtime->api->StreamClose(handle);
+}
+
+Connection::~Connection() {
+    if (handle != nullptr && runtime != nullptr && runtime->api != nullptr &&
+        !handle_closed.exchange(true))
+        runtime->api->ConnectionClose(handle);
+}
+
+Listener::~Listener() {
+    if (runtime == nullptr || runtime->api == nullptr) return;
+    if (handle != nullptr && !handle_closed.exchange(true)) runtime->api->ListenerClose(handle);
+    if (configuration != nullptr) runtime->api->ConfigurationClose(configuration);
+}
 
 // Every send buffer outlives its `StreamSend` call: MsQuic reads the bytes
 // asynchronously and only releases them at SEND_COMPLETE, where this is freed.
@@ -221,25 +286,35 @@ uint64_t NextId(Runtime* runtime) {
     return runtime->next_id++;
 }
 
-Listener* FindListener(Runtime* runtime, uint64_t id) {
-    std::lock_guard<std::mutex> lock(runtime->gate);
-    const auto found = runtime->listeners.find(id);
-    return found == runtime->listeners.end() ? nullptr : found->second.get();
-}
-
-Connection* FindConnection(Runtime* runtime, uint64_t id) {
+// The three lookups. Each returns a reference the caller owns for as long as it
+// holds it, taken under the lock, so nothing the caller then names can be freed
+// under it. A raw pointer here was the use-after-free.
+std::shared_ptr<Connection> FindConnection(Runtime* runtime, uint64_t id) {
     std::lock_guard<std::mutex> lock(runtime->gate);
     const auto found = runtime->connections.find(id);
-    return found == runtime->connections.end() ? nullptr : found->second.get();
+    return found == runtime->connections.end() ? nullptr : found->second;
 }
 
-Stream* FindStream(Runtime* runtime, uint64_t id) {
+std::shared_ptr<Stream> FindStream(Runtime* runtime, uint64_t id) {
     std::lock_guard<std::mutex> lock(runtime->gate);
     const auto found = runtime->streams.find(id);
-    return found == runtime->streams.end() ? nullptr : found->second.get();
+    return found == runtime->streams.end() ? nullptr : found->second;
 }
 
-void ShutdownConnectionForProtocolFault(Connection* connection, const std::string& message) {
+// Takes the object out of its map and returns it, so the caller's reference —
+// and any destructor it ends up running — lives outside the lock.
+template <typename Map>
+auto Detach(std::mutex& gate, Map& map, uint64_t id) {
+    typename Map::mapped_type detached;
+    std::lock_guard<std::mutex> lock(gate);
+    const auto found = map.find(id);
+    if (found == map.end()) return detached;
+    detached = std::move(found->second);
+    map.erase(found);
+    return detached;
+}
+
+void ShutdownConnectionForProtocolFault(const std::shared_ptr<Connection>& connection, const std::string& message) {
     if (connection == nullptr) return;
     SetError(connection->runtime, message);
     if (connection->runtime->api != nullptr && connection->handle != nullptr)
@@ -288,12 +363,14 @@ bool ConsumeFrames(Stream* stream) {
     return true;
 }
 
+// Drops the map's reference and nothing else. If the map was the last holder the
+// object dies here, outside the lock, and its destructor closes the handle; if a
+// host call is still inside, the object outlives this by exactly that long.
 void DestroyStream(Runtime* runtime, uint64_t stream_id) {
-    std::lock_guard<std::mutex> lock(runtime->gate);
-    runtime->streams.erase(stream_id);
+    [[maybe_unused]] const auto detached = Detach(runtime->gate, runtime->streams, stream_id);
 }
 
-QUIC_STATUS QUIC_API StreamCallback(HQUIC handle, void* context, QUIC_STREAM_EVENT* event) {
+QUIC_STATUS QUIC_API StreamCallback(HQUIC, void* context, QUIC_STREAM_EVENT* event) {
     auto* stream = static_cast<Stream*>(context);
     Runtime* runtime = stream->runtime;
     switch (event->Type) {
@@ -314,11 +391,16 @@ QUIC_STATUS QUIC_API StreamCallback(HQUIC handle, void* context, QUIC_STREAM_EVE
             ShutdownConnectionForProtocolFault(stream->owner, "CultMesh QUIC stream ended with a truncated frame.");
         break;
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        // Everything this event reports is read before the map's reference goes,
+        // because that reference may be the last one and `stream` may not
+        // survive `DestroyStream`.
         const uint64_t stream_id = stream->id;
         const uint64_t connection_id = stream->owner->id;
         const uint64_t listener_id = stream->owner->listener_id;
         const uint32_t kind = stream->kind;
-        if (!event->SHUTDOWN_COMPLETE.AppCloseInProgress) runtime->api->StreamClose(handle);
+        // An app close already in progress means MsQuic closes this handle
+        // itself; anything else leaves it to the last holder's destructor.
+        if (event->SHUTDOWN_COMPLETE.AppCloseInProgress) stream->handle_closed.store(true);
         DestroyStream(runtime, stream_id);
         PublishSimple(runtime, kEventStreamShutdown, listener_id, connection_id, stream_id, 0, 0, kind);
         break;
@@ -330,12 +412,27 @@ QUIC_STATUS QUIC_API StreamCallback(HQUIC handle, void* context, QUIC_STREAM_EVE
 }
 
 void DestroyConnection(Runtime* runtime, uint64_t connection_id) {
-    std::lock_guard<std::mutex> lock(runtime->gate);
-    for (auto it = runtime->streams.begin(); it != runtime->streams.end();)
-        it = it->second->owner != nullptr && it->second->owner->id == connection_id
-            ? runtime->streams.erase(it)
-            : std::next(it);
-    runtime->connections.erase(connection_id);
+    // Declared first so it dies last: whatever order these drop in, a stream
+    // holds its connection, so every stream handle closes before the connection
+    // handle does.
+    std::shared_ptr<Connection> connection;
+    std::vector<std::shared_ptr<Stream>> streams;
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        for (auto it = runtime->streams.begin(); it != runtime->streams.end();) {
+            if (it->second->owner != nullptr && it->second->owner->id == connection_id) {
+                streams.push_back(std::move(it->second));
+                it = runtime->streams.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        const auto found = runtime->connections.find(connection_id);
+        if (found != runtime->connections.end()) {
+            connection = std::move(found->second);
+            runtime->connections.erase(found);
+        }
+    }
 }
 
 #if defined(_WIN32)
@@ -353,9 +450,9 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
         PublishSimple(runtime, kEventConnectionConnected, connection->listener_id, connection->id, 0, 0, 0);
         break;
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
-        auto stream = std::make_unique<Stream>();
+        auto stream = std::make_shared<Stream>();
         stream->runtime = runtime;
-        stream->owner = connection;
+        stream->owner = connection->shared_from_this();
         stream->handle = event->PEER_STREAM_STARTED.Stream;
         stream->inbound = true;
         stream->id = NextId(runtime);
@@ -431,8 +528,7 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
         const uint64_t connection_id = connection->id;
-        if (!event->SHUTDOWN_COMPLETE.AppCloseInProgress && !connection->handle_closed.exchange(true))
-            runtime->api->ConnectionClose(handle);
+        if (event->SHUTDOWN_COMPLETE.AppCloseInProgress) connection->handle_closed.store(true);
         DestroyConnection(runtime, connection_id);
         break;
     }
@@ -447,7 +543,7 @@ QUIC_STATUS QUIC_API ListenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT*
     Runtime* runtime = listener->runtime;
     switch (event->Type) {
     case QUIC_LISTENER_EVENT_NEW_CONNECTION: {
-        auto connection = std::make_unique<Connection>();
+        auto connection = std::make_shared<Connection>();
         connection->runtime = runtime;
         connection->handle = event->NEW_CONNECTION.Connection;
         connection->inbound = true;
@@ -532,7 +628,7 @@ QUIC_STATUS EnsureClientConfiguration(Runtime* runtime) {
 // the handshake stalls waiting for an answer from a host that was never told to
 // give one.
 int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64_t* out_connection_id,
-                       Connection** out_connection, const std::array<uint8_t, 32>* pin) {
+                       const std::array<uint8_t, 32>* pin) {
     if (runtime == nullptr || host == nullptr || *host == '\0' || port == 0 || out_connection_id == nullptr)
         return -1;
     *out_connection_id = 0;
@@ -544,7 +640,7 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
         return static_cast<int32_t>(status);
     }
 
-    auto connection = std::make_unique<Connection>();
+    auto connection = std::make_shared<Connection>();
     connection->runtime = runtime;
     connection->id = NextId(runtime);
     if (pin != nullptr) {
@@ -561,7 +657,7 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
     }
     {
         std::lock_guard<std::mutex> lock(runtime->gate);
-        runtime->connections.emplace(raw->id, std::move(connection));
+        runtime->connections.emplace(raw->id, connection);
     }
 
     status = runtime->api->ConnectionStart(
@@ -569,13 +665,13 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC connection start failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        runtime->api->ConnectionClose(raw->handle);
+        // The map's reference goes and this local one goes with the scope; the
+        // handle is closed by whichever of the two drops last, exactly once.
         DestroyConnection(runtime, raw->id);
         return static_cast<int32_t>(status);
     }
 
     *out_connection_id = raw->id;
-    if (out_connection != nullptr) *out_connection = raw;
     return 0;
 }
 
@@ -610,55 +706,52 @@ CULTMESH_API int32_t cultmesh_quic_runtime_open(const char* app_name, void** out
 CULTMESH_API void cultmesh_quic_runtime_close(void* handle) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr) return;
+
+    // Quiesce before anything is closed or freed. Marking the runtime closing
+    // refuses every call that has not started; waking the pollers gets the
+    // blocked ones out of `next_event`; waiting for `active_calls` to reach zero
+    // is what makes the teardown below safe at all. A wake without the wait is
+    // how a poller returns into freed memory, so the wait is the contract, not
+    // the wake. Objects are taken out of the maps here and released after the
+    // lock, so their destructors run on this thread and close their handles.
+    std::vector<std::shared_ptr<Stream>> streams;
+    std::vector<std::shared_ptr<Connection>> connections;
+    std::vector<std::shared_ptr<Listener>> listeners;
     {
-        std::lock_guard<std::mutex> lock(runtime->gate);
+        std::unique_lock<std::mutex> lock(runtime->gate);
+        if (runtime->closing) return;
         runtime->closing = true;
+        runtime->signal.notify_all();
+        runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });
+        for (auto& entry : runtime->streams) streams.push_back(std::move(entry.second));
+        for (auto& entry : runtime->connections) connections.push_back(std::move(entry.second));
+        for (auto& entry : runtime->listeners) listeners.push_back(std::move(entry.second));
+        runtime->streams.clear();
+        runtime->connections.clear();
+        runtime->listeners.clear();
     }
-    runtime->signal.notify_all();
 
     // Bottom-up, and by the app's own hand. `RegistrationClose` blocks until
     // every child handle the app opened has been closed *by the app*, and a
     // silent shutdown delivers no shutdown events at all, so leaning on the
-    // callbacks to do the closing deadlocks the caller forever. Connections are
-    // closed here; MsQuic cascades that to their streams, which arrive at
-    // `StreamCallback` with `AppCloseInProgress` set.
-    //
-    // The handles are copied out from under the lock and closed without it: a
-    // callback running concurrently takes the same lock, and `ConnectionClose`
-    // does not return until those callbacks have finished.
-    std::vector<HQUIC> connections;
-    std::vector<HQUIC> listeners;
-    std::vector<HQUIC> configurations;
-    {
-        std::lock_guard<std::mutex> lock(runtime->gate);
-        for (auto& entry : runtime->connections)
-            if (entry.second->handle != nullptr && !entry.second->handle_closed.exchange(true))
-                connections.push_back(entry.second->handle);
-        for (auto& entry : runtime->listeners) {
-            if (entry.second->handle != nullptr) listeners.push_back(entry.second->handle);
-            if (entry.second->configuration != nullptr) configurations.push_back(entry.second->configuration);
-        }
-    }
-    for (HQUIC connection : connections) {
-        runtime->api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, kConnectionCloseCode);
-        runtime->api->ConnectionClose(connection);
-    }
-    for (HQUIC listener : listeners) runtime->api->ListenerClose(listener);
-    for (HQUIC configuration : configurations) runtime->api->ConfigurationClose(configuration);
+    // callbacks to do the closing deadlocks the caller forever.
+    streams.clear();
+    for (auto& connection : connections)
+        if (connection->handle != nullptr && !connection->handle_closed.load())
+            runtime->api->ConnectionShutdown(
+                connection->handle, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, kConnectionCloseCode);
+    connections.clear();
+    listeners.clear();
     if (runtime->client_configuration != nullptr) {
         runtime->api->ConfigurationClose(runtime->client_configuration);
         runtime->client_configuration = nullptr;
     }
 
-    // No callback can be running past this point, so the tracking maps are safe
-    // to drop.
+    // No callback can be running past this point.
     if (runtime->registration != nullptr) {
         runtime->api->RegistrationClose(runtime->registration);
         runtime->registration = nullptr;
     }
-    runtime->streams.clear();
-    runtime->connections.clear();
-    runtime->listeners.clear();
     if (runtime->api != nullptr) {
         MsQuicClose(runtime->api);
         runtime->api = nullptr;
@@ -673,10 +766,15 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || pkcs12 == nullptr || pkcs12_len <= 0 || out_listener_id == nullptr)
         return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
     *out_listener_id = 0;
     if (out_bound_port != nullptr) *out_bound_port = 0;
 
-    auto listener = std::make_unique<Listener>();
+    // Held here until the listener is fully started. Every failure path below
+    // simply returns: the destructor closes whatever was opened, and a partial
+    // open therefore leaves neither a handle nor a map entry behind.
+    auto listener = std::make_shared<Listener>();
     listener->runtime = runtime;
     listener->id = NextId(runtime);
 
@@ -706,7 +804,6 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC listener certificate could not be loaded (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        runtime->api->ConfigurationClose(listener->configuration);
         return static_cast<int32_t>(status);
     }
 
@@ -715,12 +812,7 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC listener open failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        runtime->api->ConfigurationClose(listener->configuration);
         return static_cast<int32_t>(status);
-    }
-    {
-        std::lock_guard<std::mutex> lock(runtime->gate);
-        runtime->listeners.emplace(raw->id, std::move(listener));
     }
 
     QUIC_ADDR address{};
@@ -731,11 +823,19 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
         return -2;
     }
 
+    // In the map before it starts accepting, because the callback that accepts
+    // an inbound connection reads the listener through it.
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->listeners.emplace(raw->id, listener);
+    }
+
     QUIC_BUFFER listener_alpn = AlpnBuffer();
     status = runtime->api->ListenerStart(raw->handle, &listener_alpn, 1, &address);
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC listener start failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
+        Detach(runtime->gate, runtime->listeners, raw->id);
         return static_cast<int32_t>(status);
     }
 
@@ -746,6 +846,7 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC listener address could not be read (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
+        Detach(runtime->gate, runtime->listeners, raw->id);
         return static_cast<int32_t>(status);
     }
     if (out_bound_port != nullptr) *out_bound_port = QuicAddrGetPort(&bound);
@@ -756,25 +857,29 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
 CULTMESH_API void cultmesh_quic_listener_close(void* handle, uint64_t listener_id) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr) return;
-    Listener* listener = FindListener(runtime, listener_id);
-    if (listener == nullptr || listener->stopped) return;
-    listener->stopped = true;
-    if (listener->handle != nullptr) runtime->api->ListenerClose(listener->handle);
-    if (listener->configuration != nullptr) runtime->api->ConfigurationClose(listener->configuration);
-    std::lock_guard<std::mutex> lock(runtime->gate);
-    runtime->listeners.erase(listener_id);
+    CallScope scope(runtime);
+    if (!scope.entered()) return;
+    // Taken out of the map, then released here: ~Listener closes the handle
+    // (which is what produces event 9) and its configuration, exactly once.
+    [[maybe_unused]] const auto detached = Detach(runtime->gate, runtime->listeners, listener_id);
 }
 
 CULTMESH_API int32_t cultmesh_quic_connection_open(
     void* handle, const char* host, uint16_t port, uint64_t* out_connection_id) {
-    return OpenConnection(static_cast<Runtime*>(handle), host, port, out_connection_id, nullptr, nullptr);
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
+    return OpenConnection(runtime, host, port, out_connection_id, nullptr);
 }
 
 CULTMESH_API int32_t cultmesh_quic_connection_certificate_complete(
     void* handle, uint64_t connection_id, int32_t accept) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr) return -1;
-    Connection* connection = FindConnection(runtime, connection_id);
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
+    const auto connection = FindConnection(runtime, connection_id);
     if (connection == nullptr) return -1;
     const auto status = runtime->api->ConnectionCertificateValidationComplete(
         connection->handle,
@@ -791,7 +896,9 @@ CULTMESH_API int32_t cultmesh_quic_connection_certificate_complete(
 CULTMESH_API void cultmesh_quic_connection_shutdown(void* handle, uint64_t connection_id, uint64_t code) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr) return;
-    Connection* connection = FindConnection(runtime, connection_id);
+    CallScope scope(runtime);
+    if (!scope.entered()) return;
+    const auto connection = FindConnection(runtime, connection_id);
     if (connection == nullptr || connection->closing) return;
     connection->closing = true;
     if (connection->handle != nullptr)
@@ -802,12 +909,14 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
     void* handle, uint64_t connection_id, uint8_t kind, uint64_t* out_stream_id) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || out_stream_id == nullptr) return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
     *out_stream_id = 0;
     if (kind != kReliableStream && kind != kLatestOnlyStream) return -2;
-    Connection* connection = FindConnection(runtime, connection_id);
+    const auto connection = FindConnection(runtime, connection_id);
     if (connection == nullptr) return -1;
 
-    auto stream = std::make_unique<Stream>();
+    auto stream = std::make_shared<Stream>();
     stream->runtime = runtime;
     stream->owner = connection;
     stream->kind = kind;
@@ -823,16 +932,19 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
             Hex(static_cast<uint64_t>(status)) + ").");
         return static_cast<int32_t>(status);
     }
+    // In the map before it starts. `StreamStart` can reach shutdown-complete on
+    // an MsQuic worker before it returns here, and that callback has to find the
+    // stream to report it and to drop the map's reference.
+    {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->streams.emplace(raw->id, stream);
+    }
     status = runtime->api->StreamStart(raw->handle, QUIC_STREAM_START_FLAG_IMMEDIATE);
     if (QUIC_FAILED(status)) {
         SetError(runtime, "CultMesh QUIC stream start failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        runtime->api->StreamClose(raw->handle);
+        DestroyStream(runtime, raw->id);
         return static_cast<int32_t>(status);
-    }
-    {
-        std::lock_guard<std::mutex> lock(runtime->gate);
-        runtime->streams.emplace(raw->id, std::move(stream));
     }
 
     // The kind byte is the first thing on the stream, which is what the peer's
@@ -857,8 +969,12 @@ CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
     void* handle, uint64_t stream_id, const uint8_t* encoded_frame, int32_t length, int32_t fin) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || encoded_frame == nullptr || length <= 0) return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
     if (static_cast<uint32_t>(length) > kMaximumEncodedFrameBytes) return -2;
-    Stream* stream = FindStream(runtime, stream_id);
+    // The reference is held for the whole `StreamSend` below, so the worker
+    // cannot free the stream or close its handle underneath this call.
+    const auto stream = FindStream(runtime, stream_id);
     if (stream == nullptr || stream->handle == nullptr) return -1;
 
     // The bytes are copied because MsQuic reads them after this returns; the
@@ -885,21 +1001,24 @@ CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
 CULTMESH_API void cultmesh_quic_stream_shutdown(void* handle, uint64_t stream_id, uint64_t code) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr) return;
-    Stream* stream = FindStream(runtime, stream_id);
+    CallScope scope(runtime);
+    if (!scope.entered()) return;
+    const auto stream = FindStream(runtime, stream_id);
     if (stream == nullptr || stream->handle == nullptr) return;
     runtime->api->StreamShutdown(stream->handle, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, code);
 }
 
-// The one blocking crossing. Returns 0 on timeout, 1 with the event filled and
-// its payload copied, 2 when `payload_capacity` is too small (the event stays at
-// the head of the queue and `out_required` is set), negative on a bad call. This
-// is the v1 two-phase poll convention applied to a queue of typed events.
+// The one blocking crossing; see section 6 of the header for its returns. The
+// call scope is what `cultmesh_quic_runtime_close` waits on: a poller blocked
+// here is woken by `closing` and counted out before anything is freed.
 CULTMESH_API int32_t cultmesh_quic_next_event(
     void* handle, int32_t timeout_ms, cultmesh_quic_event* out_event,
     uint8_t* payload, int32_t payload_capacity, int32_t* out_required) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || out_event == nullptr || out_required == nullptr || payload_capacity < 0)
         return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
     *out_required = 0;
 
     std::unique_lock<std::mutex> lock(runtime->gate);
@@ -926,6 +1045,8 @@ CULTMESH_API int32_t cultmesh_quic_next_event(
 CULTMESH_API int32_t cultmesh_quic_last_error(void* handle, char* destination, int32_t capacity) {
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || destination == nullptr || capacity <= 0) return -1;
+    CallScope scope(runtime);
+    if (!scope.entered()) return -1;
     std::lock_guard<std::mutex> lock(runtime->gate);
     const size_t count = (std::min)(runtime->error.size(), static_cast<size_t>(capacity - 1));
     std::memcpy(destination, runtime->error.data(), count);
@@ -961,7 +1082,6 @@ enum class ClientState : int32_t {
 
 struct V1Client {
     Runtime* runtime = nullptr;
-    Connection* connection = nullptr;
     uint64_t connection_id = 0;
     ClientState state = ClientState::Connecting;
     std::deque<std::vector<uint8_t>> frames;
@@ -1090,13 +1210,11 @@ CULTMESH_API int32_t cultmesh_quic_open(
     client->runtime = static_cast<Runtime*>(runtime_handle);
 
     // The pin goes in before the connection starts; see OpenConnection.
-    Connection* connection = nullptr;
-    const auto status = OpenConnection(client->runtime, host, port, &client->connection_id, &connection, &pin);
+    const auto status = OpenConnection(client->runtime, host, port, &client->connection_id, &pin);
     if (status != 0) {
         cultmesh_quic_runtime_close(client->runtime);
         return status;
     }
-    client->connection = connection;
 
     *result = client.release();
     return 0;
