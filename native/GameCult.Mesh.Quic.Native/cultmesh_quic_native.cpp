@@ -190,12 +190,16 @@ public:
         ++runtime_->active_calls;
         entered_ = true;
     }
+    // The notify stays under `gate`, and that is the whole point of it. Released
+    // first, the closer's predicate is already true, so it can return from its
+    // wait, run the teardown and destroy the runtime — condition variable
+    // included — before this thread reaches the notify. Holding the lock across
+    // both means the closer cannot leave `signal.wait` until this scope has let
+    // go, so the condition variable is still alive when it is signalled.
     ~CallScope() {
         if (!entered_) return;
-        {
-            std::lock_guard<std::mutex> lock(runtime_->gate);
-            --runtime_->active_calls;
-        }
+        std::lock_guard<std::mutex> lock(runtime_->gate);
+        --runtime_->active_calls;
         runtime_->signal.notify_all();
     }
     CallScope(const CallScope&) = delete;
