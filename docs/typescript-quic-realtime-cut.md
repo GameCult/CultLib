@@ -43,9 +43,9 @@ have been broken since `8cb3b72`** (the scoped rename; Hands first
 attributed it to `8dd5a45`, which only bumped a version, and Soul
 corrected it) because `scripts/run-typescript-workspaces.mjs:9` names the
 old unscoped `cultcache-ts`; one-word fix, lands in Cut 2's fix batch.
-**The runner is still named `mutate-cultmesh-authority.mjs`** while
-carrying a codec target; it is renamed `scripts/mutate-cultmesh.mjs` in
-the same batch and this map's references follow.
+**The runner is `scripts/mutate-cultmesh.mjs`** since `65f2b66`'s batch
+(renamed from `mutate-cultmesh-authority.mjs` once it carried a codec
+target); every reference below that names the old path is history.
 
 **Soul's pass on Cut 2** (Fable; probes `probe-cs/`, `parity.mjs`,
 `symmetric.mjs` and others in the session scratchpad) held byte parity in
@@ -73,9 +73,66 @@ own decoder refuses (a cast on the enum), where TypeScript refuses at
 encode, the stricter side; an overflow near `int.MaxValue` is reachable
 from hostile bytes and refused on both sides with different words; the
 runner's sentinel detects only the last mutant by design, and the sidecar
-repair names the mutation a dead run was inside. **Cut 3 may start in
-parallel**, provided the first two land before the bridge hands the codec
-a `Buffer`; both are in the same Hands pass ahead of it.
+repair names the mutation a dead run was inside.
+
+**The Cut 2 fix batch landed** (Opus) at `65f2b66` (the aggregate scripts
+reach every workspace again; breakage confirmed at `8cb3b72`), `9a4c939`
+(the payload copy is `new Uint8Array(bytes.subarray(…))`, because Soul's
+prescribed `Uint8Array.prototype.slice.call` returns a `Buffer` from a
+`Buffer` through `@@species` and fails Soul's own assertion; three crafted
+negative-length frames refused; the false equivalence note gone),
+`6ed0ff7` (both halves of the frame parity in CI on both OSes) and
+`7a0749b` (the eleven stricter spellings named for what they are: three
+backslash, two missing-authority, four host repairs, two `URL` throws; the
+same slip in `isProtectedEndpoint`'s own comment fixed). 75 of 75
+mutations killed across three targets. Gap, not a workaround: `npm run
+test:ts` still cannot go green on the workstation because one
+`cultcache-ts` test spawns `python`, the Store alias stub here; `py -3`
+has msgpack; pre-existing since `8cb3b72` and outside every cut.
+
+**Cut 3 landed** (Opus) at `6a091ef` (the bridge: 440 → 1,168 lines of
+C++, a two-role event-queue C ABI v2 with twelve exports, the five v1
+exports kept as a Windows-only Unity shim) and `23dc093` (CMake for both
+platforms, `scripts/build-quic-native.sh`, README). Host and target:
+win32-x64 built and smoked on the workstation (MSVC 14.44, CMake 4.3.2);
+linux-x64 built and smoked in the workstation's Docker `debian:13`, which
+is the development loop and **not release-grade**; its release build is
+Cut 6's Actions job. Fifteen-check FFI smoke 15 of 15 on both; the v1 gate
+3 passed, 1 skipped by design; ten native mutations killed under two green
+controls; exports 17 on Windows and exactly 12 on Linux with hidden
+visibility; the deb digest and header sizes match the probe ledger;
+manifests with SHA-256s beside every binary. Two bugs the old shape never
+exercised, found by hanging tests and now mutation-pinned: the v1
+certificate pin must be attached before `ConnectionStart` (the handshake
+reaches the certificate event on a worker thread at once on loopback), and
+teardown must close connection handles itself because `RegistrationClose`
+blocks until every child is closed. Spec discrepancies kept: `ntdll` on the
+Windows link list; the deb carries no licence text, so the script copies
+the committed MIT text; the deb ships no unversioned `.so` symlink, so the
+script creates one; four Linux runtime libraries are load-bearing and now
+in the README. Soul in flight.
+
+**Q9, the one fork Cut 3 hit, undecided until the operator rules.** The
+pinned Windows MsQuic is the Schannel flavour, and Schannel does not
+implement `QUIC_CREDENTIAL_TYPE_CERTIFICATE_PKCS12`: `ConfigurationLoadCredential`
+returns `QUIC_STATUS_NOT_SUPPORTED`, so the provider role cannot open a
+listener on Windows under it. The identical bridge DLL passes the full
+smoke beside the OpenSSL 2.5.9 `msquic.dll` (SHA-256 `FEE9A664…`,
+4,181,856 bytes). Linux is unaffected: Microsoft ships only the OpenSSL
+build for Debian.
+- **A. Pin OpenSSL on Windows.** One credential type on both platforms,
+  provider role works, ABI unchanged. Costs: the package URL and digest in
+  `build-quic-native.ps1`; the committed Windows `msquic.dll` grows from
+  537 KB to 4.18 MB, so Q8's tree price becomes about 11.6 MB; the Unity
+  plugin's `msquic.dll` diverges until the operator's unscheduled rebuild.
+  The v1 client path works under either flavour.
+- **B. Keep Schannel and convert PKCS12 to a certificate context via
+  `PFXImportCertStore`.** Keeps the pin and the Unity DLL; puts about
+  forty lines of Windows crypto in the shared provider path, breaking
+  "runtime-neutral" and the cut's own negative grep.
+- **C. Providers Linux-only.** Cheapest; kills the Windows FFI smoke the
+  cut requires and the Windows provider lanes Cuts 4 and 5 need.
+**Recommended: A.**
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
