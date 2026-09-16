@@ -39,10 +39,21 @@
 // reported killed from a win32-x64 release run where both in fact survive, and
 // die deterministically only under linux-x64 AddressSanitizer.
 //
-// This script tests the platform it is running on. For the linux-x64 native
-// entries, run it inside the Debian 13 container the bridge is built in, with
-// cmake, ninja, a C++20 compiler and Node present; a Windows run reports those
-// entries as skipped and says so.
+// This script tests the platform it is running on, and a run that skipped
+// entries exits 2 rather than 0: those rules were covered by nothing. For the
+// linux-x64 native entries, run it inside the committed development image,
+// `scripts/quic-native-linux-dev.Dockerfile`, which is the same debian:13 digest
+// the bridge is built in and carries Node, ninja, setarch and MsQuic's runtime
+// dependencies:
+//
+//   docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
+//   docker run --rm --security-opt seccomp=unconfined -v F:\Projects\CultLib:/src -w /src \
+//       cultlib-quic-native-dev bash -lc "node scripts/mutate-cultmesh.mjs native"
+//
+// The seccomp flag is required, not cautious: the ThreadSanitizer configuration
+// is re-executed under `setarch -R`, and Docker's default profile denies the
+// personality call that needs. See `explainUnrunnable` below, and the bridge's
+// README.
 //
 //   node scripts/mutate-cultmesh.mjs [target...]
 
@@ -625,6 +636,10 @@ function nativeScenariosPass() {
     try {
       execFileSync("cmake", [
         "-S", source, "-B", build,
+        // The same generator scripts/build-quic-native.sh uses. CMake's Linux
+        // default is Makefiles, and the container the bridge is built in carries
+        // ninja rather than make, so the default configured nothing at all.
+        ...(platform === "linux-x64" ? ["-G", "Ninja"] : []),
         "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
         `-DCMAKE_CXX_FLAGS=${flags}`,
         `-DCMAKE_EXE_LINKER_FLAGS=${flags}`,

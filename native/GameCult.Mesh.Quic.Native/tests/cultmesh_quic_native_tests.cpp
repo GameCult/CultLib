@@ -224,8 +224,9 @@ std::string HoldCloseOnce(int pollers) {
     for (auto& thread : threads) thread.join();
 
     if (peak != pollers)
-        return "the library counted a peak of " + std::to_string(peak) + " host call(s) inside it, not " +
-            std::to_string(pollers) + "; the blocking crossing is not inside a call scope";
+        return "the library's peak count of host calls inside it was " + std::to_string(peak) + ", not " +
+            std::to_string(pollers) + ": either the blocking crossing is not inside a call scope, or it " +
+            "did not block long enough for the pollers to be inside it together";
     if (at_close != pollers)
         return "the close began its wait with " + std::to_string(at_close) +
             " host call(s) counted inside, not " + std::to_string(pollers) +

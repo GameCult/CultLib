@@ -102,6 +102,26 @@ shipped beside it resolves without being installed system-wide.
 A Linux host still needs MsQuic's own runtime dependencies present:
 `libssl3t64`, `libnuma1`, `libxdp1`, `libnl-route-3-200`.
 
+The development loop for it is one committed image,
+[`scripts/quic-native-linux-dev.Dockerfile`](../../scripts/quic-native-linux-dev.Dockerfile),
+pinned to the same `debian:13` digest the release workflow builds in. It carries
+the toolchain, MsQuic's runtime dependencies, `setarch`, and Node, because the
+mutation harness that drives the runtime-lifetime scenarios is a Node script and
+a container that cannot run it cannot check the bridge it just built:
+
+    docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
+    docker run --rm --security-opt seccomp=unconfined -v F:\Projects\CultLib:/src -w /src \
+        cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+
+`--security-opt seccomp=unconfined` is load-bearing, not caution. The
+ThreadSanitizer configuration needs the process's address space where it expects
+it, so `scripts/mutate-cultmesh.mjs` re-executes those runs under `setarch -R`,
+which asks the kernel for `personality(ADDR_NO_RANDOMIZE)`. Docker's default
+seccomp profile denies that call. Without it ThreadSanitizer dies before `main`
+with "unexpected memory mapping" — a configuration that never starts, which a
+mutation harness would otherwise read as every mutant being killed. The harness
+stops with that diagnosis rather than reporting kills it did not earn.
+
 Where an artifact was built is part of what it is. The Linux binary is linked
 against Debian 13's glibc, so a build from anywhere else is a different artifact
 whatever the file name says.
