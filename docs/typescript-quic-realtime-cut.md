@@ -6,14 +6,20 @@ Status: Imagination output for the target in
 `docs/typescript-quic-realtime-target.md` (operator-accepted 2026-09-16). No
 code in this document has been written. Nothing here is committed by
 Imagination; the root agent commits. Q5, Q6 and Q7 were ruled the same day
-(section 13, Rulings); Q5 was then re-ruled from A to C because npmjs is
-unreachable from this network. **Cut 6 and the registry-dependent lines of
-Cuts 4 and 7 are being remapped under C**; until that lands, their text
-describes ruling A. No operator question is open. Cut 1 has not started.
+(section 13, Rulings); Q5 was then re-ruled from A to C: no registry in this
+campaign, registry publication parked for a later pass by choice. Cut 6,
+section 5.4, the binary-resolution and dependency lines of Cut 4, and Cut 7's
+ledger are remapped under C (landed 2026-09-16, same day). One operator
+question is open: Q8 in section 11, whether the built binaries are committed
+to the tree or fetched from a GitHub Release by the deploy path. Cut 1 has
+not started.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
-`f2cd2eb4641269c653977bdba9b4bce2a26d870c`. Every `file:line` below is read
-against that commit. If HEAD moves, re-anchor before cutting.
+`8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
+original anchor `f2cd2eb4` (`bf9f6f7`, `3c29fc9`, `8d8ad56`) touch only this
+document `(probe: git log --stat)`, so every `file:line` below, read against
+`f2cd2eb4`, is still exact at `8d8ad568`. If HEAD moves, re-anchor before
+cutting.
 
 How to read this document: section 1 prices the largest liability first, as
 the target requires, because if that price had turned out to dominate the
@@ -35,13 +41,14 @@ Two corrections to the target, recorded here rather than silently absorbed:
   (`CultMeshRealtimeDelivery` at :8-13, `CultMeshRealtimeFrame` at :19-44,
   `ICultMeshRealtimeTransport` at :46-52,
   `ICultMeshRealtimeTransportConnector` at :55-63) `(source read)`.
-- The target says the binding is "shipped through a registry". Today only
-  `@gamecult/cultcache-ts` has a registry publish job
+- This map's first issue attributed the phrase "shipped through a registry"
+  to the target. The target contains no such phrase and no word "registry"
+  `(probe: rg)`; the reading was the map's, and it is withdrawn. What is
+  true: today only `@gamecult/cultcache-ts` has a registry publish job
   (`.github/workflows/publish-packages.yml:20-24`, `:40-76`); `cultnet-ts`,
   `cultmesh-ts` and `cultmesh-browser` have none, and every external consumer
-  reaches them by `file:` path (section 3). Registry delivery of the binding
-  therefore also means registry delivery of `cultnet-ts` and `cultmesh-ts`,
-  which is a naming decision the operator has not yet made. See Q5.
+  reaches them by `file:` path (section 3). Q5 was ruled C on that Body: no
+  registry in this campaign, publication parked.
 
 ## 1. The largest liability, priced first
 
@@ -381,18 +388,40 @@ Sizing consequences:
 
 - Owner: `scripts/build-quic-native.ps1` (Windows x64) and the new
   `scripts/build-quic-native.sh` (Linux x64) own producing the bridge
-  artifact; `.github/workflows/publish-packages.yml` owns turning artifacts
-  into registry packages.
+  artifact; the new `.github/workflows/quic-native.yml` owns producing the
+  release-grade artifact for both platforms (Q6 A) and attaching it to a
+  GitHub Release; the committed tree `packages/cultmesh-ts/native/` owns
+  delivery to consumers (Q5 C): whatever carries the package directory (a
+  `git archive`, an `npm pack` tarball, a pnpm `file:` copy) carries the
+  binaries with it, and `packages/cultmesh-ts/native/MANIFEST.txt` plus
+  `SHA256SUMS` own provenance (MsQuic version, build host, digest per file).
 - Inputs: pinned MsQuic 2.5.9 (Schannel NuGet on Windows; `libmsquic` deb on
-  Linux) with SHA-256 checks; the bridge source.
+  Linux) with SHA-256 checks; the bridge source; the pinned `debian:13` image
+  digest for the Linux builder.
 - Outputs: `gamecult_mesh_quic_native.dll` + `msquic.dll` (win32-x64),
-  `libgamecult_mesh_quic_native.so` + `libmsquic.so.2` (linux-x64), each with
-  the MsQuic license.
-- Derived state: `artifacts/` (git-ignored, `.gitignore:66`).
-- Forbidden writers: no `postinstall` compile step in any published package;
-  a consumer host never needs CMake or a compiler.
-- Deletion line: none; the Windows script is kept and the Unity package script
-  keeps calling it.
+  `libgamecult_mesh_quic_native.so` + `libmsquic.so.2` (linux-x64), the MsQuic
+  license, and the two provenance files.
+- Derived state: `artifacts/` (git-ignored, `.gitignore:66`) is the
+  development-loop build output and never delivery; the Unity plugin copies at
+  `unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/` remain the Unity
+  package's own body (section 8, operator-only rebuild), not a source for
+  Node.
+- Forbidden writers: no `postinstall` compile or download step in any
+  package; a consumer host never needs CMake, a compiler, or registry access
+  for the binding; no workflow commits binaries to `main` (the operator
+  commits from a Release asset whose digest the manifest records, Q8);
+  `realtime-quic-native.ts` never searches `node_modules` for a platform
+  package.
+- Deletion line: the platform packages
+  `packages/cultmesh-quic-native/{win32-x64,linux-x64}` and
+  `optionalDependencies` from the ruling-A map are never created; the Windows
+  script is kept and the Unity package script keeps calling it.
+- Parked seam (registry publication, later pass): the same `quic-native.yml`
+  artifacts are the payload a publish job would wrap; the reattachment point
+  is a `cultmesh-ts` job shaped like `publish-packages.yml:39-78` that depends
+  on the two build jobs, plus `optionalDependencies` in
+  `packages/cultmesh-ts/package.json` and a `node_modules` branch in the
+  resolver. None of that exists under C.
 
 ## 6. Cut 1 (subtraction): one TypeScript route verifier
 
@@ -696,10 +725,16 @@ Deletes: none.
 Adds:
 
 - `packages/cultmesh-ts/src/realtime-quic-native.ts` (about 260 lines): the
-  koffi binding. Resolves the platform package (`@gamecult/cultmesh-quic-native-win32-x64`
-  or `-linux-x64`, Q5) or, when `CULTMESH_QUIC_NATIVE_DIR` is set, a directory
-  (this is how the repo's own tests point at `artifacts/quic-native/<platform>`
-  without a registry). Loads `msquic` first, then the bridge, by absolute path
+  koffi binding. Resolves the binary directory as `CULTMESH_QUIC_NATIVE_DIR`
+  when set (the development loop and CI point it at
+  `artifacts/quic-native/<platform>` straight from a build), otherwise
+  `path.join(__dirname, "..", "native", `${process.platform}-${process.arch}`)`,
+  the committed tree cut 6 lands (Q5 C; `__dirname` is `dist/` at runtime, so
+  the path holds in the repo, in an `npm pack` tarball, and in a pnpm `file:`
+  copy alike). No `node_modules` lookup, no platform package, no registry.
+  When neither directory holds `msquic` and the bridge, throw one error naming
+  both paths tried and the env var; until cut 6 lands, that is the error every
+  caller outside the test suite gets. Loads `msquic` first, then the bridge, by absolute path
   (the probe showed the dependent library must be resolvable before the
   bridge loads). Declares the twelve v2 prototypes. Exposes
   `CultMeshQuicNativeRuntime` with a single event pump: a loop that awaits
@@ -736,11 +771,14 @@ Adds:
   beside the RUDP ones at `:6008-6186`: `parseQuicRealtimeEndpoint`,
   `createQuicRealtimeConnector(options)`, `createQuicRealtimeSessionManager(options)`,
   and in cut 5 `createQuicRealtimeProvider(options)`.
-- `packages/cultmesh-ts/package.json:44-48` gains `"koffi": "3.3.0"` (exact)
-  and `optionalDependencies` for the two platform packages (names per Q5).
-  `koffi` is required lazily inside `realtime-quic-native.ts` so consumers
-  that never touch QUIC (AetheriaEve Electron, Odin, Stonks, weksa) load
-  nothing native.
+- `packages/cultmesh-ts/package.json:44-48` gains `"koffi": "3.3.0"` (exact).
+  No `optionalDependencies`: under Q5 C the binaries are files of this
+  package, not packages of their own. `koffi` is required lazily inside
+  `realtime-quic-native.ts` so consumers that never touch QUIC (AetheriaEve
+  Electron, Odin, Stonks, weksa) load nothing native. `koffi` itself is a
+  registry dependency like `@msgpack/msgpack` (`:45`); every consumer host
+  already installs from the registry (`deploy-streampixels-preview.sh:102`),
+  so this adds no new kind of fetch.
 - `packages/cultmesh-ts/test/realtime-quic-native.test.ts` (about 150 lines):
   the cut-3 FFI smoke, now against the runtime class.
 - `packages/cultmesh-ts/test/realtime-quic-consumer.test.ts` (about 250
@@ -883,56 +921,354 @@ Verification:
   nothing on the provider side.
 - Operator-only: none.
 
-## 11. Cut 6 (packaging and release)
+## 11. Cut 6 (packaging and release, remapped under Q5 C)
 
-Purpose: a consumer host with no toolchain installs the binding.
+Purpose: a consumer host with no toolchain and no registry access for the
+binding gets it by receiving the `cultmesh-ts` package directory, which is how
+every consumer already receives the package (P16, P17). Registry publication
+is parked, not ruled out; the seam it reattaches to is named at the end of
+this section.
 
-Adds:
+### 11.1 Body facts this cut stands on
 
-- `packages/cultmesh-quic-native/win32-x64/package.json` and
-  `packages/cultmesh-quic-native/linux-x64/package.json` (names per Q5), each
-  with `os`/`cpu` fields, `files` listing the two binaries and
-  `MSQUIC-LICENSE.txt`, no scripts, and a `README.md` naming the MsQuic
-  version and the build host. Their contents are copied from
-  `artifacts/quic-native/<platform>` by the publish job, never committed.
-- `.github/workflows/publish-packages.yml`: tag prefixes `cultnet-ts-v*`,
-  `cultmesh-ts-v*`, `cultmesh-quic-native-v*` (`:20-24`); a `cultnet-ts` job
-  and a `cultmesh-ts` job shaped like the `cultcache-ts` job (`:40-76`); a
-  native job with two runners: `windows-latest` running
-  `scripts/build-quic-native.ps1`, and `ubuntu-latest` with
-  `container: debian:13` running `scripts/build-quic-native.sh` (Q6), each
-  publishing its platform package, then the `cultmesh-ts` job depends on both.
-- `scripts/test-typescript-package-closure.mjs:9` adds the platform packages
-  to the pack list on the matching host and `:63-72` adds
-  `assert.equal(typeof mesh.CultMesh.createQuicRealtimeConnector, "function")`
-  plus a runtime smoke that opens and closes a `CultMeshQuicNativeRuntime`
-  from the installed tarballs (proves the optional dependency resolves and the
-  binaries load from `node_modules`, not from a repo path).
-- `.github/workflows/cultnet-interop.yml` gains a step after the C# RUDP
-  step that builds the Windows bridge (`build-quic-native.ps1`) and runs the
-  `QUIC realtime` lanes with `CULTMESH_QUIC_NATIVE_DIR` set. Linux CI
-  coverage of the lanes needs a Linux runner with dotnet and the deb; add a
-  second job `interop-quic-linux` on `ubuntu-latest` + `container: debian:13`
-  running only the QUIC lanes.
+- The deploy tarball is a `git archive`. The Idunn actuator on Starfire runs
+  `git -C CultLib archive --format=tar --output=<tar> origin/main packages/cultnet-ts packages/cultcache-ts`
+  (`F:\Projects\Odin\scripts\deploy-yggdrasil-streampixels.ps1:59`), uploads
+  it by `sftp` (`:127`), and `deploy-streampixels-preview.sh:95-99` extracts it
+  into `/srv/streampixels/CultLib` after deleting only those two package
+  directories (`:97`) `(source read)`. Two consequences: only committed files
+  ride (a `git archive` cannot carry untracked or ignored files), and
+  `packages/cultmesh-ts` is not in the archive today at all, although
+  StreamPixels declares it (`apps/service/package.json:26`). Adding it to the
+  archive list and to `:97` is deploy work in Odin and gamecult-ops, outside
+  this campaign (section 16); the Yggdrasil smoke below therefore ships its
+  own archive of the same shape rather than waiting on that change.
+- pnpm materialises a `file:` directory dependency as a copy of the
+  package's `files` entries only: with `pnpm 10.33.0`, `node_modules/cultmesh-ts`
+  held `README.md`, `dist`, `package.json` and nothing else (no `src`, no
+  `test`) `(probe: scratch consumer with file: overrides)`. `files` is the
+  gate, so `native` must be listed in it.
+- The MsQuic binaries the koffi probe loaded (P2) are the Unity plugin copies
+  at `unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/` (`probe.js:4-7`),
+  committed in plain git (`git ls-files`; `.gitattributes` is `* text=auto`
+  only, no LFS), `gamecult_mesh_quic_native.dll` 40,448 bytes and
+  `msquic.dll` 536,928 bytes `(probe)`. Committing binaries beside the code
+  that loads them is therefore existing practice in this repo, not a new one.
+- The Linux runtime is one file: `libmsquic.so.2 -> libmsquic.so.2.5.9`,
+  7,375,872 bytes, inside the pinned deb (P7); the deb also carries
+  `libmsquic.lttng.so.2.5.9` and `datapath_raw_xdp_kern.o`, neither needed
+  `(probe: dpkg-deb -c in debian:13)`. The repo pack is 31.68 MiB today
+  `(probe: git count-objects)`.
+- `debian:13` resolved to digest
+  `sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1`
+  on 2026-09-16 and carries `g++ 4:14.2.0-1` `(probe: docker pull; apt-cache
+  policy)`. The builder is pinned by that digest, not by the moving tag.
+- `GameCult/CultLib` is public `(probe: gh repo view)` and already carries two
+  GitHub Releases with binary assets, `cultlib-unity-v1.0.3`
+  (`org.gamecult.cultlib-1.0.3.tgz`) and `gamecult-geometry-v0.1.0` (a crate
+  and nupkgs) `(probe: gh release view)`; nothing in `scripts/`, `docs/` or
+  `.github/` creates them, so they were cut by hand `(source read: rg)`.
+  Release assets on a public repo download with plain `curl`, no token.
+- The npm registry is reachable from Starfire: `npm ping` answers `PONG`,
+  `npm view koffi` is HTTP 200, and `npm view @gamecult/cultcache-ts` is a
+  404 because it was never published `(probe)`. This confirms the corrected
+  premise in section 13: C is deferral, not necessity.
+- `.gitignore` ignores `artifacts/` (`:66`) and `node_modules`; it has no rule
+  for `*.so` or `*.dll` `(source read)`, so nothing blocks the commit path.
+- The root `package-lock.json` is committed `(probe: git ls-files)`, so
+  `npm ci` is the real install path (as `publish-packages.yml:55` uses it);
+  `cultnet-interop.yml:95` uses `npm install --no-package-lock` instead, a
+  pre-existing inconsistency this cut does not touch.
+
+### 11.2 Q8, the fork C surfaces (operator decision, recommended option first)
+
+Where do the built binaries live so that the `git archive` above carries
+them to the host?
+
+- **Option 1, commit them.** `packages/cultmesh-ts/native/{win32-x64,linux-x64}/`
+  hold the four binaries, committed by the operator from the Release assets
+  the workflow attaches, with `MANIFEST.txt` and `SHA256SUMS` beside them.
+  Price: about 8.0 MB in the tree (7,375,872 + 536,928 + 40,448 + the bridge
+  `.so`, on the order of 60 KB); pack growth roughly the compressed size,
+  about 3 MB, and that only when the MsQuic pin moves, because
+  `libmsquic.so.2` and `msquic.dll` are copies of Microsoft's files and
+  change with the pin, not with the bridge. A bridge rebuild adds tens of KB.
+  A CI job checks `sha256sum -c SHA256SUMS` on every push, so the manifest
+  and the bytes cannot drift. Deploy path change required: none beyond the
+  `packages/cultmesh-ts` archive-list fix already owed. Human step: download,
+  verify, commit (operator-only, section 11.7).
+- **Option 2, fetch them.** `native/<platform>/` is git-ignored; the tree
+  commits only `MANIFEST.txt`, `SHA256SUMS` and a `scripts/fetch-quic-native.mjs`
+  (about 80 lines) that downloads the Release assets and verifies digests.
+  Price: zero binary bytes in git, but every carrier of the package directory
+  becomes incomplete until the fetch runs: a fresh clone, every worktree,
+  Heimdall's vendored copy, `npm pack` (a tarball without binaries looks
+  valid), and the actuator, which must run the fetch and then `tar --append`
+  the ignored files after `git archive` (cross-repo edit in Odin), or the
+  deploy script must fetch from GitHub on Yggdrasil at deploy time (cross-repo
+  edit in gamecult-ops, plus GitHub egress the StreamPixels path does not
+  have today). It is the "tarball with a `.so` in it by hand" failure the
+  original Q5 text warned about, moved one step left.
+
+**Recommended: Option 1.** The tarball is a `git archive`, so committed is the
+only state that rides it without a second mechanism; the repo already commits
+the same `msquic.dll` for Unity; and the growth is bounded by the MsQuic pin,
+not by bridge iteration. Everything below is written for Option 1; Option 2
+changes only 11.4's manifest paragraph, the closure smoke, and the operator
+steps, and is not mapped further unless chosen.
+
+### 11.3 Deletes
+
+None in the tree. The ruling-A surfaces (`packages/cultmesh-quic-native/*`,
+`optionalDependencies`, `cultnet-ts`/`cultmesh-ts` publish jobs, new tag
+prefixes in `publish-packages.yml:20-24`) are never created; that is the
+subtraction, and it is an estimate change, not a diff (section 11.8).
+
+The existing `@gamecult/cultcache-ts` publish job
+(`.github/workflows/publish-packages.yml:39-78`) stays. It is out of this
+campaign's scope: it publishes a package this migration does not touch, its
+only consumer today reaches it by `file:` (`F:\Projects\Heimdall\package.json:22`
+`(source read)`), and it is the shape the parked registry pass will copy for
+`cultnet-ts` and `cultmesh-ts`. Whether it should run before then is a
+question for that pass.
+
+### 11.4 Keeps and moves
+
+- `scripts/build-quic-native.ps1` and the Unity plugin binaries are untouched
+  (5.4 deletion line). `scripts/build-quic-native.sh` is the cut-3 script,
+  unchanged here.
+- The MsQuic license text already committed at
+  `unity/org.gamecult.cultlib/Third Party Notices/MSQUIC-LICENSE.txt` is
+  copied, not referenced, to `packages/cultmesh-ts/native/MSQUIC-LICENSE.txt`,
+  because the package directory must be self-contained once copied out of the
+  repo (11.1, pnpm). Same MIT text for both platforms.
+
+### 11.5 Adds
+
+- `packages/cultmesh-ts/native/win32-x64/gamecult_mesh_quic_native.dll`,
+  `packages/cultmesh-ts/native/win32-x64/msquic.dll`,
+  `packages/cultmesh-ts/native/linux-x64/libgamecult_mesh_quic_native.so`,
+  `packages/cultmesh-ts/native/linux-x64/libmsquic.so.2` (the real file, not
+  the symlink; `RPATH $ORIGIN` from cut 3 resolves it beside the bridge).
+  Directory names are exactly `${process.platform}-${process.arch}` so the
+  cut-4 resolver needs no table.
+- `packages/cultmesh-ts/native/SHA256SUMS`: `sha256sum` format, one line per
+  binary, relative paths, generated by the workflow and committed verbatim.
+- `packages/cultmesh-ts/native/MANIFEST.txt` (about 20 lines, `key=value`):
+  `msquic.version=2.5.9`; `msquic.windows.source` = the NuGet URL at
+  `build-quic-native.ps1:30` with its SHA-256 from `:14`;
+  `msquic.linux.source` = the deb pool URL from P7 with its SHA-256;
+  `bridge.commit` = the CultLib commit the bridge was built from;
+  `build.workflow_run` = the Actions run URL; `build.release` = the Release
+  tag; `build.win32-x64.host` = runner image plus MSVC version as printed by
+  the job; `build.linux-x64.host` = `ubuntu-latest` plus the `debian:13`
+  digest plus `g++` version as printed; and the date. Every value is copied
+  from the run log by the operator, then the CI check below keeps the file
+  and the bytes agreeing. The binding never reads this file; it exists for
+  readers and for the digest check.
+- `.github/workflows/quic-native.yml` (about 120 lines), four jobs:
+  - `build-win32-x64` on `windows-latest`: checkout, run
+    `scripts/build-quic-native.ps1 -OutputDirectory artifacts/quic-native/win32-x64`,
+    print `cl.exe` version and `Get-FileHash` of both files, upload
+    `actions/upload-artifact` named `quic-native-win32-x64`.
+  - `build-linux-x64` on `ubuntu-latest` with
+    `container: debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1`
+    (Q6 A; the digest is the pin, the tag is the label): `apt-get install -y
+    cmake ninja-build g++ curl ca-certificates dpkg`, run
+    `scripts/build-quic-native.sh`, print `g++ --version` and `sha256sum`,
+    upload `quic-native-linux-x64`. No Node in this job; loading is proven by
+    the interop job below, on the same image.
+  - `release`, `needs` both, `if: startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')`,
+    `permissions: contents: write`: download both artifacts, write
+    `SHA256SUMS` and a draft `MANIFEST.txt` with every value the jobs printed,
+    and run `gh release create "$GITHUB_REF_NAME" --verify-tag` with the two
+    per-platform `.tar.gz` files, `SHA256SUMS` and `MANIFEST.txt` as assets
+    (`GH_TOKEN: ${{ github.token }}`; `gh` is preinstalled on hosted runners,
+    no third-party release action). The release notes are the manifest.
+  - `verify-committed` on `push` and `pull_request`, `ubuntu-latest`, one
+    step: `cd packages/cultmesh-ts/native && sha256sum -c SHA256SUMS`. This is
+    the check that the tree's bytes are the bytes the manifest names.
+  - Triggers: `push` to `main` and `pull_request` run `verify-committed`
+    only; `workflow_dispatch` runs the two builds (dry run, uploads
+    artifacts, no release); a `cultmesh-quic-native-v*` tag runs all four.
+    Only `release` has write permission.
+- `packages/cultmesh-ts/package.json:14-16`: `"files": ["dist", "native"]`.
+  No version bump: under C nothing keys on the version; provenance keys on
+  the commit in `MANIFEST.txt`.
+- `packages/cultmesh-ts/src/realtime-quic-native.ts` (cut 4): the runtime
+  class gains a readonly `nativeDirectory` (the absolute directory it loaded
+  from). Diagnostic only; the closure smoke asserts on it.
+- `scripts/test-typescript-package-closure.mjs`:
+  - `:39-41`: for `cultmesh-ts`, assert the packed file list contains all
+    four binaries, `native/SHA256SUMS`, `native/MANIFEST.txt` and
+    `native/MSQUIC-LICENSE.txt`, on every host (the tarball carries both
+    platforms; the host only decides which loads).
+  - `:59-70`: the runtime smoke adds
+    `assert.equal(typeof mesh.CultMesh.createQuicRealtimeConnector, "function")`,
+    the same for `createQuicRealtimeProvider`, then opens a
+    `CultMeshQuicNativeRuntime`, asserts
+    `runtime.nativeDirectory` ends with `node_modules/cultmesh-ts/native/<platform>`
+    (path separators normalised), and closes it. The child at `:70` runs with
+    `CULTMESH_QUIC_NATIVE_DIR` deleted from its env so the default path is the
+    one exercised. The point: the binaries load from the installed copy of the
+    package, not from a repo path or a registry.
+- `.github/workflows/cultnet-interop.yml`:
+  - After the C# RUDP step (`:127-128`): a step building the Windows bridge
+    (`scripts/build-quic-native.ps1 -OutputDirectory artifacts/quic-native/win32-x64`)
+    and a step running the `QUIC realtime` lanes with
+    `CULTMESH_QUIC_NATIVE_DIR` set to that directory, so CI proves the lanes
+    against a fresh build, then a second run of
+    `node scripts/test-typescript-package-closure.mjs` proves the committed
+    Windows binaries load without the env var.
+  - A second job `interop-quic-linux` on `ubuntu-latest` with the same pinned
+    `debian:13` container: `apt-get install` the build tools plus `libicu`
+    (dotnet's runtime need), `actions/setup-dotnet@v4` 10.0.x and
+    `actions/setup-node@v4` 24 (both work inside a container), build the
+    bridge with `scripts/build-quic-native.sh`, `npm ci`, run only the
+    TypeScript-provider-to-managed-connector and TypeScript-to-TypeScript
+    lanes (section 15: the native-connector lane is Windows by design), then
+    the closure script without the env var. The container is not optional:
+    the artifact is linked against Debian 13's glibc 2.41 and `ubuntu-latest`
+    (24.04) carries glibc 2.39 `(probe: ldd --version in both images)`, so a
+    symbol version the bridge or `libmsquic` references can be absent on the
+    bare runner; run the lanes on the image the artifact targets rather than
+    discover that per symbol.
 - `README.md` of `packages/cultmesh-ts` gains a "QUIC Realtime Plane" section
   after "RUDP Helpers" (`README.md:332`) with provider and consumer examples
-  matching the C# README (`src/GameCult.Mesh.Quic/README.md:13-62`).
+  matching the C# README (`src/GameCult.Mesh.Quic/README.md:13-62`), and a
+  "Native binaries" paragraph: where they live, that a `file:` dependency or
+  an `npm pack` tarball carries them, the `CULTMESH_QUIC_NATIVE_DIR`
+  override, the two provenance files, Windows x64 and Linux x64 (Debian 13
+  glibc) only, and the four `libmsquic` runtime dependencies (P7) a Linux host
+  must already have.
 
-Verification:
+### 11.6 Per-file changes
 
-- `node scripts/test-typescript-package-closure.mjs` on Windows.
-- Manual dispatch of `publish-packages.yml` with `package=cultmesh-ts` builds
-  and tests without publishing (`:24-32` semantics).
-- Operator-only: the tag pushes that publish; `NPM_TOKEN` scope for new
-  package names; and the Yggdrasil verification: `ssh gamecultadmin@yggdrasil.gamecult.org`,
-  `mkdir /tmp/cultmesh-quic-smoke && cd $_ && npm init -y && npm i cultmesh-ts@<version>`,
-  then `node -e "require('cultmesh-ts').CultMesh.createQuicRealtimeProvider({...}).then(p => { console.log(p.advertisedEndpoint); return p.dispose(); })"`
-  with a throwaway PKCS12 from `openssl`, followed by a loopback dial from a
-  second `node` process on the same host. `libmsquic`'s runtime dependencies
-  (`libssl3t64`, `libnuma1`, `libxdp1`, `libnl-route-3-200`, P7) must be
-  present on Yggdrasil; the smoke will say so if not. This is the only place
-  the Linux artifact is proven on the deploy host, and only the operator holds
-  the key.
+- `packages/cultmesh-ts/package.json:14-16`, `files` gains `"native"`.
+- `packages/cultmesh-ts/src/realtime-quic-native.ts` (cut 4 file), one
+  readonly field `nativeDirectory` set at load.
+- `scripts/test-typescript-package-closure.mjs:39-41`, `:59-70` as above;
+  `:9` unchanged (no new packages).
+- `.github/workflows/cultnet-interop.yml`, two steps after `:128`, one job
+  after `:140`.
+- `.github/workflows/quic-native.yml`, new.
+- `.github/workflows/publish-packages.yml`, unchanged.
+- `packages/cultmesh-ts/native/` (seven files), new, four of them binary and
+  operator-committed (11.7).
+- `packages/cultmesh-ts/README.md`, one section after `:332`.
+
+### 11.7 Verification
+
+- `node scripts/test-typescript-package-closure.mjs` on Windows, with
+  `CULTMESH_QUIC_NATIVE_DIR` unset in the shell. Pins: the tarball carries
+  both platforms and the provenance files; the installed copy loads its own
+  binaries.
+- `cd packages/cultmesh-ts/native && sha256sum -c SHA256SUMS` (Git Bash on
+  Windows). Pins: committed bytes equal the manifest.
+- `git check-ignore -v packages/cultmesh-ts/native/linux-x64/libmsquic.so.2`
+  must exit 1 (not ignored), and
+  `git ls-files packages/cultmesh-ts/native | wc -l` must print 7. Pins: the
+  binaries are tracked, so a `git archive` carries them.
+- `npm pack packages/cultmesh-ts --dry-run --json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].files.map(f=>f.path).filter(p=>p.startsWith('native/')).join('\n')"`
+  must list seven `native/` paths; the closure script already asserts this,
+  this is the one-liner for a reader.
+- `workflow_dispatch` of `quic-native.yml`: both build jobs green, artifacts
+  present, no release created. A tag push `cultmesh-quic-native-v<n>`
+  creates the Release with four assets. Pins: Q6 A, the builder is a Linux
+  host on the deploy OS and the artifact has a public, digest-named home.
+- Negative greps (must return nothing):
+  `rg -n "optionalDependencies|cultmesh-quic-native-(win32|linux)|@gamecult/cultmesh-quic-native" packages scripts .github --glob '!**/node_modules/**' --glob '!**/dist*/**'`
+  (no platform packages exist);
+  `rg -n "node_modules|require\.resolve" packages/cultmesh-ts/src/realtime-quic-native.ts`
+  (the resolver never searches for a package);
+  `rg -n "\"(pre|post)install\"" packages/*/package.json` (no install-time
+  compile or download);
+  `rg -n "NPM_TOKEN|npm publish|registry-url" .github/workflows/quic-native.yml`
+  (the native workflow publishes to no registry).
+- Operator-only, in order:
+  1. After the tag build, download the Release assets, compare every digest
+     with the run log and with `SHA256SUMS`, place the binaries under
+     `packages/cultmesh-ts/native/<platform>/`, fill `MANIFEST.txt` from the
+     log, commit. This is the only path bytes take into the tree; no workflow
+     writes to `main`.
+  2. Yggdrasil smoke, which installs from what C ships (the archived tree)
+     and nothing else. On Starfire, at the commit from step 1:
+     `git -C F:\Projects\CultLib archive --format=tar --output=$env:TEMP\cultlib-quic-smoke.tar <commit>`
+     (the actuator's own mechanism, `deploy-yggdrasil-streampixels.ps1:51,59`,
+     whole tree), then `sftp` it to `gamecultadmin@yggdrasil.gamecult.org:/home/gamecultadmin/`.
+     On Yggdrasil:
+     `mkdir -p /tmp/cultmesh-quic-smoke && tar -xf ~/cultlib-quic-smoke.tar -C /tmp/cultmesh-quic-smoke && cd /tmp/cultmesh-quic-smoke`;
+     `(cd packages/cultmesh-ts/native && sha256sum -c SHA256SUMS)` (the bytes
+     that arrived are the bytes the manifest names);
+     `ldd packages/cultmesh-ts/native/linux-x64/libmsquic.so.2 | grep "not found"`
+     must print nothing. If it prints, the missing ones are among
+     `libnuma1`, `libxdp1`, `libnl-route-3-200` (P7; `libssl3t64` is base):
+     under C nothing installs them because the deb itself is never installed
+     on the host, so `sudo apt-get install` them once and record it in
+     `gamecult-ops/inventory.md` beside the Node line (`:660`). Then
+     `npm ci` (registry access from Yggdrasil is the deploy path's own
+     assumption, `deploy-streampixels-preview.sh:102`) and
+     `node scripts/test-typescript-package-closure.mjs` with the env var
+     unset: this is the same smoke CI runs, now on Node 24.14.1 (P8) on the
+     deploy host, loading `node_modules/cultmesh-ts/native/linux-x64`.
+     Then the handshake: `npm run test --workspace packages/cultmesh-ts`
+     (builds `dist-test` and runs the cut-4/5 suites on the host), then a
+     throwaway PKCS12
+     (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=127.0.0.1 -days 2 -keyout k.pem -out c.pem && openssl pkcs12 -export -inkey k.pem -in c.pem -passout pass:smoke -out smoke.p12`),
+     `node packages/cultmesh-ts/dist-test/test/interop/cultmesh-quic-peer.js serve --frames 5 --delivery latest-only --pkcs12 smoke.p12 --password smoke`
+     in one shell (it prints the advertised endpoint), and
+     `node packages/cultmesh-ts/dist-test/test/interop/cultmesh-quic-peer.js dial --endpoint <printed> --expect 5`
+     in a second, which must print five frames. If cut 5 landed `serve` with
+     a generated certificate instead of `--pkcs12/--password` flags, add the
+     flags in this cut; the smoke needs a certificate it can name. Finish
+     with `rm -rf /tmp/cultmesh-quic-smoke ~/cultlib-quic-smoke.tar`. This is
+     the only place the Linux artifact is proven on the deploy host, and only
+     the operator holds the key.
+  3. Nothing here touches `/srv/streampixels`; StreamPixels adoption
+     (archive list, `:97`, its stale lockfile) is consumer work (section 15,
+     section 16).
+
+### 11.8 Subtraction estimate delta against section 14
+
+Row 6 of the table read `0 removed, 60 (manifests) + 130 (workflow) + 30
+(closure) + 60 (README) = +280` with `+2 optional platform packages` and `+3
+publish jobs` in the dependencies line. Under C:
+
+- Removed: 0 (the `cultcache-ts` job stays, 11.3).
+- Added text: about 120 (`quic-native.yml`) + 40 (interop workflow) + 30
+  (closure) + 70 (README) + 25 (`MANIFEST.txt`, `SHA256SUMS`) + 1
+  (`package.json`) = about +285, the same order as before; the 60 lines of
+  platform-package manifests are gone and the release/verify jobs take their
+  place.
+- Added binary: four files, about 8.0 MB in the tree under Option 1, 0 under
+  Option 2. Section 14 has no column for this; it is the real price of C and
+  is stated here so it is not hidden in a line count.
+- Dependencies line becomes: +0 optional platform packages (was +2); +0
+  publish jobs (was +3); +1 workflow file with four jobs (two builds, one
+  release, one digest check) and +1 job in the interop workflow (was "+1 CI
+  job"). Runtime dependency unchanged: `koffi` only.
+- Campaign total: about +3,900 source lines, unchanged; plus 8.0 MB of
+  committed binaries.
+
+### 11.9 Parked seam: registry publication (later pass)
+
+Not in this campaign, by the operator's choice (section 13). When it is
+picked up, it reattaches here without remapping the rest:
+
+- `publish-packages.yml` gains `cultnet-ts` and `cultmesh-ts` jobs shaped like
+  `:39-78`, tag prefixes at `:20-24`, dispatch options at `:30-33`; the
+  `cultmesh-ts` job `needs` the two `quic-native.yml` build jobs (or the
+  workflow is merged) and publishes the artifacts they already produce as
+  `@gamecult/cultmesh-quic-native-{win32-x64,linux-x64}` platform packages.
+- `packages/cultmesh-ts/package.json` gains `optionalDependencies` on those
+  two names; `realtime-quic-native.ts` gains a third resolution branch after
+  the env var and before the committed `native/` directory, or the committed
+  directory is retired in the same pass.
+- Naming (unscoped `cultnet-ts`/`cultmesh-ts` versus `@gamecult/*`) is the
+  original Q5 A/B fork, still open for that pass; P14 recorded all names
+  unclaimed on 2026-09-16.
+- Its Body precondition is an `NPM_TOKEN` repository secret minted on
+  npmjs.com, which the operator can now reach (section 13).
 
 ## 12. Cut 7 (documentation and ledgers)
 
@@ -955,9 +1291,21 @@ Verification:
   the `ICultMeshRealtimeLookupSource` port as the seam (Q7).
 - `docs/typescript-quic-realtime-target.md:5-7`: status line updated to point
   at this map.
+- Under Q5 C, the delivery story every document tells is the one in section
+  11: the binding ships inside `packages/cultmesh-ts/native/`, provenance
+  lives in `MANIFEST.txt` and `SHA256SUMS`, and consumers keep `file:` paths.
+  `native/GameCult.Mesh.Quic.Native/README.md` (cut 3) and
+  `packages/cultmesh-ts/README.md` (cut 6) both point at `MANIFEST.txt` as the
+  provenance owner rather than restating versions or digests. The parity row
+  above says "bindings shipped in the `cultmesh-ts` package tree", not
+  "published". Registry publication is described in exactly one place, as
+  parked: section 11.9 of this map.
 
 Verification: `rg -n "CultMeshRealtimeTransports.cs" docs src/GameCult.Mesh/docs`
-returns only correct paths.
+returns only correct paths;
+`rg -n -i "registry|npm publish|platform package|optionalDependencies" packages/cultmesh-ts/README.md native/GameCult.Mesh.Quic.Native/README.md docs/runtime-parity-scope.md src/GameCult.Mesh/docs/transport-planes.md`
+returns nothing (the only permitted mentions are this map's sections 11.9 and
+13 and the target's history).
 
 ## 13. Operator questions
 
@@ -1012,18 +1360,23 @@ Each is now a standing ruling; the options above are history.
 
 - **Q5 ruled A, then re-ruled C the same day.** A had `cultnet-ts` and
   `cultmesh-ts` publishing under their unscoped names with only the two native
-  platform packages scoped. It fell to a Body fact the map had not recorded,
-  in the operator's words: "we don't even have npm access and cannot get it
-  because our entire subnet is blocked." The publish job needs an `NPM_TOKEN`
-  minted on npmjs.com by a logged-in user; nobody on this network can mint
-  one, which is also why the existing `cultcache-ts` job has never run.
-  **C stands: no registry.** Consumers keep `file:` paths. The native binaries
-  ship inside the CultLib tree the deploy path already carries, and Q6's
-  Actions build attaches the Linux artifact to a GitHub Release instead of
-  publishing a package. Q5's naming question dissolves with it. Cut 6 is
-  remapped under C below; Cut 4's binary resolution and Cut 7's ledgers
-  follow it. Any line in this map that still says "publish", "registry" or
-  "platform package" describes A and is history.
+  platform packages scoped. The re-ruling was first stated as necessity ("we
+  don't even have npm access and cannot get it because our entire subnet is
+  blocked"); the operator corrected that Body fact the same day after
+  reaching npm signup: "apparently that was true yesterday." The registry is
+  reachable from Starfire (`npm ping` answers, section 11.1 `(probe)`), and an
+  `NPM_TOKEN` can be minted. **C still stands for this campaign, by choice:
+  no registry.** In the operator's words, registry publication is "still for
+  a later pass". Consumers keep `file:` paths. The native binaries ship inside
+  the `cultmesh-ts` package tree that the deploy path's `git archive` carries,
+  and Q6's Actions build attaches both platform artifacts to a GitHub Release
+  instead of publishing packages. Registry publication of `cultnet-ts`,
+  `cultmesh-ts` and the native binaries is parked, not ruled out; section 11.9
+  names the seam it reattaches to, and the original A/B naming fork stays
+  open for that pass. Cut 6 is remapped under C (section 11); section 5.4,
+  Cut 4's binary resolution and dependency lines, and Cut 7's ledger follow
+  it. The one fork C surfaces, whether the binaries are committed or fetched
+  from the Release, is Q8 in section 11.2 and is open.
 - **Q6 ruled A.** The Linux release artifact is built by GitHub Actions on
   `ubuntu-latest` inside `container: debian:13`, published by the workflow,
   and verified by the operator smoke on Yggdrasil in cut 6. The Docker
@@ -1051,10 +1404,13 @@ Both sides of the number, by cut, in source lines (tests included, generated
 | Total | ~350 | ~4,260 | about +3,900 |
 
 Dependencies: +1 runtime dependency on `cultmesh-ts` (`koffi`, 1.7 MB, MIT,
-loaded lazily); +2 optional platform packages; +0 build-time Node
+loaded lazily); +0 optional platform packages; +0 build-time Node
 dependencies (no node-gyp, no node-addon-api, no cmake-js). Targets: +0 .NET
 projects (the C# interop peer gains one project reference); +1 CMake platform
-branch; +1 shell build script; +3 publish jobs; +1 CI job.
+branch; +1 shell build script; +1 workflow file with four jobs; +1 job in
+the interop workflow; and, under Q8 option 1, about 8.0 MB of committed
+binaries. *(This line first read "+2 optional platform packages; +3 publish
+jobs; +1 CI job" under ruling A; section 11.8 carries the delta.)*
 
 Why the number is positive and still acceptable: the target orders a new
 capability (a QUIC realtime plane in a runtime that has none), and every line
@@ -1087,7 +1443,16 @@ about line count.
   TypeScript-to-TypeScript lanes only. The native-connector lane is Windows
   by design, matching where Unity runs.
 - **The `cultcache-ts` naming split** across consumers (section 3). Out of
-  scope; noted because Q5's answer should not make it worse.
+  scope. Q5 C touches no package name and publishes nothing, so it makes the
+  split neither better nor worse; the split becomes the parked registry
+  pass's problem (section 11.9), where the A/B naming fork is still open.
+  One consequence to carry there: StreamPixels' lockfile resolves
+  `cultmesh-ts`'s cache dependency as unscoped `cultcache-ts`
+  (`F:\Projects\StreamPixels\pnpm-lock.yaml:2561-2564` `(source read)`) while
+  `packages/cultmesh-ts/package.json:46` now names `@gamecult/cultcache-ts`,
+  so a `pnpm install --frozen-lockfile` against the current tree would refuse
+  before any QUIC code is reached. Consumer work, recorded so the Yggdrasil
+  smoke in section 11.7 is not mistaken for StreamPixels adoption.
 
 ## 16. Reminder of what a wrong cut looks like
 
