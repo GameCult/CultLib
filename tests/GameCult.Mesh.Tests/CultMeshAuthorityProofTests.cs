@@ -332,6 +332,84 @@ public sealed class CultMeshAuthorityProofTests
         CultMeshAuthorityProof.VerifySessionProof(request, accepted, verseId, route, trust, now).Should().BeTrue();
     }
 
+    // The other direction. `scripts/sign-cultmesh-authority-vectors.mjs` builds
+    // the transcripts with the TypeScript module and signs them with
+    // TypeScript-owned keys over awkward inputs (a quic scheme, unsorted
+    // protocol ids, non-ASCII generation text, a non-default priority). Only
+    // the reference implementation judges the file here; the keys come from
+    // the file, never from this side.
+    [Test]
+    public void AuthorityRouteVectorsSignedByTypeScriptVerifyHere()
+    {
+        var path = Path.Combine(RepoRoot(), "contracts", "cultmesh", "authority-route-vectors.ts-signed.json");
+        using var vectors = JsonDocument.Parse(File.ReadAllText(path));
+        var rootElement = vectors.RootElement;
+        var routeElement = rootElement.GetProperty("route");
+        var certificateElement = routeElement.GetProperty("certificate");
+        var odinRoot = PublicKey(rootElement.GetProperty("odinRoot"));
+        var providerKey = PublicKey(certificateElement.GetProperty("providerKey"));
+        var certificate = new CultMeshRouteCertificate(
+            providerKey,
+            certificateElement.GetProperty("odinKeyId").GetString()!,
+            certificateElement.GetProperty("issuedAtUnixMilliseconds").GetInt64(),
+            certificateElement.GetProperty("expiresAtUnixMilliseconds").GetInt64(),
+            certificateElement.GetProperty("signature").GetString()!);
+        var protocolIds = routeElement.GetProperty("protocolIds").EnumerateArray().Select(value => value.GetString()!).ToArray();
+        var priority = routeElement.GetProperty("priority").GetInt32();
+        CultMeshAuthorityRoute Route(int routePriority) => new(
+            routeElement.GetProperty("authorityRuntimeId").GetString()!,
+            routeElement.GetProperty("endpoint").GetString()!,
+            protocolIds,
+            routePriority,
+            routeElement.GetProperty("generation").GetString(),
+            certificate);
+        var route = Route(priority);
+        var trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.AuthenticatedRemote, new[] { odinRoot });
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(rootElement.GetProperty("nowUnixMilliseconds").GetInt64());
+        var verseId = routeElement.GetProperty("verseId").GetString()!;
+
+        protocolIds.Should().NotBeInAscendingOrder(StringComparer.Ordinal, "the vector must exercise the sort");
+        trust.Validate(verseId, route, now);
+        Action tampered = () => trust.Validate(verseId, Route(priority + 1), now);
+        tampered.Should().Throw<CultMeshSessionException>()
+            .Which.Failure.Message.Should().Be("The Odin route certificate signature is invalid.");
+
+        var proofElement = rootElement.GetProperty("sessionProof");
+        var requestElement = proofElement.GetProperty("request");
+        var request = new GameCult.Networking.CultMeshSessionOpenMessage
+        {
+            MessageId = requestElement.GetProperty("messageId").GetString(),
+            SourceRuntimeId = requestElement.GetProperty("sourceRuntimeId").GetString(),
+            VerseId = requestElement.GetProperty("verseId").GetString(),
+            AuthorityRuntimeId = requestElement.GetProperty("authorityRuntimeId").GetString(),
+            ProtocolId = requestElement.GetProperty("protocolId").GetString(),
+            RouteGeneration = requestElement.GetProperty("routeGeneration").GetString(),
+            ClientNonce = requestElement.GetProperty("clientNonce").GetString()
+        };
+        var accepted = Accepted(request, proofElement.GetProperty("providerSignature").GetString()!);
+        accepted.ProviderKeyId = proofElement.GetProperty("providerKeyId").GetString()!;
+        CultMeshAuthorityProof.VerifySessionProof(request, accepted, verseId, route, trust, now).Should().BeTrue();
+
+        var replayed = new GameCult.Networking.CultMeshSessionOpenMessage
+        {
+            MessageId = request.MessageId,
+            SourceRuntimeId = request.SourceRuntimeId,
+            VerseId = request.VerseId,
+            AuthorityRuntimeId = request.AuthorityRuntimeId,
+            ProtocolId = request.ProtocolId,
+            RouteGeneration = request.RouteGeneration,
+            ClientNonce = "replayed"
+        };
+        var replayedAccepted = Accepted(replayed, accepted.ProviderSignature!);
+        replayedAccepted.ProviderKeyId = accepted.ProviderKeyId;
+        CultMeshAuthorityProof.VerifySessionProof(replayed, replayedAccepted, verseId, route, trust, now).Should().BeFalse();
+    }
+
+    private static CultMeshEcdsaP256PublicKey PublicKey(JsonElement element) => new(
+        element.GetProperty("keyId").GetString()!,
+        element.GetProperty("x").GetString()!,
+        element.GetProperty("y").GetString()!);
+
     private static string RepoRoot()
     {
         var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);

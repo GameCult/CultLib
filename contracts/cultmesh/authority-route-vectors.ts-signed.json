@@ -1,0 +1,45 @@
+{
+  "nowUnixMilliseconds": 1800000000000,
+  "odinRoot": {
+    "keyId": "odin-ts-vector",
+    "x": "lqw9TE0EyuDU5Ghe8SafIbBBYkhHMUF7HXJQUc0nXsw=",
+    "y": "nUj+Xhakih97JiJcTUNMHM9JIo7MVQaauuAkCXph+tw="
+  },
+  "route": {
+    "verseId": "aetheria",
+    "authorityRuntimeId": "aetheria-daemon",
+    "endpoint": "cultmesh-state+quic://provider.example:4433/?cert-sha256=ABCDEF",
+    "protocolIds": [
+      "cultmesh.documents.v1",
+      "cultmesh.content.v1",
+      "cultmesh.realtime.v1"
+    ],
+    "priority": 13,
+    "generation": "ts-generation-ünïcode-∞-1",
+    "certificate": {
+      "providerKey": {
+        "keyId": "provider-ts-vector",
+        "x": "JKyjtWnoE5fhSWbeqr188SbReQWCjssf5mSMEa5pV+E=",
+        "y": "vtduzojDpbT49sbxBSsBQ+f3PG3rm+CUk/MTy2MM/ws="
+      },
+      "odinKeyId": "odin-ts-vector",
+      "issuedAtUnixMilliseconds": 1799999940000,
+      "expiresAtUnixMilliseconds": 1800003600000,
+      "signature": "NS5a7X8fNqTi1CdpPAcJaMmEsozwFRoygTW4z+JlhHFq7uaZcb4G7NwoEpPqo/Fv+UA7pNl5N+qUMuSD/oAq1Q=="
+    }
+  },
+  "sessionProof": {
+    "request": {
+      "schemaVersion": "cultmesh.session_open.v2",
+      "messageId": "ts-vector-message-1",
+      "sourceRuntimeId": "ts-vector-consumer",
+      "verseId": "aetheria",
+      "authorityRuntimeId": "aetheria-daemon",
+      "protocolId": "cultmesh.documents.v1",
+      "routeGeneration": "ts-generation-ünïcode-∞-1",
+      "clientNonce": "HICtAmV++1MarssY04Tkyn1j9qVEcOMp/P5Ce1M0Yec="
+    },
+    "providerKeyId": "provider-ts-vector",
+    "providerSignature": "OgJHkmw3fhPRS5TXxZm94yZvkWAV5TPDuvG+/zIVlnU7OFENZ0Nn0Pdx0IT/vDfEWXD+8/+sCZVFIFwa4tUjsg=="
+  }
+}

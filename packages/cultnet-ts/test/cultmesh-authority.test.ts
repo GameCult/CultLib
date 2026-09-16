@@ -30,7 +30,13 @@ import {
 } from "../src/cultmesh-authority";
 
 const NOW = 1_800_000_000_000;
-const VECTORS_PATH = join(__dirname, "..", "..", "..", "..", "contracts", "cultmesh", "authority-route-vectors.json");
+const CONTRACTS = join(__dirname, "..", "..", "..", "..", "contracts", "cultmesh");
+// Written by the C# reference (`CultMeshAuthorityProofTests.AuthorityRouteVectorsAreSharedWithTypeScript`).
+const VECTORS_PATH = join(CONTRACTS, "authority-route-vectors.json");
+// Written by `scripts/sign-cultmesh-authority-vectors.mjs` and verified by the
+// C# reference; checked here too so a transcript change on this side cannot
+// leave a stale TypeScript-signed file behind for C# to trust.
+const TS_SIGNED_VECTORS_PATH = join(CONTRACTS, "authority-route-vectors.ts-signed.json");
 
 interface Vectors {
   nowUnixMilliseconds: number;
@@ -305,8 +311,8 @@ test("base64 helpers round-trip across the 32 KiB chunk boundary", () => {
   assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
 });
 
-test("the C# reference vectors verify through the shared module", async () => {
-  const vectors = JSON.parse(readFileSync(VECTORS_PATH, "utf8")) as Vectors;
+for (const [label, path] of [["C# reference", VECTORS_PATH], ["TypeScript-signed", TS_SIGNED_VECTORS_PATH]] as const) test(`the ${label} vectors verify through the shared module`, async () => {
+  const vectors = JSON.parse(readFileSync(path, "utf8")) as Vectors;
   const trust = { mode: "authenticated-remote" as const, odinRoots: [vectors.odinRoot], now: () => vectors.nowUnixMilliseconds };
   await verifyAuthorityRoute(vectors.route, trust);
   await assert.rejects(verifyAuthorityRoute({ ...vectors.route, priority: 8 }, trust), /signature is invalid/);
