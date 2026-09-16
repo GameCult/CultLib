@@ -181,6 +181,40 @@ close.** Found, in a fix batch (Opus):
 The Q9 pin change and the manifest's stale commit line ride in the same
 batch.
 
+**The Cut 3 fix batch landed** (Opus; its commits are signed Opus 5, which
+is what ran) at `9a01321` (`include/cultmesh_quic_native.h`, 305 lines:
+the event struct with offsets static-asserted, every export, the id and
+return-code conventions, the lifetime and threading rules; the koffi smoke
+and Soul's C consumer are checked against it), `47aa7b6` (objects kept
+alive across the call that names them: one `shared_ptr` per map entry, a
+lookup returns a reference the caller holds for the whole MsQuic call, the
+worker drops only the map's reference, the handle closes exactly once in
+the destructor under the exchange guard, a stream owns its connection so
+close order is structural; `runtime_close` marks closing, wakes pollers,
+waits for `active_calls == 0`, and refuses any later call), `8c41896` (the
+ABI gaps: one event 7 per frame send with `Canceled` distinct; event 4
+uniform at completion for every path, the initiator included, published
+after the id stops resolving; return codes mapped negative on every
+platform with `cultmesh_quic_last_status` for the raw status, thirteen v2
+exports now; a null payload with capacity refused; a stream in the map
+before start; failed listeners leaving nothing) and `c729dff` (the OpenSSL
+pin with both digests, `/MT` so the DLL imports no CRT, manifests with a
+real commit line). Host and target: win32-x64 on the workstation, 20 of 20
+smoke checks, the C consumer's seq, cancel, stress (16,384 frames, zero
+lost or reordered), race 400×20 with zero crashes, closerace 20×512, the v1
+gate 3 passed 1 skipped, 18 exports; linux-x64 in the workstation's Docker
+`debian:13`, development loop only, the same set plus ASan clean on every
+mode, 13 exports. 22 of 23 mutations killed under two green controls.
+**L3 survived**: deleting the quiesce wait cannot be caught, because the
+wake happens under the lock and every poller drains before teardown; right
+by construction and by reading, unfalsifiable by this harness. Soul rules
+whether that stands or a dev-only probe asserts the invariant. Open after
+the batch: the Unity plugin's `msquic.dll` is still Schannel until the
+package build runs; the Schannel dependency cache is orphaned; the v1
+return-code values changed while the zero-versus-nonzero contract held.
+Bridge 302,080 bytes / `f4c5f644…` (win32-x64, static CRT), 108,128 /
+`61d5b96e…` (linux-x64). Soul rerun in flight.
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
