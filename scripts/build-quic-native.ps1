@@ -1,7 +1,10 @@
 param(
   [string] $Configuration = "Release",
   [string] $Architecture = "x64",
-  [string] $OutputDirectory = "artifacts\quic-native"
+  # Per-platform, so the Linux script's output sits beside this one's rather
+  # than on top of it. build-unity-package.ps1 and the Native.Tests csproj both
+  # pass an explicit -OutputDirectory, so neither is affected by this moving.
+  [string] $OutputDirectory = "artifacts\quic-native\win32-x64"
 )
 
 $ErrorActionPreference = "Stop"
