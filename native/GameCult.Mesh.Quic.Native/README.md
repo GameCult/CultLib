@@ -76,10 +76,18 @@ actually ships beside the bridge. The OpenSSL flavour rather than Schannel
 because Schannel's MsQuic refuses `QUIC_CREDENTIAL_TYPE_CERTIFICATE_PKCS12`,
 which is the only credential type a provider has on both platforms.
 
-The build uses MSVC with `/Brepro` so a rebuild reproduces the committed Unity
-plugin DLL, and links the CRT statically (`/MT`). A Node or Unity host without
-the Visual C++ redistributable cannot load a DLL that imports `vcruntime140.dll`,
+The build uses MSVC with `/Brepro` so that a build reproduces itself: the link
+timestamps are dropped, and building the same source twice gives the same bytes.
+It links the CRT statically (`/MT`), because a Node or Unity host without the
+Visual C++ redistributable cannot load a DLL that imports `vcruntime140.dll`,
 and the failure it reports names no missing runtime; the bridge carries its own.
+
+A rebuild does not reproduce the committed Unity plugin. That plugin
+(`unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/gamecult_mesh_quic_native.dll`,
+40,448 bytes) is the older build — before `/MT` and before the move off
+Schannel — and it still imports `VCRUNTIME140.dll` and `MSVCP140.dll`. The
+current source builds to 302,080 bytes with no CRT import. The committed plugin
+stays the older build until the Unity package build runs and replaces it.
 
 Linux x64, on a Debian 13 host:
 
