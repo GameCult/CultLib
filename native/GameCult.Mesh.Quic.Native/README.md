@@ -25,28 +25,28 @@ JavaScript engine: the bridge does not know what is on the other side.
 
 ## Two ABIs
 
-**v2** is the runtime-neutral queue API, and the one new hosts should use:
+**v2** is the runtime-neutral queue API, and the one new hosts should use. It is
+stated once, in [`include/cultmesh_quic_native.h`](include/cultmesh_quic_native.h):
+the 64-byte event struct with its field order and asserted offsets, the thirteen
+exports with their signatures, the id and return-code conventions, the object
+lifetime rules and the threading rules. That file is the contract. This README
+does not restate it, and where the two ever disagree the header is right.
 
-    cultmesh_quic_runtime_open / runtime_close
-    cultmesh_quic_listener_open / listener_close
-    cultmesh_quic_connection_open / connection_certificate_complete / connection_shutdown
-    cultmesh_quic_stream_open / stream_send_frame / stream_shutdown
-    cultmesh_quic_next_event
-    cultmesh_quic_last_error
+A host that can include it should. A host that cannot — koffi, Unity's
+P/Invoke — declares the same thing in its own FFI and is checked against the
+header by a test rather than by eye.
 
-`cultmesh_quic_event` is a fixed 64-byte struct described by layout rather than
-by a shared header, so a host declares it in its own FFI. Its `type` is one of:
-1 `listener_new_connection`, 2 `connection_connected`, 3
-`connection_certificate_received` (payload: the DER certificate), 4
-`connection_shutdown` (payload: a UTF-8 reason), 5 `stream_started`
-(`stream_kind` taken from the stream's first byte), 6 `stream_frame` (payload:
-one whole encoded frame, length prefix stripped), 7 `stream_send_complete`, 8
-`stream_shutdown`, 9 `listener_stopped`.
+Two things worth reading before writing a host, because they are easy to get
+wrong from the outside:
 
-`cultmesh_quic_next_event` returns 0 on timeout, 1 with the event filled and its
-payload copied, 2 when the payload buffer is too small — the event stays at the
-head of the queue and `out_required` is set, so the host can allocate and ask
-again — and negative on a bad call.
+- **Return codes are negative on a bad call, on every platform.** `-1` is a bad
+  call, `-2` a rejected argument, `<= -1000` a MsQuic refusal. `QUIC_STATUS`
+  itself is not portable — a negative HRESULT on Windows, a positive errno on
+  POSIX — so it never reaches a host; `cultmesh_quic_last_status` hands over the
+  raw value for diagnostics and nothing else.
+- **`cultmesh_quic_runtime_close` quiesces.** It marks the runtime closing, wakes
+  every blocked `cultmesh_quic_next_event`, and waits for every in-flight call to
+  return before it frees anything. No host call may begin after it starts.
 
 A client connection defers certificate validation: the bridge indicates the
 certificate, emits event 3 carrying the DER, and answers MsQuic only when the

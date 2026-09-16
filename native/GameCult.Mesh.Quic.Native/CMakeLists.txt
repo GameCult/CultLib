@@ -10,6 +10,9 @@ endif()
 
 add_library(gamecult_mesh_quic_native SHARED cultmesh_quic_native.cpp)
 target_compile_features(gamecult_mesh_quic_native PRIVATE cxx_std_20)
+# include/cultmesh_quic_native.h is the host-facing contract, not an internal
+# detail: the bridge includes it, and so does any consumer that can.
+target_include_directories(gamecult_mesh_quic_native PUBLIC include)
 
 if(WIN32)
   if(NOT DEFINED MSQUIC_ROOT)

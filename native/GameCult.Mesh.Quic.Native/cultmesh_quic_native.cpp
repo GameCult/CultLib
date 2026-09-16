@@ -21,6 +21,13 @@
 // certificate pin is compared in C, because that is the contract Unity was
 // shipped with; it delegates everything else and decides nothing new.
 
+// The host-facing contract lives in include/cultmesh_quic_native.h and is
+// included here so this file cannot drift from it: the event layout, the
+// exports, the return codes, the lifetime rules and the threading rules are
+// stated there once and asserted at compile time.
+#define CULTMESH_QUIC_BUILD 1
+#include <cultmesh_quic_native.h>
+
 #include <msquic.h>
 
 #include <algorithm>
@@ -37,35 +44,15 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(_WIN32)
-#define CULTMESH_API extern "C" __declspec(dllexport)
-#else
-#define CULTMESH_API extern "C" __attribute__((visibility("default")))
-#endif
-
-// The event struct crosses the ABI by layout, not by header: hosts describe it
-// in their own FFI. Keep it exactly 64 bytes with no implicit padding.
-extern "C" struct cultmesh_quic_event {
-    uint32_t type;
-    uint32_t stream_kind;
-    uint64_t listener_id;
-    uint64_t connection_id;
-    uint64_t stream_id;
-    uint64_t code;
-    int32_t status;
-    int32_t payload_length;
-    uint8_t reserved[16];
-};
-static_assert(sizeof(cultmesh_quic_event) == 64, "the event struct is a 64-byte ABI contract");
-static_assert(offsetof(cultmesh_quic_event, payload_length) == 44, "event field offsets are an ABI contract");
+#define CULTMESH_API extern "C" CULTMESH_QUIC_API
 
 namespace {
 
 constexpr uint32_t kApiVersion = 2;
 constexpr uint64_t kConnectionCloseCode = 0x43554c54;
 constexpr uint64_t kStreamAbortCode = 0x53544154;
-constexpr uint8_t kReliableStream = 1;
-constexpr uint8_t kLatestOnlyStream = 2;
+constexpr uint8_t kReliableStream = CULTMESH_QUIC_STREAM_RELIABLE;
+constexpr uint8_t kLatestOnlyStream = CULTMESH_QUIC_STREAM_LATEST_ONLY;
 constexpr uint32_t kMaximumEncodedFrameBytes = (64u * 1024u * 1024u) + 37u + (3u * 65535u);
 constexpr char kAlpn[] = "cultmesh-state-v1";
 
@@ -80,17 +67,16 @@ constexpr uint16_t kPeerUnidiStreamCount = 1024;
 // the shutdown arrives as event 4.
 constexpr uint32_t kHandshakeIdleTimeoutMs = 10000;
 
-enum EventType : uint32_t {
-    kEventListenerNewConnection = 1,
-    kEventConnectionConnected = 2,
-    kEventConnectionCertificateReceived = 3,
-    kEventConnectionShutdown = 4,
-    kEventStreamStarted = 5,
-    kEventStreamFrame = 6,
-    kEventStreamSendComplete = 7,
-    kEventStreamShutdown = 8,
-    kEventListenerStopped = 9,
-};
+// Short names for the header's event codes; the header is the contract.
+constexpr uint32_t kEventListenerNewConnection = CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION;
+constexpr uint32_t kEventConnectionConnected = CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED;
+constexpr uint32_t kEventConnectionCertificateReceived = CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED;
+constexpr uint32_t kEventConnectionShutdown = CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN;
+constexpr uint32_t kEventStreamStarted = CULTMESH_QUIC_EVENT_STREAM_STARTED;
+constexpr uint32_t kEventStreamFrame = CULTMESH_QUIC_EVENT_STREAM_FRAME;
+constexpr uint32_t kEventStreamSendComplete = CULTMESH_QUIC_EVENT_STREAM_SEND_COMPLETE;
+constexpr uint32_t kEventStreamShutdown = CULTMESH_QUIC_EVENT_STREAM_SHUTDOWN;
+constexpr uint32_t kEventListenerStopped = CULTMESH_QUIC_EVENT_LISTENER_STOPPED;
 
 struct Runtime;
 struct Connection;
