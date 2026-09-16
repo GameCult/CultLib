@@ -240,6 +240,10 @@ struct SendRequest {
     bool is_frame = false;
 };
 
+// A `QUIC_STATUS` reaches this through `uint32_t`, never straight to `uint64_t`:
+// it is a signed HRESULT on Windows, and widening it signed printed every
+// Windows failure as `0xFFFFFFFF80072B18`. The status is 32 bits on both
+// platforms and is read as 32 bits here.
 std::string Hex(uint64_t value) {
     std::ostringstream text;
     text << "0x" << std::hex << std::uppercase << value;
@@ -522,7 +526,7 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
     case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
         const auto* encoded = reinterpret_cast<const QUIC_BUFFER*>(event->PEER_CERTIFICATE_RECEIVED.Certificate);
         AppendTrace(connection, "certificate-status=" +
-            Hex(static_cast<uint64_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus)));
+            Hex(static_cast<uint32_t>(event->PEER_CERTIFICATE_RECEIVED.DeferredStatus)));
 #if defined(_WIN32)
         if (connection->has_pin) {
             // The v1 contract: the pin decision is made here, in C, and the host
@@ -538,7 +542,7 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
                 matches ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
             if (QUIC_FAILED(completion)) {
                 SetError(runtime, "CultMesh QUIC certificate validation completion failed (status=" +
-                    Hex(static_cast<uint64_t>(completion)) + ").");
+                    Hex(static_cast<uint32_t>(completion)) + ").");
                 return completion;
             }
             return QUIC_STATUS_PENDING;
@@ -565,7 +569,7 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
     // which is what lets these fields be plain members.
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
         connection->shutdown_reason = "CultMesh QUIC connection was shut down by the transport (status=" +
-            Hex(static_cast<uint64_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) + ", error=" +
+            Hex(static_cast<uint32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) + ", error=" +
             Hex(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode) + ").";
         connection->shutdown_code.store(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
         connection->shutdown_status = static_cast<int32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
@@ -622,7 +626,7 @@ QUIC_STATUS QUIC_API ListenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT*
             event->NEW_CONNECTION.Connection, listener->configuration);
         if (QUIC_FAILED(status)) {
             SetError(runtime, "CultMesh QUIC inbound connection configuration failed (status=" +
-                Hex(static_cast<uint64_t>(status)) + ").");
+                Hex(static_cast<uint32_t>(status)) + ").");
             // Returning a failure here is MsQuic's signal to reject and close
             // this connection itself, so the entry made a moment ago has to go
             // with it rather than sitting in the map naming a dead handle.
@@ -703,7 +707,7 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
     auto status = EnsureClientConfiguration(runtime);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC client configuration failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     auto connection = std::make_shared<Connection>();
@@ -718,7 +722,7 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
     status = runtime->api->ConnectionOpen(runtime->registration, ConnectionCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC connection open failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
     {
         std::lock_guard<std::mutex> lock(runtime->gate);
@@ -732,7 +736,7 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
         // handle is closed by whichever of the two drops last, exactly once.
         DestroyConnection(runtime, raw->id);
         return Refuse(runtime, status, "CultMesh QUIC connection start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     *out_connection_id = raw->id;
@@ -851,7 +855,7 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
         runtime->registration, &alpn, 1, &settings, sizeof(settings), nullptr, &listener->configuration);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC listener configuration failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     // PKCS12 is the one credential type Schannel and OpenSSL both take, which
@@ -868,14 +872,14 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     status = runtime->api->ConfigurationLoadCredential(listener->configuration, &credentials);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC listener certificate could not be loaded (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     Listener* raw = listener.get();
     status = runtime->api->ListenerOpen(runtime->registration, ListenerCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC listener open failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     QUIC_ADDR address{};
@@ -898,7 +902,7 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     if (QUIC_FAILED(status)) {
         Detach(runtime->gate, runtime->listeners, raw->id);
         return Refuse(runtime, status, "CultMesh QUIC listener start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     // Port 0 means "pick one"; the host needs the chosen port to advertise it.
@@ -908,7 +912,7 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     if (QUIC_FAILED(status)) {
         Detach(runtime->gate, runtime->listeners, raw->id);
         return Refuse(runtime, status, "CultMesh QUIC listener address could not be read (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
     if (out_bound_port != nullptr) *out_bound_port = QuicAddrGetPort(&bound);
     *out_listener_id = raw->id;
@@ -948,7 +952,7 @@ CULTMESH_API int32_t cultmesh_quic_connection_certificate_complete(
         accept != 0 ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC certificate validation completion failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
     return 0;
 }
@@ -991,7 +995,7 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
         StreamCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
         return Refuse(runtime, status, "CultMesh QUIC stream open failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
     // In the map before it starts. `StreamStart` can reach shutdown-complete on
     // an MsQuic worker before it returns here, and that callback has to find the
@@ -1004,7 +1008,7 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
     if (QUIC_FAILED(status)) {
         DestroyStream(runtime, raw->id);
         return Refuse(runtime, status, "CultMesh QUIC stream start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     // The kind byte is the first thing on the stream, which is what the peer's
@@ -1017,7 +1021,7 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
     if (QUIC_FAILED(status)) {
         delete request;
         return Refuse(runtime, status, "CultMesh QUIC stream kind could not be sent (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
 
     *out_stream_id = raw->id;
@@ -1052,7 +1056,7 @@ CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
     if (QUIC_FAILED(status)) {
         delete request;
         return Refuse(runtime, status, "CultMesh QUIC frame send failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
+            Hex(static_cast<uint32_t>(status)) + ").");
     }
     return 0;
 }
