@@ -303,16 +303,26 @@ const mutations = [
   { target: "realtime", rule: "decode checks the wire version", old: "  if (view.getUint16(35, true) !== WIRE_VERSION || view.getInt32(31, true) !== FIXED_HEADER_BYTES) {", new: "  if (view.getInt32(31, true) !== FIXED_HEADER_BYTES) {" },
   { target: "realtime", rule: "decode checks the stamped header size", old: "  if (view.getUint16(35, true) !== WIRE_VERSION || view.getInt32(31, true) !== FIXED_HEADER_BYTES) {", new: "  if (view.getUint16(35, true) !== WIRE_VERSION) {" },
   { target: "realtime", rule: "decode refuses a delivery byte outside the three modes", old: '  if (delivery === undefined) throw new Error("Realtime frame delivery mode is invalid.");\n', new: '  if (delivery === undefined) return { channelId: "", schemaId: "", bodyId: "", producerEpoch: 0n, sequence: 0n, delivery: "unreliable", payload: new Uint8Array(0) };\n' },
-  // Not listed: removing `payloadLength < 0` from the decoder's length refusal.
-  // The clause mirrors the reference but cannot fire on its own: a negative
-  // payload length makes the sum smaller than the frame, and reaching the sum
-  // check at all means the frame is already at least 37 bytes, so the sum can
-  // never match while the length is negative. The mutant is equivalent, and it
-  // survived when tried.
   { target: "realtime", rule: "decode refuses a length sum that misses the frame", old: "  if (payloadLength < 0 || expected !== bytes.byteLength) throw", new: "  if (payloadLength < 0) throw" },
+  // This one was first listed as equivalent — "a negative payload length makes
+  // the sum smaller than the frame, so the sum check covers it" — and it did
+  // survive. The reasoning was wrong: a negative payload length cancels against
+  // the identity lengths, so a 37-byte frame with channelLength 65535 and
+  // payloadLength -65535 sums to exactly 37 and decoded to blank identities
+  // while the reference refused it. No test covered that shape; one does now.
+  { target: "realtime", rule: "decode refuses a negative payload length the sum cancels out", old: "  if (payloadLength < 0 || expected !== bytes.byteLength) throw", new: "  if (expected !== bytes.byteLength) throw" },
   { target: "realtime", rule: "decode keeps a leading byte-order mark, as Encoding.UTF8.GetString does", old: 'const decoder = new TextDecoder("utf-8", { ignoreBOM: true });', new: "const decoder = new TextDecoder();" },
   { target: "realtime", rule: "decode reads exactly the viewed bytes of an offset view", old: "  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);", new: "  const view = new DataView(bytes.buffer);" },
-  { target: "realtime", rule: "the decoded payload does not alias the frame it came from", old: "    payload: bytes.slice(offset, offset + payloadLength),", new: "    payload: bytes.subarray(offset, offset + payloadLength)," },
+  { target: "realtime", rule: "the decoded payload does not alias the frame it came from", old: "    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),", new: "    payload: bytes.subarray(offset, offset + payloadLength)," },
+  // The narrower half of the same rule, and the one that shipped broken: a plain
+  // `bytes.slice` copies a `Uint8Array` but aliases a `Buffer`, whose own `slice`
+  // is an alias of `subarray`. The mutation above dies on the `Uint8Array` test;
+  // this one survives it and dies only on the `Buffer` test.
+  { target: "realtime", rule: "the decoded payload copies out of a Buffer, whose own slice is a view", old: "    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),", new: "    payload: bytes.slice(offset, offset + payloadLength)," },
+  // And the payload's type does not follow the frame's. This spelling copies, so
+  // both mutations above are dead to it, but `@@species` hands a `Buffer` frame a
+  // `Buffer` payload; only the `Buffer.isBuffer` assertion kills it.
+  { target: "realtime", rule: "the decoded payload is a plain Uint8Array whatever the frame was", old: "    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),", new: "    payload: Uint8Array.prototype.slice.call(bytes, offset, offset + payloadLength)," },
   // Last, because it removes this target's sentinel.
   { target: "realtime", rule: "the frame magic is 0x31545343", old: "const MAGIC = 0x31545343;", new: "const MAGIC = 0x31545344;" },
 ];

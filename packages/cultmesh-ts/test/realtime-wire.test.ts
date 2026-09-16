@@ -325,6 +325,43 @@ test("decode refuses every malformed frame the reference refuses, in the referen
   assert.equal(decodeRealtimeFrame(blank).channelId, " ".repeat(15));
 });
 
+// The `payloadLength < 0` clause in the length refusal is not redundant with the
+// sum check beside it, which is what a surviving mutant that dropped it claimed.
+// A negative payload length cancels against the identity lengths, so a frame can
+// be crafted whose sum lands exactly on its own byte length. Without the clause
+// each of these decodes to blank identities and an empty payload where the C#
+// reference (`CultMeshRealtimeWireProtocol.cs:74-76`, same clause) refuses.
+test("decode refuses a negative payload length that the length sum cancels out", () => {
+  const good = encodeRealtimeFrame(sample());
+  // A valid magic, wire version, header size and delivery byte, then the three
+  // identity lengths and the payload length written by hand.
+  const crafted = (channelLength: number, payloadLength: number, totalBytes: number) => {
+    const bytes = new Uint8Array(totalBytes);
+    bytes.set(good.subarray(0, 37), 0);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(21, channelLength, true);
+    view.setUint16(23, 0, true);
+    view.setUint16(25, 0, true);
+    view.setInt32(27, payloadLength, true);
+    // The sum the decoder computes must land exactly on the frame's own length,
+    // or the check beside the clause would refuse it and prove nothing.
+    assert.equal(37 + channelLength + 0 + 0 + payloadLength, totalBytes, "the crafted sum must match");
+    return bytes;
+  };
+  const cases: readonly (readonly [string, Uint8Array])[] = [
+    ["a maximal channel length cancelled by -65535, summing to 37", crafted(0xffff, -0xffff, 37)],
+    ["a channel length of 1 cancelled by -1, summing to 37", crafted(1, -1, 37)],
+    ["a channel length of 2 cancelled by -1, summing to 38", crafted(2, -1, 38)],
+  ];
+  for (const [label, bytes] of cases) {
+    assert.throws(
+      () => decodeRealtimeFrame(bytes),
+      (error: Error) => error.message === "Realtime frame length is invalid.",
+      label,
+    );
+  }
+});
+
 test("decode reads exactly the viewed bytes of an offset view, not the buffer behind it", () => {
   const good = encodeRealtimeFrame(sample({ payload: Uint8Array.from([9, 8, 7]) }));
   const pool = new Uint8Array(good.byteLength + 64).fill(0xa5);
@@ -336,6 +373,22 @@ test("decode reads exactly the viewed bytes of an offset view, not the buffer be
   const decoded = decodeRealtimeFrame(good);
   good[good.byteLength - 1] = 0;
   assert.deepEqual(decoded.payload, Uint8Array.from([9, 8, 7]));
+});
+
+// The `Uint8Array` case above passes with a plain `bytes.slice(...)`; this one
+// does not. Node's `Buffer` overrides `slice` with an alias of `subarray`, and a
+// `Buffer` is what a socket read hands a Node caller, so the aliasing bug this
+// pins is the one that would actually reach a consumer.
+test("the decoded payload copies out of a Node Buffer too, which overrides slice", () => {
+  const frame = Buffer.from(encodeRealtimeFrame(sample({ payload: Uint8Array.from([9, 8, 7]) })));
+  const decoded = decodeRealtimeFrame(frame);
+  frame[frame.byteLength - 1] = 0;
+  assert.deepEqual(decoded.payload, Uint8Array.from([9, 8, 7]), "payload unchanged by a later write to the frame");
+  assert.equal(Buffer.isBuffer(decoded.payload), false, "the copy is a plain Uint8Array, not a Buffer");
+  assert.notEqual(decoded.payload.buffer, frame.buffer, "the copy has its own backing store");
+  // The three identities need no such check: `TextDecoder` returns strings, which
+  // hold no reference to the bytes they were decoded from.
+  assert.equal(decoded.channelId, "aetheria.zone-1");
 });
 
 test("the codec touches no socket: no node: import in the source", () => {

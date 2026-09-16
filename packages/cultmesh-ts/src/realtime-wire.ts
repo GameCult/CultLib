@@ -173,6 +173,19 @@ export function decodeRealtimeFrame(bytes: Uint8Array): CultMeshRealtimeFrame {
     producerEpoch: view.getBigInt64(5, true),
     sequence: view.getBigInt64(13, true),
     delivery,
-    payload: bytes.slice(offset, offset + payloadLength),
+    // Not `bytes.slice(...)`. Node's `Buffer` overrides `slice` with an alias of
+    // `subarray`, so on a `Buffer` — which is what every socket read hands a Node
+    // caller — that spelling returns a *view* of the frame, and a decoded payload
+    // that changes when the frame buffer is reused.
+    //
+    // Nor `Uint8Array.prototype.slice.call(bytes, ...)`, which does bypass the
+    // override and copy, but takes its result constructor from `@@species`: on a
+    // `Buffer` that is `FastBuffer`, so the payload comes back a `Buffer` from a
+    // `Buffer` frame and a `Uint8Array` from a `Uint8Array` one. The declared
+    // type holds either way, but `deepStrictEqual` does not, so the same frame
+    // would compare equal or not depending on how it reached the decoder.
+    //
+    // The constructor copies and is the one type on both inputs.
+    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),
   };
 }
