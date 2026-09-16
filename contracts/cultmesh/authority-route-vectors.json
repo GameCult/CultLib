@@ -1,0 +1,44 @@
+{
+  "nowUnixMilliseconds": 1800000000000,
+  "odinRoot": {
+    "keyId": "odin-vector",
+    "x": "shJLGtmRrW6D87VQKv0xYQekLIfEkeN7dVawwpmIKWM=",
+    "y": "iR6Gx3aVCghzSyo7TqXqr+1397L73KDNZuzN2cZ55IE="
+  },
+  "route": {
+    "verseId": "aetheria",
+    "authorityRuntimeId": "aetheria-daemon",
+    "endpoint": "wss://provider.example/mesh",
+    "protocolIds": [
+      "cultmesh.content.v1",
+      "cultmesh.documents.v1"
+    ],
+    "priority": 7,
+    "generation": "vector-generation-1",
+    "certificate": {
+      "providerKey": {
+        "keyId": "provider-vector",
+        "x": "6XIvgx3W1q7lJFEV0yYbeKWNFgssq54BHBuh9gCwcH8=",
+        "y": "oi1FiKraueLic+VemzOx18MNwG6thmZMUWeqNw6vNOk="
+      },
+      "odinKeyId": "odin-vector",
+      "issuedAtUnixMilliseconds": 1799999940000,
+      "expiresAtUnixMilliseconds": 1800003600000,
+      "signature": "ZHuELFuCNNfbJt1T2mx1D9ZHXyxBedacDetmryMYhWKQxfROncltymkmL5KXl+1h8tDK6NytJCGy+7mYlb/DMA=="
+    }
+  },
+  "sessionProof": {
+    "request": {
+      "schemaVersion": "cultmesh.session_open.v2",
+      "messageId": "vector-message-1",
+      "sourceRuntimeId": "vector-consumer",
+      "verseId": "aetheria",
+      "authorityRuntimeId": "aetheria-daemon",
+      "protocolId": "cultmesh.documents.v1",
+      "routeGeneration": "vector-generation-1",
+      "clientNonce": "VczqjH8NdBaOb+rh8xb6P0xZjWD1el2ReNB8Vbp52ko="
+    },
+    "providerKeyId": "provider-vector",
+    "providerSignature": "6kGxSu/pwcR4lzh/7Av9nhblVIwIwVFzB7kY34vVvkpaFAbAxt8mWqIyZDTftE28G1g+NL4Ea41C3QsuImmkaA=="
+  }
+}

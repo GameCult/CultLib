@@ -14,6 +14,11 @@
       "types": "./dist/contracts.d.ts",
       "require": "./dist/contracts.js",
       "default": "./dist/contracts.js"
+    },
+    "./authority": {
+      "types": "./dist/cultmesh-authority.d.ts",
+      "require": "./dist/cultmesh-authority.js",
+      "default": "./dist/cultmesh-authority.js"
     }
   },
   "files": [

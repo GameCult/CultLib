@@ -62,6 +62,24 @@ export {
   type GhostlightVariableMap,
   type GhostlightWorldState,
 } from "./contracts";
+export {
+  base64ToBytes,
+  bytesToBase64,
+  canonicalFields,
+  canonicalRoute,
+  canonicalSession,
+  isLoopbackEndpoint,
+  isProtectedEndpoint,
+  verifyAuthorityRoute,
+  verifyP256,
+  verifyProviderSessionProof,
+  type CultMeshAuthorityIdentity,
+  type CultMeshAuthorityRouteCertificate,
+  type CultMeshAuthorityRouteView,
+  type CultMeshAuthorityTrustMode,
+  type CultMeshAuthorityTrustPolicy,
+  type CultMeshP256PublicKey,
+} from "./cultmesh-authority";
 export { encodeFrame, LengthPrefixedMessageFramer } from "./framing";
 export { CultNetPeer, createTcpFramedCultNetPeer, type CultNetPeerEvents, type CultNetPeerSchemaCatalogRequestOptions, type CultNetPeerShardCatalogRequestOptions, type TcpFramedCultNetPeerOptions } from "./peer";
 export {

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -224,6 +226,132 @@ public sealed class CultMeshAuthorityProofTests
         handler.RequestUri!.Scheme.Should().Be(Uri.UriSchemeHttps);
         handler.RequestUri.Query.Should().Contain("chunkHash=").And.Contain("recordKey=");
     }
+
+    // Shared-vector check with `packages/cultnet-ts/src/cultmesh-authority.ts`.
+    // The C# reference signs a route and a session proof with fixed keys and
+    // writes them when CULTMESH_WRITE_VECTORS=1; otherwise it asserts the
+    // committed file still verifies here. The TypeScript test verifies the same
+    // file, so both runtimes are pinned to the same transcript bytes.
+    [Test]
+    public void AuthorityRouteVectorsAreSharedWithTypeScript()
+    {
+        var path = Path.Combine(RepoRoot(), "contracts", "cultmesh", "authority-route-vectors.json");
+        using var odin = ECDsa.Create();
+        odin.ImportFromPem(VectorOdinPrivateKeyPem);
+        using var provider = ECDsa.Create();
+        provider.ImportFromPem(VectorProviderPrivateKeyPem);
+        var odinPublic = CultMeshEcdsaP256PublicKey.From("odin-vector", odin);
+        var providerPublic = CultMeshEcdsaP256PublicKey.From("provider-vector", provider);
+        var request = new GameCult.Networking.CultMeshSessionOpenMessage
+        {
+            MessageId = "vector-message-1",
+            SourceRuntimeId = "vector-consumer",
+            VerseId = "aetheria",
+            AuthorityRuntimeId = "aetheria-daemon",
+            ProtocolId = CultMeshProtocols.Documents.Value,
+            RouteGeneration = "vector-generation-1",
+            ClientNonce = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes("vector-nonce")))
+        };
+
+        if (Environment.GetEnvironmentVariable("CULTMESH_WRITE_VECTORS") == "1")
+        {
+            var signedRoute = CultMeshAuthorityProof.CreateSignedRoute(
+                "aetheria", "aetheria-daemon", "wss://provider.example/mesh",
+                new[] { CultMeshProtocols.Documents.Value, CultMeshProtocols.Content.Value }, 7, "vector-generation-1",
+                providerPublic, odinPublic.KeyId, Now.AddMinutes(-1), Now.AddHours(1), odin);
+            var signer = new CultMeshSessionProofSigner(signedRoute, provider);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(new
+            {
+                nowUnixMilliseconds = Now.ToUnixTimeMilliseconds(),
+                odinRoot = new { keyId = odinPublic.KeyId, x = odinPublic.X, y = odinPublic.Y },
+                route = new
+                {
+                    verseId = "aetheria",
+                    authorityRuntimeId = signedRoute.AuthorityRuntimeId,
+                    endpoint = signedRoute.Endpoint,
+                    protocolIds = signedRoute.ProtocolIds,
+                    priority = signedRoute.Priority,
+                    generation = signedRoute.Generation,
+                    certificate = new
+                    {
+                        providerKey = new { keyId = providerPublic.KeyId, x = providerPublic.X, y = providerPublic.Y },
+                        odinKeyId = signedRoute.Certificate!.OdinKeyId,
+                        issuedAtUnixMilliseconds = signedRoute.Certificate.IssuedAtUnixMilliseconds,
+                        expiresAtUnixMilliseconds = signedRoute.Certificate.ExpiresAtUnixMilliseconds,
+                        signature = signedRoute.Certificate.Signature
+                    }
+                },
+                sessionProof = new
+                {
+                    request = new
+                    {
+                        schemaVersion = request.SchemaVersion,
+                        messageId = request.MessageId,
+                        sourceRuntimeId = request.SourceRuntimeId,
+                        verseId = request.VerseId,
+                        authorityRuntimeId = request.AuthorityRuntimeId,
+                        protocolId = request.ProtocolId,
+                        routeGeneration = request.RouteGeneration,
+                        clientNonce = request.ClientNonce
+                    },
+                    providerKeyId = signer.ProviderKeyId,
+                    providerSignature = signer.Sign(request)
+                }
+            }, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }) + "\n");
+        }
+
+        using var vectors = JsonDocument.Parse(File.ReadAllText(path));
+        var rootElement = vectors.RootElement;
+        var routeElement = rootElement.GetProperty("route");
+        var certificateElement = routeElement.GetProperty("certificate");
+        var route = new CultMeshAuthorityRoute(
+            routeElement.GetProperty("authorityRuntimeId").GetString()!,
+            routeElement.GetProperty("endpoint").GetString()!,
+            routeElement.GetProperty("protocolIds").EnumerateArray().Select(value => value.GetString()!).ToArray(),
+            routeElement.GetProperty("priority").GetInt32(),
+            routeElement.GetProperty("generation").GetString(),
+            new CultMeshRouteCertificate(
+                providerPublic,
+                certificateElement.GetProperty("odinKeyId").GetString()!,
+                certificateElement.GetProperty("issuedAtUnixMilliseconds").GetInt64(),
+                certificateElement.GetProperty("expiresAtUnixMilliseconds").GetInt64(),
+                certificateElement.GetProperty("signature").GetString()!));
+        var trust = new CultMeshAuthorityTrustPolicy(CultMeshAuthorityTrustMode.AuthenticatedRemote, new[] { odinPublic });
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(rootElement.GetProperty("nowUnixMilliseconds").GetInt64());
+        var verseId = routeElement.GetProperty("verseId").GetString()!;
+
+        trust.Validate(verseId, route, now);
+        var proofElement = rootElement.GetProperty("sessionProof");
+        var accepted = Accepted(request, proofElement.GetProperty("providerSignature").GetString()!);
+        accepted.ProviderKeyId = proofElement.GetProperty("providerKeyId").GetString()!;
+        CultMeshAuthorityProof.VerifySessionProof(request, accepted, verseId, route, trust, now).Should().BeTrue();
+    }
+
+    private static string RepoRoot()
+    {
+        var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+        while (directory != null && !File.Exists(Path.Combine(directory.FullName, "CultLib.sln")))
+            directory = directory.Parent;
+        return directory?.FullName ?? throw new InvalidOperationException("CultLib.sln was not found above the test directory.");
+    }
+
+    // Fixed test keys. They sign only the committed vector and prove nothing else.
+    private const string VectorOdinPrivateKeyPem = @"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgHY0//QOheSwARzXE
+iX/nGqSD7XFAy530QQqKeXPNxMChRANCAASyEksa2ZGtboPztVAq/TFhB6Qsh8SR
+43t1VrDCmYgpY4kehsd2lQoIc0sqO06l6q/td/ey+9ygzWbszdnGeeSB
+-----END PRIVATE KEY-----";
+
+    private const string VectorProviderPrivateKeyPem = @"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVC+9X4t+1HAiIxP4
+TEuAuBAY+3ryKK8SaitB0TqsPQqhRANCAATpci+DHdbWruUkURXTJht4pY0WCyyr
+ngEcG6H2ALBwf6ItRYiq2rni4nPlXpszsdfDDcBurYZmTFFnqjcOrzTp
+-----END PRIVATE KEY-----";
 
     private static CultMeshAuthorityRoute SignedRoute(ECDsa odin, ECDsa provider) =>
         CultMeshAuthorityProof.CreateSignedRoute(
