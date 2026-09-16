@@ -1235,8 +1235,33 @@ they govern.
   concept plus a matching rule in every runtime, in a later cut. Note this
   is only about the `schemas` list: the *hop* already resolves an abstract
   target to its leaves (D9), so the hostile example works under A.
-- **Q-L. Refusing an out-of-target reference at write time.** **A,
-  follow-up (FU-Ref)** (recommended): this cut refuses it at read
+- **Q-L. Refusing an out-of-target reference at write time. RULED A,
+  2026-09-17**, with the follow-up upgraded from optional to intended. The
+  operator: notice on read for now, but on write eventually; today this is
+  left to consumers to enforce, as Aetheria's Database Tools did and as
+  CultCache Studio is expected to, and it is easy to insert garbage at the
+  source level which a cheap check would prevent.
+
+  **Two things make the follow-up worth more than "nice to have."** First,
+  enforcement living in consumers is duplicated authority by construction:
+  every tool that writes records re-implements the same check, and a tool
+  that forgets is indistinguishable from one that does not, until a read
+  refuses. Second, the check really is cheap — the declaration already names
+  the target (`TargetSchemaName` on the member catalog entry), and the write
+  path already has the record in hand.
+
+  **What Self could establish about the consumer story, 2026-09-17:** it
+  rests on less than it sounds. There is no CultCache Studio repository
+  under `F:\Projects`, and no project file by that name anywhere; every
+  reference to it is forward-looking, in Aetheria's migration documents,
+  where it is described as absorbing that project's Database Tools. Aetheria's
+  actual data tooling today is the `tools/AetherDb` console project. So the
+  enforcement being relied on is one tool, in one project, for one catalog,
+  and there is no second implementation to be inconsistent with yet — which is
+  the cheapest moment to move the rule to its owner rather than the most
+  expensive.
+
+  Original options: **A, follow-up (FU-Ref)** (recommended): this cut refuses it at read
   (`reference_outside_target`, S18), which is where the corruption is
   noticed; refusing at write touches the cache's put path and every
   runtime's apply path and is a change of a different size. **B**, in this
