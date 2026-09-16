@@ -49,6 +49,12 @@ const targets = {
     dist: join(repoRoot, "packages", "cultmesh-browser", "dist", "index.js"),
     sentinel: "isUnsignedCertificate(route.certificate)",
   },
+  realtime: {
+    workspace: "packages/cultmesh-ts",
+    file: join(repoRoot, "packages", "cultmesh-ts", "src", "realtime-wire.ts"),
+    dist: join(repoRoot, "packages", "cultmesh-ts", "dist", "realtime-wire.js"),
+    sentinel: "0x31545343",
+  },
 };
 
 const mutations = [
@@ -256,6 +262,55 @@ const mutations = [
     old: "isUnsignedCertificate(route.certificate)",
     new: '(route.certificate?.signature ?? "") === ""',
   },
+  // The realtime frame codec. Every rule the cut map names for it gets one
+  // mutation; the killer is `npm run test --workspace packages/cultmesh-ts`,
+  // whose vectors are written by the C# reference and by this codec in turn.
+  // A mutation that changes the encoding symmetrically (an endianness flip, a
+  // field swap) still dies, because the vector bytes came from the other side.
+  { target: "realtime", rule: "the header is little-endian", old: "view.setUint32(0, MAGIC, true);", new: "view.setUint32(0, MAGIC, false);" },
+  { target: "realtime", rule: "the delivery byte sits at offset 4", old: "  result[4] = deliveryByte;\n", new: "  result[5] = deliveryByte;\n" },
+  { target: "realtime", rule: "the producer epoch is written before the sequence", old: "  view.setBigInt64(5, frame.producerEpoch, true);\n  view.setBigInt64(13, frame.sequence, true);\n", new: "  view.setBigInt64(5, frame.sequence, true);\n  view.setBigInt64(13, frame.producerEpoch, true);\n" },
+  { target: "realtime", rule: "the epoch and sequence are 64-bit, not 32-bit", old: "  view.setBigInt64(5, frame.producerEpoch, true);", new: "  view.setInt32(5, Number(frame.producerEpoch), true);" },
+  { target: "realtime", rule: "the three identity lengths are written channel, schema, body", old: "  view.setUint16(23, schema.byteLength, true);\n  view.setUint16(25, body.byteLength, true);\n", new: "  view.setUint16(23, body.byteLength, true);\n  view.setUint16(25, schema.byteLength, true);\n" },
+  { target: "realtime", rule: "the identity length prefixes are 16-bit, not 8-bit", old: "  view.setUint16(21, channel.byteLength, true);", new: "  view.setUint8(21, channel.byteLength);" },
+  { target: "realtime", rule: "the identity length prefixes are little-endian", old: "  view.setUint16(21, channel.byteLength, true);", new: "  view.setUint16(21, channel.byteLength, false);" },
+  { target: "realtime", rule: "the payload length prefix sits at offset 27", old: "  view.setInt32(27, frame.payload.byteLength, true);", new: "  view.setInt32(28, frame.payload.byteLength, true);" },
+  { target: "realtime", rule: "the header size is stamped into the frame", old: "  view.setInt32(31, FIXED_HEADER_BYTES, true);", new: "  view.setInt32(31, FIXED_HEADER_BYTES + 1, true);" },
+  { target: "realtime", rule: "the wire version is stamped into the frame", old: "  view.setUint16(35, WIRE_VERSION, true);", new: "  view.setUint16(35, WIRE_VERSION + 1, true);" },
+  { target: "realtime", rule: "the identities are written channel, schema, body, then the payload", old: "  result.set(channel, offset); offset += channel.byteLength;\n  result.set(schema, offset); offset += schema.byteLength;\n", new: "  result.set(schema, offset); offset += schema.byteLength;\n  result.set(channel, offset); offset += channel.byteLength;\n" },
+  { target: "realtime", rule: "the fixed header is 37 bytes", old: "const FIXED_HEADER_BYTES = 37;", new: "const FIXED_HEADER_BYTES = 38;" },
+  { target: "realtime", rule: "delivery encodes as the C# enum ordinal, reliable-ordered first", old: 'const DELIVERY_BYTES: readonly CultMeshRealtimeDelivery[] = ["reliable-ordered", "latest-only", "unreliable"];', new: 'const DELIVERY_BYTES: readonly CultMeshRealtimeDelivery[] = ["latest-only", "reliable-ordered", "unreliable"];' },
+  { target: "realtime", rule: "an identity the delivery union cannot spell is refused", old: '  if (deliveryByte < 0) throw new Error("Realtime frame delivery mode is invalid.");\n', new: "" },
+  { target: "realtime", rule: "identities are UTF-8, and the prefix counts bytes not characters", old: "  const channel = encoder.encode(frame.channelId);", new: "  const channel = Uint8Array.from(frame.channelId, c => c.charCodeAt(0) & 0xff);" },
+  { target: "realtime", rule: "an identity over 65535 bytes is refused", old: "  if (channel.byteLength > MAX_IDENTITY_BYTES || schema.byteLength > MAX_IDENTITY_BYTES || body.byteLength > MAX_IDENTITY_BYTES) {\n    throw new Error(\"Realtime frame identity exceeds the QUIC wire limit.\");\n  }\n", new: "" },
+  { target: "realtime", rule: "a payload over the 64 MiB ceiling is refused", old: "  if (frame.payload.byteLength > CULTMESH_REALTIME_MAX_PAYLOAD_BYTES) {\n    throw new Error(\"Realtime frame payload exceeds the QUIC wire limit.\");\n  }\n", new: "" },
+  { target: "realtime", rule: "the payload ceiling is 64 MiB", old: "export const CULTMESH_REALTIME_MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;", new: "export const CULTMESH_REALTIME_MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;" },
+  { target: "realtime", rule: "the encoded ceiling covers the header and three maximal identities", old: "  CULTMESH_REALTIME_MAX_PAYLOAD_BYTES + 37 + 3 * 0xffff;", new: "  CULTMESH_REALTIME_MAX_PAYLOAD_BYTES + 37 + 0xffff;" },
+  { target: "realtime", rule: "the ALPN is cultmesh-state-v1", old: 'export const CULTMESH_REALTIME_ALPN = "cultmesh-state-v1";', new: 'export const CULTMESH_REALTIME_ALPN = "cultmesh-state-v2";' },
+  { target: "realtime", rule: "the QUIC connection close and stream abort codes", old: "export const CULTMESH_REALTIME_CONNECTION_CLOSE_CODE = 0x43554c54n;", new: "export const CULTMESH_REALTIME_CONNECTION_CLOSE_CODE = 0x53544154n;" },
+  { target: "realtime", rule: "the two stream kinds are 1 and 2", old: "export const CULTMESH_REALTIME_RELIABLE_STREAM = 1;", new: "export const CULTMESH_REALTIME_RELIABLE_STREAM = 2;" },
+  { target: "realtime", rule: "a blank channel identity is refused, on C#'s whitespace set", old: '  if (isNullOrWhiteSpaceCSharp(frame.channelId)) throw new Error("Realtime channel identity is required.");\n', new: "" },
+  { target: "realtime", rule: "the blank reading is C#'s IsNullOrWhiteSpace, not String.prototype.trim", old: "  if (isNullOrWhiteSpaceCSharp(frame.schemaId)) throw new Error", new: '  if (frame.schemaId.trim() === "") throw new Error' },
+  { target: "realtime", rule: "a blank body identity is refused", old: '  if (isNullOrWhiteSpaceCSharp(frame.bodyId)) throw new Error("Realtime body identity is required.");\n', new: "" },
+  { target: "realtime", rule: "a negative epoch or sequence is refused", old: "  if (frame.producerEpoch < 0n || frame.sequence < 0n) {", new: "  if (false) {" },
+  { target: "realtime", rule: "an epoch or sequence outside the i64 range is refused", old: "  if (frame.producerEpoch > INT64_MAX || frame.sequence > INT64_MAX || frame.producerEpoch < INT64_MIN || frame.sequence < INT64_MIN) {", new: "  if (false) {" },
+  { target: "realtime", rule: "decode refuses a truncated header", old: '  if (bytes.byteLength < FIXED_HEADER_BYTES) throw new Error("Realtime frame header is truncated.");\n', new: "" },
+  { target: "realtime", rule: "decode checks the magic", old: '  if (view.getUint32(0, true) !== MAGIC) throw new Error("Realtime frame magic is invalid.");\n', new: "" },
+  { target: "realtime", rule: "decode checks the wire version", old: "  if (view.getUint16(35, true) !== WIRE_VERSION || view.getInt32(31, true) !== FIXED_HEADER_BYTES) {", new: "  if (view.getInt32(31, true) !== FIXED_HEADER_BYTES) {" },
+  { target: "realtime", rule: "decode checks the stamped header size", old: "  if (view.getUint16(35, true) !== WIRE_VERSION || view.getInt32(31, true) !== FIXED_HEADER_BYTES) {", new: "  if (view.getUint16(35, true) !== WIRE_VERSION) {" },
+  { target: "realtime", rule: "decode refuses a delivery byte outside the three modes", old: '  if (delivery === undefined) throw new Error("Realtime frame delivery mode is invalid.");\n', new: '  if (delivery === undefined) return { channelId: "", schemaId: "", bodyId: "", producerEpoch: 0n, sequence: 0n, delivery: "unreliable", payload: new Uint8Array(0) };\n' },
+  // Not listed: removing `payloadLength < 0` from the decoder's length refusal.
+  // The clause mirrors the reference but cannot fire on its own: a negative
+  // payload length makes the sum smaller than the frame, and reaching the sum
+  // check at all means the frame is already at least 37 bytes, so the sum can
+  // never match while the length is negative. The mutant is equivalent, and it
+  // survived when tried.
+  { target: "realtime", rule: "decode refuses a length sum that misses the frame", old: "  if (payloadLength < 0 || expected !== bytes.byteLength) throw", new: "  if (payloadLength < 0) throw" },
+  { target: "realtime", rule: "decode keeps a leading byte-order mark, as Encoding.UTF8.GetString does", old: 'const decoder = new TextDecoder("utf-8", { ignoreBOM: true });', new: "const decoder = new TextDecoder();" },
+  { target: "realtime", rule: "decode reads exactly the viewed bytes of an offset view", old: "  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);", new: "  const view = new DataView(bytes.buffer);" },
+  { target: "realtime", rule: "the decoded payload does not alias the frame it came from", old: "    payload: bytes.slice(offset, offset + payloadLength),", new: "    payload: bytes.subarray(offset, offset + payloadLength)," },
+  // Last, because it removes this target's sentinel.
+  { target: "realtime", rule: "the frame magic is 0x31545343", old: "const MAGIC = 0x31545343;", new: "const MAGIC = 0x31545344;" },
 ];
 
 function digest(bytes) {
