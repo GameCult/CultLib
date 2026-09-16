@@ -1,0 +1,177 @@
+{
+  "frames": [
+    {
+      "label": "ts reliable-ordered, small payload",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 21,
+        "sequence": 22,
+        "delivery": "reliable-ordered",
+        "payload": "AAH+/w=="
+      },
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "encodedLength": 79,
+      "sha256OfEncoding": "68c264a42ce34e540e9dbee31dab5b73dec98c767f0b44591ce6a477cd17fc04"
+    },
+    {
+      "label": "ts latest-only, small payload",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 23,
+        "sequence": 24,
+        "delivery": "latest-only",
+        "payload": "f4A="
+      },
+      "encoding": "Q1NUMQEXAAAAAAAAABgAAAAAAAAACQAUAAkAAgAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xf4A=",
+      "encodedLength": 77,
+      "sha256OfEncoding": "3d4f49f4aa2c1f132c3a09ee83555c13e0bc036d636524a972e2829cf417b959"
+    },
+    {
+      "label": "ts unreliable, small payload",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 25,
+        "sequence": 26,
+        "delivery": "unreliable",
+        "payload": "pQ=="
+      },
+      "encoding": "Q1NUMQIZAAAAAAAAABoAAAAAAAAACQAUAAkAAQAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xpQ==",
+      "encodedLength": 76,
+      "sha256OfEncoding": "2c2faec604850959d44ee65d87d2ea59462b667c5d0db8565a8c159d75301851"
+    },
+    {
+      "label": "ts empty payload",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 0,
+        "sequence": 0,
+        "delivery": "latest-only",
+        "payload": ""
+      },
+      "encoding": "Q1NUMQEAAAAAAAAAAAAAAAAAAAAACQAUAAkAAAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0x",
+      "encodedLength": 75,
+      "sha256OfEncoding": "6d2a04b399f32db4086e728194249b0279330ffa5517cdd82228f691a0f10708"
+    },
+    {
+      "label": "ts multi-byte identities",
+      "fields": {
+        "channelId": "ts.zøne-∂",
+        "schemaId": "cultmesh.realtime.µ1",
+        "bodyId": "ts-bödy-🧊",
+        "producerEpoch": 27,
+        "sequence": 28,
+        "delivery": "unreliable",
+        "payload": "dHMtcGF5bG9hZC3iiII="
+      },
+      "encoding": "Q1NUMQIbAAAAAAAAABwAAAAAAAAADAAVAA0ADgAAACUAAAABAHRzLnrDuG5lLeKIgmN1bHRtZXNoLnJlYWx0aW1lLsK1MXRzLWLDtmR5LfCfp4p0cy1wYXlsb2FkLeKIgg==",
+      "encodedLength": 97,
+      "sha256OfEncoding": "d5d22458bd50a446c7bdce4e2598fe8e5e7bfac3646d8fcd7215363c7c5c8ca1"
+    },
+    {
+      "label": "ts epoch and sequence at long.MaxValue",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 9223372036854775807,
+        "sequence": 9223372036854775807,
+        "delivery": "reliable-ordered",
+        "payload": "Bw=="
+      },
+      "encoding": "Q1NUMQD/////////f/////////9/CQAUAAkAAQAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xBw==",
+      "encodedLength": 76,
+      "sha256OfEncoding": "2abb67a876dc4ed006f33708b4c4dda55a90a6f95da7352749225195b10d45ba"
+    },
+    {
+      "label": "ts identities at exactly 65535 UTF-8 bytes",
+      "fields": {
+        "channelId": {
+          "repeat": "ü☃",
+          "byteLength": 65535
+        },
+        "schemaId": {
+          "repeat": "☃ü",
+          "byteLength": 65535
+        },
+        "bodyId": {
+          "repeat": "ç☃",
+          "byteLength": 65535
+        },
+        "producerEpoch": 29,
+        "sequence": 30,
+        "delivery": "latest-only",
+        "payload": "M0Q="
+      },
+      "encoding": null,
+      "encodedLength": 196644,
+      "sha256OfEncoding": "8bd4cd4c5232339f76b8e394eb93b66e8d14302398ecce2ae5bdb78070ef783a"
+    },
+    {
+      "label": "ts 64 MiB payload",
+      "fields": {
+        "channelId": "ts.zone-a",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "ts-body-1",
+        "producerEpoch": 31,
+        "sequence": 32,
+        "delivery": "unreliable",
+        "payload": {
+          "ramp": 67108864
+        }
+      },
+      "encoding": null,
+      "encodedLength": 67108939,
+      "sha256OfEncoding": "f2c20e0b47a7681fbaeff6fcba024363542805de4cd95eeb7fa9f125ba646af0"
+    }
+  ],
+  "malformed": [
+    {
+      "label": "ts truncated header",
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAAB",
+      "message": "Realtime frame header is truncated."
+    },
+    {
+      "label": "ts wrong magic",
+      "encoding": "Q1OrMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame magic is invalid."
+    },
+    {
+      "label": "ts wire version 2",
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAACAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame wire version is unsupported."
+    },
+    {
+      "label": "ts header size 38",
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACYAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame wire version is unsupported."
+    },
+    {
+      "label": "ts delivery 3",
+      "encoding": "Q1NUMQMVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame delivery mode is invalid."
+    },
+    {
+      "label": "ts delivery 128",
+      "encoding": "Q1NUMYAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame delivery mode is invalid."
+    },
+    {
+      "label": "ts payload length -1",
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAgCUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/w==",
+      "message": "Realtime frame length is invalid."
+    },
+    {
+      "label": "ts length sum off by one",
+      "encoding": "Q1NUMQAVAAAAAAAAABYAAAAAAAAACQAUAAkABAAAACUAAAABAHRzLnpvbmUtYWN1bHRtZXNoLnJlYWx0aW1lLnYxdHMtYm9keS0xAAH+/wA=",
+      "message": "Realtime frame length is invalid."
+    }
+  ]
+}

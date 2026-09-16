@@ -1,0 +1,177 @@
+{
+  "frames": [
+    {
+      "label": "reliable-ordered, small payload",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 1,
+        "sequence": 2,
+        "delivery": "reliable-ordered",
+        "payload": "AH+A/yo="
+      },
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYABQAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03AH+A/yo=",
+      "encodedLength": 83,
+      "sha256OfEncoding": "d04539b99790560e5e570208d92d3ac25f85909a36bfeb190c2080288cc9f1d4"
+    },
+    {
+      "label": "latest-only, small payload",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 3,
+        "sequence": 4,
+        "delivery": "latest-only",
+        "payload": "AQID"
+      },
+      "encoding": "Q1NUMQEDAAAAAAAAAAQAAAAAAAAADwAUAAYAAwAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03AQID",
+      "encodedLength": 81,
+      "sha256OfEncoding": "2c875718cf4968979f3cd4083ba2b279e8c03815ad3447c66037ee4530b2814a"
+    },
+    {
+      "label": "unreliable, small payload",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 5,
+        "sequence": 6,
+        "delivery": "unreliable",
+        "payload": "/g=="
+      },
+      "encoding": "Q1NUMQIFAAAAAAAAAAYAAAAAAAAADwAUAAYAAQAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03/g==",
+      "encodedLength": 79,
+      "sha256OfEncoding": "b932adf333a0ca73d3a9077e15cf9062070a3084a50a3a30c3baa53312d864b1"
+    },
+    {
+      "label": "empty payload",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 0,
+        "sequence": 0,
+        "delivery": "reliable-ordered",
+        "payload": ""
+      },
+      "encoding": "Q1NUMQAAAAAAAAAAAAAAAAAAAAAADwAUAAYAAAAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03",
+      "encodedLength": 78,
+      "sha256OfEncoding": "06c0362f2b395bf7855522190f6a59c45c46947ce7a9a4b8be115cf54a48f419"
+    },
+    {
+      "label": "multi-byte identities",
+      "fields": {
+        "channelId": "aetheria.zöne-∞",
+        "schemaId": "cultmesh.realtime.€1",
+        "bodyId": "bødy-\uD83D\uDD25",
+        "producerEpoch": 11,
+        "sequence": 12,
+        "delivery": "latest-only",
+        "payload": "cGF5bG9hZC3iiJ4="
+      },
+      "encoding": "Q1NUMQELAAAAAAAAAAwAAAAAAAAAEgAWAAoACwAAACUAAAABAGFldGhlcmlhLnrDtm5lLeKInmN1bHRtZXNoLnJlYWx0aW1lLuKCrDFiw7hkeS3wn5SlcGF5bG9hZC3iiJ4=",
+      "encodedLength": 98,
+      "sha256OfEncoding": "90c6ae8f1362d9e000aa57682612bb1d7606cabe2cd0c0969fdd07b816f44b1c"
+    },
+    {
+      "label": "epoch and sequence at long.MaxValue",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 9223372036854775807,
+        "sequence": 9223372036854775807,
+        "delivery": "unreliable",
+        "payload": "Wg=="
+      },
+      "encoding": "Q1NUMQL/////////f/////////9/DwAUAAYAAQAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03Wg==",
+      "encodedLength": 79,
+      "sha256OfEncoding": "208068a668b48dc1abde9b3d7f025e7f7b6de6c480faea25c1383b6de9fd37ca"
+    },
+    {
+      "label": "identities at exactly 65535 UTF-8 bytes",
+      "fields": {
+        "channelId": {
+          "repeat": "ä€",
+          "byteLength": 65535
+        },
+        "schemaId": {
+          "repeat": "€ä",
+          "byteLength": 65535
+        },
+        "bodyId": {
+          "repeat": "ñ€",
+          "byteLength": 65535
+        },
+        "producerEpoch": 13,
+        "sequence": 14,
+        "delivery": "reliable-ordered",
+        "payload": "ESI="
+      },
+      "encoding": null,
+      "encodedLength": 196644,
+      "sha256OfEncoding": "e3c1a353b606e86b35169efb875e76349dcfcb2d036973ee3bbe3c601fbda3e1"
+    },
+    {
+      "label": "64 MiB payload",
+      "fields": {
+        "channelId": "aetheria.zone-1",
+        "schemaId": "cultmesh.realtime.v1",
+        "bodyId": "body-7",
+        "producerEpoch": 15,
+        "sequence": 16,
+        "delivery": "reliable-ordered",
+        "payload": {
+          "ramp": 67108864
+        }
+      },
+      "encoding": null,
+      "encodedLength": 67108942,
+      "sha256OfEncoding": "4d99183bdb450af854d87a81ba86a3a4c92ecc1b208675d916f1b75a9f1e7928"
+    }
+  ],
+  "malformed": [
+    {
+      "label": "truncated header",
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAAB",
+      "message": "Realtime frame header is truncated."
+    },
+    {
+      "label": "wrong magic",
+      "encoding": "vFNUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame magic is invalid."
+    },
+    {
+      "label": "wire version 2",
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAACAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame wire version is unsupported."
+    },
+    {
+      "label": "header size 36",
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACQAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame wire version is unsupported."
+    },
+    {
+      "label": "delivery 3",
+      "encoding": "Q1NUMQMBAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame delivery mode is invalid."
+    },
+    {
+      "label": "delivery 255",
+      "encoding": "Q1NUMf8BAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame delivery mode is invalid."
+    },
+    {
+      "label": "payload length -1",
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAgCUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJ",
+      "message": "Realtime frame length is invalid."
+    },
+    {
+      "label": "length sum off by one",
+      "encoding": "Q1NUMQABAAAAAAAAAAIAAAAAAAAADwAUAAYAAwAAACUAAAABAGFldGhlcmlhLnpvbmUtMWN1bHRtZXNoLnJlYWx0aW1lLnYxYm9keS03CQkJAA==",
+      "message": "Realtime frame length is invalid."
+    }
+  ]
+}

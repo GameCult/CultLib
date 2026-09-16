@@ -34,6 +34,7 @@ import {
   type CultNetWireContract,
 } from "cultnet-ts";
 
+export * from "./realtime-wire";
 export * from "./provider-session";
 export * from "./provider-session-wire";
 export * from "./provider-rudp-transport";
