@@ -78,8 +78,18 @@ LF-on-disk state. Anchors are now normalised to the file's EOL. Fixes 1 and
 short-circuit at `packages/cultmesh-browser/src/index.ts:915` tests
 `!route.certificate` where the shared verifier now treats an empty
 signature as unsigned, so such a route passes the verifier and is then
-asked for a provider proof, where C# would not ask. In Hands as a one-line
-alignment through a shared predicate.
+asked for a provider proof, where C# would not ask. **Landed** at `a801e0a`:
+`isUnsignedCertificate` is exported from the shared module and used by the
+verifier and the browser's session check, with a browser test for the
+blank-signature loopback route, the signed loopback route that still needs
+a proof, and the blank-signature remote refused in both modes. Twenty-one
+mutations, twenty-one killed. Tests 74, 18, 10. Second Soul pass in flight.
+
+Seen by Hands, recorded for section 15: `packages/cultnet-ts/src/generated/swarm-contracts.generated.ts`
+is rewritten with LF by every build while the tree is `autocrlf=true`, so
+it shows modified with zero content diff after any build; the generator's
+line endings and the repo's normalisation disagree, and every pass discards
+the churn by hand.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
@@ -577,8 +587,12 @@ Verification:
   `cultmesh-browser` tarball must resolve `cultnet-ts/authority` from the
   registry-shaped install at `scripts/test-typescript-package-closure.mjs:63-72`).
 - Negative greps (must return nothing):
-  `rg -n "crypto\.subtle\.(verify|importKey)|function (verifyAuthorityRoute|canonicalRoute|canonicalSession|canonicalFields|verifyP256|isLoopbackEndpoint)" packages/cultmesh-browser/src packages/cultmesh-ts/src`
+  `rg -n "crypto\.subtle\.(verify|importKey)|function (verifyAuthorityRoute|canonicalRoute|canonicalSession|canonicalFields|verifyP256|isLoopbackEndpoint|isProtectedEndpoint|isUnsignedCertificate)" packages/cultmesh-browser/src packages/cultmesh-ts/src`
   and `rg -n "cultmesh-browser" packages/cultmesh-ts/package.json packages/cultnet-ts/package.json`.
+  *(The name list grew by two after the fix batch: `isProtectedEndpoint`,
+  written fresh as the C# rule, and `isUnsignedCertificate`, the shared
+  reading of "unsigned" the browser's session check now uses. Soul noted
+  the grep pins names, not structure; a shim under another name passes it.)*
 - Operator-only: none.
 
 ## 7. Cut 2 (behaviour, pure TypeScript): the realtime frame codec
