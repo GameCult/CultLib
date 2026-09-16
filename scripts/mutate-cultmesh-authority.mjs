@@ -282,6 +282,54 @@ function occurrences(text, needle) {
   return text.split(needle).length - 1;
 }
 
+/**
+ * Repairs a file left mutated by a run that died before its `finally`, and only
+ * that.
+ *
+ * A SIGKILL leaves the sidecar behind. The repair used to write the sidecar over
+ * whatever the file now held, which is right after a kill and destructive after
+ * one: a fix made to the source between the kill and the next run was silently
+ * reverted to bytes from before the kill, and the run then reported on code
+ * nobody had written.
+ *
+ * So repair only what this script can prove it wrote. The mutation table is the
+ * record: every file state a live run can leave behind is either the original
+ * (the sidecar, also what the no-op control writes) or the original with exactly
+ * one of that target's mutations applied. Anything else — a hand edit, a
+ * half-written file, a different branch — is somebody else's, and the run stops
+ * with both digests rather than guessing.
+ */
+function repair(name, target, own, sidecar) {
+  const original = readFileSync(sidecar);
+  const originalText = original.toString("utf8");
+  const eol = originalText.includes("\r\n") ? "\r\n" : "\n";
+  const withEol = text => text.replace(/\r?\n/g, eol);
+  const current = readFileSync(target.file);
+  const currentDigest = digest(current);
+  const originalDigest = digest(original);
+
+  if (currentDigest === originalDigest || currentDigest === digest(Buffer.from(originalText, "utf8"))) {
+    unlinkSync(sidecar);
+    console.log(`${target.file} is already the original; dropped the stale ${sidecar}`);
+    return;
+  }
+
+  const currentText = current.toString("utf8");
+  const mutant = own.find(mutation =>
+    originalText.replace(withEol(mutation.old), withEol(mutation.new)) === currentText);
+  if (!mutant) {
+    throw new Error(
+      `${target.file} is neither the original nor any mutation of target '${name}', so a previous run did not write it.\n` +
+      `  ${target.file} sha256=${currentDigest}\n` +
+      `  ${sidecar} sha256=${originalDigest}\n` +
+      "  Refusing to overwrite it. Reconcile the file by hand, then delete the sidecar.",
+    );
+  }
+  writeFileSync(target.file, original);
+  unlinkSync(sidecar);
+  console.log(`repaired ${target.file} from ${sidecar}: a previous run stopped inside '${mutant.rule}'`);
+}
+
 const results = [];
 let failed = false;
 
@@ -289,11 +337,7 @@ for (const [name, target] of Object.entries(targets)) {
   const own = mutations.filter(mutation => (mutation.target ?? "shared") === name);
   if (own.length === 0) throw new Error(`target '${name}' has no mutations`);
   const sidecar = `${target.file}.mutation-original`;
-  if (existsSync(sidecar)) {
-    writeFileSync(target.file, readFileSync(sidecar));
-    unlinkSync(sidecar);
-    console.log(`repaired ${target.file} from ${sidecar}: a previous run stopped before restoring it`);
-  }
+  if (existsSync(sidecar)) repair(name, target, own, sidecar);
 
   const original = readFileSync(target.file);
   const originalText = original.toString("utf8");
