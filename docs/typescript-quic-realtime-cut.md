@@ -321,8 +321,77 @@ the fix is weaker than the fix:
 a handle closed under a live call. Both were previously reported killed on
 the sanitizer target only, and neither has a definition left. The third fix
 batch is told to give each a real entry or to say plainly that the rule is
-undefended, because an honest gap beats a fabricated kill. **Third fix batch
-in Hands.**
+undefended, because an honest gap beats a fabricated kill.
+
+**The third fix batch landed** at `62e53df` (the development seam and a
+hold-then-close scenario), `e4e09a0` (four entries, the bounded wait at 50 ms,
+an exit status on skips, the child's stderr on a red control, re-execution
+with randomisation disabled), `12c8bfc` (the header's self-contradiction) and
+`4407098` (the committed container, the Ninja generator, the README recipe
+with the seccomp requirement).
+
+**Soul's fourth pass, 2026-09-17** (Fable, banked mid-pass when that model ran
+out, resumed on Opus from the bank; the handoff paid for itself by carrying a
+live harness process, a dirty tree and two leads the successor opened with).
+**The verdict splits, so it is given twice.**
+
+*The infrastructure question is now yes.* The committed container built with no
+cache, then the literal README run line, gives eight killed, none surviving,
+none skipped, exit zero on Linux; Windows gives six killed, two honestly
+skipped, and a real exit code. A stranger can rerun both targets today. The
+seccomp requirement is genuinely load-bearing and the randomisation
+re-execution genuinely runs. The development seam is absent from a release
+build: thirteen production symbols, no debug symbols, no assertion strings,
+and every executable section byte-identical between pre- and post-change
+release builds. The predecessor's harness had already exited, restoring the
+tree byte-exactly, so the restore path holds.
+
+*The rules question is still no.* Three of the four rules in the native table
+are pinned. The fourth is not, and the cause is structural rather than a bad
+constant:
+
+- **F1, confirmed, high: the hold sits after the wait whose duration is the
+  rule**, so every timeout mutant lands in a blind spot by construction.
+  A hard-coded 100 ms survives Windows and Linux with assertions, and dies
+  under the thread sanitizer only because its slowdown trips an unrelated
+  condition. **A hard-coded 2000 ms survives the entire matrix on both
+  targets.** A host asking for five seconds silently gets two and every
+  consumer's poll loop spins at two and a half times the rate it asked for,
+  forever. The committed one-millisecond entry dies only because one is less
+  than the scenario's fifty-millisecond settle: constant pinning constant.
+- **F2, confirmed, high: the pop-before-copy gap was wrong about itself.**
+  A client opening to a closed loopback port reaches that path in about a
+  millisecond with no listener, credential or connection, because the failure
+  path always publishes a non-empty reason; fifteen lines. Moving the pop
+  before the copy then crashes an ordinary optimised build twice out of two,
+  while both committed scenarios stay green on that same binary.
+- **F3, confirmed, medium: the refusal during a close has no entry** and
+  survives being neutered, though the header promises it. A call entering
+  behind the closer increments the in-flight count behind the wait, which can
+  then never reach zero.
+- F4, low: the seam misdescribes itself, claiming the held call touches
+  nothing afterwards when its scope destructor takes the gate, decrements and
+  notifies. The safety comes from the assertion, not the hold.
+- F5, low: the bounded wait at 600 ms survives, the same shape as F1 and
+  honestly labelled as a limit by Hands.
+- Also: "the close wakes every blocked poll" **is** defended by committed code
+  but has no entry, so the table understates coverage in one place while
+  overstating it in another.
+
+**Two scars from the pass itself.** An export made with `git archive` carried
+1,459 inserted carriage returns, poisoning any byte comparison built on it;
+raw blobs verified against the worktree hash are the only safe source. And the
+51 bytes that differ between pre- and post-change release builds are accounted
+for: 48 are four copies of the reproducibility content hash, and the last
+three sit in exception metadata outside every executable section and **could
+not be fully accounted for**, which Soul said rather than rounding away. The
+same source rebuilt at the same path twice differs by zero bytes; built
+elsewhere it differs by 69, so the figure is only meaningful at a shared path.
+
+**One undocumented step remains** in an otherwise clean path: the README
+hardcodes the container mount, so a newcomer on another checkout must edit the
+line. **Fourth fix batch in Hands**, told to fix the structural cause once
+rather than add another entry at another constant.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
