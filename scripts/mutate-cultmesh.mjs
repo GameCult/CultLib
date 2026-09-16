@@ -398,6 +398,57 @@ const mutations = [
       "        }\n" +
       "        if (last) runtime_->signal.notify_all();\n",
   },
+  // The rule the quiesce rests on, and the one the scenario used to assume
+  // rather than test: the blocking crossing is a counted host call for as long
+  // as it is inside the library. Soul deleted the scope from `next_event`
+  // outright and every configuration stayed green, because the pollers finished
+  // before the teardown reached them. `holdclose` reads the bridge's own count
+  // instead.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the blocking crossing is a counted call (revert: no call scope on next_event)",
+    old: "    CallScope scope(runtime);\n" +
+      "    if (!scope.entered()) return -1;\n" +
+      "    *out_required = 0;\n",
+    new: "    *out_required = 0;\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The shape that passes review: the guard is there, it refuses during a
+    // close, it is simply let go before the call blocks. What the closer waits
+    // on is the count, and this hands it back at the door.
+    rule: "the blocking crossing is a counted call (loosening: the scope is dropped before the wait)",
+    old: "    CallScope scope(runtime);\n" +
+      "    if (!scope.entered()) return -1;\n" +
+      "    *out_required = 0;\n",
+    new: "    {\n" +
+      "        CallScope scope(runtime);\n" +
+      "        if (!scope.entered()) return -1;\n" +
+      "    }\n" +
+      "    *out_required = 0;\n",
+  },
+  // And the fixture's own premise, which is a rule of the bridge and not of the
+  // scenario: a positive timeout blocks. Soul inverted this comparison and the
+  // scenario stayed green on six configurations, because nothing checked that
+  // the pollers were inside the library when the close began.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "a positive timeout blocks until an event or the close (revert: it returns at once)",
+    old: "    if (runtime->events.empty() && timeout_ms > 0) {",
+    new: "    if (runtime->events.empty() && timeout_ms < 0) {",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // Still a wait, still the host's timeout in the signature, and the poller is
+    // gone a millisecond later. A scenario that only sleeps cannot tell.
+    rule: "a positive timeout blocks until an event or the close (loosening: it waits a token 1 ms)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds(1),",
+  },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
@@ -409,11 +460,17 @@ const mutations = [
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     // A bounded wait is the shape that survives review: it looks like the wait,
-    // it usually finishes, and it turns the contract into a hope. The assertion
-    // is what tells them apart.
+    // it usually finishes, and it turns the contract into a hope. The bound is
+    // 50 ms, not the 1 ms this entry used to carry, because 1 ms only ever lost
+    // a race — Soul measured the margin at a few hundred lock handoffs, and the
+    // same loosening at 50 ms survived on both targets. `holdclose` holds its
+    // pollers for 500 ms, so the bound no longer has to be unlucky: any bound
+    // shorter than the hold expires with calls still inside and the bridge's own
+    // assertion says so. A bound longer than the hold is not distinguished, and
+    // that is the honest limit of this entry.
     rule: "the close waits for every in-flight call (loosening: a bounded wait that gives up)",
     old: "        runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });",
-    new: "        runtime->signal.wait_for(lock, std::chrono::milliseconds(1),\n" +
+    new: "        runtime->signal.wait_for(lock, std::chrono::milliseconds(50),\n" +
       "            [runtime] { return runtime->active_calls == 0; });",
   },
 ];
@@ -447,12 +504,31 @@ function testsPass(workspace) {
 // missing wait fail on the first close instead of on an unlucky one. The
 // ThreadSanitizer build is the only thing that sees a notify land on a destroyed
 // condition variable, and it exists on linux-x64 alone.
+//
+// `holdclose` runs only where the development seam exists, which is the
+// assertion build: it drives the quiesce through that seam rather than through a
+// sleep, and it is what kills the rules about counting a host call at all. The
+// ThreadSanitizer build deliberately keeps the shipped shape — no assertions, no
+// seam — because what it is there for is the race in a library built like the
+// one that ships.
 const nativeConfigurations = platform === "linux-x64"
   ? [
-      { name: "asserts", asserts: "ON", sanitizer: null },
-      { name: "tsan", asserts: "OFF", sanitizer: "thread" },
+      {
+        name: "asserts",
+        asserts: "ON",
+        sanitizer: null,
+        scenarios: [["holdclose", "3", "64"], ["closerace", "20", "256"]],
+      },
+      { name: "tsan", asserts: "OFF", sanitizer: "thread", scenarios: [["closerace", "20", "256"]] },
     ]
-  : [{ name: "asserts", asserts: "ON", sanitizer: null }];
+  : [
+      {
+        name: "asserts",
+        asserts: "ON",
+        sanitizer: null,
+        scenarios: [["holdclose", "3", "64"], ["closerace", "20", "256"]],
+      },
+    ];
 
 function msquicArguments() {
   if (platform === "win32-x64") {
@@ -480,6 +556,54 @@ function msquicArguments() {
     ],
     runtime: [[versioned, "libmsquic.so.2"]],
   };
+}
+
+// What the last failed native check actually said. A red control used to arrive
+// as a bare RED line with the child's output thrown away, which is how a
+// configuration that could not start at all stayed invisible; this is printed
+// with it.
+let nativeFailure = null;
+
+function childOutput(error) {
+  const parts = [error.stderr, error.stdout]
+    .map(stream => (stream ? stream.toString("utf8").trimEnd() : ""))
+    .filter(text => text.length > 0);
+  return parts.length > 0 ? parts.join("\n") : `${error.message}`;
+}
+
+// A sanitizer needs the process's address space where it expects it. Under the
+// kernel's address-space randomisation a ThreadSanitizer process dies before
+// main with "unexpected memory mapping", which is not a mutation being killed —
+// it is every mutation being reported killed for a run that never started. So
+// the sanitizer configurations are re-executed with randomisation off rather
+// than left to whoever invokes this script to know.
+//
+// `setarch -R` asks for that through personality(ADDR_NO_RANDOMIZE), which
+// Docker's default seccomp profile denies. Both failures are named here rather
+// than swallowed.
+function scenarioCommand(runner, scenario, configuration) {
+  if (configuration.sanitizer && platform === "linux-x64")
+    return ["setarch", ["-R", runner, ...scenario]];
+  return [runner, scenario];
+}
+
+function explainUnrunnable(error, configuration, runner, scenario) {
+  const output = childOutput(error);
+  const invocation = `setarch -R ${runner} ${scenario.join(" ")}`;
+  if (error.code === "ENOENT")
+    return `the ${configuration.name} configuration needs setarch (util-linux) to disable address-space ` +
+      `randomisation, and it is not on PATH.\n  Required invocation: ${invocation}`;
+  if (/failed to set personality|Operation not permitted/.test(output))
+    return `setarch could not disable address-space randomisation for the ${configuration.name} ` +
+      "configuration: personality(ADDR_NO_RANDOMIZE) was denied.\n" +
+      "  Docker's default seccomp profile denies it; run the container with --security-opt seccomp=unconfined.\n" +
+      `  Required invocation: ${invocation}\n  ${output}`;
+  if (/unexpected memory mapping/.test(output))
+    return `the ${configuration.name} sanitizer died before the scenario started, on the kernel's ` +
+      "address-space randomisation.\n" +
+      `  Required invocation: ${invocation}, in a container run with --security-opt seccomp=unconfined.\n` +
+      `  ${output}`;
+  return null;
 }
 
 function nativeScenariosPass() {
@@ -511,24 +635,37 @@ function nativeScenariosPass() {
       ], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
       execFileSync("cmake", ["--build", build, "--config", "RelWithDebInfo"],
         { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
-    } catch {
+    } catch (error) {
       // A mutation that does not compile is killed by the build, which is a
       // legitimate kill: the rule it removed was load-bearing to the language.
+      nativeFailure = `${configuration.name}: the build failed\n${childOutput(error)}`;
       return false;
     }
     for (const [from, name] of msquic.runtime) writeFileSync(join(binaries, name), readFileSync(from));
     const runner = join(binaries,
       platform === "win32-x64" ? "cultmesh_quic_native_tests.exe" : "cultmesh_quic_native_tests");
-    try {
-      execFileSync(runner, ["closerace", "20", "256"], {
-        cwd: binaries,
-        stdio: ["ignore", "pipe", "pipe"],
-        // Without this a reported race is printed and the run still exits 0,
-        // so every sanitizer mutation would survive.
-        env: { ...process.env, TSAN_OPTIONS: "halt_on_error=1", ASAN_OPTIONS: "halt_on_error=1" },
-      });
-    } catch {
-      return false;
+    for (const scenario of configuration.scenarios) {
+      const [command, commandArguments] = scenarioCommand(runner, scenario, configuration);
+      try {
+        execFileSync(command, commandArguments, {
+          cwd: binaries,
+          stdio: ["ignore", "pipe", "pipe"],
+          // A held poller plus a stopped close is the shape a broken mutant
+          // leaves behind, and it hangs rather than failing. Bounded well above
+          // the scenarios' own seconds so only a hang reaches it.
+          timeout: 180000,
+          // Without this a reported race is printed and the run still exits 0,
+          // so every sanitizer mutation would survive.
+          env: { ...process.env, TSAN_OPTIONS: "halt_on_error=1", ASAN_OPTIONS: "halt_on_error=1" },
+        });
+      } catch (error) {
+        // A scenario the environment cannot run is not a kill, and reporting it
+        // as one is how a whole configuration goes quiet. It stops the run.
+        const unrunnable = explainUnrunnable(error, configuration, runner, scenario);
+        if (unrunnable) throw new Error(unrunnable);
+        nativeFailure = `${configuration.name}: ${scenario.join(" ")}\n${childOutput(error)}`;
+        return false;
+      }
     }
   }
   return true;
@@ -640,9 +777,17 @@ for (const [name, target] of Object.entries(targets)) {
   writeFileSync(sidecar, original);
   try {
     writeFileSync(target.file, Buffer.from(originalText, "utf8"));
+    nativeFailure = null;
     const controlPass = check();
     results.push({ target: name, outcome: controlPass ? "green" : "RED", rule: "control (no-op rewrite)" });
-    if (!controlPass) failed = true;
+    // A red control is the harness failing, not a rule failing, and it used to
+    // arrive with nothing but the colour. Whatever the child said is the
+    // diagnosis, so it is printed where it happens rather than discarded.
+    if (!controlPass) {
+      failed = true;
+      console.error(`control RED [${name}]: the unmutated source does not pass its own check`);
+      if (nativeFailure) console.error(nativeFailure);
+    }
     else {
       for (const mutation of own) {
         const [old, replacement] = [withEol(mutation.old), withEol(mutation.new)];
@@ -697,4 +842,17 @@ for (const [name, target] of Object.entries(targets)) {
 
 console.log(`build host and target: ${platform}`);
 for (const result of results) console.log(`${result.outcome.padEnd(9)} [${result.target}] ${result.rule}`);
-process.exit(failed ? 1 : 0);
+
+// A run that skipped entries has not covered those rules, and exiting 0 lets a
+// gate read a win32-x64 run — where every ThreadSanitizer rule is skipped — as
+// proof of something it never touched. The status says which of the three
+// outcomes the run reached.
+const counted = outcome => results.filter(result => result.outcome === outcome).length;
+const [killed, survived, skipped] = [counted("killed"), counted("SURVIVED"), counted("skipped")];
+console.log(`${killed} killed, ${survived} survived, ${skipped} skipped on ${platform}`);
+if (skipped > 0) {
+  console.log(
+    `${skipped} rule(s) have no kill on ${platform} and were not exercised by this run; ` +
+    "run the native target on the platform each names to cover them.");
+}
+process.exit(failed ? 1 : (skipped > 0 ? 2 : 0));
