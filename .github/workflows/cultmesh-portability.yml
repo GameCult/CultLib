@@ -96,12 +96,25 @@ jobs:
           --filter FullyQualifiedName~Document_OneHundredThousandDistinctLeaseCyclesLeaveNoResourcesOrCallbacks
           --logger "console;verbosity=minimal"
 
+      # The TypeScript side of the CultMesh authority rules. This job is the
+      # only one that runs on both Windows and Linux for main, codex/** and
+      # pull requests: cultnet-interop.yml is windows-latest and main-only, so
+      # until these steps existed the shared verifier's tests never ran on
+      # Linux at all, and the browser client's never ran in CI on any OS.
+      # packages/cultnet-ts verifies both vector files; cultmesh-browser proves
+      # the browser client reads the shared rules rather than its own.
+      - name: Verify the CultMesh authority rules with the TypeScript verifier
+        run: npm run test --workspace packages/cultnet-ts
+
+      - name: Verify the browser client against the shared TypeScript verifier
+        run: npm run test --workspace packages/cultmesh-browser
+
       # Both directions of the CultMesh authority vectors: the C#-written
       # file (contracts/cultmesh/authority-route-vectors.json) and the
       # TypeScript-signed file (authority-route-vectors.ts-signed.json) are
       # verified by the C# reference here; the TypeScript side verifies both
-      # in `npm test --workspace packages/cultnet-ts`. CULTMESH_WRITE_VECTORS
-      # is never set in CI: the committed files are the contract.
+      # in the step above. CULTMESH_WRITE_VECTORS is never set in CI: the
+      # committed files are the contract.
       - name: Verify the CultMesh authority vectors with the C# reference
         run: >-
           dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
