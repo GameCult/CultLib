@@ -69,8 +69,17 @@ Windows x64, from the repo root:
 
     powershell -File scripts/build-quic-native.ps1
 
-MsQuic comes from a pinned NuGet package verified by SHA-256, and the build uses
-MSVC with `/Brepro` so a rebuild reproduces the committed Unity plugin DLL.
+MsQuic comes from `Microsoft.Native.Quic.MsQuic.OpenSSL` 2.5.9, pinned twice: the
+NuGet zip by digest and size, and the `msquic.dll` inside it by digest and size,
+because the archive is what the download is checked against and the DLL is what
+actually ships beside the bridge. The OpenSSL flavour rather than Schannel
+because Schannel's MsQuic refuses `QUIC_CREDENTIAL_TYPE_CERTIFICATE_PKCS12`,
+which is the only credential type a provider has on both platforms.
+
+The build uses MSVC with `/Brepro` so a rebuild reproduces the committed Unity
+plugin DLL, and links the CRT statically (`/MT`). A Node or Unity host without
+the Visual C++ redistributable cannot load a DLL that imports `vcruntime140.dll`,
+and the failure it reports names no missing runtime; the bridge carries its own.
 
 Linux x64, on a Debian 13 host:
 

@@ -193,4 +193,4 @@ $manifest = Get-Content -LiteralPath (Join-Path $outputRoot "package.json") -Raw
 Write-Host "CultLib Unity package: $outputRoot"
 Write-Host "Package: $($manifest.name)@$($manifest.version)"
 Write-Host "Managed assemblies: $($expectedAssemblies.Count)"
-Write-Host "Native realtime: MsQuic Schannel 2.5.9 (Windows x64)"
+Write-Host "Native realtime: MsQuic OpenSSL 2.5.9 (Windows x64)"

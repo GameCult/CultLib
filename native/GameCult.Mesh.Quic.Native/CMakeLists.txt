@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(gamecult_mesh_quic_native LANGUAGES CXX)
 
-# Two platforms, one source. Windows takes MsQuic from the pinned Schannel NuGet
+# Two platforms, one source. Windows takes MsQuic from the pinned OpenSSL NuGet
 # layout (MSQUIC_ROOT); Linux takes it from the extracted libmsquic deb, whose
 # headers and library land in unrelated places, so they are named separately.
 if(NOT WIN32 AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux"))
@@ -16,8 +16,13 @@ target_include_directories(gamecult_mesh_quic_native PUBLIC include)
 
 if(WIN32)
   if(NOT DEFINED MSQUIC_ROOT)
-    message(FATAL_ERROR "MSQUIC_ROOT must point at the extracted Microsoft.Native.Quic.MsQuic.Schannel package build/native directory")
+    message(FATAL_ERROR "MSQUIC_ROOT must point at the extracted Microsoft.Native.Quic.MsQuic.OpenSSL package build/native directory")
   endif()
+  # Static CRT. A Node or Unity host without the Visual C++ redistributable
+  # installed cannot load a DLL that imports vcruntime140.dll, and the failure
+  # arrives as "the specified module could not be found" with nothing naming the
+  # missing runtime. The bridge carries its own instead.
+  set_property(TARGET gamecult_mesh_quic_native PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
   target_compile_definitions(gamecult_mesh_quic_native PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_include_directories(gamecult_mesh_quic_native PRIVATE "${MSQUIC_ROOT}/include")
   target_link_directories(gamecult_mesh_quic_native PRIVATE "${MSQUIC_ROOT}/lib/x64")
