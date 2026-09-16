@@ -95,3 +95,15 @@ jobs:
           dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
           --filter FullyQualifiedName~Document_OneHundredThousandDistinctLeaseCyclesLeaveNoResourcesOrCallbacks
           --logger "console;verbosity=minimal"
+
+      # Both directions of the CultMesh authority vectors: the C#-written
+      # file (contracts/cultmesh/authority-route-vectors.json) and the
+      # TypeScript-signed file (authority-route-vectors.ts-signed.json) are
+      # verified by the C# reference here; the TypeScript side verifies both
+      # in `npm test --workspace packages/cultnet-ts`. CULTMESH_WRITE_VECTORS
+      # is never set in CI: the committed files are the contract.
+      - name: Verify the CultMesh authority vectors with the C# reference
+        run: >-
+          dotnet test tests/GameCult.Mesh.Tests/GameCult.Mesh.Tests.csproj
+          --filter FullyQualifiedName~AuthorityProof
+          --logger "console;verbosity=minimal"
