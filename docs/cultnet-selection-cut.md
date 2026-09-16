@@ -1188,6 +1188,14 @@ they govern.
   path language in miniature, refused. Depends: section 13's table and
   `snapshot_query.rs`'s client.
 
+**Q-A, Q-B and Q-C are no longer open.** The operator ruled all three on
+2026-09-17 and they are recorded in the Huginn campaign's map,
+`F:\Projects\Epiphany\notes\eureka-pipeline-state-cut.md`: receipt ordinals
+yes; `open_items` and `history` deleted rather than kept as presets; and the
+leaf gains titles on `question` and `ruling`, riding the same store version
+bump as the ordinal so there is one migration rather than two. They are named
+below only because work here still depends on them.
+
 What depends on each: S1-S8 on Q-D A; S5 on the shard-log assumption
 (section 1) and on Q-B for Huginn; S9 on D6; S16 and the schema files on
 Q-J; S18 on Q-L A; the Huginn cut on Q-B and Q-C. Settled by R-1 to R-5:
