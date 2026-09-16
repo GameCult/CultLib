@@ -15,42 +15,26 @@ import {
   type CultMeshSessionAcceptedMessage,
   type CultMeshSessionOpenMessage,
 } from "cultnet-ts/contracts";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  isLoopbackEndpoint,
+  verifyAuthorityRoute,
+  verifyProviderSessionProof,
+  type CultMeshAuthorityIdentity,
+  type CultMeshAuthorityRouteCertificate,
+  type CultMeshAuthorityRouteView,
+  type CultMeshAuthorityTrustMode,
+  type CultMeshAuthorityTrustPolicy,
+  type CultMeshP256PublicKey,
+} from "cultnet-ts/authority";
 
-export interface CultMeshBrowserIdentity {
-  verseId: string;
-  authorityRuntimeId: string;
-}
-
-export interface CultMeshBrowserRoute extends CultMeshBrowserIdentity {
-  endpoint: string;
-  protocolId?: string;
-  protocolIds?: readonly string[];
-  priority?: number;
-  generation: string;
-  certificate?: CultMeshBrowserRouteCertificate;
-}
-
-export interface CultMeshBrowserP256PublicKey {
-  keyId: string;
-  x: string;
-  y: string;
-}
-
-export interface CultMeshBrowserRouteCertificate {
-  providerKey: CultMeshBrowserP256PublicKey;
-  odinKeyId: string;
-  issuedAtUnixMilliseconds: number;
-  expiresAtUnixMilliseconds: number;
-  signature: string;
-}
-
-export type CultMeshBrowserAuthorityTrustMode = "authenticated-remote" | "local-development";
-
-export interface CultMeshBrowserAuthorityTrustPolicy {
-  mode: CultMeshBrowserAuthorityTrustMode;
-  odinRoots?: readonly CultMeshBrowserP256PublicKey[];
-  now?: () => number;
-}
+export type CultMeshBrowserIdentity = CultMeshAuthorityIdentity;
+export type CultMeshBrowserRoute = CultMeshAuthorityRouteView;
+export type CultMeshBrowserP256PublicKey = CultMeshP256PublicKey;
+export type CultMeshBrowserRouteCertificate = CultMeshAuthorityRouteCertificate;
+export type CultMeshBrowserAuthorityTrustMode = CultMeshAuthorityTrustMode;
+export type CultMeshBrowserAuthorityTrustPolicy = CultMeshAuthorityTrustPolicy;
 
 export interface CultMeshBrowserRendezvous {
   resolve(
@@ -794,19 +778,6 @@ export function decodeCultNetOperationPayload<T>(response: CultNetOperationRespo
   return decode(base64ToBytes(response.payload)) as T;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  return Uint8Array.from(binary, character => character.charCodeAt(0));
-}
-
 function requireWebSocketEndpoint(value: string, field: string): URL {
   let endpoint: URL;
   try {
@@ -946,129 +917,15 @@ async function validateSessionAcceptance(
   if (!providerKey || message.providerKeyId !== providerKey.keyId || !message.providerSignature) {
     return new Error("CultMesh authority did not prove possession of the Odin-certified provider key.");
   }
-  if (!await verifyP256(providerKey, canonicalSession(request, route.endpoint), message.providerSignature)) {
+  if (!await verifyProviderSessionProof(request, route.endpoint, providerKey, message.providerSignature)) {
     return new Error("CultMesh provider session proof is invalid.");
   }
   return undefined;
 }
 
-async function verifyAuthorityRoute(
-  route: CultMeshBrowserRoute,
-  trust: CultMeshBrowserAuthorityTrustPolicy,
-): Promise<void> {
-  const certificate = route.certificate;
-  if (!certificate) {
-    if (trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint)) return;
-    throw new Error("Remote CultMesh routes require an Odin-signed authority certificate.");
-  }
-  const endpoint = new URL(route.endpoint);
-  if (endpoint.protocol !== "wss:" && !(trust.mode === "local-development" && isLoopbackEndpoint(route.endpoint))) {
-    throw new Error("Authenticated remote CultMesh browser routes require wss:// channel protection.");
-  }
-  const now = trust.now?.() ?? Date.now();
-  if (now < certificate.issuedAtUnixMilliseconds || now >= certificate.expiresAtUnixMilliseconds) {
-    throw new Error("The Odin route certificate is not currently valid.");
-  }
-  const root = trust.odinRoots?.find(candidate => candidate.keyId === certificate.odinKeyId);
-  if (!root) throw new Error(`Odin key '${certificate.odinKeyId}' is not trusted by this consumer.`);
-  if (!await verifyP256(root, canonicalRoute(route), certificate.signature)) {
-    throw new Error("The Odin route certificate signature is invalid.");
-  }
-}
-
-function canonicalRoute(route: CultMeshBrowserRoute): Uint8Array {
-  const certificate = route.certificate!;
-  return canonicalFields(
-    "gamecult.cultmesh.route-certificate.v1",
-    route.verseId,
-    route.authorityRuntimeId,
-    route.endpoint,
-    [...(route.protocolIds ?? [route.protocolId ?? "cultmesh.documents.v1"])].sort().join("\u001f"),
-    String(route.priority ?? 0),
-    route.generation,
-    certificate.providerKey.keyId,
-    certificate.providerKey.x,
-    certificate.providerKey.y,
-    certificate.odinKeyId,
-    String(certificate.issuedAtUnixMilliseconds),
-    String(certificate.expiresAtUnixMilliseconds),
-  );
-}
-
-function canonicalSession(request: CultMeshSessionOpenMessage, endpoint: string): Uint8Array {
-  return canonicalFields(
-    "gamecult.cultmesh.session-proof.v1",
-    request.clientNonce,
-    request.messageId,
-    request.sourceRuntimeId,
-    request.verseId,
-    request.authorityRuntimeId,
-    request.protocolId,
-    endpoint,
-    request.routeGeneration,
-  );
-}
-
-function canonicalFields(...values: string[]): Uint8Array {
-  const encoder = new TextEncoder();
-  const encoded = values.map(value => encoder.encode(value));
-  const total = encoded.reduce((sum, value) => sum + 4 + value.byteLength, 0);
-  const result = new Uint8Array(total);
-  const view = new DataView(result.buffer);
-  let offset = 0;
-  for (const value of encoded) {
-    view.setUint32(offset, value.byteLength, false);
-    offset += 4;
-    result.set(value, offset);
-    offset += value.byteLength;
-  }
-  return result;
-}
-
-async function verifyP256(
-  key: CultMeshBrowserP256PublicKey,
-  payload: Uint8Array,
-  signatureBase64: string,
-): Promise<boolean> {
-  try {
-    const x = base64ToBytes(key.x);
-    const y = base64ToBytes(key.y);
-    const signature = base64ToBytes(signatureBase64);
-    if (x.byteLength !== 32 || y.byteLength !== 32 || signature.byteLength !== 64) return false;
-    const raw = new Uint8Array(65);
-    raw[0] = 4;
-    raw.set(x, 1);
-    raw.set(y, 33);
-    const publicKey = await crypto.subtle.importKey(
-      "raw",
-      raw.slice().buffer as ArrayBuffer,
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["verify"],
-    );
-    return await crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" },
-      publicKey,
-      signature.slice().buffer as ArrayBuffer,
-      payload.slice().buffer as ArrayBuffer,
-    );
-  } catch {
-    return false;
-  }
-}
-
 function randomNonce(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return bytesToBase64(bytes);
-}
-
-function isLoopbackEndpoint(value: string): boolean {
-  try {
-    const host = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
-  } catch {
-    return false;
-  }
 }
 
 function requireText(value: string, field: string): void {
