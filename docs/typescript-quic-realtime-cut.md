@@ -9,10 +9,9 @@ Imagination; the root agent commits. Q5, Q6 and Q7 were ruled the same day
 (section 13, Rulings); Q5 was then re-ruled from A to C: no registry in this
 campaign, registry publication parked for a later pass by choice. Cut 6,
 section 5.4, the binary-resolution and dependency lines of Cut 4, and Cut 7's
-ledger are remapped under C (landed 2026-09-16, same day). One operator
-question is open: Q8 in section 11, whether the built binaries are committed
-to the tree or fetched from a GitHub Release by the deploy path. Cut 1 has
-not started.
+ledger are remapped under C (landed 2026-09-16, same day). Q8 is ruled:
+the built binaries are committed to the tree (section 11.2). No operator
+question is open. Cut 1 is in Hands.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
@@ -1017,6 +1016,9 @@ not by bridge iteration. Everything below is written for Option 1; Option 2
 changes only 11.4's manifest paragraph, the closure smoke, and the operator
 steps, and is not mapped further unless chosen.
 
+**Ruled 2026-09-16: Option 1.** Operator: "Commit them, yeah." Option 2 is
+history.
+
 ### 11.3 Deletes
 
 None in the tree. The ruling-A surfaces (`packages/cultmesh-quic-native/*`,
@@ -1376,7 +1378,11 @@ Each is now a standing ruling; the options above are history.
   open for that pass. Cut 6 is remapped under C (section 11); section 5.4,
   Cut 4's binary resolution and dependency lines, and Cut 7's ledger follow
   it. The one fork C surfaces, whether the binaries are committed or fetched
-  from the Release, is Q8 in section 11.2 and is open.
+  from the Release, is Q8 in section 11.2.
+- **Q8 ruled Option 1.** The four native binaries are committed at
+  `packages/cultmesh-ts/native/<platform>/` with their manifest and digests,
+  so they ride the `git archive` the deploy path already builds. Operator's
+  words: "Commit them, yeah."
 - **Q6 ruled A.** The Linux release artifact is built by GitHub Actions on
   `ubuntu-latest` inside `container: debian:13`, published by the workflow,
   and verified by the operator smoke on Yggdrasil in cut 6. The Docker
