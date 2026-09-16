@@ -13,7 +13,43 @@ ledger are remapped under C (landed 2026-09-16, same day). Q8 is ruled:
 the built binaries are committed to the tree (section 11.2). No operator
 question is open. **Cut 1 landed** at `e234a64` (shared verifier, tests,
 C#-written vectors), `66286b9` (browser copy deleted, −143 net) and
-`062a5c6` (mutation runner; twelve killed, one equivalent). Soul in flight.
+`062a5c6` (mutation runner; twelve killed, one equivalent). Soul's pass
+found the verifier and the C#-to-TypeScript bridge sound and proved the
+other direction by probe; a fix batch is in Hands for the six findings below.
+
+**Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
+greps, all twelve mutations rerun and killed, the control catching a
+truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
+every non-64-byte P1363 signature tried, across forty keys), the separator
+byte matching C#, and the TypeScript-signs-C#-verifies direction proven by
+a probe over adversarial inputs, which nothing in the repo yet pins. Found:
+
+- **The mutation runner leaves the last mutant compiled in `dist/`**, which
+  is git-ignored, and the browser tests then pass against it. A stale asset
+  impersonating logic, the doctrine's own trap. Medium.
+- **The C# half of the vector check never runs in CI.** The only `dotnet
+  test` of that project is filtered to one lease test; a C# transcript
+  change would leave the committed vector self-consistent and nothing red.
+  Medium.
+- **`verifyP256` fails closed on Node `Buffer` inputs**: `.slice().buffer`
+  on a pooled buffer is the whole pool. Internal callers allocate their own
+  bytes, so it is safe today and wrong for the Cut 4 consumer. Medium.
+- **The `protocolIds` sort is untested**: the vector's ids were written
+  sorted, so removing the sort survives. Low-medium.
+- **Four edge divergences from the C# rules**: an empty signature is
+  "unsigned" in C# and "invalid" in TypeScript; C#'s loopback set is wider
+  (`127.0.0.2`, and the TypeScript test pinned the narrower answer); root
+  lookup and validity window check in opposite orders; duplicate root key
+  ids throw in C# and take-first in TypeScript. All aligned to C# in the fix
+  batch.
+- **The negative grep pins names, not structure**: a local shim under
+  another name passed every browser test and both greps. A guard-strength
+  note, recorded.
+- **A killed runner leaves the mutant in the tree**; a sidecar restore is
+  added, as Epiphany's harness has.
+- **`cultmesh-ts` resolves modules with `moduleResolution: "Node"`**, which
+  ignores `exports`, so `cultnet-ts/authority` is unresolvable from that
+  package until Cut 4 changes it; the root re-export covers it today.
 
 Anchor: repo `F:\Projects\CultLib`, branch `main`, HEAD
 `8d8ad568aa280bac34bf123503a9e38c175eb558`. The three commits since the
@@ -367,8 +403,11 @@ Sizing consequences:
 - Inputs: a route view (Verse, authority runtime, endpoint, protocol ids,
   priority, generation, certificate), a trust policy (`mode`, `odinRoots`,
   `now`), a session-open request and an accepted message.
-- Outputs: resolution or a thrown `Error` with the same message texts the
-  browser package emits today (its tests pin them).
+- Outputs: resolution or a thrown `Error` whose message is the C# reference's
+  for the same refusal. *(First written as "the same message texts the
+  browser package emits today (its tests pin them)"; Soul found the browser
+  tests pin two messages only, and the channel-protection text was false for
+  QUIC. Corrected 2026-09-16.)*
 - Derived state: none.
 - Forbidden writers: `cultmesh-browser` must not retain or regrow
   `verifyAuthorityRoute`, `canonicalRoute`, `canonicalSession`,
