@@ -119,7 +119,16 @@ struct Connection : std::enable_shared_from_this<Connection> {
     uint64_t id = 0;
     uint64_t listener_id = 0;
     bool inbound = false;
-    bool closing = false;
+    // Written by the host thread in `cultmesh_quic_connection_shutdown`, read on
+    // an MsQuic worker when the shutdown completes: the code the host passed is
+    // what its own event 4 has to carry.
+    std::atomic<bool> closing{false};
+    std::atomic<uint64_t> shutdown_code{0};
+    // Why it ended, recorded by whichever initiated-by callback saw it and read
+    // by shutdown-complete, which is the single emitter of event 4. Both run on
+    // this connection's own worker, serialized.
+    std::string shutdown_reason;
+    int32_t shutdown_status = 0;
     // Set when MsQuic is closing the handle itself (an app close already in
     // progress), so the destructor's one-shot close stands down.
     std::atomic<bool> handle_closed{false};
@@ -160,6 +169,9 @@ struct Runtime {
     std::unordered_map<uint64_t, std::shared_ptr<Stream>> streams;
     uint64_t next_id = 1;
     std::string error;
+    // The raw platform status behind the last MsQuic refusal, kept because the
+    // portable return code deliberately throws its bits away.
+    int32_t last_status = 0;
     bool closing = false;
     // Host calls currently inside the library. `cultmesh_quic_runtime_close`
     // waits for this to reach zero before it touches a handle.
@@ -218,6 +230,10 @@ Listener::~Listener() {
 struct SendRequest {
     QUIC_BUFFER buffer{};
     std::vector<uint8_t> bytes;
+    // Which send this was. The bridge writes the stream's kind byte itself, and
+    // that completion is not the host's to hear about; event 7 is one per
+    // `cultmesh_quic_stream_send_frame` and nothing else.
+    bool is_frame = false;
 };
 
 std::string Hex(uint64_t value) {
@@ -230,6 +246,24 @@ void SetError(Runtime* runtime, const std::string& message) {
     if (runtime == nullptr) return;
     std::lock_guard<std::mutex> lock(runtime->gate);
     runtime->error = message;
+}
+
+// `QUIC_STATUS` never reaches a host. It is a negative HRESULT on Windows and a
+// positive errno on POSIX, so a host that checked for a negative value saw every
+// Linux failure as success. One negative space on both platforms instead; the
+// raw bits go to `cultmesh_quic_last_status`. See section 3 of the header.
+int32_t MsQuicCode(QUIC_STATUS status) {
+    return CULTMESH_QUIC_RESULT_MSQUIC_BASE -
+        static_cast<int32_t>(static_cast<uint32_t>(status) & 0xffffu);
+}
+
+int32_t Refuse(Runtime* runtime, QUIC_STATUS status, const std::string& message) {
+    if (runtime != nullptr) {
+        std::lock_guard<std::mutex> lock(runtime->gate);
+        runtime->error = message;
+        runtime->last_status = static_cast<int32_t>(status);
+    }
+    return MsQuicCode(status);
 }
 
 // The only way anything reaches the host. Callers must not hold `gate`.
@@ -260,9 +294,14 @@ void PublishSimple(Runtime* runtime, uint32_t type, uint64_t listener_id, uint64
     Publish(runtime, header, nullptr, 0);
 }
 
+// v1 diagnostics only, and bounded. A v2 connection has no reader for this, and
+// a long-lived one appended to it once per MsQuic event for as long as it lived.
+constexpr size_t kMaximumTraceBytes = 512;
+
 void AppendTrace(Connection* connection, const std::string& event) {
-    if (connection == nullptr) return;
+    if (connection == nullptr || !connection->has_pin) return;
     std::lock_guard<std::mutex> lock(connection->runtime->gate);
+    if (connection->trace.size() >= kMaximumTraceBytes) return;
     if (!connection->trace.empty()) connection->trace += ",";
     connection->trace += event;
 }
@@ -381,11 +420,22 @@ QUIC_STATUS QUIC_API StreamCallback(HQUIC, void* context, QUIC_STREAM_EVENT* eve
         }
         ConsumeFrames(stream);
         break;
-    case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        delete static_cast<SendRequest*>(event->SEND_COMPLETE.ClientContext);
-        PublishSimple(runtime, kEventStreamSendComplete, stream->owner->listener_id, stream->owner->id,
-                      stream->id, 0, 0, stream->kind);
+    case QUIC_STREAM_EVENT_SEND_COMPLETE: {
+        // Which send finished is the client context's job to say. Without it the
+        // bridge's own kind byte completed as an anonymous event 7 and the host
+        // counted six completions for five frames.
+        auto* request = static_cast<SendRequest*>(event->SEND_COMPLETE.ClientContext);
+        const bool is_frame = request != nullptr && request->is_frame;
+        delete request;
+        if (is_frame)
+            PublishSimple(runtime, kEventStreamSendComplete, stream->owner->listener_id, stream->owner->id,
+                          stream->id,
+                          event->SEND_COMPLETE.Canceled
+                              ? CULTMESH_QUIC_SEND_CANCELED
+                              : CULTMESH_QUIC_SEND_COMPLETED,
+                          0, stream->kind);
         break;
+    }
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
         if (!stream->buffered.empty())
             ShutdownConnectionForProtocolFault(stream->owner, "CultMesh QUIC stream ended with a truncated frame.");
@@ -503,33 +553,41 @@ QUIC_STATUS QUIC_API ConnectionCallback(HQUIC handle, void* context, QUIC_CONNEC
         Publish(runtime, header, der, der_length);
         return QUIC_STATUS_PENDING;
     }
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
-        const std::string reason = "CultMesh QUIC connection was shut down by the transport (status=" +
+    // The two initiated-by events say why a connection is ending, not that it
+    // has ended; the object and its id are still live here. They record the
+    // reason and the code, and shutdown-complete below is the one place event 4
+    // is emitted, once per connection id, after the id has stopped resolving.
+    // All three of these run on the connection's own MsQuic worker, serialized,
+    // which is what lets these fields be plain members.
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        connection->shutdown_reason = "CultMesh QUIC connection was shut down by the transport (status=" +
             Hex(static_cast<uint64_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status)) + ", error=" +
             Hex(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode) + ").";
-        cultmesh_quic_event header{};
-        header.type = kEventConnectionShutdown;
-        header.listener_id = connection->listener_id;
-        header.connection_id = connection->id;
-        header.code = event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
-        header.status = static_cast<int32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
-        Publish(runtime, header, reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
+        connection->shutdown_code.store(event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+        connection->shutdown_status = static_cast<int32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
         break;
-    }
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
-        const std::string reason = "CultMesh QUIC connection was shut down by the peer.";
-        cultmesh_quic_event header{};
-        header.type = kEventConnectionShutdown;
-        header.listener_id = connection->listener_id;
-        header.connection_id = connection->id;
-        header.code = event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
-        Publish(runtime, header, reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        connection->shutdown_reason = "CultMesh QUIC connection was shut down by the peer.";
+        connection->shutdown_code.store(event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
         break;
-    }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
         const uint64_t connection_id = connection->id;
         if (event->SHUTDOWN_COMPLETE.AppCloseInProgress) connection->handle_closed.store(true);
+        // A host that ended the connection itself gets nothing else from MsQuic
+        // — no initiated-by-peer, no initiated-by-transport — so without this
+        // its own connection id simply stopped existing and the end of a
+        // connection was observable only from the other side.
+        cultmesh_quic_event header{};
+        header.type = kEventConnectionShutdown;
+        header.listener_id = connection->listener_id;
+        header.connection_id = connection_id;
+        header.code = connection->shutdown_code.load();
+        header.status = connection->shutdown_status;
+        const std::string reason = connection->shutdown_reason.empty()
+            ? std::string("CultMesh QUIC connection was shut down by the host.")
+            : connection->shutdown_reason;
         DestroyConnection(runtime, connection_id);
+        Publish(runtime, header, reinterpret_cast<const uint8_t*>(reason.data()), reason.size());
         break;
     }
     default:
@@ -561,6 +619,11 @@ QUIC_STATUS QUIC_API ListenerCallback(HQUIC, void* context, QUIC_LISTENER_EVENT*
         if (QUIC_FAILED(status)) {
             SetError(runtime, "CultMesh QUIC inbound connection configuration failed (status=" +
                 Hex(static_cast<uint64_t>(status)) + ").");
+            // Returning a failure here is MsQuic's signal to reject and close
+            // this connection itself, so the entry made a moment ago has to go
+            // with it rather than sitting in the map naming a dead handle.
+            raw->handle_closed.store(true);
+            DestroyConnection(runtime, raw->id);
             return status;
         }
         PublishSimple(runtime, kEventListenerNewConnection, listener->id, raw->id, 0, 0, 0);
@@ -635,9 +698,8 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
 
     auto status = EnsureClientConfiguration(runtime);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC client configuration failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC client configuration failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
 
     auto connection = std::make_shared<Connection>();
@@ -651,9 +713,8 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
 
     status = runtime->api->ConnectionOpen(runtime->registration, ConnectionCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC connection open failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC connection open failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
     {
         std::lock_guard<std::mutex> lock(runtime->gate);
@@ -663,12 +724,11 @@ int32_t OpenConnection(Runtime* runtime, const char* host, uint16_t port, uint64
     status = runtime->api->ConnectionStart(
         raw->handle, runtime->client_configuration, QUIC_ADDRESS_FAMILY_UNSPEC, host, port);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC connection start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
         // The map's reference goes and this local one goes with the scope; the
         // handle is closed by whichever of the two drops last, exactly once.
         DestroyConnection(runtime, raw->id);
-        return static_cast<int32_t>(status);
+        return Refuse(runtime, status, "CultMesh QUIC connection start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
     }
 
     *out_connection_id = raw->id;
@@ -686,8 +746,10 @@ CULTMESH_API int32_t cultmesh_quic_runtime_open(const char* app_name, void** out
     *out_runtime = nullptr;
     auto runtime = std::make_unique<Runtime>();
 
+    // No runtime yet to hang `last_status` on, so these two refusals lose the
+    // raw bits. Everything after this point keeps them.
     auto status = MsQuicOpenVersion(kApiVersion, reinterpret_cast<const void**>(&runtime->api));
-    if (QUIC_FAILED(status)) return static_cast<int32_t>(status);
+    if (QUIC_FAILED(status)) return MsQuicCode(status);
 
     const QUIC_REGISTRATION_CONFIG registration_config = {
         (app_name != nullptr && *app_name != '\0') ? app_name : "GameCult.Mesh.Quic.Native",
@@ -696,7 +758,7 @@ CULTMESH_API int32_t cultmesh_quic_runtime_open(const char* app_name, void** out
     status = runtime->api->RegistrationOpen(&registration_config, &runtime->registration);
     if (QUIC_FAILED(status)) {
         MsQuicClose(runtime->api);
-        return static_cast<int32_t>(status);
+        return MsQuicCode(status);
     }
 
     *out_runtime = runtime.release();
@@ -784,9 +846,8 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     auto status = runtime->api->ConfigurationOpen(
         runtime->registration, &alpn, 1, &settings, sizeof(settings), nullptr, &listener->configuration);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC listener configuration failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC listener configuration failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
 
     // PKCS12 is the one credential type Schannel and OpenSSL both take, which
@@ -802,17 +863,15 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     credentials.Flags = QUIC_CREDENTIAL_FLAG_NONE;
     status = runtime->api->ConfigurationLoadCredential(listener->configuration, &credentials);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC listener certificate could not be loaded (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC listener certificate could not be loaded (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
 
     Listener* raw = listener.get();
     status = runtime->api->ListenerOpen(runtime->registration, ListenerCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC listener open failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC listener open failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
 
     QUIC_ADDR address{};
@@ -833,10 +892,9 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     QUIC_BUFFER listener_alpn = AlpnBuffer();
     status = runtime->api->ListenerStart(raw->handle, &listener_alpn, 1, &address);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC listener start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
         Detach(runtime->gate, runtime->listeners, raw->id);
-        return static_cast<int32_t>(status);
+        return Refuse(runtime, status, "CultMesh QUIC listener start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
     }
 
     // Port 0 means "pick one"; the host needs the chosen port to advertise it.
@@ -844,10 +902,9 @@ CULTMESH_API int32_t cultmesh_quic_listener_open(
     uint32_t bound_size = sizeof(bound);
     status = runtime->api->GetParam(raw->handle, QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &bound_size, &bound);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC listener address could not be read (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
         Detach(runtime->gate, runtime->listeners, raw->id);
-        return static_cast<int32_t>(status);
+        return Refuse(runtime, status, "CultMesh QUIC listener address could not be read (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
     }
     if (out_bound_port != nullptr) *out_bound_port = QuicAddrGetPort(&bound);
     *out_listener_id = raw->id;
@@ -886,9 +943,8 @@ CULTMESH_API int32_t cultmesh_quic_connection_certificate_complete(
         accept != 0 ? static_cast<BOOLEAN>(1) : static_cast<BOOLEAN>(0),
         accept != 0 ? QUIC_TLS_ALERT_CODE_SUCCESS : QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC certificate validation completion failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC certificate validation completion failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
     return 0;
 }
@@ -899,8 +955,10 @@ CULTMESH_API void cultmesh_quic_connection_shutdown(void* handle, uint64_t conne
     CallScope scope(runtime);
     if (!scope.entered()) return;
     const auto connection = FindConnection(runtime, connection_id);
-    if (connection == nullptr || connection->closing) return;
-    connection->closing = true;
+    if (connection == nullptr || connection->closing.exchange(true)) return;
+    // Kept for the shutdown-complete callback: this is the code the initiator's
+    // own event 4 carries, matching the one the peer sees.
+    connection->shutdown_code.store(code);
     if (connection->handle != nullptr)
         runtime->api->ConnectionShutdown(connection->handle, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, code);
 }
@@ -928,9 +986,8 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
         connection->handle, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
         StreamCallback, raw, &raw->handle);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC stream open failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC stream open failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
     // In the map before it starts. `StreamStart` can reach shutdown-complete on
     // an MsQuic worker before it returns here, and that callback has to find the
@@ -941,10 +998,9 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
     }
     status = runtime->api->StreamStart(raw->handle, QUIC_STREAM_START_FLAG_IMMEDIATE);
     if (QUIC_FAILED(status)) {
-        SetError(runtime, "CultMesh QUIC stream start failed (status=" +
-            Hex(static_cast<uint64_t>(status)) + ").");
         DestroyStream(runtime, raw->id);
-        return static_cast<int32_t>(status);
+        return Refuse(runtime, status, "CultMesh QUIC stream start failed (status=" +
+            Hex(static_cast<uint64_t>(status)) + ").");
     }
 
     // The kind byte is the first thing on the stream, which is what the peer's
@@ -956,9 +1012,8 @@ CULTMESH_API int32_t cultmesh_quic_stream_open(
     status = runtime->api->StreamSend(raw->handle, &request->buffer, 1, QUIC_SEND_FLAG_NONE, request);
     if (QUIC_FAILED(status)) {
         delete request;
-        SetError(runtime, "CultMesh QUIC stream kind could not be sent (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC stream kind could not be sent (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
 
     *out_stream_id = raw->id;
@@ -981,6 +1036,7 @@ CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
     // 4-byte LE length prefix is the QUIC stream framing, and it is added here
     // so that framing lives in one place for both directions.
     auto* request = new SendRequest();
+    request->is_frame = true;
     request->bytes.resize(sizeof(uint32_t) + static_cast<size_t>(length));
     WriteUInt32LittleEndian(request->bytes.data(), static_cast<uint32_t>(length));
     std::memcpy(request->bytes.data() + sizeof(uint32_t), encoded_frame, static_cast<size_t>(length));
@@ -991,9 +1047,8 @@ CULTMESH_API int32_t cultmesh_quic_stream_send_frame(
     const auto status = runtime->api->StreamSend(stream->handle, &request->buffer, 1, flags, request);
     if (QUIC_FAILED(status)) {
         delete request;
-        SetError(runtime, "CultMesh QUIC frame send failed (status=" +
+        return Refuse(runtime, status, "CultMesh QUIC frame send failed (status=" +
             Hex(static_cast<uint64_t>(status)) + ").");
-        return static_cast<int32_t>(status);
     }
     return 0;
 }
@@ -1017,6 +1072,9 @@ CULTMESH_API int32_t cultmesh_quic_next_event(
     auto* runtime = static_cast<Runtime*>(handle);
     if (runtime == nullptr || out_event == nullptr || out_required == nullptr || payload_capacity < 0)
         return -1;
+    // A null buffer with a non-zero capacity is a lie about the buffer. Taking
+    // it meant the event was consumed and its payload silently dropped.
+    if (payload == nullptr && payload_capacity > 0) return -1;
     CallScope scope(runtime);
     if (!scope.entered()) return -1;
     *out_required = 0;
@@ -1052,6 +1110,15 @@ CULTMESH_API int32_t cultmesh_quic_last_error(void* handle, char* destination, i
     std::memcpy(destination, runtime->error.data(), count);
     destination[count] = '\0';
     return static_cast<int32_t>(count);
+}
+
+CULTMESH_API int32_t cultmesh_quic_last_status(void* handle) {
+    auto* runtime = static_cast<Runtime*>(handle);
+    if (runtime == nullptr) return 0;
+    CallScope scope(runtime);
+    if (!scope.entered()) return 0;
+    std::lock_guard<std::mutex> lock(runtime->gate);
+    return runtime->last_status;
 }
 
 // ---------------------------------------------------------------------------

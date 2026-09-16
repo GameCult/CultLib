@@ -95,11 +95,12 @@ enum cultmesh_quic_event_type {
     /* Payload: the peer's DER certificate. The handshake is blocked until the
      * host answers with `cultmesh_quic_connection_certificate_complete`. */
     CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED = 3,
-    /* The connection is gone, whoever ended it. Payload: a UTF-8 reason.
-     * `code` is the QUIC application error code — the peer's when the peer
-     * ended it, and the code the host passed to `cultmesh_quic_connection_shutdown`
-     * when the host did. Emitted exactly once per connection id, including for
-     * the initiator of a local shutdown: every connection id's end is observable. */
+    /* The connection is gone, whoever ended it, and its id no longer resolves.
+     * Payload: a UTF-8 reason. `code` is the QUIC application error code — the
+     * peer's when the peer ended it, and the code the host passed to
+     * `cultmesh_quic_connection_shutdown` when the host did. Emitted exactly
+     * once per connection id, including for the initiator of a local shutdown:
+     * every connection id's end is observable from the host that owns it. */
     CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN = 4,
     /* An inbound stream's first byte named its kind. `stream_id`, `stream_kind`. */
     CULTMESH_QUIC_EVENT_STREAM_STARTED = 5,
@@ -269,7 +270,9 @@ CULTMESH_QUIC_API void cultmesh_quic_stream_shutdown(
 
 /* The one blocking crossing.
  *
- *   0   nothing within `timeout_ms` (or the runtime is closing)
+ *   0   nothing within `timeout_ms`. A poller already blocked here when
+ *       `cultmesh_quic_runtime_close` starts is woken and returns 0; one that
+ *       arrives after it starts is refused with -1 like any other call.
  *   1   `*out_event` filled and up to `payload_capacity` payload bytes copied;
  *       `*out_required` is the payload size
  *   2   `payload_capacity` is too small. Nothing is consumed and nothing is
