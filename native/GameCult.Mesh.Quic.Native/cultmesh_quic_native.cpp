@@ -35,6 +35,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -45,6 +47,29 @@
 #include <vector>
 
 #define CULTMESH_API extern "C" CULTMESH_QUIC_API
+
+// Development builds only, and never in a shipped binary: after
+// `cultmesh_quic_runtime_close` has quiesced, no host call may still be inside
+// the library. The wait is what makes that true, and its absence is otherwise
+// visible only as a use-after-free a sanitizer catches by luck — a poller has to
+// be preempted in the right window. With pollers blocked, this states the
+// invariant directly, so a build without the wait dies on the first close rather
+// than on the run that happens to be unlucky.
+#if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
+#define CULTMESH_QUIC_ASSERT_QUIESCED(count)                                          \
+    do {                                                                              \
+        const int cultmesh_quic_remaining = (count);                                   \
+        if (cultmesh_quic_remaining != 0) {                                            \
+            std::fprintf(stderr,                                                       \
+                "cultmesh_quic_runtime_close: %d host call(s) still inside the "        \
+                "library after the quiesce\n", cultmesh_quic_remaining);                \
+            std::fflush(stderr);                                                       \
+            std::abort();                                                              \
+        }                                                                              \
+    } while (false)
+#else
+#define CULTMESH_QUIC_ASSERT_QUIESCED(count) ((void)0)
+#endif
 
 namespace {
 
@@ -793,6 +818,7 @@ CULTMESH_API void cultmesh_quic_runtime_close(void* handle) {
         runtime->closing = true;
         runtime->signal.notify_all();
         runtime->signal.wait(lock, [runtime] { return runtime->active_calls == 0; });
+        CULTMESH_QUIC_ASSERT_QUIESCED(runtime->active_calls);
         for (auto& entry : runtime->streams) streams.push_back(std::move(entry.second));
         for (auto& entry : runtime->connections) connections.push_back(std::move(entry.second));
         for (auto& entry : runtime->listeners) listeners.push_back(std::move(entry.second));
