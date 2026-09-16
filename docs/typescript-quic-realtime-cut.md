@@ -264,6 +264,66 @@ on Windows release and kill three times of three under AddressSanitizer, so
 the entries table must say which target each is honest on. A mutation whose
 kill depends on the target is not killed until it runs there.
 
+**The second fix batch landed** (Opus) at `a4753f4` (the notify moves inside
+the gate), `dc9e12c` (a Windows status stops sign-extending in diagnostics),
+`53d5929` (the header says the return code is portably negative, not portably
+meaningful), `19d8d5c` (the readme says the committed Unity plugin is the
+older build), `f4186e7` (a committed scenario runner for the runtime
+lifetime) and `180917d` (four native entries, each naming the target it is
+honest on).
+
+**The discovery that outweighed the fix: there was no committed native
+harness at all.** Every native mutation kill this cut had reported came from
+consumers and scenarios that lived in agent scratchpads and no longer exist.
+The runner at the previous head carried three package targets and nothing
+touching the bridge, and two entries could not even be re-marked because
+their definitions were gone. Hands built what the brief had assumed already
+existed.
+
+**Soul's third pass, 2026-09-17** (Fable). Held: the lifetime fix on both
+targets, the reverted notify killed three of three by the thread sanitizer
+and invisible to the address sanitizer, so its target marking is right; the
+assertion killing the deleted wait deterministically on both targets and
+absent from both shipped libraries and a fresh release build; two fresh
+release builds byte-identical to the committed artifact; the return-code
+numbers recomputed from the pinned headers; byte-exact restore on both hosts.
+**Cut 3 still does not close**, and the reason is that the harness defending
+the fix is weaker than the fix:
+
+- **The committed Linux path does not run as committed.** The sanitizer
+  configuration dies before the scenario starts, on the kernel's
+  address-space randomisation, and the runner swallows the child's standard
+  error, so a future agent sees a red control and no diagnosis. Soul reached
+  four of four kills only by disabling randomisation and relaxing the
+  container's seccomp profile, neither of which any committed file mentions.
+  The image came from a definition that is not in the repository, and the
+  documented development recipe cannot run the runner at all, since it
+  installs the C++ toolchain but not the JavaScript runtime. High for the
+  claim that the Linux kills are rerunnable.
+- **The scenario does not test the rule it exists for.** Deleting the call
+  guard from the polling entry point, so host calls are not counted at all,
+  survived nine runs of nine across every configuration. The harness pins the
+  order of the count and the notify, not that anything is counted.
+- **The scenario passes vacuously when nothing parks.** Inverting the timeout
+  comparison makes every poller return before the close begins, and the
+  scenario is green on all six configurations.
+- **The bounded-wait loosening is pinned by a constant, not by the rule.** At
+  one millisecond it dies with as few as two calls outstanding; at fifty
+  milliseconds it survives on both targets. A bounded wait is the wrong
+  contract at any bound.
+- **A skipped entry exits zero** with no closing summary, so a gate reads a
+  host that killed nothing as green.
+- **The header contradicts itself**, forbidding a call that begins after
+  close starts and separately promising such a poll is refused, when that
+  refusal path reads freed memory after teardown.
+
+**Two rules are defended by nothing committed**: popping before copying, and
+a handle closed under a live call. Both were previously reported killed on
+the sanitizer target only, and neither has a definition left. The third fix
+batch is told to give each a real entry or to say plainly that the rule is
+undefended, because an honest gap beats a fabricated kill. **Third fix batch
+in Hands.**
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
