@@ -1152,7 +1152,22 @@ they govern.
   cannot know a consumer's enums; the organ keeps the typed refusal at its
   door). Depends: everything in sections 2-10.
 - **Q-E.** Withdrawn: the seam question is answered by the placement ruling.
-- **Q-J. Number encoding on the wire.** **A, IEEE float64, with the 2^53
+- **Q-J. Number encoding on the wire. RULED B, decimal strings,
+  2026-09-17.** The operator: floats are fragile, and strings are the most
+  reliable way to store a number. **Self's recommendation of A was argued
+  backwards and the map said so wrongly.** B was framed as "a second value
+  encoding beside `any_of`'s strings"; it is the opposite. Every value in this
+  vocabulary is already a string, so decimal strings keep the wire to **one**
+  value encoding, and it is float64 that would add a second. What B really
+  costs is a comparison rule, and that is where the danger sits: a decimal
+  string compared lexicographically answers that ten is less than nine. So
+  the cut must specify a canonical decimal form and a numeric comparison,
+  and pin both with mutants — a lexicographic comparison must die, and a
+  non-canonical spelling of an equal value must not change an answer. Name
+  the edge cases the canonical form settles: leading and trailing zeros, an
+  explicit plus, exponent notation, and negative zero. No exactness limit
+  needs stating, because there is no longer one.
+  - *Superseded, kept as history:* **A, IEEE float64, with the 2^53
   limit stated in the schema and in this map** (recommended: one encoding,
   no parse rule per runtime, and no catalog in hand declares an integer
   member wide enough to lose). **B**, decimal strings — exact, but a second
