@@ -437,9 +437,63 @@ answer was an argued equivalence rather than a swap.
 Named limits: the 600 ms mutant lives only in the report; `payloadfit` and
 `polltimeout` run only in the assertion configuration, so the pop-before-copy
 kill rests on an unsanitized crash and an exit code rather than an
-address-sanitizer configuration the harness still lacks. **Fifth Soul pass in
-flight**, asked to settle the rules question and to test the two-band argument
-against a mutant that scales or derives its wait rather than replacing it.
+address-sanitizer configuration the harness still lacks. **Soul's fifth pass, 2026-09-17** (Opus). Both targets reproduced end to end
+from a fresh clone at a different path. **Cut 3 still does not close, and for
+the same underlying reason in a third costume: the scenario proves the wait is
+not a constant, not that it is the host's.**
+
+- **F1, confirmed, high: an expression defeats the two-band argument.** No
+  constant sits in both bands, which is true and is not the rule. Any mapping
+  that is identity at 200 and 900 passes for free, and the late tolerance is a
+  flat 300 ms. Three mutants, each run through all five Windows scenarios, all
+  **survived all five**: clamping the wait to at most a second, adding 150 ms,
+  and scaling by six fifths. **The clamp is the one that matters**, because its
+  failure is verbatim the bug this batch claims to fix — a host asking for five
+  seconds gets one, forever, with nothing reporting it — and "cap the wait so
+  shutdown gets noticed" is the most ordinary spelling that line will ever be
+  given. The close is cheap: raise the long probe above any plausible ceiling,
+  which kills the clamp and the scale, and make the tolerance proportional
+  rather than flat, which kills the offset.
+- **F2, confirmed, medium: a Windows clone cannot run the documented Linux
+  path at all.** `.gitattributes:2` is `* text=auto` with no rule for shell
+  scripts, so a default Windows clone writes the build script with carriage
+  returns and the container dies in under a second complaining about the
+  interpreter line. Soul hit it from a clean clone before anything else ran.
+  The mount fix works; this is a second, independent blocker on the same
+  documented path, and it fires for the likeliest newcomer. One line repairs
+  it.
+- **F3, confirmed, low: the only non-comment source change in the range is
+  pinned by nothing.** Reverting the hold's new guard survived all five
+  scenarios, because the timeout scenario never arms the hold and the other two
+  never let a timeout expire, so nothing is ever in both states at once. The
+  seam folds away in release, so nothing shipped is at risk; it is the
+  recurring shape again.
+
+**The declared equivalence holds, and its stated reason was the weaker half.**
+Narrowing the close's wake to one waiter is genuinely equivalent, reproduced.
+But the equivalence rests on two premises together: the closing flag is set
+permanently under the gate before the notify and appears in every waiter's
+predicate, so after a close begins no poller can block at all; and each exiting
+call's own destructor takes the gate, decrements and wakes everyone, cascading.
+Soul then narrowed **both** wakes, which also survived and **is not equivalent
+by any argument**, since a notify consumed by the closer stalls the chain. It
+passes on wait-queue ordering alone. The premises belong beside the entry so
+the claim is checkable rather than assertable.
+
+**Held:** Linux 18 killed and Windows 16 with two honest skips, both
+reproduced; 600 ms dying to the new scenario and surviving the older two;
+the closed-port probe reaching the two-phase poll and both pop-before-copy
+entries dying on both targets; the release shape clean on both, with the new
+local folding away. **The red-control path proved itself unasked** — a run
+from a deep temporary path failed MSBuild's file tracker, and the harness
+reported a red control with the child's output rather than banking eighteen
+kills it had not earned.
+
+**Two record corrections.** The source digest quoted in the previous report is
+checkout-dependent, because line-ending conversion changes it; Soul's clone
+restored to a different one. It is not a portable identity. And the Windows
+harness needs a short checkout path or the control fails on the file tracker,
+which belongs where a newcomer meets it. **Fifth fix batch in Hands.**
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
