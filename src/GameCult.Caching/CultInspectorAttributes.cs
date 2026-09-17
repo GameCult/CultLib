@@ -64,12 +64,13 @@ namespace GameCult.Caching
         public float Max { get; }
     }
 
-    // A string member holding an engine asset path. AssetType is the engine's asset type, named by the consumer
-    // (typeof(UnityEngine.Texture2D) in a Unity assembly); a lowering that does not know the type ignores it.
+    // A string member holding an engine asset's stable identity; in Unity, the `.meta` GUID. AssetType is the
+    // engine's asset type, named by the consumer (typeof(UnityEngine.Texture2D) in a Unity assembly); a lowering
+    // that does not know the type ignores it.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true)]
-    public sealed class CultInspectorAssetPathAttribute : Attribute
+    public sealed class CultInspectorAssetGuidAttribute : Attribute
     {
-        public CultInspectorAssetPathAttribute(Type? assetType = null)
+        public CultInspectorAssetGuidAttribute(Type? assetType = null)
         {
             AssetType = assetType;
         }

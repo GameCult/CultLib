@@ -150,8 +150,8 @@ public sealed class ItemData
     public string Notes = string.Empty;
 
     [Key(3)]
-    [CultInspectorAssetPath]
-    public string IconPath = string.Empty;
+    [CultInspectorAssetGuid]
+    public string IconGuid = string.Empty;
 }
 ```
 
@@ -161,8 +161,9 @@ public sealed class ItemData
 - `CultInspectorOrder`
 - `CultInspectorTextArea`
 - `CultInspectorRange`
-- `CultInspectorAssetPath` (optional engine asset `Type`, named by the
-  consumer; the Studio uses it when it is a `UnityEngine.Object` type)
+- `CultInspectorAssetGuid` (a string member holding an engine asset's stable
+  identity, in Unity the `.meta` GUID; optional engine asset `Type`, named by
+  the consumer; the Studio uses it when it is a `UnityEngine.Object` type)
 - `CultInspectorDrawer` (on drawer classes)
 
 CultMesh collaboration should feed the same CultCache mutation surface rather

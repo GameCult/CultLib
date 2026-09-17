@@ -41,7 +41,7 @@ namespace GameCult.Caching
             Order = Find<CultInspectorOrderAttribute>()?.Order;
             Range = Find<CultInspectorRangeAttribute>();
             TextArea = Find<CultInspectorTextAreaAttribute>();
-            AssetPath = Find<CultInspectorAssetPathAttribute>();
+            AssetGuid = Find<CultInspectorAssetGuidAttribute>();
         }
 
         public IReadOnlyList<Attribute> Attributes { get; }
@@ -53,7 +53,7 @@ namespace GameCult.Caching
         public int? Order { get; }
         public CultInspectorRangeAttribute? Range { get; }
         public CultInspectorTextAreaAttribute? TextArea { get; }
-        public CultInspectorAssetPathAttribute? AssetPath { get; }
+        public CultInspectorAssetGuidAttribute? AssetGuid { get; }
 
         public T? Find<T>() where T : Attribute => Attributes.OfType<T>().FirstOrDefault();
     }

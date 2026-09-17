@@ -43,6 +43,15 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void AssetGuidMemberExposesItsAttributeAndDeclaredType()
+        {
+            var member = Model().MembersOf(typeof(InspectAsset)).Single();
+
+            Assert.That(member.Metadata.AssetGuid, Is.Not.Null);
+            Assert.That(member.Metadata.AssetGuid!.AssetType, Is.EqualTo(typeof(Uri)));
+        }
+
+        [Test]
         public void ClaimsResolveAttributeThenTypeThenBuiltIn()
         {
             var claims = new CultInspectorDrawerClaims(
@@ -319,6 +328,14 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName]
             public string Name = string.Empty;
+        }
+
+        [CultDocument("tests.inspect_asset", "tests.inspect_asset.v1")]
+        [MessagePackObject]
+        public sealed class InspectAsset
+        {
+            [Key(0)] [CultInspectorAssetGuid(typeof(Uri))]
+            public string Guid = string.Empty;
         }
 
         [CultDocument("tests.inspect_fixed", "tests.inspect_fixed.v1")]

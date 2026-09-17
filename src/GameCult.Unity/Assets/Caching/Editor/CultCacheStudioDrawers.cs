@@ -167,12 +167,13 @@ namespace GameCult.Unity.Caching.Editor
 
         private static string DrawString(string label, string value, CultInspectorMetadata metadata)
         {
-            if (metadata.AssetPath != null)
+            if (metadata.AssetGuid != null)
             {
-                var assetType = metadata.AssetPath.AssetType != null && typeof(Object).IsAssignableFrom(metadata.AssetPath.AssetType) ? metadata.AssetPath.AssetType : typeof(Object);
-                var asset = string.IsNullOrEmpty(value) ? null : AssetDatabase.LoadAssetAtPath(value, assetType);
+                var assetType = metadata.AssetGuid.AssetType != null && typeof(Object).IsAssignableFrom(metadata.AssetGuid.AssetType) ? metadata.AssetGuid.AssetType : typeof(Object);
+                var path = string.IsNullOrEmpty(value) ? string.Empty : AssetDatabase.GUIDToAssetPath(value);
+                var asset = string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath(path, assetType);
                 var next = EditorGUILayout.ObjectField(label, asset, assetType, false);
-                return next == asset ? value : next == null ? string.Empty : AssetDatabase.GetAssetPath(next);
+                return next == asset ? value : next == null ? string.Empty : AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(next));
             }
 
             var textArea = metadata.TextArea;
