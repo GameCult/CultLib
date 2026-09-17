@@ -199,6 +199,11 @@ No persistent state is introduced. No cell is empty.
 
 ### Q1. Where does the grouping declaration live, and how is nesting ordered? (blocks Cuts 1, 4)
 
+**Ruled B (operator, 2026-09-17):** "I like B". The same ruling reopens the item
+schema: a crafted item's manufacturer belongs to its production lot, not its
+design (see Cut 4).
+
+
 - **A. Member attribute** `[CultInspectorGroup(int order = 0)]` on a field or
   property.
   - Levels are ordered by `order`, then by the member's display order
@@ -588,6 +593,13 @@ hits only a KDTree file).
 - **Ledger:** Versions and binaries only.
 
 ### Cut 4. Aetheria: re-pin CultLib and annotate grouping
+
+**Blocked (2026-09-17).** The operator ruled that a crafted item's manufacturer and
+optional branding belong to its production lot, after Njordr's lot ontology, so
+`ItemData.Manufacturer` leaves the design. Grouping `GearData` by `Manufacturer`
+is therefore not the target. This cut is re-mapped once that schema ruling
+settles. Cuts 1-3 do not depend on it.
+
 
 - **Repo and branch:** Aetheria `codex/cultcache-cutover`, the current branch.
   Stage by path only: `Assets/Scripts/Editor/CultCacheDrawers.cs` carries an
