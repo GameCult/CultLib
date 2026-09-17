@@ -1070,6 +1070,11 @@ for (const [name, target] of Object.entries(targets)) {
   }
 
   if (!target.dist) {
+    // This digest says the file this run started with is the file it ended with.
+    // It is not an identity for the source: `text=auto` gives a Windows checkout
+    // carriage returns, so two clones of the same commit restore to two
+    // different digests. The identity that survives a clone is the commit, or
+    // `git rev-parse HEAD:<path>` for one file.
     results.push({ target: name, outcome: "restored", rule: `${target.file} sha256=${originalDigest}` });
     continue;
   }
