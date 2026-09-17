@@ -152,19 +152,40 @@ std::string CloseRaceOnce(int pollers) {
 // value cannot tell a bridge that honours the host's timeout from one that waits
 // on that same number of its own: a constant has to satisfy both bands, and no
 // constant is in both.
+//
+// A constant was never the hard case, though, and the numbers are chosen for the
+// waits that are computed from the argument instead. Any mapping that is the
+// identity at both of these passes for free, so the two are picked to leave the
+// ordinary ones nowhere to be identity:
+//
+//  - 5000 is above any ceiling a bridge would plausibly clamp a host's timeout
+//    to. A wait of `min(timeout, 1000)` — cap it so a shutdown gets noticed — is
+//    the most ordinary spelling this line will ever be given, and it returns
+//    from this probe four seconds early.
+//  - 200 is low enough that an added constant shows as a proportion. A wait of
+//    `timeout + 150` is 75% late here, and the late tolerance below is a
+//    fraction of what was asked for rather than a flat number it could hide in.
 constexpr int32_t kShortPollMs = 200;
-constexpr int32_t kLongPollMs = 900;
+constexpr int32_t kLongPollMs = 5000;
 
 // How much sooner than the timeout a poll may return. A wait may be late; it may
 // not be early, because returning early is exactly what waiting on a shorter
 // duration looks like. This is scheduler granularity, not slack.
 constexpr int kEarlyToleranceMs = 20;
 
-// How much later than the timeout a poll may return. Wide enough for a loaded
-// machine and a container, and narrower than the gap between the two timeouts,
-// which is what closes the constant off: 200 admits [180, 500] and 900 admits
-// [880, 1200], and nothing is in both.
-constexpr int kLateToleranceMs = 300;
+// How much later than the timeout a poll may return: an allowance for scheduler
+// granularity plus an eighth of what was asked for.
+//
+// Proportional, and not the flat 300 ms this used to be, because a flat
+// tolerance is a gap a mapping hides in. `timeout + k` for any k under the flat
+// value passes at every probe, at every value, forever — and the measured
+// overshoot on both targets is about 10 ms, so a flat 300 was 290 ms of room
+// for a bridge to add a little of its own and be believed.
+//
+// The honest limit: a scaling smaller than an eighth survives this, and this
+// does not claim otherwise. An eighth is under the smallest scaling anyone
+// writes on purpose, and 60 ms is six times the overshoot either target shows.
+constexpr int LateToleranceMs(int32_t timeout_ms) { return 60 + timeout_ms / 8; }
 
 struct TimedPoll {
     int32_t result;
@@ -209,7 +230,7 @@ std::string PollTimeoutOnce() {
                 " ms: the wait ended on some shorter duration than the one it was given";
             break;
         }
-        if (poll.elapsed_ms > timeout_ms + kLateToleranceMs) {
+        if (poll.elapsed_ms > timeout_ms + LateToleranceMs(timeout_ms)) {
             failure = asked + "returned after " + std::to_string(poll.elapsed_ms) +
                 " ms: the wait ended on some longer duration than the one it was given";
             break;

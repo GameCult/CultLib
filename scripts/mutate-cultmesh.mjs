@@ -478,10 +478,18 @@ const mutations = [
   // for five seconds silently got two, and every consumer's poll loop spun at two
   // and a half times the rate it asked for.
   //
-  // `polltimeout` asks twice, 200 ms and 900 ms, and measures. That is what makes
-  // a constant unsurvivable rather than merely unlucky: no single value sits in
-  // both bands, so the entries below are two sides of one rule and not two
-  // numbers to be tuned against.
+  // `polltimeout` asks twice and measures. That is what makes a constant
+  // unsurvivable rather than merely unlucky: no single value sits in both bands,
+  // so the first two entries below are two sides of one rule and not two numbers
+  // to be tuned against.
+  //
+  // A constant was never the hard case, though. A wait computed from the
+  // argument is identity wherever the probes are, and passes for free: the two
+  // bands rule out a constant and rule out nothing else. Clamping, adding and
+  // scaling all survived the whole matrix once, on bands of 200 and 900 with a
+  // flat late tolerance of 300 ms. The scenario's numbers are what closed that,
+  // and the third entry is here so nothing reopens it quietly — a table of
+  // constants would go green again the moment those numbers drifted back.
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
@@ -497,6 +505,19 @@ const mutations = [
     rule: "the wait is on the host's timeout (loosening: a longer constant of the bridge's own)",
     old: "std::chrono::milliseconds(timeout_ms),",
     new: "std::chrono::milliseconds(2000),",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The derived wait, which is the shape the two constants above do not cover
+    // and the most ordinary spelling this line will ever be given: cap the wait
+    // so a shutdown gets noticed. Its failure is verbatim the one the scenario
+    // exists for — a host asking for five seconds gets one, forever, with
+    // nothing reporting it — and it is identity at any probe below the cap, so
+    // it is the long probe's height that kills it rather than the two bands.
+    rule: "the wait is on the host's timeout (loosening: the bridge caps it at a second)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds((std::min)(timeout_ms, 1000)),",
   },
   // The close's wake. It was defended by committed code and had no entry, so the
   // table understated what `closerace` covers; these say it.
