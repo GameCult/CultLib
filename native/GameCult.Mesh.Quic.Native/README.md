@@ -110,11 +110,12 @@ mutation harness that drives the runtime-lifetime scenarios is a Node script and
 a container that cannot run it cannot check the bridge it just built:
 
     docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-    docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src `
-        cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+    docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
 
 Both lines are run from the repository root, and the mount is that root wherever
-it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell.
+it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. The second is one line
+because the shell it is offered to is not decided here; a continuation would have
+to pick one, and a backtick pasted into a POSIX shell is not a continuation.
 
 `--security-opt seccomp=unconfined` is load-bearing, not caution. The
 ThreadSanitizer configuration needs the process's address space where it expects
@@ -124,6 +125,13 @@ seccomp profile denies that call. Without it ThreadSanitizer dies before `main`
 with "unexpected memory mapping" — a configuration that never starts, which a
 mutation harness would otherwise read as every mutant being killed. The harness
 stops with that diagnosis rather than reporting kills it did not earn.
+
+The win32-x64 half of the harness needs the checkout somewhere short — near a
+drive root rather than under a deep temporary directory. MSVC builds the bridge
+and its scenario runner through MSBuild, whose file tracker gives out on long
+paths, and the build then fails for every mutant including the no-op control.
+The harness stops on a red control rather than reporting a table of kills, so
+the failure is loud, but it names MSBuild and not the path.
 
 Where an artifact was built is part of what it is. The Linux binary is linked
 against Debian 13's glibc, so a build from anywhere else is a different artifact

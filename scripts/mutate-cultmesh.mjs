@@ -47,11 +47,15 @@
 // dependencies:
 //
 //   docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-//   docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src `
-//       cultlib-quic-native-dev bash -lc "node scripts/mutate-cultmesh.mjs native"
+//   docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src cultlib-quic-native-dev bash -lc "node scripts/mutate-cultmesh.mjs native"
 //
 // Both from the repository root; the mount is that root wherever it is, as
-// `${PWD}` in PowerShell or `$(pwd)` in a POSIX shell.
+// `${PWD}` in PowerShell or `$(pwd)` in a POSIX shell. The second is one line
+// because a continuation would have to pick one of those shells.
+//
+// The win32-x64 half wants the checkout somewhere short, near a drive root. MSVC
+// builds the bridge through MSBuild, whose file tracker gives out on long paths,
+// and a run from a deep temporary directory fails its own no-op control.
 //
 // The seccomp flag is required, not cautious: the ThreadSanitizer configuration
 // is re-executed under `setarch -R`, and Docker's default profile denies the

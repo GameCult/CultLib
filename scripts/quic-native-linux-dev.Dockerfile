@@ -9,8 +9,10 @@
 # runner that mutates it at all.
 #
 #   docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-#   docker run --rm --security-opt seccomp=unconfined -v F:\Projects\CultLib:/src -w /src \
-#       cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+#   docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+#
+# Both from the repository root, and the mount is that root wherever it is:
+# `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell.
 #
 # `--security-opt seccomp=unconfined` is not optional and not caution. The
 # ThreadSanitizer configuration needs the process's address space where it
