@@ -80,6 +80,7 @@ Copy-Item -LiteralPath (Join-Path $buildRoot "bin\$Configuration\gamecult_mesh_q
   -Destination $outputRoot -Force
 Copy-Item -LiteralPath (Join-Path $nativeRoot "bin\x64\msquic.dll") -Destination $outputRoot -Force
 Copy-Item -LiteralPath (Join-Path $extractRoot "LICENSE") -Destination (Join-Path $outputRoot "MSQUIC-LICENSE.txt") -Force
+Copy-Item -LiteralPath (Join-Path $extractRoot "THIRD-PARTY-NOTICES") -Destination (Join-Path $outputRoot "OPENSSL-NOTICE.txt") -Force
 
 Write-Host "CultMesh native QUIC runtime: $outputRoot"
 Get-ChildItem -LiteralPath $outputRoot -File | Select-Object Name,Length

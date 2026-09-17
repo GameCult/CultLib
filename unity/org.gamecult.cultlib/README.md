@@ -3,8 +3,10 @@
 This package is generated from the CultLib .NET projects. It carries the same
 CultCache, CultNet, and CultMesh assemblies consumed through NuGet by normal
 .NET applications, staged as Unity-compatible managed plugins. Windows x64
-builds also receive the native MsQuic realtime connector and its Schannel
-runtime; the Microsoft license is included under `Third Party Notices`.
+builds also receive the native MsQuic realtime connector, built against
+OpenSSL (`Microsoft.Native.Quic.MsQuic.OpenSSL` 2.5.9, not Schannel — Schannel's
+MsQuic refuses the PKCS12 credential type both platforms share); the Microsoft
+and OpenSSL license notices are included under `Third Party Notices`.
 
 Build it with `scripts/build-unity-package.ps1`. Do not edit generated plugin
 assemblies in the package output.

@@ -82,12 +82,12 @@ It links the CRT statically (`/MT`), because a Node or Unity host without the
 Visual C++ redistributable cannot load a DLL that imports `vcruntime140.dll`,
 and the failure it reports names no missing runtime; the bridge carries its own.
 
-A rebuild does not reproduce the committed Unity plugin. That plugin
-(`unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/gamecult_mesh_quic_native.dll`,
-40,448 bytes) is the older build — before `/MT` and before the move off
-Schannel — and it still imports `VCRUNTIME140.dll` and `MSVCP140.dll`. The
-current source builds to 302,080 bytes with no CRT import. The committed plugin
-stays the older build until the Unity package build runs and replaces it.
+The committed Unity plugin
+(`unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/gamecult_mesh_quic_native.dll`)
+is this build: 302,080 bytes, `/MT`, OpenSSL MsQuic, no CRT import. It replaced
+an older 40,448-byte build — before `/MT` and before the move off Schannel,
+still importing `VCRUNTIME140.dll` and `MSVCP140.dll` — at the CultLib 1.0.60 /
+Studio 1.4.0 release.
 
 Linux x64, on a Debian 13 host:
 

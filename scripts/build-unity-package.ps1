@@ -145,6 +145,8 @@ Copy-Item -LiteralPath (Join-Path $quicNativeRoot "msquic.dll") -Destination $na
 New-Item -ItemType Directory -Force -Path (Join-Path $outputRoot "Third Party Notices") | Out-Null
 Copy-Item -LiteralPath (Join-Path $quicNativeRoot "MSQUIC-LICENSE.txt") `
   -Destination (Join-Path $outputRoot "Third Party Notices\MSQUIC-LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $quicNativeRoot "OPENSSL-NOTICE.txt") `
+  -Destination (Join-Path $outputRoot "Third Party Notices\OPENSSL-NOTICE.txt")
 
 $meshPackagePath = Join-Path $pluginRoot "GameCult.Mesh.dll"
 $meshPackageVersion = [Reflection.AssemblyName]::GetAssemblyName($meshPackagePath).Version.ToString()
@@ -185,6 +187,8 @@ if ($UpdateTemplate) {
   $templateNoticesRoot = Join-Path $templateRoot "Third Party Notices"
   New-Item -ItemType Directory -Force -Path $templateNoticesRoot | Out-Null
   Copy-Item -LiteralPath (Join-Path $outputRoot "Third Party Notices\MSQUIC-LICENSE.txt") `
+    -Destination $templateNoticesRoot -Force
+  Copy-Item -LiteralPath (Join-Path $outputRoot "Third Party Notices\OPENSSL-NOTICE.txt") `
     -Destination $templateNoticesRoot -Force
   Write-Host "Updated tracked Unity package assemblies: $templatePluginRoot"
 }
