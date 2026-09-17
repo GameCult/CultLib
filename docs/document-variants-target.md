@@ -74,9 +74,20 @@ edited in CultCache Studio:
 
 ## Fork rulings (operator, 2026-09-17)
 
-- **1, granularity: agreed.** Index addressing into lists is out, and addressing reuses
-  CultNet's member-path grammar. The Imagination pass still chooses between stable element
-  identity and whole-element replacement, and that choice comes back as a fork.
+- **1, granularity: stable element identity, ids everywhere** (operator, 2026-09-17: "ids
+  everywhere").
+  - Every object element in a list carries a stable id, minted when the element is created.
+    This is the approach of sequence CRDTs (RGA, YATA/Yjs, Automerge, Fugue).
+  - Matching algorithms (Myers, diff3, GumTree) are heuristics. They fail on look-alike
+    elements such as two `EnergyDraw` behaviors, which is why identity is minted, not
+    inferred.
+  - An override addresses an element id plus a member path in CultNet's grammar. An
+    insertion is a new element anchored after an existing id; a removal names the
+    removed id. Index addressing is out.
+  - Rebasing is deterministic. An override whose element id exists in the new base
+    re-applies. One whose element is missing is an explicit conflict that Studio shows,
+    to keep, retarget or clear; it is never silently retargeted.
+  - Existing stores get ids minted once, by a rewrite.
 - **2, where resolution lives: at load, kept in memory** (operator: "agreed"). Resolution
   computes a variant's complete document from its base chain and its overrides.
   - The cache holds both the stored delta and the resolved document.
