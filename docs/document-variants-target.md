@@ -72,6 +72,25 @@ edited in CultCache Studio:
   variants. The map settles whether it tests the stored delta or the resolved
   document; it must not mean both.
 
+## Fork rulings (operator, 2026-09-17)
+
+- **1, granularity: agreed.** Index addressing into lists is out, and addressing reuses
+  CultNet's member-path grammar. The Imagination pass still chooses between stable element
+  identity and whole-element replacement, and that choice comes back as a fork.
+- **2, where resolution lives: still open.** Here, resolution means computing a
+  variant's complete document from its base chain and its overrides. The operator asked
+  what the fork meant, and it has been explained.
+- **3, cross-store bases: no.** A variant and its base live in the same store.
+- **4, CultNet: deltas.**
+- **5, runtimes: C# first.** TypeScript, Python, Rust and Kotlin refuse a store
+  or snapshot containing variants, loudly, until each implements resolution.
+- **6, type change: open.** The operator called it "a good question".
+- **7, clearing and rebasing.**
+  - Clearing an override removes that member from the variant's stored delta. A member
+    that is not overridden is not stored.
+  - Rebasing (changing a variant's base) is supported. Operator: "rebasing is a nice
+    tool to have, things can get annoying otherwise".
+
 ## Open forks, for the Imagination pass to map and the operator to rule
 
 1. **Override granularity.**
