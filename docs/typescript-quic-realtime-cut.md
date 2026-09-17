@@ -390,8 +390,56 @@ elsewhere it differs by 69, so the figure is only meaningful at a shared path.
 
 **One undocumented step remains** in an otherwise clean path: the README
 hardcodes the container mount, so a newcomer on another checkout must edit the
-line. **Fourth fix batch in Hands**, told to fix the structural cause once
-rather than add another entry at another constant.
+line.
+
+**The fourth fix batch landed** at `25d7de2` (the container mount taken from
+the running checkout rather than one machine's path) and `a937a0b` (the
+scenarios, the seam correction and the new entries).
+
+**Hands rejected Self's diagnosis and gave a better one.** Self had said the
+blind spot was that the hold sat after the wait whose duration was the rule.
+The real cause is that **no committed scenario ever let a timeout finish a
+poll**: both ended their waits with a close, so the timeout governed nothing
+either could observe. The fix is therefore a scenario rather than a seam
+recording. `polltimeout` polls an idle runtime and measures elapsed against
+what was asked, **at two values with non-overlapping bands** — 200 ms in
+[180,500] and 900 ms in [880,1200] — because one value cannot tell a bridge
+honouring the host's timeout from one waiting on a constant that happens to
+equal it, and no constant lies in both bands. No new export, no header change,
+and it works in the shipped shape.
+
+All three constants now die by that scenario: 100 ms, 600 ms and 2000 ms. The
+600 ms case survives both older scenarios and dies to the new one, which is
+the demonstration of what the old ones could not see; Hands kept it as a hand
+check rather than carrying a third constant in the table.
+
+Also landed: Soul's closed-port probe committed as `payloadfit`, reaching the
+two-phase poll in about a millisecond, where the pop-before-copy mutant
+segfaults an optimised Windows build with no sanitizer, five runs of five; an
+entry for the refusal of a call racing a close; an entry for the wake, which
+the table had been silently failing to claim; and the seam's self-description
+corrected, since a held call does leave its scope, which takes the gate,
+decrements and notifies. Release shape unchanged on both targets, with no
+debug exports and no assertion strings.
+
+**Tables now: Linux 18 killed, none surviving, none skipped, exit 0. Windows
+16 killed, none surviving, two honestly skipped, exit 2.** Controls green on
+both.
+
+**A declared equivalence, handed to Soul rather than substituted.** Changing
+the close's wake-all to a wake-one survives, and Hands argues it is equivalent
+rather than uncovered, because the first poller out calls wake-all under the
+gate from its own scope destructor. It recorded the equivalence beside the
+entry and shipped the queue-conditional wake as the loosening instead. This
+campaign's fourth encounter with that defect shape, and the first where the
+answer was an argued equivalence rather than a swap.
+
+Named limits: the 600 ms mutant lives only in the report; `payloadfit` and
+`polltimeout` run only in the assertion configuration, so the pop-before-copy
+kill rests on an unsanitized crash and an exit code rather than an
+address-sanitizer configuration the harness still lacks. **Fifth Soul pass in
+flight**, asked to settle the rules question and to test the two-band argument
+against a mutant that scales or derives its wait rather than replacing it.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
