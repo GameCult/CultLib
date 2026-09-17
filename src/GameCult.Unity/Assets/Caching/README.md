@@ -167,8 +167,10 @@ public sealed class ItemData
   `AssetReference` keeps and `Addressables.LoadAssetAsync<T>` accepts; optional
   engine asset `Type`, named by the consumer; the Studio uses it when it is a
   `UnityEngine.Object` type, refuses to store a built-in resource's GUID since
-  it has no Addressables entry, and warns rather than silently clearing a
-  stored value that no longer resolves)
+  it has no Addressables entry (checked by asking AssetDatabase whether the
+  picked object is a main or sub-asset under `Assets/` or `Packages/`, not by
+  guessing from the GUID's hex digits), and never silently clears a stored
+  value that no longer resolves — it warns and offers a Clear button instead)
 - `CultInspectorDrawer` (on drawer classes)
 
 CultMesh collaboration should feed the same CultCache mutation surface rather

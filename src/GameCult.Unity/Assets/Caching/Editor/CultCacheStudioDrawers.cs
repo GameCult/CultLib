@@ -177,11 +177,20 @@ namespace GameCult.Unity.Caching.Editor
                 GUILayout.MaxHeight(Mathf.Max(textArea.MaxLines, textArea.MinLines, 1) * EditorGUIUtility.singleLineHeight));
         }
 
-        // Every zero-hex GUID that AssetDatabase uses for built-in/generated resources (the ordinary
-        // "all zero" form and the "...f000000000000000" virtual-asset form) has no .meta file and no
-        // Addressables entry, so it cannot be stored as a key.
-        private static bool IsBuiltinResourceGuid(string guid) =>
-            !string.IsNullOrEmpty(guid) && guid.TrimEnd('0', 'f') == string.Empty;
+        // A GUID-string heuristic ("all zero", "...f000...") cannot cover every built-in Unity ships:
+        // "Library/unity default resources" built-ins (verified in 6000.3.24f1, e.g. LegacyRuntime font
+        // and the Cube mesh under GUID 0000000000000000e000000000000000) carry ordinary-looking hex GUIDs
+        // with no all-zero or all-f suffix. Ask AssetDatabase about the object instead: a real project
+        // asset is always either the main asset at its path or one of its sub-assets, and always lives
+        // under Assets/ or Packages/. Built-ins are neither (verified False for both IsMainAsset and
+        // IsSubAsset) and resolve to no path under either root.
+        private static bool IsBuiltinResource(Object asset)
+        {
+            if (asset == null) return false;
+            if (AssetDatabase.IsMainAsset(asset) || AssetDatabase.IsSubAsset(asset)) return false;
+            var path = AssetDatabase.GetAssetPath(asset);
+            return string.IsNullOrEmpty(path) || !(path.StartsWith("Assets/", StringComparison.Ordinal) || path.StartsWith("Packages/", StringComparison.Ordinal));
+        }
 
         // Reads and writes the Addressables key form ruled in docs/addressables-cut.md (operator ruling S):
         // the bare GUID for a main asset, "guid[subAssetName]" for a picked sub-asset. Never rewrites a
@@ -210,19 +219,26 @@ namespace GameCult.Unity.Caching.Editor
                 stale = asset == null;
             }
 
-            if (stale) EditorGUILayout.HelpBox(label + ": stored value \"" + value + "\" does not resolve to an asset.", MessageType.Warning);
+            if (stale)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.HelpBox(label + ": stored value \"" + value + "\" does not resolve to an asset.", MessageType.Warning);
+                    if (GUILayout.Button("Clear", GUILayout.Width(48), GUILayout.Height(EditorGUIUtility.singleLineHeight))) return string.Empty;
+                }
+            }
 
             var next = EditorGUILayout.ObjectField(label, asset, assetType, false);
             if (next == asset) return value;
             if (next == null) return string.Empty;
 
-            var nextGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(next));
-            if (string.IsNullOrEmpty(nextGuid) || IsBuiltinResourceGuid(nextGuid))
+            if (IsBuiltinResource(next))
             {
                 Debug.LogWarning(label + ": \"" + next.name + "\" is a built-in resource with no Addressables GUID. Not stored.");
                 return value;
             }
 
+            var nextGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(next));
             return CultAssetGuidKey.Format(nextGuid, AssetDatabase.IsSubAsset(next) ? next.name : null);
         }
 
