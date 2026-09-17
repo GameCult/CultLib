@@ -38,6 +38,21 @@ if (Test-Path -LiteralPath $outputRoot) {
 }
 
 $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
+
+# docs/semver-policy.md: refuse to build a release whose CHANGELOG.md entry
+# claims a breaking change under too small a bump, or whose version skips or
+# reverses the previous published tag. Runs before the (slow) build below so
+# a bad version number fails fast.
+& node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
+  --package "org.gamecult.cultlib" `
+  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
+  --version $unityPackageVersion `
+  --tag-prefix "cultlib-unity" `
+  --cwd $repoRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
+}
+
 # The tracked DLLs and pdbs are committed beside their source, so none may name a commit or a worktree:
 # Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
 # carries its pdb's content id. ContinuousIntegrationBuild maps the local source path to /_/.

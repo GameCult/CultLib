@@ -42,8 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # fetch-depth: 0 so the semver check below can see every previously
+      # published tag, not just the one that triggered this run.
       - name: Check out CultLib
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -63,6 +67,19 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
             exit 1
           fi
+
+      # docs/semver-policy.md: a breaking change under too small a bump, or a
+      # version that skips or reverses the previous release, fails here
+      # instead of shipping with a number that lies.
+      - name: Verify semver policy
+        if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
+        run: |
+          tagged="${GITHUB_REF_NAME#cultcache-ts-v}"
+          node scripts/check-changelog-semver.mjs \
+            --package "@gamecult/cultcache-ts" \
+            --changelog packages/cultcache-ts/CHANGELOG.md \
+            --version "$tagged" \
+            --tag-prefix cultcache-ts
 
       - name: Build and test
         working-directory: packages/cultcache-ts
@@ -105,15 +122,25 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # fetch-depth: 0 so the semver check below can see every previously
+      # published tag, not just the one that triggered this run.
       - name: Check out CultLib
         if: steps.selected.outputs.run == 'true'
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         if: steps.selected.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Set up Node
+        if: steps.selected.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
 
       - name: Verify the tag matches the manifest version
         if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
@@ -124,6 +151,19 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
             exit 1
           fi
+
+      # docs/semver-policy.md: a breaking change under too small a bump, or a
+      # version that skips or reverses the previous release, fails here
+      # instead of shipping with a number that lies.
+      - name: Verify semver policy
+        if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          tagged="${GITHUB_REF_NAME#${{ matrix.package }}-v}"
+          node scripts/check-changelog-semver.mjs \
+            --package "${{ matrix.package }}" \
+            --changelog packages/${{ matrix.package }}/CHANGELOG.md \
+            --version "$tagged" \
+            --tag-prefix "${{ matrix.package }}"
 
       # Lower layers install from source so a release of one package is tested
       # against the sibling revision it was cut with, not whatever PyPI has.

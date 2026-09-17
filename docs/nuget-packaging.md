@@ -1,5 +1,8 @@
 # NuGet Packaging
 
+See `docs/semver-policy.md` for what a version bump on these packages is
+required to mean and how a release is checked against that before it ships.
+
 CultLib publishes the managed dependency graph as separate packages. The leaf
 package is `GameCult.Mesh`; its NuGet dependencies preserve the CultMesh,
 CultNet, and CultCache ownership boundaries.
