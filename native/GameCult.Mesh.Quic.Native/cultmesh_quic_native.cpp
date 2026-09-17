@@ -83,9 +83,11 @@
 //  - HELD parks a call inside the library until the scenario releases it, so the
 //    close races calls that are genuinely there for as long as the scenario
 //    wants them there, instead of for as long as the schedule happens to give.
-//    It returns true when it parked, and touches nothing afterwards: a bridge
-//    that frees the runtime out from under a held call is then reported by the
-//    scenario rather than crashing inside it.
+//    It returns true when it parked, and a held call makes no further call of
+//    its own; what it does still do is leave its CallScope, which takes the gate,
+//    decrements the count and notifies. That is the ordinary exit every export
+//    makes, and it is the bridge's wait — not the hold — that keeps the runtime
+//    alive underneath it.
 #if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
 #define CULTMESH_QUIC_DEBUG_PEAK(count) DebugRaisePeak(count)
 #define CULTMESH_QUIC_DEBUG_AT_CLOSE(count) DebugRecordCallsAtClose(count)
@@ -1172,12 +1174,16 @@ CULTMESH_API int32_t cultmesh_quic_next_event(
 
     std::unique_lock<std::mutex> lock(runtime->gate);
     if (runtime->events.empty() && timeout_ms > 0) {
-        runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+        // The host's timeout bounds the wait; an event or the close ends it
+        // sooner, and `woken` is which of the two happened.
+        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),
             [runtime] { return !runtime->events.empty() || runtime->closing; });
         // Development builds only; a no-op unless a scenario has armed the hold.
-        // A held call returns the same 0 an empty queue would have, and touches
-        // the runtime no further.
-        if (CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;
+        // A held call returns the same 0 an empty queue would have, and makes no
+        // further call of its own. Only a woken call is held: one whose own
+        // timeout expired is on its way out, and parking it would let a scenario
+        // report a call the bridge kept when what kept it was the fixture.
+        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;
     }
     if (runtime->events.empty()) return 0;
 

@@ -47,8 +47,11 @@
 // dependencies:
 //
 //   docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-//   docker run --rm --security-opt seccomp=unconfined -v F:\Projects\CultLib:/src -w /src \
+//   docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src `
 //       cultlib-quic-native-dev bash -lc "node scripts/mutate-cultmesh.mjs native"
+//
+// Both from the repository root; the mount is that root wherever it is, as
+// `${PWD}` in PowerShell or `$(pwd)` in a POSIX shell.
 //
 // The seccomp flag is required, not cautious: the ThreadSanitizer configuration
 // is re-executed under `setarch -R`, and Docker's default profile denies the
@@ -455,10 +458,164 @@ const mutations = [
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     // Still a wait, still the host's timeout in the signature, and the poller is
-    // gone a millisecond later. A scenario that only sleeps cannot tell.
+    // gone a millisecond later. This used to die for the wrong reason — 1 ms is
+    // shorter than `closerace`'s 50 ms settle, so the poller left before the
+    // close began and the scenario complained about its own fixture. It dies on
+    // `polltimeout` now, which measures the wait against what was asked for.
     rule: "a positive timeout blocks until an event or the close (loosening: it waits a token 1 ms)",
     old: "std::chrono::milliseconds(timeout_ms),",
     new: "std::chrono::milliseconds(1),",
+  },
+  // And the rule underneath that one, which nothing reached until `polltimeout`:
+  // the duration waited on is the host's, not one of the bridge's own. Both
+  // scenarios that came before it end their waits with a close, so the timeout
+  // governed nothing either could see and any constant at all passed them. A
+  // 2000 ms constant survived the entire Linux matrix and Windows: a host asking
+  // for five seconds silently got two, and every consumer's poll loop spun at two
+  // and a half times the rate it asked for.
+  //
+  // `polltimeout` asks twice, 200 ms and 900 ms, and measures. That is what makes
+  // a constant unsurvivable rather than merely unlucky: no single value sits in
+  // both bands, so the entries below are two sides of one rule and not two
+  // numbers to be tuned against.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the wait is on the host's timeout (revert: a shorter constant of the bridge's own)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds(100),",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The lengthening, which is the half that looks harmless: every poll still
+    // blocks, every poll still returns, and nothing anywhere reports an error.
+    rule: "the wait is on the host's timeout (loosening: a longer constant of the bridge's own)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds(2000),",
+  },
+  // The close's wake. It was defended by committed code and had no entry, so the
+  // table understated what `closerace` covers; these say it.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the close wakes every blocked poll (revert: the close marks and waits without waking)",
+    old: "        runtime->signal.notify_all();\n" +
+      "        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);\n",
+    new: "        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The plausible reading: the wait is for events, so wake it when there are
+    // events. The wake a close owes has nothing to do with the queue.
+    //
+    // Not listed beside it: narrowing `notify_all` to `notify_one`. It survived
+    // when tried, and it is equivalent rather than uncovered — the first poller
+    // out notifies all under the gate from its own CallScope destructor, so the
+    // wake propagates whatever the close asked for.
+    rule: "the close wakes every blocked poll (loosening: it wakes only when something is queued)",
+    old: "        runtime->signal.notify_all();\n" +
+      "        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);\n",
+    new: "        if (!runtime->events.empty()) runtime->signal.notify_all();\n" +
+      "        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);\n",
+  },
+  // Section 4's other half: a call that races the start of a close is refused.
+  // The header has promised it since it was written and nothing checked it. A
+  // call admitted instead increments the in-flight count behind a wait that has
+  // already read it, and that wait can then be left on a count that only reaches
+  // zero if the late caller happens to leave.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "a call racing the start of a close is refused (revert: the scope admits it)",
+    old: "        if (runtime_->closing) return;\n",
+    new: "",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The reading that sounds conservative: if other calls are still inside, the
+    // close is waiting for them anyway, so one more can do no harm. It is the
+    // exact case the refusal exists for.
+    rule: "a call racing the start of a close is refused (loosening: only when nothing else is inside)",
+    old: "        if (runtime_->closing) return;\n",
+    new: "        if (runtime_->closing && runtime_->active_calls == 0) return;\n",
+  },
+  // The two-phase poll, which is how every host sizes its buffer. Reaching it
+  // needs no listener, no credential and no established connection: a client
+  // opening to a closed loopback port is refused in about a millisecond and the
+  // refusal always carries a non-empty reason, which is an 87-byte payload.
+  // It was written off as unreachable and is neither unreachable nor safe —
+  // moving the pop above the copy crashes outright.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "a payload that does not fit is refused without being consumed (revert: the refusal pops)",
+    old: "    if (required > payload_capacity) {\n" +
+      "        *out_required = required;\n" +
+      "        return 2;\n" +
+      "    }\n",
+    new: "    if (required > payload_capacity) {\n" +
+      "        *out_required = required;\n" +
+      "        runtime->events.pop_front();\n" +
+      "        return 2;\n" +
+      "    }\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The helpful shape: give the caller what fits, tell it what it missed. It
+    // reports 2, so a host obeying the header asks again — for an event that is
+    // no longer there.
+    rule: "a payload that does not fit is refused without being consumed (loosening: it truncates)",
+    old: "    if (required > payload_capacity) {\n" +
+      "        *out_required = required;\n" +
+      "        return 2;\n" +
+      "    }\n",
+    new: "    if (required > payload_capacity) {\n" +
+      "        *out_required = required;\n" +
+      "        *out_event = queued.header;\n" +
+      "        if (payload_capacity > 0 && payload != nullptr)\n" +
+      "            std::memcpy(payload, queued.payload.data(), static_cast<size_t>(payload_capacity));\n" +
+      "        runtime->events.pop_front();\n" +
+      "        return 2;\n" +
+      "    }\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the event is copied before it is popped (revert: the pop moves above the copy)",
+    old: "    *out_event = queued.header;\n" +
+      "    if (required > 0 && payload != nullptr)\n" +
+      "        std::memcpy(payload, queued.payload.data(), static_cast<size_t>(required));\n" +
+      "    *out_required = required;\n" +
+      "    runtime->events.pop_front();\n",
+    new: "    runtime->events.pop_front();\n" +
+      "    *out_event = queued.header;\n" +
+      "    if (required > 0 && payload != nullptr)\n" +
+      "        std::memcpy(payload, queued.payload.data(), static_cast<size_t>(required));\n" +
+      "    *out_required = required;\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // `queued` is a reference into the deque, and the pop destroys what it names.
+    // This is the spelling that hides that: the header is copied first, so only
+    // the payload — the part that is a pointer into a freed vector — is read
+    // afterwards. Both die; this one dies with the header already correct, which
+    // is why the payload bytes are checked and not only their length.
+    rule: "the event is copied before it is popped (loosening: only the payload copy moves after it)",
+    old: "    *out_event = queued.header;\n" +
+      "    if (required > 0 && payload != nullptr)\n" +
+      "        std::memcpy(payload, queued.payload.data(), static_cast<size_t>(required));\n" +
+      "    *out_required = required;\n" +
+      "    runtime->events.pop_front();\n",
+    new: "    *out_event = queued.header;\n" +
+      "    *out_required = required;\n" +
+      "    runtime->events.pop_front();\n" +
+      "    if (required > 0 && payload != nullptr)\n" +
+      "        std::memcpy(payload, queued.payload.data(), static_cast<size_t>(required));\n",
   },
   {
     target: "native",
@@ -516,30 +673,29 @@ function testsPass(workspace) {
 // ThreadSanitizer build is the only thing that sees a notify land on a destroyed
 // condition variable, and it exists on linux-x64 alone.
 //
-// `holdclose` runs only where the development seam exists, which is the
-// assertion build: it drives the quiesce through that seam rather than through a
-// sleep, and it is what kills the rules about counting a host call at all. The
-// ThreadSanitizer build deliberately keeps the shipped shape — no assertions, no
-// seam — because what it is there for is the race in a library built like the
-// one that ships.
+// `holdclose` and `latecall` run only where the development seam exists, which
+// is the assertion build: they drive the quiesce and the refusal through that
+// seam rather than through a sleep, and they are what kill the rules about
+// counting a host call at all. The ThreadSanitizer build deliberately keeps the
+// shipped shape — no assertions, no seam — because what it is there for is the
+// race in a library built like the one that ships.
+//
+// `polltimeout` measures a wait against the timeout it asked for, so it is run
+// only where nothing distorts the clock: a sanitizer's slowdown would make its
+// bands meaningless, which is the honest limit of that entry.
+const assertScenarios = [
+  ["holdclose", "3", "64"],
+  ["latecall", "5"],
+  ["polltimeout", "3"],
+  ["payloadfit", "3"],
+  ["closerace", "20", "256"],
+];
 const nativeConfigurations = platform === "linux-x64"
   ? [
-      {
-        name: "asserts",
-        asserts: "ON",
-        sanitizer: null,
-        scenarios: [["holdclose", "3", "64"], ["closerace", "20", "256"]],
-      },
+      { name: "asserts", asserts: "ON", sanitizer: null, scenarios: assertScenarios },
       { name: "tsan", asserts: "OFF", sanitizer: "thread", scenarios: [["closerace", "20", "256"]] },
     ]
-  : [
-      {
-        name: "asserts",
-        asserts: "ON",
-        sanitizer: null,
-        scenarios: [["holdclose", "3", "64"], ["closerace", "20", "256"]],
-      },
-    ];
+  : [{ name: "asserts", asserts: "ON", sanitizer: null, scenarios: assertScenarios }];
 
 function msquicArguments() {
   if (platform === "win32-x64") {
