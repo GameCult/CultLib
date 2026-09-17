@@ -560,11 +560,13 @@ hits only a KDTree file).
 
 Versions bumped from the original 1.0.60/1.4.0 plan: `codex/asset-guid-attribute`
 took 1.0.60/1.4.0 for its own release (replacing the asset path attribute with
-`CultInspectorAssetGuid`, then adding sub-asset key support), landed and
-released first. This branch must rebase onto and rebuild after
-`codex/asset-guid-attribute` before its own release: same files
-(`CultInspectorModel.cs`, the Studio drawers, the plugin DLLs/pdbs), so a plain
-merge would silently drop one side's binary rebuild.
+`CultInspectorAssetGuid`, then adding sub-asset key support, then a built-in
+refusal fix and a stale-value Clear button); it releases first. This branch
+must rebase onto and rebuild after `codex/asset-guid-attribute` before its own
+release: same files (`CultInspectorModel.cs`, the Studio drawers, the plugin
+DLLs/pdbs), so a plain merge reports binary conflicts on the plugin DLLs/pdbs
+rather than silently picking one side; resolve by taking either side's text
+changes as needed and then rebuilding, not by hand-merging the binaries.
 
 - **Repo and branch:** CultLib `main`. Merge `claude/studio-grouping`
   (fast-forward or merge commit), then create the release commit in the same
@@ -577,7 +579,9 @@ merge would silently drop one side's binary rebuild.
     `x86_64/*.dll`, via
     `powershell -File scripts\build-unity-package.ps1 -UpdateTemplate`. The
     script derives the assembly version from the package.json and checks it
-    (`:150-153`).
+    (`:152-155` after the rebase onto `codex/asset-guid-attribute`, whose
+    `0c9cb57` inserted two lines above this block for the OpenSSL notice;
+    it is `:150-153` on this branch's own unrebased copy of the script).
 - **Tags on the release commit:** `cultlib-unity-v1.0.61` and
   `caching-unity-v1.5.0`. That is two tags in one push, under GitHub's
   three-tag workflow limit (migration cut map header). No `cultmath-unity` tag,
