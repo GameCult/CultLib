@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts keep LF in the working tree as well as in the index. Left to
+# `text=auto`, a Windows clone writes them with carriage returns, and the
+# documented Linux path then dies inside the container in under a second: the
+# shebang reads as the interpreter `bash\r`, which does not exist. Nothing about
+# that failure names line endings, and the same clone builds and tests fine
+# everywhere else, so it reads as a broken image rather than a broken checkout.
+*.sh text eol=lf
