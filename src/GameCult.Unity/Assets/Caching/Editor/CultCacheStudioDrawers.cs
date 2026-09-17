@@ -167,14 +167,7 @@ namespace GameCult.Unity.Caching.Editor
 
         private static string DrawString(string label, string value, CultInspectorMetadata metadata)
         {
-            if (metadata.AssetGuid != null)
-            {
-                var assetType = metadata.AssetGuid.AssetType != null && typeof(Object).IsAssignableFrom(metadata.AssetGuid.AssetType) ? metadata.AssetGuid.AssetType : typeof(Object);
-                var path = string.IsNullOrEmpty(value) ? string.Empty : AssetDatabase.GUIDToAssetPath(value);
-                var asset = string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath(path, assetType);
-                var next = EditorGUILayout.ObjectField(label, asset, assetType, false);
-                return next == asset ? value : next == null ? string.Empty : AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(next));
-            }
+            if (metadata.AssetGuid != null) return DrawAssetGuid(label, value, metadata.AssetGuid);
 
             var textArea = metadata.TextArea;
             if (textArea == null) return EditorGUILayout.TextField(label, value ?? string.Empty);
@@ -182,6 +175,55 @@ namespace GameCult.Unity.Caching.Editor
             return EditorGUILayout.TextArea(value ?? string.Empty,
                 GUILayout.MinHeight(Mathf.Max(textArea.MinLines, 1) * EditorGUIUtility.singleLineHeight),
                 GUILayout.MaxHeight(Mathf.Max(textArea.MaxLines, textArea.MinLines, 1) * EditorGUIUtility.singleLineHeight));
+        }
+
+        // Every zero-hex GUID that AssetDatabase uses for built-in/generated resources (the ordinary
+        // "all zero" form and the "...f000000000000000" virtual-asset form) has no .meta file and no
+        // Addressables entry, so it cannot be stored as a key.
+        private static bool IsBuiltinResourceGuid(string guid) =>
+            !string.IsNullOrEmpty(guid) && guid.TrimEnd('0', 'f') == string.Empty;
+
+        // Reads and writes the Addressables key form ruled in docs/addressables-cut.md (operator ruling S):
+        // the bare GUID for a main asset, "guid[subAssetName]" for a picked sub-asset. Never rewrites a
+        // stored value on its own — a value that fails to parse or resolve stays exactly as stored, with
+        // a warning shown alongside it, until the operator picks a new asset.
+        private static string DrawAssetGuid(string label, string value, CultInspectorAssetGuidAttribute attribute)
+        {
+            var assetType = attribute.AssetType != null && typeof(Object).IsAssignableFrom(attribute.AssetType) ? attribute.AssetType : typeof(Object);
+            Object asset = null;
+            var stale = false;
+
+            if (!string.IsNullOrEmpty(value))
+            {
+                if (CultAssetGuidKey.TryParse(value, out var guid, out var subAssetName))
+                {
+                    var path = AssetDatabase.GUIDToAssetPath(guid);
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        asset = subAssetName == null
+                            ? AssetDatabase.LoadAssetAtPath(path, assetType)
+                            : AssetDatabase.LoadAllAssetRepresentationsAtPath(path)
+                                .FirstOrDefault(candidate => candidate != null && candidate.name == subAssetName && assetType.IsInstanceOfType(candidate));
+                    }
+                }
+
+                stale = asset == null;
+            }
+
+            if (stale) EditorGUILayout.HelpBox(label + ": stored value \"" + value + "\" does not resolve to an asset.", MessageType.Warning);
+
+            var next = EditorGUILayout.ObjectField(label, asset, assetType, false);
+            if (next == asset) return value;
+            if (next == null) return string.Empty;
+
+            var nextGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(next));
+            if (string.IsNullOrEmpty(nextGuid) || IsBuiltinResourceGuid(nextGuid))
+            {
+                Debug.LogWarning(label + ": \"" + next.name + "\" is a built-in resource with no Addressables GUID. Not stored.");
+                return value;
+            }
+
+            return CultAssetGuidKey.Format(nextGuid, AssetDatabase.IsSubAsset(next) ? next.name : null);
         }
 
         private object DrawInteger(string label, Type type, object value, CultInspectorMetadata metadata)

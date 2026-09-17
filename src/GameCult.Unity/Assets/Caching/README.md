@@ -162,8 +162,13 @@ public sealed class ItemData
 - `CultInspectorTextArea`
 - `CultInspectorRange`
 - `CultInspectorAssetGuid` (a string member holding an engine asset's stable
-  identity, in Unity the `.meta` GUID; optional engine asset `Type`, named by
-  the consumer; the Studio uses it when it is a `UnityEngine.Object` type)
+  identity: in Unity, the `.meta` GUID for a main asset, or `guid[subAssetName]`
+  when a sub-asset such as one sprite of a sheet is picked — the same key form
+  `AssetReference` keeps and `Addressables.LoadAssetAsync<T>` accepts; optional
+  engine asset `Type`, named by the consumer; the Studio uses it when it is a
+  `UnityEngine.Object` type, refuses to store a built-in resource's GUID since
+  it has no Addressables entry, and warns rather than silently clearing a
+  stored value that no longer resolves)
 - `CultInspectorDrawer` (on drawer classes)
 
 CultMesh collaboration should feed the same CultCache mutation surface rather
