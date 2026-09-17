@@ -77,14 +77,22 @@ edited in CultCache Studio:
 - **1, granularity: agreed.** Index addressing into lists is out, and addressing reuses
   CultNet's member-path grammar. The Imagination pass still chooses between stable element
   identity and whole-element replacement, and that choice comes back as a fork.
-- **2, where resolution lives: still open.** Here, resolution means computing a
-  variant's complete document from its base chain and its overrides. The operator asked
-  what the fork meant, and it has been explained.
+- **2, where resolution lives: at load, kept in memory** (operator: "agreed"). Resolution
+  computes a variant's complete document from its base chain and its overrides.
+  - The cache holds both the stored delta and the resolved document.
+  - A base edit re-resolves its variants inside the same commit, so watches and indexes
+    observe the change atomically.
+  - Compare-exchange (`Expect`) tests the stored delta. The resolved document is derived.
 - **3, cross-store bases: no.** A variant and its base live in the same store.
 - **4, CultNet: deltas.**
 - **5, runtimes: C# first.** TypeScript, Python, Rust and Kotlin refuse a store
   or snapshot containing variants, loudly, until each implements resolution.
-- **6, type change: open.** The operator called it "a good question".
+- **6, type change: the same concrete type only** (operator: "agreed").
+  - An override can only name members the base type has, and rebasing requires the same
+    type.
+  - A variant whose type differs from its base's is refused loudly.
+  - Subtype variants are parked until real content needs a template base. A record
+    flagged as a template, not a real item, may be the smaller feature.
 - **7, clearing and rebasing.**
   - Clearing an override removes that member from the variant's stored delta. A member
     that is not overridden is not stored.
