@@ -84,6 +84,7 @@ if ($LASTEXITCODE -ne 0) {
 New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $templateRoot "package.json") -Destination $outputRoot
 Copy-Item -LiteralPath (Join-Path $templateRoot "README.md") -Destination $outputRoot
+Copy-Item -LiteralPath (Join-Path $templateRoot "CHANGELOG.md") -Destination $outputRoot
 
 $expectedAssemblies = @(
   "ConcurrentCollections.dll",
