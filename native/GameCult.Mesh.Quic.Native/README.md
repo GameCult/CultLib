@@ -110,8 +110,11 @@ mutation harness that drives the runtime-lifetime scenarios is a Node script and
 a container that cannot run it cannot check the bridge it just built:
 
     docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-    docker run --rm --security-opt seccomp=unconfined -v F:\Projects\CultLib:/src -w /src \
+    docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src `
         cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+
+Both lines are run from the repository root, and the mount is that root wherever
+it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell.
 
 `--security-opt seccomp=unconfined` is load-bearing, not caution. The
 ThreadSanitizer configuration needs the process's address space where it expects
