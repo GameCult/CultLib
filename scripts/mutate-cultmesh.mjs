@@ -559,10 +559,34 @@ const mutations = [
     // The plausible reading: the wait is for events, so wake it when there are
     // events. The wake a close owes has nothing to do with the queue.
     //
-    // Not listed beside it: narrowing `notify_all` to `notify_one`. It survived
-    // when tried, and it is equivalent rather than uncovered — the first poller
-    // out notifies all under the gate from its own CallScope destructor, so the
-    // wake propagates whatever the close asked for.
+    // Not listed beside it: narrowing the close's `notify_all` to `notify_one`.
+    // It survived when tried, and it is equivalent rather than uncovered — but
+    // the equivalence rests on two premises together, and neither alone carries
+    // it, so they are written here where the claim can be checked instead of
+    // taken:
+    //
+    //  - `closing` is set permanently under the gate before the notify and is in
+    //    every waiter's predicate, so once a close has begun no poller can block
+    //    at all. The set of waiters is therefore fixed when the close wakes one.
+    //  - each exiting call's own CallScope destructor takes the gate, decrements
+    //    and wakes everyone. So one wake is enough to start a chain that reaches
+    //    all of them.
+    //
+    // Narrowing *both* of those to `notify_one` also survived, and that one is
+    // not equivalent by any argument: a wake consumed by the closer, which waits
+    // on the same variable for the count to reach zero, re-checks a count that
+    // is still non-zero and goes back to waiting, and the chain stops with the
+    // remaining pollers sitting out their timeouts. It passes on wait-queue
+    // ordering alone — the pollers are all queued before the closer, so the head
+    // of a FIFO queue is never the closer until it is the only waiter left.
+    //
+    // That is recorded as unreached, not unreachable. A scenario cannot force it
+    // while the first premise holds, because the only way to put the closer
+    // ahead of a poller in that queue is a poller that blocks after the close
+    // has begun, which is the thing premise one rules out. Reaching it would
+    // take a seam that controls which waiter a notify goes to, which does not
+    // exist and is not obviously worth building. The standard does not promise
+    // FIFO, so the survival is the implementation's, not the code's.
     rule: "the close wakes every blocked poll (loosening: it wakes only when something is queued)",
     old: "        runtime->signal.notify_all();\n" +
       "        CULTMESH_QUIC_DEBUG_AT_CLOSE(runtime->active_calls);\n",
