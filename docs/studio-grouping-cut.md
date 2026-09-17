@@ -556,22 +556,30 @@ hits only a KDTree file).
 - **Ledger:** Window about +70 to 90 lines, drawers about +25 lines, README
   about +20 lines. Two inline decisions deleted.
 
-### Cut 3. CultLib release: cultlib Unity 1.0.60, Studio 1.4.0
+### Cut 3. CultLib release: cultlib Unity 1.0.61, Studio 1.5.0
+
+Versions bumped from the original 1.0.60/1.4.0 plan: `codex/asset-guid-attribute`
+took 1.0.60/1.4.0 for its own release (replacing the asset path attribute with
+`CultInspectorAssetGuid`, then adding sub-asset key support), landed and
+released first. This branch must rebase onto and rebuild after
+`codex/asset-guid-attribute` before its own release: same files
+(`CultInspectorModel.cs`, the Studio drawers, the plugin DLLs/pdbs), so a plain
+merge would silently drop one side's binary rebuild.
 
 - **Repo and branch:** CultLib `main`. Merge `claude/studio-grouping`
   (fast-forward or merge commit), then create the release commit in the same
   clean worktree. Q5-A is assumed.
 - **Files:**
-  - `unity/org.gamecult.cultlib/package.json:4`: `1.0.59` → `1.0.60`.
-  - `src/GameCult.Unity/Assets/Caching/package.json:4`: `1.3.1` → `1.4.0`,
-    because this is new user-facing capability. `:13`: `"org.gamecult.cultlib": "1.0.60"`.
+  - `unity/org.gamecult.cultlib/package.json:4`: `1.0.60` → `1.0.61`.
+  - `src/GameCult.Unity/Assets/Caching/package.json:4`: `1.4.0` → `1.5.0`,
+    because this is new user-facing capability. `:13`: `"org.gamecult.cultlib": "1.0.61"`.
   - `unity/org.gamecult.cultlib/Runtime/Plugins/*.dll|pdb` and
     `x86_64/*.dll`, via
     `powershell -File scripts\build-unity-package.ps1 -UpdateTemplate`. The
     script derives the assembly version from the package.json and checks it
     (`:150-153`).
-- **Tags on the release commit:** `cultlib-unity-v1.0.60` and
-  `caching-unity-v1.4.0`. That is two tags in one push, under GitHub's
+- **Tags on the release commit:** `cultlib-unity-v1.0.61` and
+  `caching-unity-v1.5.0`. That is two tags in one push, under GitHub's
   three-tag workflow limit (migration cut map header). No `cultmath-unity` tag,
   because CultMath is unchanged.
 - **Verification:**
@@ -608,8 +616,8 @@ settles. Cuts 1-3 do not depend on it.
   - `Directory.Build.props:5` `CultLibRevision`: set it to the Cut 3 release
     commit's full SHA. Note that it lives in props, not targets; the check is in
     `Directory.Build.targets:2-22`.
-  - `Packages/manifest.json:53`: `#caching-unity-v1.3.1` → `#caching-unity-v1.4.0`.
-    `:54`: `#cultlib-unity-v1.0.59` → `#cultlib-unity-v1.0.60`. `:55`
+  - `Packages/manifest.json:53`: `#caching-unity-v1.4.0` → `#caching-unity-v1.5.0`.
+    `:54`: `#cultlib-unity-v1.0.60` → `#cultlib-unity-v1.0.61`. `:55`
     `cultmath-unity-v0.2.3` is unchanged. Unity rewrites
     `Packages/packages-lock.json`; commit that too.
   - `Assets/Scripts/ServerShared/ItemData.cs`, under Q1-B:
