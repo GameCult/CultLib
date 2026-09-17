@@ -21,6 +21,7 @@
 //   cultmesh_quic_native_tests holdclose [iterations] [pollers]
 //   cultmesh_quic_native_tests polltimeout [iterations]
 //   cultmesh_quic_native_tests latecall [iterations]
+//   cultmesh_quic_native_tests holdtimeout [iterations]
 //
 // `closerace` hunts the race: many pollers, many iterations, and whatever the
 // schedule gives. `holdclose` takes the guessing out of it — the bridge's
@@ -34,6 +35,10 @@
 // passes both. `polltimeout` is the one that lets the timeout govern the return
 // and measures it. `latecall` covers the other half of section 4: a call that
 // races the start of a close is refused rather than counted behind its wait.
+// `holdtimeout` covers the seam's own rule, which nothing else is in a position
+// to see: the hold parks a call the wait woke and not one whose own timeout
+// expired, so the quiesce the hold scenarios assert is the bridge's doing and
+// not the fixture's.
 //
 // Exit code 0 means every assertion held. Anything else, including a sanitizer
 // abort or the bridge's own assertion, is a failure. Under ThreadSanitizer run
@@ -569,6 +574,69 @@ std::string LateCallOnce() {
     return {};
 }
 
+// How long `holdtimeout`'s poll asks for, and how long the hold stays armed
+// under it. The gap between them is the whole measurement: a poll the hold
+// parks leaves when the hold is released, so its elapsed time lands at the
+// second number instead of the first.
+constexpr int32_t kHeldTimeoutPollMs = 150;
+constexpr int kHoldArmedMs = 800;
+
+// The seam's own rule, and the only scenario that can see it: the hold parks a
+// call the wait woke, and not one whose own timeout expired.
+//
+// Everything else that arms the hold parks a woken call, so the guard governs
+// nothing either of them observes — the timeout scenario never arms the hold,
+// and the hold scenarios never let a timeout expire, so nothing was ever in
+// both states at once and the guard could be deleted with every scenario still
+// green. This puts one call in both states: the hold is armed, and the runtime
+// is idle, so the wait ends on the timeout and the call is on its way out.
+//
+// It matters because a scenario that parked such a call would then report the
+// bridge keeping a host call inside the library when what kept it was the
+// fixture — the quiesce numbers `holdclose` asserts would be the seam's, not
+// the bridge's.
+std::string HoldTimeoutOnce() {
+    cultmesh_quic_debug_hold_calls(1);
+    void* runtime = nullptr;
+    const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
+    if (opened != 0 || runtime == nullptr) {
+        cultmesh_quic_debug_hold_calls(0);
+        return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
+    }
+
+    // On a thread of its own, because a parked call does not come back until the
+    // release below and this thread is what releases it.
+    TimedPoll poll{};
+    std::thread poller([runtime, &poll] { poll = PollFor(runtime, kHeldTimeoutPollMs); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kHoldArmedMs));
+    cultmesh_quic_debug_hold_calls(0);
+    poller.join();
+    cultmesh_quic_runtime_close(runtime);
+
+    if (poll.result != 0)
+        return "a poll ended by its own timeout returned " + std::to_string(poll.result) +
+            ", not the 0 an idle runtime owes it";
+    if (poll.elapsed_ms < kHeldTimeoutPollMs - kEarlyToleranceMs)
+        return "a poll asking for " + std::to_string(kHeldTimeoutPollMs) + " ms returned after " +
+            std::to_string(poll.elapsed_ms) + " ms, so the fixture never let its timeout run out";
+    if (poll.elapsed_ms > kHeldTimeoutPollMs + LateToleranceMs(kHeldTimeoutPollMs))
+        return "a poll asking for " + std::to_string(kHeldTimeoutPollMs) + " ms returned after " +
+            std::to_string(poll.elapsed_ms) + " ms: the hold parked a call its own timeout had "
+            "already ended, and it left when the hold did";
+    return {};
+}
+
+int HoldTimeout(int iterations) {
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        const std::string failure = HoldTimeoutOnce();
+        if (!failure.empty())
+            return Fail("holdtimeout iteration " + std::to_string(iteration) + ": " + failure);
+    }
+    std::printf("holdtimeout %dx: ok\n", iterations);
+    return 0;
+}
+
 int LateCall(int iterations) {
     for (int iteration = 0; iteration < iterations; ++iteration) {
         const std::string failure = LateCallOnce();
@@ -606,7 +674,8 @@ int CloseRace(int iterations, int pollers) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: %s closerace|holdclose|polltimeout|payloadfit|latecall [iterations] [pollers]\n",
+            "usage: %s closerace|holdclose|holdtimeout|polltimeout|payloadfit|latecall "
+            "[iterations] [pollers]\n",
             argv[0]);
         return 2;
     }
@@ -620,9 +689,10 @@ int main(int argc, char** argv) {
     if (scenario == "closerace") return CloseRace(iterations, pollers);
     if (scenario == "polltimeout") return PollTimeout(iterations);
     if (scenario == "payloadfit") return PayloadFit(iterations);
-    if (scenario == "holdclose" || scenario == "latecall") {
+    if (scenario == "holdclose" || scenario == "latecall" || scenario == "holdtimeout") {
 #if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
         if (scenario == "latecall") return LateCall(iterations);
+        if (scenario == "holdtimeout") return HoldTimeout(iterations);
         return HoldClose(iterations, pollers);
 #else
         std::fprintf(stderr,

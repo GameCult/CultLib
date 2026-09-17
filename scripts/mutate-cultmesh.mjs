@@ -519,6 +519,30 @@ const mutations = [
     old: "std::chrono::milliseconds(timeout_ms),",
     new: "std::chrono::milliseconds((std::min)(timeout_ms, 1000)),",
   },
+  // The seam's own rule, and the only non-comment source change of the last pass
+  // that nothing pinned. It is development-only and folds away in release, so
+  // nothing shipped was at risk; it is still the shape this campaign keeps
+  // finding, a change justified by a scenario that cannot observe it. The
+  // timeout scenario never armed the hold and the hold scenarios never let a
+  // timeout expire, so no call was ever in both states and the guard could be
+  // deleted with everything green. `holdtimeout` puts one call in both.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the hold parks only a call the wait woke (revert: it parks whatever reaches it)",
+    old: "        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
+    new: "        if (CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The spelling nobody would look twice at: the same two conditions, the
+    // other way round. The hold blocks, so the order is the rule — asked first,
+    // it parks the call and then decides whether it should have.
+    rule: "the hold parks only a call the wait woke (loosening: it decides after parking)",
+    old: "        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
+    new: "        if (CULTMESH_QUIC_DEBUG_HELD(lock) && woken) return 0;\n",
+  },
   // The close's wake. It was defended by committed code and had no entry, so the
   // table understated what `closerace` covers; these say it.
   {
@@ -698,19 +722,21 @@ function testsPass(workspace) {
 // ThreadSanitizer build is the only thing that sees a notify land on a destroyed
 // condition variable, and it exists on linux-x64 alone.
 //
-// `holdclose` and `latecall` run only where the development seam exists, which
-// is the assertion build: they drive the quiesce and the refusal through that
-// seam rather than through a sleep, and they are what kill the rules about
-// counting a host call at all. The ThreadSanitizer build deliberately keeps the
-// shipped shape — no assertions, no seam — because what it is there for is the
-// race in a library built like the one that ships.
+// `holdclose`, `latecall` and `holdtimeout` run only where the development seam
+// exists, which is the assertion build: they drive the quiesce and the refusal
+// through that seam rather than through a sleep, and they are what kill the
+// rules about counting a host call at all. The ThreadSanitizer build
+// deliberately keeps the shipped shape — no assertions, no seam — because what
+// it is there for is the race in a library built like the one that ships.
 //
-// `polltimeout` measures a wait against the timeout it asked for, so it is run
-// only where nothing distorts the clock: a sanitizer's slowdown would make its
-// bands meaningless, which is the honest limit of that entry.
+// `polltimeout` and `holdtimeout` both measure a wait against the timeout it
+// asked for, so they are run only where nothing distorts the clock: a
+// sanitizer's slowdown would make their bands meaningless, which is the honest
+// limit of those entries.
 const assertScenarios = [
   ["holdclose", "3", "64"],
   ["latecall", "5"],
+  ["holdtimeout", "3"],
   ["polltimeout", "3"],
   ["payloadfit", "3"],
   ["closerace", "20", "256"],
