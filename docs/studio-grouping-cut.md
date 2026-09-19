@@ -606,11 +606,14 @@ changes as needed and then rebuilding, not by hand-merging the binaries.
 
 ### Cut 4. Aetheria: re-pin CultLib and annotate grouping
 
-**Blocked (2026-09-17).** The operator ruled that a crafted item's manufacturer and
-optional branding belong to its production lot, after Njordr's lot ontology, so
-`ItemData.Manufacturer` leaves the design. Grouping `GearData` by `Manufacturer`
-is therefore not the target. This cut is re-mapped once that schema ruling
-settles. Cuts 1-3 do not depend on it.
+**Unblocked, needs re-mapping (2026-09-19).** The operator ruled that a crafted
+item's manufacturer and optional branding belong to its production lot, after
+Njordr's lot ontology, so `ItemData.Manufacturer` leaves the design. Grouping
+`GearData` by `Manufacturer` is therefore not the target. That schema ruling has
+now settled: Aetheria's provenance schema cut closed at `46efccbe` and merged to
+master at `9b85211f`, and branding is derived from the lot's `ProvenanceLedger`
+rather than stored on the design. This cut is waiting on a fresh Imagination pass
+against the landed schema, not on the ruling. Cuts 1-3 do not depend on it.
 
 
 - **Repo and branch:** Aetheria `codex/cultcache-cutover`, the current branch.
