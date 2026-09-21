@@ -495,6 +495,23 @@ restored to a different one. It is not a portable identity. And the Windows
 harness needs a short checkout path or the control fails on the file tracker,
 which belongs where a newcomer meets it. **Fifth fix batch in Hands.**
 
+**The fifth fix batch landed** (Opus), `ca6c0f5..244154e`. F2: `*.sh text
+eol=lf` in `.gitattributes` (`ca6c0f5`); the container line no longer picks a
+shell's continuation, the Dockerfile's recipe mounts the running checkout, and
+the win32-x64 short-path requirement is stated where a newcomer meets it
+(`c177533`). F1: the long probe is 5000 ms and the late tolerance is
+`60 + timeout/8` rather than a flat 300, which kills the clamp and the scale on
+both checks and the offset on the short one; the clamp is its own entry. Stated
+limit, in source beside the tolerance: **a scaling smaller than an eighth
+survives** (`c682619`). F3: `holdtimeout` puts a call in both states; the
+revert and the reordered-conditions loosening both die there at about 800 ms
+and on nothing else (`5ab4c62`). The single-waiter equivalence now states both
+premises beside the entry, and narrowing both wakes is recorded as **not yet
+reached**, with why a scenario cannot force it while the first premise holds
+(`b985f07`). The restore digest is printed as a restore check, not an identity
+(`244154e`). Hands' numbers: win32-x64 19 killed, 2 honest skips; linux-x64 21
+killed. **Soul's sixth pass dispatched 2026-09-22** (Opus).
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
