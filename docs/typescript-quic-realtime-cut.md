@@ -512,6 +512,45 @@ reached**, with why a scenario cannot force it while the first premise holds
 (`244154e`). Hands' numbers: win32-x64 19 killed, 2 honest skips; linux-x64 21
 killed. **Soul's sixth pass dispatched 2026-09-22** (Opus).
 
+**Soul's sixth pass, 2026-09-22** (Opus). Hands' table reproduced exactly from
+fresh `autocrlf=true` clones: win32-x64 19 killed, 2 skips; linux-x64 21
+killed; controls green. **Cut 3 still does not close.** Every scenario so far
+has a single-threaded host.
+
+- **N1, confirmed, medium: the wait's predicate is pinned by nothing.** Dropping
+  it (`wait_for(lock, ms(t)) == no_timeout`, `cultmesh_quic_native.cpp:1179-1180`)
+  survived the whole matrix on both targets. At the bridge, a second host thread
+  calling `cultmesh_quic_last_error` every 20 ms made an idle `poll(1000)` return
+  after 0 and 20 ms, where the real bridge stays 1000. Every `CallScope`
+  destructor wakes all waiters (`:286`), so a host with a poll thread and a send
+  thread spins at the rate of its other calls. The rule "a poll with nothing to
+  deliver stays for its timeout" is pinned only for a host with one thread.
+- **N2, confirmed, low-medium: the stated limit understates what survives.**
+  Survived on both targets: `min(t,5000)`, `min(t,4990)`, `t*11/10`, `t+70`.
+  `max(t,220)` survived on Linux and died on Windows. `max(t,250)` and `t+80`
+  die only on `holdtimeout`'s 150 ms probe, by margins of 22 and 2 ms, so those
+  kills depend on timing. "5000 is above any plausible ceiling" is wrong,
+  because 5000 is itself a round ceiling, and no probe can see a floor under
+  about 60 ms. Either add a small-timeout probe and a probe above 5000, or state
+  the full limit: offsets to about 75 ms, floors to about 220 ms, and clamps at
+  or above about 4980 ms.
+- **N3, confirmed, low-medium: the LF fix does not reach an existing clone.**
+  A clone made at `367c9bc` and moved to `244154e` keeps the CRLF script, since
+  the blob did not change. Its status is clean and it still dies on `bash\r`.
+  Nothing tells an existing clone to check its `*.sh` out again.
+- **N4, confirmed, low (development seam): no hold mutant is a function of the
+  input.** `(woken || timeout_ms > 1000) && HELD` survived on both targets.
+  Both of Hands' hold entries only rearrange the guard's syntax.
+
+**Held:** F2 from a fresh clone, covering every file the container runs or
+parses. F3's revert and its loosening, with only `holdtimeout` failing under the
+revert. The clamp entry. Both equivalence premises, checked against source, with
+"narrow both wakes" recorded as not yet reached. Restores verified by hash
+against `checkout-index`. Sidecar repair after a mid-mutation `taskkill`.
+`polltimeout` and `holdtimeout` stayed green for five rounds under 16 burners on
+8 CPUs. **Not run:** a forced red control, and Windows under a CPU burner.
+**All four go to Hands as the sixth fix batch.**
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
