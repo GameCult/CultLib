@@ -47,9 +47,17 @@
 
 #include <cultmesh_quic_native.h>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -153,44 +161,90 @@ std::string CloseRaceOnce(int pollers) {
     return {};
 }
 
-// The two timeouts `polltimeout` asks for. Two, and not one, because a single
+// The three timeouts `polltimeout` asks for. More than one, because a single
 // value cannot tell a bridge that honours the host's timeout from one that waits
-// on that same number of its own: a constant has to satisfy both bands, and no
-// constant is in both.
+// on that same number of its own: a constant has to satisfy every band, and no
+// constant is in two of them.
 //
 // A constant was never the hard case, though, and the numbers are chosen for the
 // waits that are computed from the argument instead. Any mapping that is the
-// identity at both of these passes for free, so the two are picked to leave the
-// ordinary ones nowhere to be identity:
+// identity at every probe passes for free, so each probe is placed to leave one
+// family of ordinary mappings nowhere to be identity:
 //
-//  - 5000 is above any ceiling a bridge would plausibly clamp a host's timeout
-//    to. A wait of `min(timeout, 1000)` — cap it so a shutdown gets noticed — is
-//    the most ordinary spelling this line will ever be given, and it returns
-//    from this probe four seconds early.
-//  - 200 is low enough that an added constant shows as a proportion. A wait of
-//    `timeout + 150` is 75% late here, and the late tolerance below is a
-//    fraction of what was asked for rather than a flat number it could hide in.
+//  - 15 ms is as small as the OS timer lets a measurement be honest about. A
+//    floor — `max(timeout, 100)`, so a polling host cannot spin — and an added
+//    constant — `timeout + 100` of grace — are both the whole of the wait here,
+//    and nothing larger can see either one under the scheduler's noise.
+//  - 200 is the ordinary host poll, and sits between the other two so that a
+//    constant cannot satisfy both of its neighbours.
+//  - 7300 is long and deliberately not round. A clamp — `min(timeout, 1000)` to
+//    notice a shutdown, `min(timeout, 5000)` because five seconds is surely
+//    enough — is identity at any probe at or under its ceiling, and a round
+//    probe is exactly where somebody's round ceiling sits.
+constexpr int32_t kShortestPollMs = 15;
 constexpr int32_t kShortPollMs = 200;
-constexpr int32_t kLongPollMs = 5000;
+constexpr int32_t kLongPollMs = 7300;
 
 // How much sooner than the timeout a poll may return. A wait may be late; it may
 // not be early, because returning early is exactly what waiting on a shorter
 // duration looks like. This is scheduler granularity, not slack.
 constexpr int kEarlyToleranceMs = 20;
 
-// How much later than the timeout a poll may return: an allowance for scheduler
-// granularity plus an eighth of what was asked for.
+// How much later than the timeout a single poll may return: an allowance for
+// the scheduler, plus a sixteenth of what was asked for.
 //
-// Proportional, and not the flat 300 ms this used to be, because a flat
-// tolerance is a gap a mapping hides in. `timeout + k` for any k under the flat
-// value passes at every probe, at every value, forever — and the measured
-// overshoot on both targets is about 10 ms, so a flat 300 was 290 ms of room
-// for a bridge to add a little of its own and be believed.
+// This is what the probes that look for gross failures use: a constant of the
+// bridge's own, a clamp, a hold that parks a call until it is released, a wait
+// that restarts on every wake. Each of those is wrong by far more than this.
+constexpr int kSchedulerSlackMs = 60;
+constexpr int LateToleranceMs(int32_t timeout_ms) { return kSchedulerSlackMs + timeout_ms / 16; }
+
+// The 15 ms probe is held to something much tighter, because it is the only
+// place a floor or an added constant shows and a scheduler allowance would hide
+// both. Scheduler delay only ever adds, so the probe is asked
+// `kShortestAttempts` times and the fastest is what is checked: noise has to
+// delay every attempt to fail the bridge, and a floor or offset delays every
+// attempt by construction. Every attempt is still checked for being early.
+constexpr int kShortestAttempts = 10;
+constexpr int kTimerSlackMs = 30;
+
+// Both allowances were checked against a loaded machine, two busy threads per
+// logical CPU for five rounds of all three timed scenarios, and not a quiet one.
+// Worst overshoot seen, win32-x64 and linux-x64 on 8 logical CPUs:
+//  - a single poll: 15 and 41 ms;
+//  - the fastest of the 15 ms attempts: 0 and 0 ms.
+// On win32-x64 that needs `MeasureAboveTheLoad` below. At normal priority under
+// the same load a single poll landed up to 127 ms late and the fastest of ten
+// 15 ms attempts up to 87 ms late — Windows makes a woken thread wait out busy
+// threads' time slices — and a tolerance of 45 ms plus a sixteenth failed the
+// unmutated bridge in four rounds of five.
 //
-// The honest limit: a scaling smaller than an eighth survives this, and this
-// does not claim otherwise. An eighth is under the smallest scaling anyone
-// writes on purpose, and 60 ms is six times the overshoot either target shows.
-constexpr int LateToleranceMs(int32_t timeout_ms) { return 60 + timeout_ms / 8; }
+// The honest limit. Each of these was compiled into the bridge and run through
+// all three timed scenarios on both targets; what survives is not claimed:
+//  - an added constant: `timeout + 25` survived and `timeout + 40` died, on the
+//    15 ms probe alone;
+//  - a floor: `max(timeout, 40)` survived and `max(timeout, 50)` died, on the
+//    15 ms probe alone and on linux-x64 by 5 ms, so a floor near 50 is a kill
+//    that rests on timing;
+//  - a scaling: `timeout * 106 / 100` survived and `timeout * 108 / 100` died,
+//    on the 7300 ms probe alone;
+//  - a clamp: `min(timeout, 7285)` survived and `min(timeout, 7275)` died; a
+//    clamp at or above 7300 is the identity at every probe;
+//  - a shortening of up to `kEarlyToleranceMs` at any probe.
+// Each run prints its worst overshoot per probe, so the allowances can be
+// rechecked on another machine rather than trusted.
+
+// The timed scenarios measure the bridge's wait, and on a loaded Windows machine
+// what they would otherwise measure is the scheduler's: a thread woken at the
+// end of its wait queues behind busy threads of equal priority for whole time
+// slices. Raising this process above them takes that out of the measurement,
+// and it needs no privilege on Windows. Linux schedules a woken thread promptly
+// at normal priority under the same load, so nothing is asked of it there.
+void MeasureAboveTheLoad() {
+#if defined(_WIN32)
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+#endif
+}
 
 struct TimedPoll {
     int32_t result;
@@ -215,31 +269,53 @@ TimedPoll PollFor(void* runtime, int32_t timeout_ms) {
 // bridge could wait on any duration at all and every assertion would still hold.
 // A runtime with no listener and no connection has nothing to deliver, so the
 // timeout is what ends this poll, and the elapsed time is what it waited on.
-std::string PollTimeoutOnce() {
+// The bands every timed poll is held to, and the worst overshoot seen, which is
+// printed so a tolerance can be checked against a machine under load rather than
+// trusted.
+struct Overshoot {
+    long long worst_ms = LLONG_MIN;
+    void Record(const TimedPoll& poll, int32_t timeout_ms) {
+        worst_ms = (std::max)(worst_ms, poll.elapsed_ms - timeout_ms);
+    }
+};
+
+std::string CheckTimedPoll(const TimedPoll& poll, int32_t timeout_ms, int late_tolerance_ms) {
+    const std::string asked = "a poll asking for " + std::to_string(timeout_ms) + " ms ";
+    if (poll.result != 0)
+        return asked + "returned " + std::to_string(poll.result) + ", not the 0 an idle runtime owes it";
+    if (poll.elapsed_ms < timeout_ms - kEarlyToleranceMs)
+        return asked + "returned after " + std::to_string(poll.elapsed_ms) +
+            " ms: the wait ended on some shorter duration than the one it was given";
+    if (poll.elapsed_ms > static_cast<long long>(timeout_ms) + late_tolerance_ms)
+        return asked + "returned after " + std::to_string(poll.elapsed_ms) +
+            " ms: the wait ended on some longer duration than the one it was given";
+    return {};
+}
+
+constexpr std::array<int32_t, 3> kTimedProbesMs{kShortestPollMs, kShortPollMs, kLongPollMs};
+
+std::string PollTimeoutOnce(std::array<Overshoot, 3>& overshoot) {
     void* runtime = nullptr;
     const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
     if (opened != 0 || runtime == nullptr)
         return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
 
     std::string failure;
-    for (const int32_t timeout_ms : {kShortPollMs, kLongPollMs}) {
-        const TimedPoll poll = PollFor(runtime, timeout_ms);
-        const std::string asked = "a poll asking for " + std::to_string(timeout_ms) + " ms ";
-        if (poll.result != 0) {
-            failure = asked + "returned " + std::to_string(poll.result) +
-                ", not the 0 an idle runtime owes it";
-            break;
-        }
-        if (poll.elapsed_ms < timeout_ms - kEarlyToleranceMs) {
-            failure = asked + "returned after " + std::to_string(poll.elapsed_ms) +
-                " ms: the wait ended on some shorter duration than the one it was given";
-            break;
-        }
-        if (poll.elapsed_ms > timeout_ms + LateToleranceMs(timeout_ms)) {
-            failure = asked + "returned after " + std::to_string(poll.elapsed_ms) +
-                " ms: the wait ended on some longer duration than the one it was given";
-            break;
-        }
+    // The fastest of several, each checked for being early; see kShortestAttempts.
+    TimedPoll fastest{0, LLONG_MAX};
+    for (int attempt = 0; attempt < kShortestAttempts && failure.empty(); ++attempt) {
+        const TimedPoll poll = PollFor(runtime, kShortestPollMs);
+        failure = CheckTimedPoll(poll, kShortestPollMs, INT_MAX);
+        if (poll.elapsed_ms < fastest.elapsed_ms) fastest = poll;
+    }
+    if (failure.empty()) {
+        overshoot[0].Record(fastest, kShortestPollMs);
+        failure = CheckTimedPoll(fastest, kShortestPollMs, kTimerSlackMs);
+    }
+    for (size_t probe = 1; probe < kTimedProbesMs.size() && failure.empty(); ++probe) {
+        const TimedPoll poll = PollFor(runtime, kTimedProbesMs[probe]);
+        overshoot[probe].Record(poll, kTimedProbesMs[probe]);
+        failure = CheckTimedPoll(poll, kTimedProbesMs[probe], LateToleranceMs(kTimedProbesMs[probe]));
     }
 
     cultmesh_quic_runtime_close(runtime);
@@ -247,12 +323,16 @@ std::string PollTimeoutOnce() {
 }
 
 int PollTimeout(int iterations) {
+    MeasureAboveTheLoad();
+    std::array<Overshoot, 3> overshoot{};
     for (int iteration = 0; iteration < iterations; ++iteration) {
-        const std::string failure = PollTimeoutOnce();
+        const std::string failure = PollTimeoutOnce(overshoot);
         if (!failure.empty())
             return Fail("polltimeout iteration " + std::to_string(iteration) + ": " + failure);
     }
-    std::printf("polltimeout %dx: ok\n", iterations);
+    std::printf("polltimeout %dx: ok (worst overshoot %lld ms at %d best of %d, %lld ms at %d, %lld ms at %d)\n",
+        iterations, overshoot[0].worst_ms, kTimedProbesMs[0], kShortestAttempts, overshoot[1].worst_ms, kTimedProbesMs[1],
+        overshoot[2].worst_ms, kTimedProbesMs[2]);
     return 0;
 }
 
@@ -628,6 +708,7 @@ std::string HoldTimeoutOnce() {
 }
 
 int HoldTimeout(int iterations) {
+    MeasureAboveTheLoad();
     for (int iteration = 0; iteration < iterations; ++iteration) {
         const std::string failure = HoldTimeoutOnce();
         if (!failure.empty())

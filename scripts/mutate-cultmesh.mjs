@@ -478,17 +478,17 @@ const mutations = [
   // for five seconds silently got two, and every consumer's poll loop spun at two
   // and a half times the rate it asked for.
   //
-  // `polltimeout` asks twice and measures. That is what makes a constant
-  // unsurvivable rather than merely unlucky: no single value sits in both bands,
+  // `polltimeout` asks three times and measures. That is what makes a constant
+  // unsurvivable rather than merely unlucky: no single value sits in two bands,
   // so the first two entries below are two sides of one rule and not two numbers
   // to be tuned against.
   //
   // A constant was never the hard case, though. A wait computed from the
-  // argument is identity wherever the probes are, and passes for free: the two
+  // argument is identity wherever the probes are, and passes for free: the
   // bands rule out a constant and rule out nothing else. Clamping, adding and
   // scaling all survived the whole matrix once, on bands of 200 and 900 with a
   // flat late tolerance of 300 ms. The scenario's numbers are what closed that,
-  // and the third entry is here so nothing reopens it quietly — a table of
+  // and the entries after the constants are here so nothing reopens it quietly — a table of
   // constants would go green again the moment those numbers drifted back.
   {
     target: "native",
@@ -514,10 +514,38 @@ const mutations = [
     // so a shutdown gets noticed. Its failure is verbatim the one the scenario
     // exists for — a host asking for five seconds gets one, forever, with
     // nothing reporting it — and it is identity at any probe below the cap, so
-    // it is the long probe's height that kills it rather than the two bands.
+    // it is the long probe's height that kills it rather than the bands.
     rule: "the wait is on the host's timeout (loosening: the bridge caps it at a second)",
     old: "std::chrono::milliseconds(timeout_ms),",
     new: "std::chrono::milliseconds((std::min)(timeout_ms, 1000)),",
+  },
+  // The same clamp at a round ceiling nobody would call short. It survived both
+  // targets while the long probe was 5000, where it is the identity; the probe is
+  // 7300 now so that no round ceiling sits on it.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the wait is on the host's timeout (loosening: the bridge caps it at a round five seconds)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds((std::min)(timeout_ms, 5000)),",
+  },
+  // A floor and an added constant are the whole wait at a small timeout and a
+  // rounding error at a large one, so only the 15 ms probe sees them. Both
+  // survived every probe while the smallest was 150 ms. The scenario's source
+  // states how small a floor or offset still survives.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the wait is on the host's timeout (loosening: a floor, so a polling host cannot spin)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds((std::max)(timeout_ms, 100)),",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "the wait is on the host's timeout (loosening: a little grace added to it)",
+    old: "std::chrono::milliseconds(timeout_ms),",
+    new: "std::chrono::milliseconds(timeout_ms + 100),",
   },
   // The seam's own rule, and the only non-comment source change of the last pass
   // that nothing pinned. It is development-only and folds away in release, so
