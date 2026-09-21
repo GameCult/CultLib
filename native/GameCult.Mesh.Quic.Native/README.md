@@ -117,6 +117,15 @@ it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. The second is one line
 because the shell it is offered to is not decided here; a continuation would have
 to pick one, and a backtick pasted into a POSIX shell is not a continuation.
 
+A Windows clone made before `.gitattributes` kept shell scripts at LF still has
+`scripts/build-quic-native.sh` with carriage returns, and pulling does not fix
+it: the script's content did not change, so git neither rewrites it nor reports
+it modified. The container then dies at once on the interpreter `bash\r`. From
+the repository root, in either shell, this checks the script out again under the
+current attributes:
+
+    git rm --cached -q scripts/build-quic-native.sh; git checkout HEAD -- scripts/build-quic-native.sh
+
 `--security-opt seccomp=unconfined` is load-bearing, not caution. The
 ThreadSanitizer configuration needs the process's address space where it expects
 it, so `scripts/mutate-cultmesh.mjs` re-executes those runs under `setarch -R`,

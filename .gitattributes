@@ -7,4 +7,9 @@
 # shebang reads as the interpreter `bash\r`, which does not exist. Nothing about
 # that failure names line endings, and the same clone builds and tests fine
 # everywhere else, so it reads as a broken image rather than a broken checkout.
+#
+# A clone checked out before this rule keeps its carriage returns, because the
+# blob is unchanged and git has no reason to rewrite the file. The one-line
+# repair is in native/GameCult.Mesh.Quic.Native/README.md, beside the container
+# path it unblocks.
 *.sh text eol=lf
