@@ -2038,15 +2038,18 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     Ok(())
 }
 
-// Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): v0's own
-// cleaning - an empty schema_ids/record_keys list, or one made only of blanks, lowers to `null`
-// (no filter) rather than reaching the door as something to refuse or the evaluator as "match
-// nothing". A v1 Selection with the same shape is refused outright (validation_refuses_a_blank_entry_in_schemas_or_keys,
-// validation_refuses_undeclared_index_role_and_empty_lists in tests/selection.rs) - this is v0's
-// own compatibility rule, owned by the lowering in snapshot_query.rs, not a meaning v1 carries.
+// R-Q3/R-R (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3, 2026-09-22): corrects
+// this test's own earlier ruling from the commit 2 fix batch, which lowered an *explicit* empty
+// or all-blank v0 list to "no filter". Only an *omitted* list (`None`) means "no filter" now - a
+// present list, even one that empties out after trimming/deduping blanks, answers empty
+// (`recordKeys: []` matches v0's own pre-cut server, which tested `filter?.RecordKeys != null`,
+// not a length). A v1 Selection with the same shape is refused outright
+// (validation_refuses_a_blank_entry_in_schemas_or_keys,
+// validation_refuses_undeclared_index_role_and_empty_lists in tests/selection.rs) - that is a v1
+// door rule this v0 lowering never reaches (`serve_read_only_raw_snapshot` never calls `validate`).
 #[test]
-fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_filter() -> Result<()>
-{
+fn serve_read_only_raw_snapshot_omitted_v0_schema_list_is_no_filter_present_empty_or_blank_answers_empty()
+-> Result<()> {
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
         GhostlightAgentStateFixture,
@@ -2081,7 +2084,21 @@ fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_fi
         },
     ];
 
-    for schema_ids in [None, Some(Vec::new()), Some(vec!["   ".to_string()])] {
+    // The field omitted entirely: no filter, both rows.
+    let omitted_request = CultNetMessage::SnapshotRequest {
+        message_id: "req-1".to_string(),
+        schema_ids: None,
+        record_keys: None,
+    };
+    let omitted_response =
+        serve_read_only_raw_snapshot(&registry, &policy, &source, &omitted_request)?;
+    let CultNetMessage::SnapshotResponseRaw { documents, .. } = omitted_response else {
+        panic!("expected a raw snapshot response");
+    };
+    assert_eq!(documents.len(), 2, "schema_ids omitted must lower to no filter, not zero rows");
+
+    // A present list - empty, or made only of blanks - answers empty (R-R), not "no filter".
+    for schema_ids in [Some(Vec::new()), Some(vec!["   ".to_string()])] {
         let request = CultNetMessage::SnapshotRequest {
             message_id: "req-1".to_string(),
             schema_ids: schema_ids.clone(),
@@ -2093,8 +2110,9 @@ fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_fi
         };
         assert_eq!(
             documents.len(),
-            2,
-            "schema_ids = {schema_ids:?} must lower to no filter, not zero rows"
+            0,
+            "schema_ids = {schema_ids:?} is present and empty after trimming, so it must answer \
+             empty, not fall back to every row"
         );
     }
 
@@ -2118,6 +2136,72 @@ fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_fi
         2,
         "a mixed list keeps its one distinct non-blank schema id, still selecting both rows of that schema"
     );
+
+    Ok(())
+}
+
+// R-R: v0's pre-cut server preserved the caller's requested key order (a `HashSet<string>` built
+// from the array, which enumerates in insertion order), not plain snapshot-source order.
+#[test]
+fn serve_read_only_raw_snapshot_keeps_the_requested_record_key_order() -> Result<()> {
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightAgentStateFixture,
+    >("ghostlight.agent-state".to_string(), None));
+
+    let mut policy = CultNetReadOnlySnapshotPolicy::new();
+    policy.allow("ghostlight.agent-state", "row-1")?;
+    policy.allow("ghostlight.agent-state", "row-2")?;
+    policy.allow("ghostlight.agent-state", "row-3")?;
+
+    // Source order is row-1, row-2, row-3; the request asks for them in the opposite order.
+    let source = vec![
+        CultNetRawDocumentRecord {
+            schema_id: "ghostlight.agent-state".to_string(),
+            record_key: "row-1".to_string(),
+            stored_at: "now".to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![1],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        },
+        CultNetRawDocumentRecord {
+            schema_id: "ghostlight.agent-state".to_string(),
+            record_key: "row-2".to_string(),
+            stored_at: "now".to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![2],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        },
+        CultNetRawDocumentRecord {
+            schema_id: "ghostlight.agent-state".to_string(),
+            record_key: "row-3".to_string(),
+            stored_at: "now".to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![3],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        },
+    ];
+
+    let request = CultNetMessage::SnapshotRequest {
+        message_id: "req-1".to_string(),
+        schema_ids: None,
+        record_keys: Some(vec!["row-3".to_string(), "row-1".to_string(), "row-2".to_string()]),
+    };
+    let response = serve_read_only_raw_snapshot(&registry, &policy, &source, &request)?;
+    let CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
+        panic!("expected a raw snapshot response");
+    };
+    let keys: Vec<&str> = documents.iter().map(|d| d.record_key.as_str()).collect();
+    assert_eq!(keys, vec!["row-3", "row-1", "row-2"], "the requested key order must survive, not the source's");
 
     Ok(())
 }

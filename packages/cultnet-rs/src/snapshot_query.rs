@@ -76,11 +76,17 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         return Err(anyhow!("expected cultnet.snapshot_request.v0"));
     };
     require_non_empty(message_id, "message_id")?;
-    // Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): the door
-    // refuses an empty or blank entry in a *present* Selection list, but v0's own lowering keeps
-    // v0's old cleaning - an empty v0 list, or one made only of blanks, lowers to `null` (no
-    // filter) rather than reaching the door as something to refuse. That is a v0 compatibility
-    // rule the lowering owns, not a meaning the evaluator or the door carries for v1 lists.
+    // R-Q3/R-R (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3, 2026-09-22 -
+    // corrects this comment's own earlier ruling from the commit 2 fix batch, which lowered an
+    // empty v0 list to "no filter"): `None` (the field omitted) still means "no filter", but a
+    // *present* v0 list - even one that empties out after trimming/deduping blanks - must lower to
+    // `Some(possibly-empty)`, never collapse to `None`. `matches_schema_keys_fields` already
+    // treats a present-but-empty selection list as "match nothing" (R-E), which is v0's own
+    // pre-cut behaviour (`recordKeys: []` answers empty, `CultNetDocumentRegistry.
+    // CreateRawSnapshotResponse` tests `filter?.RecordKeys != null`, not a length); collapsing to
+    // `None` here used to turn that into "match everything" instead. Unlike the C# reference, this
+    // function never calls `validate`, so there is no v1 door for a present-but-empty list to hit
+    // (R-R's fixup on the C# side does not apply here).
     // R-M: `lower_v0_list` already dedups (Soul: it dedups before `reject_duplicates` ever ran,
     // making that function's own duplicate check dead code - deleted below along with its calls).
     let schema_ids = lower_v0_list(schema_ids);
@@ -124,6 +130,20 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
             continue;
         }
         selected.push(document);
+    }
+
+    // R-R: pre-cut v0 iterated the requested record keys in the caller's own order (a
+    // `HashSet<string>` built from the array, which enumerates in insertion order); the shared
+    // evaluator carries no such tiebreak of its own, so this v0 lowering restores the requested
+    // order here rather than leaking plain snapshot-source order when the caller asked for
+    // particular keys. A stable sort keeps the relative order of documents that share a requested
+    // key (e.g. across schemas) as `raw_snapshot()` produced them.
+    if let Some(keys) = &record_keys {
+        selected.sort_by_key(|document| {
+            keys.iter()
+                .position(|key| key == &document.record_key)
+                .unwrap_or(usize::MAX)
+        });
     }
 
     Ok(CultNetMessage::SnapshotResponseRaw {
@@ -360,7 +380,10 @@ fn require_non_empty(value: &str, field: &str) -> Result<()> {
 /// rule the lowering owns, not a meaning the door or the evaluator carries for v1's own lists
 /// (those refuse `[]` and any blank entry outright, in `selection::validate`).
 fn lower_v0_list(list: &Option<Vec<String>>) -> Option<Vec<String>> {
-    let Some(values) = list else { return None };
+    // R-Q3: `None` (the field omitted) still means "no filter"; a present list is always lowered
+    // to `Some`, even when trimming/deduping empties it out (R-R) - see this function's caller for
+    // why collapsing that case to `None` was wrong.
+    let values = list.as_ref()?;
     let mut seen = std::collections::HashSet::new();
     let filtered: Vec<String> = values
         .iter()
@@ -368,5 +391,5 @@ fn lower_v0_list(list: &Option<Vec<String>>) -> Option<Vec<String>> {
         .filter(|value| seen.insert(value.as_str()))
         .cloned()
         .collect();
-    if filtered.is_empty() { None } else { Some(filtered) }
+    Some(filtered)
 }
