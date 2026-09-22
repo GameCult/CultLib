@@ -44,6 +44,44 @@ Rust Hands caught the conflict before writing a line and stopped, correctly.
 specifies the form. The Q-J fix lands on the branch before the Rust runtime,
 as its own commits. Commit 1 is not wire-final until it does.
 
+**Commit 2 landed** (Sonnet) in five parts:
+- `0787608` deletes `_projectRecord`. Its two tests now drive a real change of
+  identity instead of a projection. It also collapses the fourth matcher.
+- `c5b03cb` collapses the CultMesh alias checks.
+- `4167cc4` adds the fourth matcher's mutation entry.
+- `5ba48f0` finishes the Mesh collapse. `CultMeshSnapshotRequestOptions` and
+  `CultMeshPeerSnapshotDocumentOptions` become records that carry one
+  `Selection`, and their clones collapse to `with`. `CleanSnapshotFilter` and
+  the triple rule give way to two owners, `ResolveDefaultSelection` and
+  `OverlaySelection`. `CultMeshHotBodySubscription` carries one `Selection`.
+  The four-tier read fallback becomes one read anchored on the record key,
+  with the two tiers that could return the wrong key's record deleted.
+- `4c33a62` adds the Mesh entries: three reverts killed and two loosenings
+  **survived**. The survivals are fixture gaps, since no test passes an empty
+  non-null `recordKeys` or a record key with different casing. They go to the
+  fix batch.
+
+Mesh is net **−83** against §11's estimate of about −326. The shortfall has
+four parts:
+- about −41 is the payload-sniff fallback, which was kept;
+- `IsSameCultDocumentSchema` stays, because it already delegates entirely and
+  inlining it would duplicate the resolution at four sites;
+- `CultMeshClient`'s three subscription sites still call the v0
+  `SubscribeAsync`, which this cut does not retype. They move with Cut 2,
+  the watch cut;
+- the read keeps two tiers, because a test enforces that.
+
+This is an honest miss.
+
+**Two corrections to Hands' report.** First, the payload-sniff fallback was
+**not "ruled kept by the operator"**. Hands kept it in `c5b03cb` as a
+discrepancy, and Soul is judging whether it is a second selection decision or
+a decode capability. Second, Hands reports that one Networking test crashes the
+test host on a disposed-socket race in `CultNetRudpSchemaServer`/`CultNetTransport`
+and calls it pre-existing. Networking was 162/162 at `17d10e0`, so that claim
+must be checked against `17d10e0` and `main` before anyone believes it. It goes
+to Soul by name.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
