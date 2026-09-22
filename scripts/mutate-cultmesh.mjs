@@ -468,8 +468,8 @@ const mutations = [
     // 50 ms settle, so the poller left before the close began and the scenario
     // complained about its own fixture rather than the bridge.
     rule: "a positive timeout blocks until an event or the close (loosening: it waits a token 1 ms)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(1)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(1)),",
   },
   // And the rule underneath that one: the duration waited on is the host's, not
   // one of the bridge's own. Self's ruling of 2026-09-22 moved this whole family
@@ -485,8 +485,8 @@ const mutations = [
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (revert: a shorter constant of the bridge's own)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(100)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(100)),",
   },
   {
     target: "native",
@@ -494,8 +494,8 @@ const mutations = [
     // The lengthening, which is the half that looks harmless: every poll still
     // blocks, every poll still returns, and nothing anywhere reports an error.
     rule: "the wait is on the host's timeout (loosening: a longer constant of the bridge's own)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(2000)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(2000)),",
   },
   {
     target: "native",
@@ -504,30 +504,30 @@ const mutations = [
     // and the most ordinary spelling this line will ever be given: cap the wait
     // so a shutdown gets noticed.
     rule: "the wait is on the host's timeout (loosening: the bridge caps it at a second)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((std::min)(timeout_ms, 1000))),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((std::min)(timeout_ms, 1000))),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     // The same clamp at a round ceiling nobody would call short.
     rule: "the wait is on the host's timeout (loosening: the bridge caps it at a round five seconds)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((std::min)(timeout_ms, 5000))),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((std::min)(timeout_ms, 5000))),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: a floor, so a polling host cannot spin)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((std::max)(timeout_ms, 100))),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((std::max)(timeout_ms, 100))),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: a little grace added to it)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms + 100)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms + 100)),",
   },
   // Soul's seventh pass named eight more derivations that were each the
   // identity at every wall-clock probe the previous six passes could afford:
@@ -541,22 +541,22 @@ const mutations = [
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: a floor at 50, invisible to a late-only check)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms < 50 ? 0 : timeout_ms)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms < 50 ? 0 : timeout_ms)),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: rounded down to a 16 ms quantum)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms / 16 * 16)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms / 16 * 16)),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: rounded up to a 40 ms quantum)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((timeout_ms + 39) / 40 * 40)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((timeout_ms + 39) / 40 * 40)),",
   },
   {
     target: "native",
@@ -566,41 +566,41 @@ const mutations = [
     // a fault that only shows past the twelfth had nowhere to be seen at all.
     rule: "the wait is on the host's timeout (loosening: it doubles once a runtime has polled more than 12 times)",
     old: "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
     new: "        static std::atomic<int> debug_poll_count{0};\n" +
       "        const int32_t doubled_timeout_ms = (++debug_poll_count > 12) ? timeout_ms * 2 : timeout_ms;\n" +
       "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(doubled_timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(doubled_timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: the bridge caps it at 7275 ms)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((std::min)(timeout_ms, 7275))),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((std::min)(timeout_ms, 7275))),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: 25 ms of grace added to it)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms + 25)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms + 25)),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: a floor of 40, so a polling host cannot spin)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT((std::max)(timeout_ms, 40))),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds((std::max)(timeout_ms, 40))),",
   },
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait is on the host's timeout (loosening: scaled up by 6%)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
-    new: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms * 106 / 100)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms * 106 / 100)),",
   },
   // The seam itself: development-only, folded away to a pass-through in a
   // release build (see the macro's `#else` in cultmesh_quic_native.cpp), and
@@ -612,7 +612,7 @@ const mutations = [
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
     rule: "the wait seam records what the bridge actually waits on (revert: it never records)",
-    old: "std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),",
+    old: "CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
     new: "std::chrono::milliseconds(timeout_ms),",
   },
   {
@@ -632,10 +632,10 @@ const mutations = [
       "        // sooner, and `woken` is which of the two happened. RECORD_WAIT wraps\n" +
       "        // this exact argument; see the development seam note near its macros.\n" +
       "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
     new: "    std::unique_lock<std::mutex> lock(runtime->gate);\n" +
-      "    CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms);\n" +
+      "    CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms));\n" +
       "    if (runtime->events.empty() && timeout_ms > 0) {\n" +
       "        // The host's timeout bounds the wait; an event or the close ends it\n" +
       "        // sooner, and `woken` is which of the two happened. RECORD_WAIT wraps\n" +
@@ -659,10 +659,10 @@ const mutations = [
     // milliseconds of its 1000 ms ask.
     rule: "an idle poll stays for its timeout while other host threads call (revert: the wait has no predicate)",
     old: "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
     new: "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms))) ==\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms))) ==\n" +
       "            std::cv_status::no_timeout;\n",
   },
   {
@@ -673,10 +673,10 @@ const mutations = [
     // any wake at all. Only a second host thread can see it.
     rule: "an idle poll stays for its timeout while other host threads call (loosening: it reads what woke it and does not wait again)",
     old: "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
     new: "        runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)));\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)));\n" +
       "        const bool woken = !runtime->events.empty() || runtime->closing;\n",
   },
   {
@@ -689,11 +689,11 @@ const mutations = [
     // of the input, so no single probe value makes it the identity.
     rule: "an idle poll stays for its timeout while other host threads call (loosening: each wake restarts the whole timeout)",
     old: "        const bool woken = runtime->signal.wait_for(\n" +
-      "            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),\n" +
+      "            lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),\n" +
       "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
     new: "        while (runtime->events.empty() && !runtime->closing &&\n" +
       "               runtime->signal.wait_for(\n" +
-      "                   lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms))) ==\n" +
+      "                   lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms))) ==\n" +
       "                   std::cv_status::no_timeout) {\n" +
       "        }\n" +
       "        const bool woken = !runtime->events.empty() || runtime->closing;\n",
@@ -759,11 +759,10 @@ const mutations = [
   {
     target: "native",
     honestOn: ["linux-x64", "win32-x64"],
-    // S5: the same guard at 1500, which `holdtimeout` used to carry at a long
-    // probe of 1300 and could not see. The long probe is 1600 now, above the
-    // stated ceiling, with the hold kept armed past it — a call this guard
-    // parks anyway sits out the rest of the arming instead of leaving on its
-    // own timeout, well past the scenario's generous late tolerance.
+    // S5: the same guard at 1500. `holdtimeout`'s long probe sits above it, at
+    // 1600, with the hold kept armed past it — a call this guard parks anyway
+    // sits out the rest of the arming instead of leaving on its own timeout,
+    // well past the scenario's generous late tolerance.
     rule: "the hold parks only a call the wait woke (loosening: it also parks any long wait, over 1500)",
     old: "        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
     new: "        if ((woken || timeout_ms > 1500) && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
@@ -939,6 +938,93 @@ const mutations = [
     new: "        runtime->signal.wait_for(lock, std::chrono::milliseconds(50),\n" +
       "            [runtime] { return runtime->active_calls == 0; });",
   },
+  // Self's ruling of 2026-09-22, the eighth fix batch. Six findings, six
+  // entries below (R1, W1-W3, P1, Z1-Z2); F5 (closerace under starvation) and
+  // F6 (stale prose) needed no new mutant.
+  //
+  // F1: nothing ran the release macro's `#else` branch. `polltimeout`,
+  // `pollbusy`, `pollhammer` and `zerotimeout` now run against a plain
+  // release configuration (asserts OFF, CMAKE_BUILD_TYPE=Release) on both
+  // targets, and R1 changes that branch from a pass-through to a tenth of the
+  // real timeout — invisible to every configuration that never built it.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "R1: the release macro is a pass-through (loosening: it divides the duration by 10)",
+    old: "#define CULTMESH_QUIC_DEBUG_RECORD_WAIT(duration) (duration)",
+    new: "#define CULTMESH_QUIC_DEBUG_RECORD_WAIT(duration) ((duration)/10)",
+  },
+  // F2: the seam now wraps the whole duration handed to `wait_for`, so
+  // anything that reaches the wait through the seam's own argument is caught
+  // by `waitseam`'s equality check. These three apply their arithmetic
+  // outside that argument instead — to the return value of RECORD_WAIT,
+  // after it has already recorded and returned the honest duration — so
+  // `waitseam` cannot see them by construction; only the wall-clock
+  // scenarios can, which is why `kGenerousLateToleranceMs` was narrowed
+  // alongside this entry.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "W1: 600 ms added to the wait outside the seam's own argument",
+    old: "lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)) + " +
+      "std::chrono::milliseconds(600),",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "W2: the wait floored at 500 ms outside the seam's own argument",
+    old: "lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "lock, (std::max)(CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)), " +
+      "std::chrono::milliseconds(500)),",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "W3: the wait scaled by a 1000/909 ratio outside the seam's own argument",
+    old: "lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)),",
+    new: "lock, CULTMESH_QUIC_DEBUG_RECORD_WAIT(std::chrono::milliseconds(timeout_ms)) * 1000 / 909,",
+  },
+  // F3: `pollhammer` covered the predicate only on a runtime with nothing
+  // live in it. P1 adds the survivor: a busy host with a connection is
+  // treated the same as a busy host with events queued, so it never sleeps.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "P1: an idle poll also ends when the runtime holds a live connection",
+    old: "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
+    new: "            [runtime] {\n" +
+      "                return !runtime->events.empty() || runtime->closing ||\n" +
+      "                    !runtime->connections.empty();\n" +
+      "            });\n",
+  },
+  // F4: a non-positive timeout was never timed at all — the bridge's own
+  // guard skips the wait outright, so nothing pinned how fast that path has
+  // to return. Both entries insert a stall on exactly that path, ahead of
+  // the guard that already exists.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "Z1: a non-positive timeout sleeps 500 ms before returning",
+    old: "    if (runtime->events.empty() && timeout_ms > 0) {\n",
+    new: "    if (runtime->events.empty() && timeout_ms <= 0) {\n" +
+      "        std::this_thread::sleep_for(std::chrono::milliseconds(500));\n" +
+      "    }\n" +
+      "    if (runtime->events.empty() && timeout_ms > 0) {\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "Z2: a non-positive timeout spins for 300 ms before returning",
+    old: "    if (runtime->events.empty() && timeout_ms > 0) {\n",
+    new: "    if (runtime->events.empty() && timeout_ms <= 0) {\n" +
+      "        const auto debug_z2_until =\n" +
+      "            std::chrono::steady_clock::now() + std::chrono::milliseconds(300);\n" +
+      "        while (std::chrono::steady_clock::now() < debug_z2_until) {\n" +
+      "        }\n" +
+      "    }\n" +
+      "    if (runtime->events.empty() && timeout_ms > 0) {\n",
+  },
 ];
 
 function digest(bytes) {
@@ -965,23 +1051,28 @@ function testsPass(workspace) {
 // the scenario runner beside it and run the scenarios. There is no npm here and
 // no `dist/`; the artifacts live under artifacts/, which is git-ignored.
 //
-// Two configurations, because the two rules are visible to different things. The
-// assertion build states the quiesce invariant outright, which is what makes the
-// missing wait fail on the first close instead of on an unlucky one. The
-// ThreadSanitizer build is the only thing that sees a notify land on a destroyed
-// condition variable, and it exists on linux-x64 alone.
+// Two or three configurations, because the rules are visible to different
+// things. The assertion build states the quiesce invariant outright, which is
+// what makes the missing wait fail on the first close instead of on an unlucky
+// one. The ThreadSanitizer build is the only thing that sees a notify land on
+// a destroyed condition variable, and it exists on linux-x64 alone. The
+// release build is the thing that actually ships: asserts off, no development
+// seam, no sanitizer — added by Self's ruling of 2026-09-22 because it is the
+// one configuration where R1's release-only macro branch is reachable at all.
 //
 // `holdclose`, `latecall` and `holdtimeout` run only where the development seam
 // exists, which is the assertion build: they drive the quiesce and the refusal
 // through that seam rather than through a sleep, and they are what kill the
 // rules about counting a host call at all. The ThreadSanitizer build
 // deliberately keeps the shipped shape — no assertions, no seam — because what
-// it is there for is the race in a library built like the one that ships.
+// it is there for is the race in a library built like the one that ships, and
+// the release build keeps that same shape for the rules that ship-shape alone
+// can hide.
 //
-// `polltimeout`, `pollbusy` and `holdtimeout` measure a wait against the
-// timeout it asked for, so they are run only where nothing distorts the clock:
-// a sanitizer's slowdown would make their bands meaningless, which is the honest
-// limit of those entries.
+// `polltimeout`, `pollbusy`, `pollhammer` and `holdtimeout` measure a wait
+// against the timeout it asked for, so they are run only where nothing
+// distorts the clock: a sanitizer's slowdown would make their bands
+// meaningless, which is the honest limit of those entries.
 const assertScenarios = [
   ["holdclose", "3", "64"],
   ["latecall", "5"],
@@ -990,15 +1081,34 @@ const assertScenarios = [
   ["polltimeout", "3"],
   ["pollbusy", "3"],
   ["pollhammer", "3"],
+  ["zerotimeout", "3"],
   ["payloadfit", "3"],
   ["closerace", "20", "256"],
+];
+// Self's ruling of 2026-09-22, F1: the assertion build is the only
+// configuration that ever ran the timed scenarios, so R1's release-only
+// `#else` branch (cultmesh_quic_native.cpp's CULTMESH_QUIC_DEBUG_RECORD_WAIT
+// macro) was unobservable by construction — nothing built without
+// CULTMESH_QUIC_DEBUG_ASSERTS ever ran `polltimeout`, `pollbusy` or
+// `pollhammer` against it. This configuration is the thing that ships: a
+// plain Release build, asserts off, no sanitizer, running the timed
+// scenarios plus the new zero-timeout check against it.
+const releaseScenarios = [
+  ["polltimeout", "3"],
+  ["pollbusy", "3"],
+  ["pollhammer", "3"],
+  ["zerotimeout", "3"],
 ];
 const nativeConfigurations = platform === "linux-x64"
   ? [
       { name: "asserts", asserts: "ON", sanitizer: null, scenarios: assertScenarios },
       { name: "tsan", asserts: "OFF", sanitizer: "thread", scenarios: [["closerace", "20", "256"]] },
+      { name: "release", asserts: "OFF", sanitizer: null, buildType: "Release", scenarios: releaseScenarios },
     ]
-  : [{ name: "asserts", asserts: "ON", sanitizer: null, scenarios: assertScenarios }];
+  : [
+      { name: "asserts", asserts: "ON", sanitizer: null, scenarios: assertScenarios },
+      { name: "release", asserts: "OFF", sanitizer: null, buildType: "Release", scenarios: releaseScenarios },
+    ];
 
 function msquicArguments() {
   if (platform === "win32-x64") {
@@ -1087,10 +1197,14 @@ function nativeScenariosPass() {
     const flags = configuration.sanitizer
       ? [`-fsanitize=${configuration.sanitizer}`, "-fno-omit-frame-pointer", "-g"].join(" ")
       : "";
+    // The release configuration builds Release rather than RelWithDebInfo — it
+    // is the thing that actually ships, and R1 targets the macro branch that
+    // only a build without CULTMESH_QUIC_DEBUG_ASSERTS ever compiles.
+    const buildType = configuration.buildType ?? "RelWithDebInfo";
     // Multi-config generators (MSVC) put the binaries in a per-config directory;
     // single-config ones (Ninja, Makefiles) do not.
     const binaries = platform === "win32-x64"
-      ? join(build, "bin", "RelWithDebInfo")
+      ? join(build, "bin", buildType)
       : join(build, "bin");
     try {
       execFileSync("cmake", [
@@ -1099,7 +1213,7 @@ function nativeScenariosPass() {
         // default is Makefiles, and the container the bridge is built in carries
         // ninja rather than make, so the default configured nothing at all.
         ...(platform === "linux-x64" ? ["-G", "Ninja"] : []),
-        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        `-DCMAKE_BUILD_TYPE=${buildType}`,
         `-DCMAKE_CXX_FLAGS=${flags}`,
         `-DCMAKE_EXE_LINKER_FLAGS=${flags}`,
         `-DCMAKE_SHARED_LINKER_FLAGS=${flags}`,
@@ -1107,7 +1221,7 @@ function nativeScenariosPass() {
         `-DCULTMESH_QUIC_DEBUG_ASSERTS=${configuration.asserts}`,
         ...msquic.configure,
       ], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
-      execFileSync("cmake", ["--build", build, "--config", "RelWithDebInfo"],
+      execFileSync("cmake", ["--build", build, "--config", buildType],
         { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       // A mutation that does not compile is killed by the build, which is a

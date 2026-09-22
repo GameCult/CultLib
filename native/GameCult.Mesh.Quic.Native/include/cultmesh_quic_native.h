@@ -316,9 +316,10 @@ CULTMESH_QUIC_API int32_t cultmesh_quic_last_status(void* runtime);
  *
  * Present only in a library configured with `CULTMESH_QUIC_DEBUG_ASSERTS`, which
  * a shipped build never is. It exists for the runtime-lifetime scenarios: the
- * quiesce is a promise about host calls that are inside the library, and a
- * scenario that can only sleep and hope cannot tell a bridge that counts them
- * from one that does not.
+ * quiesce is a promise about host calls that are inside the library, and the
+ * wait scenarios need the same kind of promise about the exact duration the
+ * bridge hands its own condition wait. A scenario that can only sleep and hope
+ * cannot tell a bridge that counts and waits correctly from one that does not.
  *
  * It is process-wide, not per-runtime, because the numbers outlive the runtime
  * they describe: `cultmesh_quic_runtime_close` frees the runtime, and the count
@@ -341,12 +342,14 @@ CULTMESH_QUIC_API int32_t cultmesh_quic_debug_peak_calls(void);
  * since the hold was armed. This is the number the wait exists for. */
 CULTMESH_QUIC_API int32_t cultmesh_quic_debug_calls_at_close(void);
 
-/* The `timeout_ms` most recently handed to the condition wait inside
- * `cultmesh_quic_next_event`, recorded at the point the wait is entered rather
- * than observed from outside. A poll whose queue is not empty, or whose
- * `timeout_ms` is not greater than zero, never enters that wait and leaves this
- * unchanged. -1 until the first such wait, or after
- * `cultmesh_quic_debug_reset_last_wait_ms`.
+/* The whole duration, in milliseconds, most recently handed to the condition
+ * wait inside `cultmesh_quic_next_event`, recorded at the point the wait is
+ * entered rather than observed from outside. A poll whose queue is not empty,
+ * or whose `timeout_ms` is not greater than zero, never enters that wait and
+ * leaves this unchanged. -1 until the first such wait, or after
+ * `cultmesh_quic_debug_reset_last_wait_ms` — tracked by a separate internal
+ * flag, not by -1 being stored here, so a wait that ever recorded exactly -1
+ * itself could not be confused with nothing having been recorded.
  *
  * This exists because a wall-clock probe cannot tell the host's timeout from
  * any function of it that is the identity at the probe's own value — a floor,
