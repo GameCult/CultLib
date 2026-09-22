@@ -1471,6 +1471,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             async Task FetchOnce(string messageId)
             {
@@ -1488,8 +1493,12 @@ namespace GameCult.Networking.Tests
             await FetchOnce("first");
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
             await FetchOnce("second");
-            cancellation.Cancel();
-            serverThread.Join();
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         // A batch is a value: nothing staged in it reaches CultNet observers before the store commits it. A put made
@@ -1551,6 +1560,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-subscription-client");
             var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
@@ -1577,13 +1591,16 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(update.SubscriptionId, Is.EqualTo("note"));
             Assert.That(update.ChangeKind, Is.EqualTo("added"));
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo(recordKey));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1611,6 +1628,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             await database.PutAsync(new CultRecordKey("tests:public:initial"), new NetworkSchemaNote
             {
@@ -1655,11 +1677,14 @@ namespace GameCult.Networking.Tests
                 Text = "public-live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1698,6 +1723,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -1717,6 +1747,12 @@ namespace GameCult.Networking.Tests
                     supportedBodyTransports: [CultMeshBodyTransportKind.SharedMemory.ToString()]),
                 TimeSpan.FromSeconds(2));
             Assert.That(targetCache.Get(new CultRecordKey(recordKeyOne)), Is.Not.Null);
+            // R-K: PublishDemand runs after the snapshot is sent, on the server thread, while
+            // SubscribeAsync's completion is driven by the client's receipt of that same snapshot on a
+            // different thread - asserting immediately races the two. Wait for the deterministic
+            // condition (the demand actually being published) instead of assuming order-of-completion
+            // across a network round trip.
+            await WaitUntilAsync(() => bodyDemand.Plan(bodyId).HasConsumers, TimeSpan.FromSeconds(2));
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.True);
 
             // Drive the record's identity change through the selection itself
@@ -1744,6 +1780,8 @@ namespace GameCult.Networking.Tests
             await WaitUntilAsync(
                 () => targetCache.Get(new CultRecordKey(recordKeyTwo)) == null,
                 TimeSpan.FromSeconds(2));
+            // R-K: same race as the HasConsumers=true assertion above, the other direction.
+            await WaitUntilAsync(() => !bodyDemand.Plan(bodyId).HasConsumers, TimeSpan.FromSeconds(2));
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.False);
             var changeCountAfterRevocation = changes.Count;
             await sourceDatabase.PutAsync(new CultRecordKey(recordKeyTwo), new NetworkSchemaNote
@@ -1752,11 +1790,14 @@ namespace GameCult.Networking.Tests
                 Text = "must-not-escape"
             });
             await Task.Delay(100);
-            cancellation.Cancel();
-            serverThread.Join();
-
             Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
             Assert.That(targetCache.Get(new CultRecordKey(recordKeyTwo)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         // Reconcile's remaining responsibility after the S2-2 deletion (docs/cultnet-selection-cut.md,
@@ -1874,6 +1915,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-body-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -1904,10 +1950,14 @@ namespace GameCult.Networking.Tests
                 SubscriptionId = "world-body"
             });
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(removed.Active, Is.False);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         // A load's delivery reaches a subscription observer that needs the lifecycle gate while a subscribe's demand
@@ -1958,6 +2008,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("demand-write-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -1974,7 +2029,14 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(finished, Is.True, "the demand handler's cache write deadlocked with the load's delivery");
             await written.Task;
-            serverThread.Join();
+            }
+            finally
+            {
+                // Cancel/Join before disposing anything the poll thread touches (server), so a failed
+                // assertion above cannot race the thread against a disposed socket (R-K).
+                cancellation.Cancel();
+                serverThread.Join();
+            }
             subscriptions.Dispose();
             server.Dispose();
             database.Dispose();
@@ -2038,6 +2100,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-reactive-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -2053,11 +2120,15 @@ namespace GameCult.Networking.Tests
             });
 
             var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(observed.RecordKeys, Is.EqualTo(new[] { "world:field:fog" }));
             Assert.That(observed.SchemaIds, Is.EqualTo(new[] { "gamecult.fields.splats.v1" }));
             Assert.That(observed.BodyIds, Is.Empty);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2089,6 +2160,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-disconnect-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -2107,11 +2183,14 @@ namespace GameCult.Networking.Tests
             client.Dispose();
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
-            serverThread.Join();
-
             Assert.That(removed.SubscriptionId, Is.EqualTo("disconnect-world-body"));
             Assert.That(removed.Active, Is.False);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2141,6 +2220,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2164,12 +2248,15 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(update.SubscriptionId, Is.EqualTo("notes"));
             Assert.That(update.Document, Is.TypeOf<NetworkSchemaNote>());
             Assert.That(((NetworkSchemaNote)targetCache.Get(new CultRecordKey(recordKey))!).Text, Is.EqualTo("live"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2199,6 +2286,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2225,11 +2317,14 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("live"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2254,6 +2349,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2290,11 +2390,14 @@ namespace GameCult.Networking.Tests
                 Text = "updated"
             });
             update = await AwaitWithTimeout(updated.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(update.Text, Is.EqualTo("updated"));
             Assert.That(value.Current.Text, Is.EqualTo("updated"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2328,6 +2431,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2341,11 +2449,14 @@ namespace GameCult.Networking.Tests
                 client.SubscribeLiveValueAsync<NetworkSchemaNote>("demanded-note", recordKey),
                 TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => value.HasValue, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(value.Current.Text, Is.EqualTo("materialized-on-demand"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2376,6 +2487,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2396,11 +2512,14 @@ namespace GameCult.Networking.Tests
                 Text = "wire-live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(update.SchemaId, Is.EqualTo(wireSchema));
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("wire-live"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2430,16 +2549,29 @@ namespace GameCult.Networking.Tests
             var method = typeof(CultNetDatabaseSubscriptionServer).GetMethod(
                 "CreateMatchedRecord",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var requestType = typeof(CultNetDatabaseSubscriptionServer).GetNestedType(
+                "SubscriptionRequest", BindingFlags.NonPublic)!;
+            var requestCtor = requestType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).Single();
+            var request = requestCtor.Invoke(new object?[]
+            {
+                new CultNetSelection
+                {
+                    Schemas = ["tests.networking_note.v1"],
+                    Keys = ["tests:subscription-client:alias-note"]
+                },
+                "alias-notes",
+                "alias-notes",
+                true,
+                null,
+                null,
+                null,
+                false
+            });
 
             var record = (CultNetRawDocumentRecord?)method.Invoke(subscriptions, new object?[]
             {
                 change,
-                new CultNetDatabaseSubscribeMessage
-                {
-                    SubscriptionId = "alias-notes",
-                    SchemaIds = ["tests.networking_note.v1"],
-                    RecordKeys = ["tests:subscription-client:alias-note"]
-                },
+                request,
                 null
             });
 
@@ -2494,6 +2626,8 @@ namespace GameCult.Networking.Tests
                 catch (Exception error) { serverFailure.TrySetResult(error); }
             }) { IsBackground = true };
             serverThread.Start();
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp(
                 runtimeId: "csharp-rudp-large-snapshot-client",
@@ -2516,12 +2650,16 @@ namespace GameCult.Networking.Tests
             await WaitUntilAsync(
                 () => server.Peers.Count == 1 && server.Peers.Single().PendingReliablePacketCount == 0,
                 TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
-            serverThread.Join();
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].Payload, Has.Length.EqualTo(128 * 1024));
             Assert.That(server.Stats.BytesSent, Is.LessThan(512 * 1024),
                 "A lossless large response must not remain trapped in the reliable resend queue.");
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2555,6 +2693,8 @@ namespace GameCult.Networking.Tests
                 catch (Exception error) { serverFailure.TrySetResult(error); }
             }) { IsBackground = true };
             serverThread.Start();
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp(
                 runtimeId: "csharp-rudp-concurrent-publish-client",
@@ -2597,8 +2737,12 @@ namespace GameCult.Networking.Tests
             if (completed == serverFailure.Task) throw await serverFailure.Task;
             if (completed != receivedAll.Task)
                 Assert.Fail($"Concurrent publish timed out after receiving {receivedIds.Count} of {expectedMessages} logical messages.");
-            cancellation.Cancel();
-            serverThread.Join();
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
 
             Assert.That(receivedIds.Count, Is.EqualTo(expectedMessages));
         }

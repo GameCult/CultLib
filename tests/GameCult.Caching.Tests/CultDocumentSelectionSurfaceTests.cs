@@ -197,7 +197,11 @@ namespace GameCult.Caching.Tests
 
             Assert.That(leaf.TryGetIndexNumber(tiny, "tiny_double", out var tinyNumber), Is.True);
             Assert.That(tinyNumber, Does.Not.Contain("E"));
-            Assert.That(tinyNumber, Is.EqualTo("0.0000001"));
+            // R-D (docs/cultnet-selection-cut.md): the exact decimal expansion, not a shortest
+            // round-trip form. 1e-7 is not exactly representable as a double; its nearest double's
+            // exact value is this - the old assertion pinned "0.0000001", the shortest form a
+            // pre-R-D render would have produced instead.
+            Assert.That(tinyNumber, Is.EqualTo("0.0000000999999999999999954748111825886258685613938723690807819366455078125"));
         }
 
         [Test]

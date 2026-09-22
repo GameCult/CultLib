@@ -32,6 +32,12 @@ namespace GameCult.Networking.Tests
         [TestCase(" 1")]
         [TestCase("1.")]
         [TestCase("1..5")]
+        // R-D/Q-J (Soul's whole-cut pass, confirmed): .NET's $ matches immediately before a single
+        // trailing newline even without RegexOptions.Multiline, so a naive `$`-anchored pattern accepts
+        // "5\n" as canonical - the door must refuse it exactly as it refuses any other non-canonical
+        // spelling, byte for byte the same as Rust and the JSON schema's ECMA-262 $.
+        [TestCase("5\n")]
+        [TestCase("5\r\n")]
         public void IsCanonicalRefusesNonCanonicalSpellings(string value) =>
             Assert.That(CultNetCanonicalNumber.IsCanonical(value), Is.False);
 
