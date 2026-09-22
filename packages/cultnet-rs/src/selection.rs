@@ -1883,7 +1883,14 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn mint<R: Row>(as_of: u64, last_row: &R, selection: &Selection, key: &CursorKey) -> String {
-        let digest = Self::compute_digest(selection, key);
+        let digest = Self::compute_digest(
+            as_of,
+            last_row.ordinal(),
+            last_row.schema_id(),
+            last_row.record_key(),
+            selection,
+            key,
+        );
         // R-O: the cursor body uses length-prefixed fields, not a delimiter - a record key
         // carrying any character, including the pre-fix delimiter itself (F6), round-trips.
         let mut body = String::new();
@@ -1915,29 +1922,52 @@ impl Cursor {
         })
     }
 
-    /// Verifies this cursor's digest against `selection` under `key` in constant time (R-O): a
-    /// cursor forged without the key, or minted by a different process's key, is refused.
+    /// Verifies this cursor's digest against `selection` under `key` in constant time (R-O/R-Y): a
+    /// cursor forged without the key, minted by a different process's key, or **rewritten in its
+    /// own position** (`asOf`, `ordinal`, `schemaId` or `recordKey` edited after minting, with the
+    /// original digest reused) is refused - the digest covers the body, not only the selection.
     fn verify_digest(&self, selection: &Selection, key: &CursorKey) -> bool {
-        let expected = Self::compute_digest(selection, key);
+        let expected = Self::compute_digest(
+            self.as_of,
+            self.ordinal,
+            &self.schema_id,
+            &self.record_key,
+            selection,
+            key,
+        );
         constant_time_eq(self.digest.as_bytes(), expected.as_bytes())
     }
 
-    /// An HMAC-SHA256 digest, keyed under `key`, of the selection with `cursor` and `limit`
-    /// cleared, so a cursor is bound to the selection that minted it and to the process that
-    /// minted it.
+    /// An HMAC-SHA256 digest, keyed under `key`, of the cursor's own position (`asOf`, `ordinal`,
+    /// `schemaId`, `recordKey`) as well as the selection with `cursor` and `limit` cleared (R-Y),
+    /// so a cursor is bound both to the selection that minted it, the process that minted it, and
+    /// the exact position it names - a caller cannot hold one valid cursor, rewrite `ordinal` or
+    /// `recordKey` to skip or replay rows, and reuse the original digest.
     ///
     /// R-H: every string and list inside the selection is length-prefixed, so no separator
     /// character can ever make two distinct selections collide (Soul found `["a|b"]` and
     /// `["a","b"]` digesting the same under a separator-joined scheme). This need not (and does
     /// not) byte-match the C# reference's own digest - each server answers its own pages (see this
     /// type's doc comment) - only the collision-freedom and the keying are load-bearing.
-    pub fn compute_digest(selection: &Selection, key: &CursorKey) -> String {
+    pub fn compute_digest(
+        as_of: u64,
+        ordinal: i64,
+        schema_id: &str,
+        record_key: &str,
+        selection: &Selection,
+        key: &CursorKey,
+    ) -> String {
+        let mut canonical = String::new();
+        write_length_prefixed(&mut canonical, &as_of.to_string());
+        write_length_prefixed(&mut canonical, &ordinal.to_string());
+        write_length_prefixed(&mut canonical, schema_id);
+        write_length_prefixed(&mut canonical, record_key);
+
         let mut sorted_schemas = selection.schemas.clone().unwrap_or_default();
         sorted_schemas.sort();
         let mut sorted_keys = selection.keys.clone().unwrap_or_default();
         sorted_keys.sort();
 
-        let mut canonical = String::new();
         write_length_prefixed_list(&mut canonical, &sorted_schemas);
         write_length_prefixed_list(&mut canonical, &sorted_keys);
 
@@ -2023,4 +2053,61 @@ fn read_length_prefixed_fields(bytes: &[u8], count: usize) -> Option<Vec<String>
         return None;
     }
     Some(fields)
+}
+
+/// R-Y: the cursor's digest covers its own body, not only the selection, so a cursor's position
+/// cannot be rewritten while reusing a genuine digest. Lives here, rather than in the integration
+/// tests, because forging that specific attack - splicing a genuine digest onto a rewritten body -
+/// needs the private `digest` field and the length-prefix wire helpers above.
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn encode(as_of: u64, ordinal: i64, schema_id: &str, record_key: &str, digest: &str) -> String {
+        let mut body = String::new();
+        write_length_prefixed(&mut body, &as_of.to_string());
+        write_length_prefixed(&mut body, &ordinal.to_string());
+        write_length_prefixed(&mut body, schema_id);
+        write_length_prefixed(&mut body, record_key);
+        write_length_prefixed(&mut body, digest);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
+    }
+
+    #[test]
+    fn a_rewritten_ordinal_under_the_original_digest_fails_verification() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+
+        let forged = encode(1, 6, "schema-a", "k1", &genuine_digest);
+        let parsed = Cursor::parse(&forged).expect("well-formed body, forged digest");
+        assert!(
+            !parsed.verify_digest(&selection, &key),
+            "reusing the digest under a rewritten ordinal must fail verification"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_record_key_under_the_original_digest_fails_verification() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+
+        let forged = encode(1, 5, "schema-a", "k2", &genuine_digest);
+        let parsed = Cursor::parse(&forged).expect("well-formed body, forged digest");
+        assert!(
+            !parsed.verify_digest(&selection, &key),
+            "reusing the digest under a rewritten record key must fail verification"
+        );
+    }
+
+    #[test]
+    fn the_genuine_digest_still_verifies() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+        let genuine = encode(1, 5, "schema-a", "k1", &genuine_digest);
+        let parsed = Cursor::parse(&genuine).expect("well-formed body");
+        assert!(parsed.verify_digest(&selection, &key));
+    }
 }

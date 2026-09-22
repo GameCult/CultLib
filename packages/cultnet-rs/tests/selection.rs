@@ -1461,17 +1461,60 @@ fn cursor_digest_does_not_collide_on_differently_split_lists() {
         ..Selection::default()
     };
     assert_ne!(
-        Cursor::compute_digest(&one_joined_value, test_cursor_key()),
-        Cursor::compute_digest(&two_split_values, test_cursor_key()),
+        Cursor::compute_digest(1, 1, "s", "k", &one_joined_value, test_cursor_key()),
+        Cursor::compute_digest(1, 1, "s", "k", &two_split_values, test_cursor_key()),
         "a length-prefixed digest must not let list-splitting collide"
     );
 
     let one_key = Selection { keys: Some(vec!["a,b".into()]), ..Selection::default() };
     let two_keys = Selection { keys: Some(vec!["a".into(), "b".into()]), ..Selection::default() };
     assert_ne!(
-        Cursor::compute_digest(&one_key, test_cursor_key()),
-        Cursor::compute_digest(&two_keys, test_cursor_key())
+        Cursor::compute_digest(1, 1, "s", "k", &one_key, test_cursor_key()),
+        Cursor::compute_digest(1, 1, "s", "k", &two_keys, test_cursor_key())
     );
+}
+
+// ------------------------------------------------------------------------------------------
+// R-Y: the digest covers the cursor's own body (`asOf`, `ordinal`, `schemaId`, `recordKey`), not
+// only the selection - a caller holding one valid cursor cannot rewrite its position and reuse
+// the digest.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn cursor_digest_does_not_collide_across_rewritten_positions() {
+    let selection = Selection::default();
+    let key = test_cursor_key();
+    let base = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, key);
+    let rewritten_ordinal = Cursor::compute_digest(1, 6, "schema-a", "k1", &selection, key);
+    let rewritten_key = Cursor::compute_digest(1, 5, "schema-a", "k2", &selection, key);
+    let rewritten_as_of = Cursor::compute_digest(2, 5, "schema-a", "k1", &selection, key);
+    let rewritten_schema = Cursor::compute_digest(1, 5, "schema-b", "k1", &selection, key);
+    assert_ne!(base, rewritten_ordinal, "a rewritten ordinal must not reuse the digest");
+    assert_ne!(base, rewritten_key, "a rewritten record key must not reuse the digest");
+    assert_ne!(base, rewritten_as_of, "a rewritten asOf must not reuse the digest");
+    assert_ne!(base, rewritten_schema, "a rewritten schemaId must not reuse the digest");
+}
+
+// A cursor whose position was rewritten but whose digest bytes were reused (a forgery only
+// possible with access to the encoded body, not the process key) is covered by the in-module
+// unit test next to `Cursor` itself (`selection.rs`'s `cursor_tests`), where the private `digest`
+// field and the length-prefix helpers used to splice a forged body are directly reachable. This
+// integration test only exercises the public surface: two cursors minted for different positions
+// under the same selection and key never share a digest, which is what makes that forgery
+// impossible without the raw bytes.
+#[test]
+fn cursor_minted_for_a_different_position_never_shares_a_digest() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let genuine = page.next_cursor.expect("more than one row");
+    let parsed = Cursor::parse(&genuine).expect("mints decode");
+
+    let d1 = Cursor::compute_digest(1, parsed.ordinal, &parsed.schema_id, &parsed.record_key, &selection, test_cursor_key());
+    let d2 = Cursor::compute_digest(1, parsed.ordinal + 1, &parsed.schema_id, &parsed.record_key, &selection, test_cursor_key());
+    let d3 = Cursor::compute_digest(1, parsed.ordinal, &parsed.schema_id, "some-other-key", &selection, test_cursor_key());
+    assert_ne!(d1, d2, "a rewritten ordinal must not reuse the digest");
+    assert_ne!(d1, d3, "a rewritten record key must not reuse the digest");
 }
 
 // ------------------------------------------------------------------------------------------
