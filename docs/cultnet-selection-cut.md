@@ -445,6 +445,36 @@ until the Rust half lands. Caching 192. Mesh 253/254. Python 54, 78 and 34. In
 rules (there are only regression tests), S9, and a diagnosis of the 1-in-20
 failure over 30 runs.
 
+**The Rust half of the fix batch landed** (Sonnet), `8b114ed`..`a088435`:
+- 36/36 entries killed.
+- Three real bugs were found while it ran, among them a v0 fast path that
+  had inherited the door's "empty matches all".
+- The `contracts.rs` hand codecs are gone (−362/+35).
+- The Rust Hands corrected `f32` 3e20 to `300000006012263202816`.
+
+**Shared parity fixture** (Sonnet), `3317ddd` and `defb9a1`. Both runtimes now
+build their vectors from
+`contracts/cultnet/interop/selection-vectors.fixture.json`, which uses real
+SHA-256 ids. A test bug is fixed: both readers had compared the page size with
+`matched`. Of 15 vectors in each direction, the following agree byte for byte:
+exact ids, float tie, astral order, header and document projection,
+`cites`/`cited`, and the refusals. **Two real parity defects:**
+- **Two incompatible alias rules.** C#'s `CultNetSchemaAliasMatching.Matches`
+  (`CultNetDatabase.cs:74-87`) strips `.vN` and compares against the
+  descriptor's `SchemaName`. Rust's `schema_alias::matches`
+  (`selection.rs:452-459`) strips `.vN` and compares against the *hash*. No
+  alias resolves in both.
+- **C# does not refuse an unresolved `cites.target`** (`CultNetSelection.cs:361-391`),
+  which R-E requires. Rust does refuse it.
+
+**Self's ruling, 2026-09-22: the C# reference's alias rule is the rule.**
+CultLib keeps wire parity against the C# reference. An alias is a schema
+*name* with a `.vN` suffix, resolved against the descriptor's name. A
+hash-shaped alias is not a wire form. Rust ports the name rule, which means
+its `RowSet` must expose each schema's name, and it deletes the hash-stripping
+matcher. C# refuses an unresolved `cites.target` at the door. Each vector that
+fails today becomes a vector both runtimes must pass.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
