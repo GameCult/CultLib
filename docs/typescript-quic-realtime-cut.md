@@ -889,6 +889,59 @@ executing the README's command block literally, with no extra step:
 Structural delta: one `add_custom_command`, four lines, in the test target's
 build graph. No new files, scripts, options or targets.
 
+**The Windows leg ran, 2026-09-22** (Sonnet), and found the same class of
+defect as Linux in a far worse form. Committed at `f3aae70`.
+
+**The scenarios were passing against the wrong MsQuic.** The bridge imports
+`msquic.dll` by name. Neither `build-quic-native.ps1` nor CMake ever copied
+the pinned library beside the test binary in the build tree — only into the
+packaged output directory, which a test build never produces. Linux failed
+loudly here (`cannot open shared object file`). **Windows did not fail at
+all**: DLL search fell through to `PATH` and loaded an unrelated `msquic.dll`
+from the Windows Performance Toolkit — 529,480 bytes, SHA `B2B7FD2D…` —
+instead of the pinned `Microsoft.Native.Quic.MsQuic.OpenSSL` 2.5.9 build at
+4,181,856 bytes, SHA `C17C6581…`. Every asserts scenario passed on the first
+run against that binary with nothing indicating anything was wrong.
+
+This is the doctrine's own trap: a stale asset impersonating logic, and the
+green result was the thing hiding it. Fixed by mirroring `5533c34`'s Linux
+`POST_BUILD` copy on the Windows side, taking `msquic.dll` from
+`MSQUIC_ROOT/bin/x64`. Both test build directories now carry the pinned
+library at the right size and SHA, and every result below is from a rerun
+after the fix.
+
+**Open question, not yet answered: how far back does this reach?** Every
+earlier Windows scenario and mutation number in this campaign was produced on
+this machine, and the copy has never existed. If the harness did not place the
+pinned DLL itself, then Windows figures recorded in earlier passes — including
+the 39-killed count — were measured against whatever `msquic.dll` happened to
+be on `PATH`. **Nothing here re-proves those numbers.** They should be treated
+as unconfirmed until someone checks whether the deleted harness copied the
+library, and re-runs them if it did not.
+
+**Asserts build** (`Debug`, tests on, asserts on), nine scenarios, all pass:
+`polltimeout` (worst overshoot 31 ms), `pollbusy` (17 ms), `pollhammer`,
+`zerotimeout` (3 probes), `payloadfit`, `holdclose` (20×256 pollers),
+`latecall`, `holdtimeout` (63 ms), `waitseam` (11 probes, 40 repeated polls).
+Every overshoot is far inside the 400 ms tolerance and nothing was weakened.
+
+**Release build** (asserts off): `polltimeout` (20 ms), `pollbusy` (24 ms),
+`pollhammer`, `zerotimeout`, and `payloadfit` as a bonus — all pass. **F1 is
+now closed on both platforms.** `holdclose` refuses to run there with
+*"needs the development seam"*, which is useful evidence in itself: it proves
+the release build's asserts are genuinely compiled out rather than merely
+untested.
+
+`closerace` was **not run**. It is the sixteen-burner stress, which stays an
+operator fork.
+
+**A documentation gap, not a wrong instruction.** The README's Windows section
+documents only the plain library build and carries no worked test-build
+recipe, where the Linux section has one. Hands followed the brief's flags
+because nothing better existed. That gap is why the missing DLL copy went
+unnoticed for so long: there was no documented Windows path to run, and so
+nobody ran one.
+
 **Still outstanding for Cut 3:**
 
 - The **Windows release configuration**. It lived inside the harness and left
