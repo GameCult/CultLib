@@ -732,6 +732,21 @@ merge.**
   cross-runtime defect, which the alias port fixed. Rust's port also drops
   `SchemaVersion` and `CompatibleSchemaIds`, so R-E is two rules agreeing on a
   subset.
+- **Soul's own corrections, same pass.** It first reported a wedged
+  `cargo mutants` job on Yggdrasil and asked for it to be killed. Checking the
+  box rather than its log, the work directory was already gone: what it had
+  lost was its detached ssh's output. Self had by then killed the process,
+  which was Soul's own run, so nothing else was affected. **The shape is worth
+  keeping: a log is not the machine, and Self acted before confirming the
+  process was actually stalled.**
+- **The Stryker triage is owed, after four attempts, none of them Stryker's
+  fault.** The `dotnet/sdk:10.0` image has no `python3`; the JSON reporter threw
+  on `CreateDirectory`; two runs with a different output path ran about fifty
+  minutes without finishing, against three minutes for the mutation phase that
+  did complete. The completed run stands, and the command is in Soul's notes:
+  `dotnet-stryker --project GameCult.Networking.csproj --mutate "**/CultNetSelection*.cs" --reporter json --reporter progress --concurrency 4`.
+  **Read the HTML report Stryker writes beside the JSON**, rather than parsing
+  JSON in the container.
 - **cargo-mutants cannot run on `cultnet-rs` at all.** `schema_discovery.rs`
   uses `include_str!("../../../contracts/…")`, which escapes the package, so
   the tool's copied tree fails its baseline build. **There is no mutation
