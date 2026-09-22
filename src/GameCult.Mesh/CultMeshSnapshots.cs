@@ -1002,8 +1002,8 @@ namespace GameCult.Mesh
                     binding != null &&
                     typeof(TDocument).IsAssignableFrom(binding.DocumentType);
                 var canDeserializeAsSchemaAlias =
-                    string.Equals(record.SchemaId, descriptor.SchemaId, StringComparison.Ordinal) ||
-                    (binding != null && IsSameCultDocumentSchema(binding.DocumentType, descriptor)) ||
+                    CultNetSchemaAliasMatching.Matches(record.SchemaId, descriptor) ||
+                    (binding != null && CultNetSchemaAliasMatching.Matches(binding.SchemaId, descriptor)) ||
                     RawSnapshotPayloadMatchesSchema(record.Payload, descriptor);
                 if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
@@ -1030,20 +1030,17 @@ namespace GameCult.Mesh
             return documents;
         }
 
+        // Decode-time fallback for a wire schemaId this runtime does not recognize by any alias
+        // (e.g. a foreign/runtime-generated id): trust the payload's own embedded schemaVersion
+        // instead. This is a decode concern, not a selector engine — the server's answer is not
+        // re-filtered here, and schema identity itself still goes through the one alias matcher.
         private static bool RawSnapshotPayloadMatchesSchema(
             byte[] payload,
             CultDocumentDescriptor descriptor)
         {
             var schemaVersion = TryReadSchemaVersion(payload);
-            if (string.IsNullOrWhiteSpace(schemaVersion))
-                return false;
-
-            if (string.Equals(schemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal))
-                return true;
-
-            var schemaName = InferSchemaName(schemaVersion!);
-            return !string.IsNullOrWhiteSpace(schemaName) &&
-                   string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal);
+            return !string.IsNullOrWhiteSpace(schemaVersion) &&
+                   CultNetSchemaAliasMatching.Matches(schemaVersion!, descriptor);
         }
 
         private static string? TryReadSchemaVersion(byte[] payload)
@@ -1073,18 +1070,6 @@ namespace GameCult.Mesh
             }
 
             return null;
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-                return null;
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
     }
 }

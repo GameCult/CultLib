@@ -3471,13 +3471,15 @@ namespace GameCult.Mesh
                 CultDocumentRegistry.Shared.GetRequired<TDocument>());
         }
 
+        // The one schema-alias matcher (docs/cultnet-selection-cut.md, D4): every runtime-side
+        // schema identity decision, wire or local, goes through CultNetSchemaAliasMatching.
         private static bool IsSameCultDocumentSchema(
             Type documentType,
             CultDocumentDescriptor descriptor,
             string? schemaId = null)
         {
             if (!string.IsNullOrWhiteSpace(schemaId) &&
-                string.Equals(schemaId, descriptor.SchemaId, StringComparison.Ordinal))
+                CultNetSchemaAliasMatching.Matches(schemaId, descriptor))
             {
                 return true;
             }
@@ -3492,8 +3494,7 @@ namespace GameCult.Mesh
                 return false;
             }
 
-            return string.Equals(storedDescriptor.SchemaName, descriptor.SchemaName, StringComparison.Ordinal) &&
-                   string.Equals(storedDescriptor.SchemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal);
+            return CultNetSchemaAliasMatching.Matches(storedDescriptor.SchemaVersion, descriptor);
         }
 
         private static TDocument ConvertUntypedDocument<TDocument>(object document)
