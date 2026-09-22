@@ -217,6 +217,26 @@
       "matched": 0,
       "hasNext": false,
       "expectedEdges": []
+    },
+    {
+      "name": "refuses_unmatched_cites_target_schema",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlkvHNoYTI1Njpub3QtYS1kZWNsYXJlZC1zY2hlbWGpcmVjb3JkS2V5pGEtZXGkcm9sZcClY2l0ZWTAqnByb2plY3Rpb26maGVhZGVyqmRlc2NlbmRpbmfCpWxpbWl0wKZjdXJzb3LA",
+      "asOf": 1,
+      "expectedRefusalField": "cites.target.schemaId",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "refuses_cites_target_by_hash_shaped_alias",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlk2UpzaGEyNTY6ZmYzNWYzZDlkNmRlM2YxMDY2YjkzNjllNzNmZTZjNzY0OGU4ODM2OGQxOGVmYzIyNzVjOTk0NzMwY2Q4NGNmZi52MalyZWNvcmRLZXmkYS1lcaRyb2xlwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": "cites.target.schemaId",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
     }
   ]
 }
