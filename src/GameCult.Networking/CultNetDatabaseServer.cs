@@ -245,15 +245,15 @@ namespace GameCult.Networking
             }
             catch (CultNetSelectionInvalidException ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+                peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
             }
             catch (CultNetSelectionCursorException ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = $"{ex.Code}: {ex.Message}" });
+                peer.SendCultNet(CultNetErrorMessage.ForCursor(ex));
             }
             catch (CultNetSelectionReferenceOutsideTargetException ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = $"reference_outside_target: {ex.Message}" });
+                peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
             }
 
             return Task.CompletedTask;
@@ -379,7 +379,12 @@ namespace GameCult.Networking
             // refused here rather than reaching Matches' own InvalidOperationException on the first change.
             if (message.Selection.HasHop)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = "selection_invalid: selection.cites/selection.cited need the subscription server's reconcile loop (D6); this server only fast-matches a single row." });
+                peer.SendCultNet(new CultNetErrorMessage
+                {
+                    Error = "selection_invalid: selection.cites/selection.cited need the subscription server's reconcile loop (D6); this server only fast-matches a single row.",
+                    Code = "selection_invalid",
+                    Details = new CultNetErrorDetails { Field = "cites" }
+                });
                 return Task.CompletedTask;
             }
 
@@ -389,7 +394,7 @@ namespace GameCult.Networking
             }
             catch (CultNetSelectionInvalidException ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+                peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
                 return Task.CompletedTask;
             }
 
@@ -405,11 +410,26 @@ namespace GameCult.Networking
 
             if (message.IncludeSnapshot)
             {
-                peer.SendCultNet(CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+                try
                 {
-                    MessageId = message.MessageId,
-                    Selection = message.Selection
-                }));
+                    peer.SendCultNet(CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+                    {
+                        MessageId = message.MessageId,
+                        Selection = message.Selection
+                    }));
+                }
+                catch (CultNetSelectionInvalidException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+                }
+                catch (CultNetSelectionCursorException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForCursor(ex));
+                }
+                catch (CultNetSelectionReferenceOutsideTargetException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+                }
             }
             else
             {

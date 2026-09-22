@@ -1538,6 +1538,30 @@ namespace GameCult.Caching
                     return memberType.GetGenericArguments()[0];
                 }
 
+                // R-T(b): a many reference's implicit target is its CultRecordRef<T> element's T - the
+                // same narrowing a scalar CultRecordRef<T> gets above - not left null just because the
+                // member's own declared type is List<> or IDictionary<,>, not CultRecordRef<> itself.
+                // Before this, an implicitly-typed many reference reached CultNetSelectionEvaluator's
+                // EnsureWithinDeclaredTarget with a null TargetType and its out-of-target check was
+                // silently skipped for every edge through it (R-T(b)/S18).
+                if (IsEnumerableOfRecordRef(memberType))
+                {
+                    foreach (var candidate in memberType.GetInterfaces().Append(memberType))
+                    {
+                        if (candidate.IsGenericType &&
+                            candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>) &&
+                            IsCultRecordRefType(candidate.GetGenericArguments()[0]))
+                        {
+                            return candidate.GetGenericArguments()[0].GetGenericArguments()[0];
+                        }
+                    }
+                }
+
+                if (TryGetDictionaryRefTypes(memberType, out var keyProperty, out _))
+                {
+                    return keyProperty.PropertyType.GetGenericArguments()[0];
+                }
+
                 return null;
             }
         }

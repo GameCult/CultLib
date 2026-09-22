@@ -91,6 +91,12 @@ namespace GameCult.Networking
                 return false;
             if (selection.Fields == null)
                 return true;
+            // R-T(a): a removed change is evaluated without reading a document (there is none to read -
+            // the row is gone). It matches on the selection's keys and schemas alone; a field predicate
+            // cannot be tested against a value that no longer exists, so it counts as unknown rather
+            // than excluding the row (or throwing TryGetIndexValue(null)).
+            if (document == null)
+                return true;
 
             foreach (var field in selection.Fields)
             {
@@ -239,7 +245,11 @@ namespace GameCult.Networking
                 if (cursor.Digest != CultNetSelectionCursor.ComputeDigest(selection))
                     throw new CultNetSelectionCursorException("cursor_invalid", "The cursor's selection digest does not match this selection.");
                 if (cursor.AsOf != asOf)
-                    throw new CultNetSelectionCursorException("cursor_stale", $"The cursor was minted at asOf {cursor.AsOf}; this server answers as of {asOf}.");
+                    throw new CultNetSelectionCursorException(
+                        "cursor_stale",
+                        $"The cursor was minted at asOf {cursor.AsOf}; this server answers as of {asOf}.",
+                        asOf: cursor.AsOf,
+                        current: asOf);
                 startIndex = FindCursorPosition(ordered, cursor, selection.Descending);
             }
 
@@ -305,10 +315,14 @@ namespace GameCult.Networking
 
         // D9: a reference's target set is every registered leaf assignable to its declared target type.
         // A stored edge naming a row whose schema is outside that set refuses the selection (S18).
+        // R-T(b): this runs for every edge, including one whose member carries no declared target type
+        // (CultDocumentRegistry.PersistedMember.TargetType is null only for a shape the cache could not
+        // infer a target from - it no longer special-cases that away here without checking anything;
+        // typeof(object) is every registered leaf, which is the correct target set for a genuinely
+        // unconstrained reference and keeps this the one path, not a skip plus a duplicate path.
         private static void EnsureWithinDeclaredTarget(CultDocumentRegistry registry, Type? targetType, Row from, string role, Row to)
         {
-            if (targetType == null) return;
-            var leaves = registry.ResolveTargetLeaves(targetType);
+            var leaves = registry.ResolveTargetLeaves(targetType ?? typeof(object));
             if (leaves.Any(leaf => leaf.SchemaId == to.Descriptor.SchemaId)) return;
             throw new CultNetSelectionReferenceOutsideTargetException(from.Descriptor.SchemaId, from.Key.Value, role, to.Descriptor.SchemaId, to.Key.Value);
         }
@@ -407,12 +421,21 @@ namespace GameCult.Networking
     /// <summary>The typed refusal for a cursor the server cannot answer (<c>cursor_stale</c>/<c>cursor_invalid</c>).</summary>
     public sealed class CultNetSelectionCursorException : Exception
     {
-        public CultNetSelectionCursorException(string code, string message) : base(message)
+        public CultNetSelectionCursorException(string code, string message, ulong? asOf = null, ulong? current = null)
+            : base(message)
         {
             Code = code;
+            AsOf = asOf;
+            Current = current;
         }
 
         public string Code { get; }
+
+        /// <summary>The cursor's own minted <c>asOf</c>. Carried on the wire only for <c>cursor_stale</c> (R-N).</summary>
+        public ulong? AsOf { get; }
+
+        /// <summary>The answering server's current <c>asOf</c>. Carried on the wire only for <c>cursor_stale</c> (R-N).</summary>
+        public ulong? Current { get; }
     }
 
     /// <summary>

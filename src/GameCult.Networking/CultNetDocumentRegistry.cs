@@ -549,8 +549,14 @@ namespace GameCult.Networking
             return wire;
         }
 
-        /// <summary>The wire schema id this registry answers with for a descriptor - its binding's override when one is registered, else the descriptor's own id (R-E: the same id <see cref="ToRawRecord(CultNetSelectionEvaluator.Row, CultNetDocumentMessageOptions?)"/> emits).</summary>
-        private string WireSchemaId(CultDocumentDescriptor descriptor) =>
+        /// <summary>
+        /// The wire schema id this registry answers with for a descriptor - its binding's override when
+        /// one is registered, else the descriptor's own id (R-E: the same id
+        /// <see cref="ToRawRecord(CultNetSelectionEvaluator.Row, CultNetDocumentMessageOptions?)"/> emits).
+        /// Internal rather than private (R-P): one id reaches the authorizer, and it is this one, on
+        /// every path - CultNetDatabaseSubscriptionServer's live path needs it too.
+        /// </summary>
+        internal string WireSchemaId(CultDocumentDescriptor descriptor) =>
             GetByDocumentType(descriptor.DocumentType)?.SchemaId ?? descriptor.SchemaId;
 
         /// <summary>

@@ -509,6 +509,70 @@ namespace GameCult.Networking
         /// Gets or sets optional shard routing details for authority failures.
         /// </summary>
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
+        /// <summary>
+        /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>. Additive to
+        /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
+        /// </summary>
+        [Key("code")] public string? Code { get; set; }
+        /// <summary>
+        /// Gets or sets the code-specific structured detail (R-N). Additive to <c>cultnet.error.v0</c>.
+        /// </summary>
+        [Key("details")] public CultNetErrorDetails? Details { get; set; }
+
+        /// <summary>
+        /// Builds the wire error for a door refusal (R-N): code <c>selection_invalid</c>, details
+        /// <c>{ field, value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForSelectionInvalid(CultNetSelectionInvalidException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"selection_invalid: {ex.Message}",
+                Code = "selection_invalid",
+                Details = new CultNetErrorDetails { Field = ex.Field, Value = ex.Value }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a cursor refusal (R-N): code <c>cursor_stale</c> with details
+        /// <c>{ asOf, current }</c>, or code <c>cursor_invalid</c> with no details.
+        /// </summary>
+        public static CultNetErrorMessage ForCursor(CultNetSelectionCursorException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"{ex.Code}: {ex.Message}",
+                Code = ex.Code,
+                Details = ex.Code == "cursor_stale"
+                    ? new CultNetErrorDetails { AsOf = ex.AsOf, Current = ex.Current }
+                    : null
+            };
+
+        /// <summary>
+        /// Builds the wire error for an out-of-target reference refusal (R-N): code
+        /// <c>reference_outside_target</c>, no details.
+        /// </summary>
+        public static CultNetErrorMessage ForReferenceOutsideTarget(CultNetSelectionReferenceOutsideTargetException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"reference_outside_target: {ex.Message}",
+                Code = "reference_outside_target"
+            };
+    }
+
+    /// <summary>
+    /// Code-specific structured detail carried on <see cref="CultNetErrorMessage"/> (R-N). Fields are
+    /// populated only for the code that defines them; every field is otherwise omitted (nil on the wire).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetErrorDetails
+    {
+        /// <summary>The selection field that failed (<c>selection_invalid</c>).</summary>
+        [Key("field")] public string? Field { get; set; }
+        /// <summary>The offending value, when there is one string worth naming (<c>selection_invalid</c>).</summary>
+        [Key("value")] public string? Value { get; set; }
+        /// <summary>The cursor's own minted asOf (<c>cursor_stale</c>).</summary>
+        [Key("asOf")] public ulong? AsOf { get; set; }
+        /// <summary>The answering server's current asOf (<c>cursor_stale</c>).</summary>
+        [Key("current")] public ulong? Current { get; set; }
     }
 
     /// <summary>

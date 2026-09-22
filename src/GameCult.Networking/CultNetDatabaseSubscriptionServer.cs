@@ -155,7 +155,7 @@ namespace GameCult.Networking
             }
             catch (CultNetSelectionInvalidException ex)
             {
-                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+                peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
                 return Task.CompletedTask;
             }
 
@@ -189,6 +189,20 @@ namespace GameCult.Networking
                     }
                     PublishDemand(request, key, active: true);
                     projection.DemandActive = true;
+                }
+                catch (CultNetSelectionInvalidException ex)
+                {
+                    // R-N: a hop-bearing selection re-validates inside CreateProjectedSnapshot's
+                    // EvaluateAll, so a selection that passed the door check above can still refuse here.
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
+                    peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+                    return Task.CompletedTask;
+                }
+                catch (CultNetSelectionReferenceOutsideTargetException ex)
+                {
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
+                    peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+                    return Task.CompletedTask;
                 }
                 catch
                 {
@@ -515,7 +529,13 @@ namespace GameCult.Networking
             if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
                 return null;
             var legacyRequest = request.ToLegacyShape(request.SubscriptionId);
-            if (_authorizeRecord?.Invoke(legacyRequest, peer, key.Value, descriptor.SchemaId) == false)
+            // R-P: one id reaches the authorizer, and it is the wire id, on every path. The snapshot
+            // path (CreateProjectedSnapshot, below) authorizes against the raw record's own SchemaId,
+            // which is the wire id ToRawRecord/binding emit; this live fast path used to pass
+            // descriptor.SchemaId instead - the CLR type's own registered id, not the id a binding
+            // overrides to - so a row delivered by the snapshot could be refused on its first live
+            // change, or leak through a denylist keyed on the wire id.
+            if (_authorizeRecord?.Invoke(legacyRequest, peer, key.Value, _database.Documents.WireSchemaId(descriptor)) == false)
                 return null;
 
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
