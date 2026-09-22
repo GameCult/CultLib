@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine;
@@ -293,18 +291,11 @@ pub enum CultNetMessage {
     Verify { nonce: String, session: String },
     #[serde(rename = "cultnet.login_success.v0", rename_all = "camelCase")]
     LoginSuccess { nonce: String, session: String },
-    /// R-N (docs/cultnet-selection-cut.md, fix batch 3): `code` and `details` are additive over
-    /// the pre-cut `error` string, so a v0 peer that has never heard of them keeps working
-    /// unchanged. Every selection and cursor refusal, and `reference_outside_target`, is carried
-    /// this way in both servers and in Rust - see `SelectionRefusal::to_wire_message`.
+    // R-N (docs/cultnet-selection-cut.md, fix batch 3) is pending: `code`/`details` land here once
+    // the C# reference's exact field names and code strings are known (Self, 2026-09-22 - do not
+    // guess them). `Error` stays its pre-cut shape until then.
     #[serde(rename = "cultnet.error.v0", rename_all = "camelCase")]
-    Error {
-        error: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        details: Option<BTreeMap<String, String>>,
-    },
+    Error { error: String },
     #[serde(rename = "cultnet.sample.change_name.v0", rename_all = "camelCase")]
     SampleChangeName { name: String },
     #[serde(rename = "cultnet.sample.chat.v0", rename_all = "camelCase")]
@@ -585,7 +576,7 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(nonce, "nonce")?;
             require_non_empty(session, "session")?;
         }
-        CultNetMessage::Error { error, .. } => require_non_empty(error, "error")?,
+        CultNetMessage::Error { error } => require_non_empty(error, "error")?,
         CultNetMessage::SampleChangeName { name } => require_non_empty(name, "name")?,
         CultNetMessage::SampleChat { text } => require_non_empty(text, "text")?,
         CultNetMessage::DocumentPut {
@@ -1305,10 +1296,6 @@ fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessa
         }),
         4 => Ok(CultNetMessage::Error {
             error: require_legacy_string(payload.first(), "ErrorMessage.Error")?,
-            // The legacy array wire has no slot for `code`/`details` (R-N); a v0 peer never sees
-            // them, on the wire or off it.
-            code: None,
-            details: None,
         }),
         5 => Ok(CultNetMessage::SampleChangeName {
             name: require_legacy_string(payload.first(), "ChangeNameMessage.Name")?,
@@ -1392,9 +1379,7 @@ fn encode_gamecult_networking_message(message: &CultNetMessage) -> Result<rmpv::
                 legacy_bytes(session, "LoginSuccessMessage.Session")?,
             ]),
         ],
-        CultNetMessage::Error { error, .. } => {
-            // R-N: `code`/`details` are additive on the named wire only; the legacy array wire
-            // has no slot for them and never carried them.
+        CultNetMessage::Error { error } => {
             vec![
                 rmpv::Value::from(4),
                 rmpv::Value::Array(vec![error.as_str().into()]),

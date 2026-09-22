@@ -15,7 +15,7 @@
 //! the comparator; it is a pure string algorithm with no `f64`/`f32` anywhere on the comparison path.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use base64::Engine;
@@ -26,7 +26,6 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::CultNetMessage;
 use crate::security::constant_time_eq;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -930,69 +929,11 @@ impl From<SelectionInvalid> for SelectionRefusal {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// R-N (docs/cultnet-selection-cut.md, fix batch 3): refusals are wire messages
-// ---------------------------------------------------------------------------------------------
-
-impl SelectionRefusal {
-    /// The wire `code` this refusal carries on `cultnet.error.v0` (R-N). Mirrors the C#
-    /// reference's mapping from `CultNetSelectionInvalidException` and the cursor/reference
-    /// refusals to the same string.
-    pub fn wire_code(&self) -> &'static str {
-        match self {
-            Self::Invalid(_) => "selection_invalid",
-            Self::CursorStale { .. } => "cursor_stale",
-            Self::CursorInvalid { .. } => "cursor_invalid",
-            Self::ReferenceOutsideTarget { .. } => "reference_outside_target",
-        }
-    }
-
-    /// The wire `details` this refusal carries alongside `code` (R-N): a flat string map, so the
-    /// shape stays additive over the pre-cut `error` string on every transport this crate speaks.
-    pub fn wire_details(&self) -> BTreeMap<String, String> {
-        let mut details = BTreeMap::new();
-        match self {
-            Self::Invalid(inner) => {
-                details.insert("field".to_string(), inner.field.clone());
-                if let Some(value) = &inner.value {
-                    details.insert("value".to_string(), value.clone());
-                }
-            }
-            Self::CursorStale { as_of, current } => {
-                details.insert("asOf".to_string(), as_of.to_string());
-                details.insert("current".to_string(), current.to_string());
-            }
-            Self::CursorInvalid { message } => {
-                details.insert("message".to_string(), message.clone());
-            }
-            Self::ReferenceOutsideTarget {
-                from_schema_id,
-                from_key,
-                role,
-                to_schema_id,
-                to_key,
-            } => {
-                details.insert("fromSchemaId".to_string(), from_schema_id.clone());
-                details.insert("fromKey".to_string(), from_key.clone());
-                details.insert("role".to_string(), role.clone());
-                details.insert("toSchemaId".to_string(), to_schema_id.clone());
-                details.insert("toKey".to_string(), to_key.clone());
-            }
-        }
-        details
-    }
-
-    /// This refusal as the `cultnet.error.v0` message a peer actually receives (R-N): `error`
-    /// stays the human string every peer already reads, `code`/`details` are additive.
-    pub fn to_wire_message(&self) -> CultNetMessage {
-        let details = self.wire_details();
-        CultNetMessage::Error {
-            error: self.to_string(),
-            code: Some(self.wire_code().to_string()),
-            details: if details.is_empty() { None } else { Some(details) },
-        }
-    }
-}
+// R-N (docs/cultnet-selection-cut.md, fix batch 3) is deliberately not implemented here: the C#
+// reference's exact `code` string per refusal and `details` field names are not landed on this
+// branch yet, and Self's instruction (2026-09-22) is not to guess them. When they land, this is
+// where a `SelectionRefusal -> CultNetMessage::Error` mapping belongs, matched byte-for-byte
+// against the reference.
 
 // ---------------------------------------------------------------------------------------------
 // Row / RowSet (D7): the consumer's declarations and values, reflected over nothing
