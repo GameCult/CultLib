@@ -160,6 +160,94 @@ namespace GameCult.Networking.Tests
                     .With.Property(nameof(CultNetSelectionCursorException.Code)).EqualTo("cursor_invalid"));
         }
 
+        // R-N (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): every refusal maps to a
+        // wire code, and selection_invalid/cursor_stale carry structured details, on cultnet.error.v0.
+        // Each test here decodes the bytes a peer actually receives (CultNetSchemaMessageSerialization
+        // round trip), not the in-process exception or message object.
+        [Test]
+        public void ErrorMessage_WireDecodesSelectionInvalidCodeAndDetails()
+        {
+            var registry = Registry();
+            var ex = Assert.Throws<CultNetSelectionInvalidException>(
+                () => new CultNetSelection { Schemas = Array.Empty<string>() }.Validate(registry.AllDescriptors.ToArray()))!;
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(CultNetErrorMessage.ForSelectionInvalid(ex));
+            var decoded = (CultNetErrorMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(decoded.Code, Is.EqualTo("selection_invalid"));
+            Assert.That(decoded.Details, Is.Not.Null);
+            Assert.That(decoded.Details!.Field, Is.EqualTo("schemas"));
+            Assert.That(decoded.Details!.Value, Is.Null);
+        }
+
+        [Test]
+        public void ErrorMessage_WireDecodesCursorStaleCodeAndDetails()
+        {
+            var registry = Registry();
+            var rows = new[]
+            {
+                Row(registry, new SelLeafA { Name = "a", Kind = "k", Mass = 1 }, "a", 1),
+                Row(registry, new SelLeafA { Name = "b", Kind = "k", Mass = 1 }, "b", 2)
+            };
+            var selection = new CultNetSelection { Limit = 1 };
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+            selection.Cursor = first.NextCursor;
+            var ex = Assert.Throws<CultNetSelectionCursorException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 2))!;
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(CultNetErrorMessage.ForCursor(ex));
+            var decoded = (CultNetErrorMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(decoded.Code, Is.EqualTo("cursor_stale"));
+            Assert.That(decoded.Details, Is.Not.Null);
+            Assert.That(decoded.Details!.AsOf, Is.EqualTo(1ul));
+            Assert.That(decoded.Details!.Current, Is.EqualTo(2ul));
+        }
+
+        [Test]
+        public void ErrorMessage_WireDecodesCursorInvalidCodeWithNoDetails()
+        {
+            var registry = Registry();
+            var rows = new[]
+            {
+                Row(registry, new SelLeafA { Name = "a", Kind = "k", Mass = 1 }, "a", 1),
+                Row(registry, new SelLeafA { Name = "b", Kind = "k", Mass = 1 }, "b", 2)
+            };
+            var selection = new CultNetSelection { Limit = 1 };
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+            var mismatched = new CultNetSelection { Limit = 1, Cursor = first.NextCursor, Descending = true };
+            var ex = Assert.Throws<CultNetSelectionCursorException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, mismatched, asOf: 1))!;
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(CultNetErrorMessage.ForCursor(ex));
+            var decoded = (CultNetErrorMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(decoded.Code, Is.EqualTo("cursor_invalid"));
+            Assert.That(decoded.Details, Is.Null);
+        }
+
+        [Test]
+        public void ErrorMessage_WireDecodesReferenceOutsideTargetCodeWithNoDetails()
+        {
+            var leafB = new SelLeafB { Name = "b", Kind = "k", Mass = 1 };
+            var offTargetCiter = new SelCiterNarrow { Name = "bad", NarrowRef = new CultRecordRef<SelLeafA>(new CultRecordKey("b")) };
+            var narrowRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(SelLeafA), typeof(SelLeafB), typeof(SelCiterNarrow) });
+            var rows = new[]
+            {
+                new CultNetSelectionEvaluator.Row(narrowRegistry.GetRequired<SelLeafB>(), new CultRecordKey("b"), leafB, 1),
+                new CultNetSelectionEvaluator.Row(narrowRegistry.GetRequired<SelCiterNarrow>(), new CultRecordKey("bad"), offTargetCiter, 2)
+            };
+            var selection = new CultNetSelection { Cited = new CultNetIncoming { Role = "NarrowRef", Exists = true } };
+            var ex = Assert.Throws<CultNetSelectionReferenceOutsideTargetException>(
+                () => CultNetSelectionEvaluator.Select(narrowRegistry, rows, selection, asOf: 1))!;
+
+            var payload = CultNetSchemaMessageSerialization.Serialize(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+            var decoded = (CultNetErrorMessage)CultNetSchemaMessageSerialization.Deserialize(payload);
+
+            Assert.That(decoded.Code, Is.EqualTo("reference_outside_target"));
+            Assert.That(decoded.Details, Is.Null);
+        }
+
         // S6: the hop follows one declared reference by role; a second role is not followed.
         [Test]
         public void EvaluatorHopsOneEdgeByDeclaredReferenceAndRole()
@@ -290,6 +378,48 @@ namespace GameCult.Networking.Tests
                 () => CultNetSelectionEvaluator.Select(narrowRegistry, rows, selection, asOf: 1));
         }
 
+        // R-T(b) (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): EnsureWithinDeclaredTarget
+        // checks every edge against its declared target, including a many reference declared with no
+        // explicit [CultReference(typeof(...))] - CultDocumentRegistry.PersistedMember used to leave
+        // TargetType null for that shape (only the explicit-target and scalar CultRecordRef<T> cases were
+        // inferred), which made EnsureWithinDeclaredTarget skip the check outright for every edge through
+        // it. SelCiterManyUntyped's ManyRefs declares many:true with no explicit target, so its target is
+        // inferred from the CultRecordRef<SelLeafA> element alone; a SelLeafB target must still refuse.
+        [Test]
+        public void EvaluatorRefusesAnOutOfTargetEdgeThroughAnImplicitlyTypedManyReference()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SelLeafA), typeof(SelLeafB), typeof(SelCiterManyUntyped) });
+            var leafA = new SelLeafA { Name = "a", Kind = "k", Mass = 1 };
+            var leafB = new SelLeafB { Name = "b", Kind = "k", Mass = 1 };
+            var okCiter = new SelCiterManyUntyped
+            {
+                Name = "ok",
+                ManyRefs = new[] { new CultRecordRef<SelLeafA>(new CultRecordKey("a")) }
+            };
+            var offTargetCiter = new SelCiterManyUntyped
+            {
+                Name = "bad",
+                ManyRefs = new[] { new CultRecordRef<SelLeafA>(new CultRecordKey("b")) }
+            };
+
+            var okRows = new[]
+            {
+                new CultNetSelectionEvaluator.Row(registry.GetRequired<SelLeafA>(), new CultRecordKey("a"), leafA, 1),
+                new CultNetSelectionEvaluator.Row(registry.GetRequired<SelCiterManyUntyped>(), new CultRecordKey("ok"), okCiter, 2)
+            };
+            var selection = new CultNetSelection { Cited = new CultNetIncoming { Role = "ManyRefs", Exists = true } };
+            var okEvaluation = CultNetSelectionEvaluator.Select(registry, okRows, selection, asOf: 1);
+            Assert.That(okEvaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "a" }));
+
+            var badRows = new[]
+            {
+                new CultNetSelectionEvaluator.Row(registry.GetRequired<SelLeafB>(), new CultRecordKey("b"), leafB, 1),
+                new CultNetSelectionEvaluator.Row(registry.GetRequired<SelCiterManyUntyped>(), new CultRecordKey("bad"), offTargetCiter, 2)
+            };
+            Assert.Throws<CultNetSelectionReferenceOutsideTargetException>(
+                () => CultNetSelectionEvaluator.Select(registry, badRows, selection, asOf: 1));
+        }
+
         // S23: the evaluator matches every row sharing an index value, never the cache's own
         // last-writer-wins unique-index map. Three rows share "shared" here.
         [Test]
@@ -364,6 +494,21 @@ namespace GameCult.Networking.Tests
             [Key(1)]
             [CultReference(typeof(SelLeafA))]
             public CultRecordRef<SelLeafA> NarrowRef;
+        }
+
+        [CultDocument("cultnet.selection-tests.citer_many_untyped", "cultnet.selection-tests.citer_many_untyped.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class SelCiterManyUntyped
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            // No explicit [CultReference(typeof(...))] target - the target is inferred from the
+            // CultRecordRef<SelLeafA> element alone (R-T(b)).
+            [Key(1)]
+            [CultReference(many: true)]
+            public CultRecordRef<SelLeafA>[] ManyRefs = Array.Empty<CultRecordRef<SelLeafA>>();
         }
     }
 }

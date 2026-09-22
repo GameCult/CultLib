@@ -1886,6 +1886,161 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // R-P (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): one id reaches the
+        // authorizer, and it is the wire id, on both the snapshot and the live path. The binding below
+        // overrides NetworkSchemaNote's wire schema id away from its descriptor's own id
+        // ("tests.networking_note"); the authorizer allowlists only the wire id. Before the fix, the
+        // live fast path (CreateMatchedRecord) passed descriptor.SchemaId instead of the wire id, so a
+        // row delivered by the snapshot was refused on its first live change.
+        [Test]
+        public async Task DatabaseSubscriptionServer_AuthorizesSnapshotAndFirstLiveChangeByTheSameWireId()
+        {
+            const string wireSchemaId = "tests.networking_note.wire-alias";
+            const string recordKey = "tests:wire-id:note";
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry, schemaId: wireSchemaId));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions { DocumentRegistry = registry });
+            await database.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "initial"
+            });
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-wire-id-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (_, _) => true,
+                authorizeRecord: (_, _, _, schemaId) => schemaId == wireSchemaId);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-wire-id-subscription-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changed = new TaskCompletionSource<CultNetDatabaseChangeRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changed.TrySetResult(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+                client.SendCultNet(new CultNetDatabaseSubscribeMessage
+                {
+                    MessageId = "subscribe-wire-id",
+                    SubscriptionId = "wire-id",
+                    RecordKeys = new[] { recordKey },
+                    IncludeSnapshot = true
+                });
+
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { recordKey }));
+
+                await database.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+                {
+                    Schema = "tests.networking_note.v1",
+                    Text = "updated"
+                });
+                var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(update.Document, Is.Not.Null);
+                Assert.That(update.Document!.RecordKey, Is.EqualTo(recordKey));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // R-T(a) (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): a removed change is
+        // evaluated without reading a document - it matches on the selection's keys and schemas alone,
+        // and a field predicate counts as unknown rather than excluding the row or throwing
+        // TryGetIndexValue(null). A subscriber holding the row under a selection with a field predicate
+        // must still receive the removal.
+        [Test]
+        public async Task DatabaseSubscriptionServer_DeliversARemovalUnderAFieldPredicateSelectionWithNoException()
+        {
+            const string recordKey = "v1:field-predicate-removal:sword";
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey(recordKey), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "sword",
+                Kind = "weapon",
+                Mass = 3
+            });
+            var schemaId = cache.Registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-field-predicate-removal-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-field-predicate-removal-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawV1Message>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "subscribe-field-predicate-removal",
+                    SubscriptionId = "field-predicate-removal",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Schemas = new[] { schemaId },
+                        Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "weapon" } } }
+                    }
+                });
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Matched, Is.EqualTo(1u));
+
+                // Before R-T(a), evaluating this delete against the field predicate threw
+                // TryGetIndexValue(null) on the server's poll thread instead of delivering a removal.
+                await database.DeleteAsync<CultNetSelectionEvaluatorTests.SelLeafA>(new CultRecordKey(recordKey));
+
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKey),
+                    TimeSpan.FromSeconds(2));
+                Assert.That(changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKey), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
         // R-A (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch): CultNetDatabaseServer
         // answers a v1 snapshot request against the selection's own Fields predicate, not a selection
         // quietly lowered to v0's two allowlists. CultNetDatabaseServer pairs with Server (the
