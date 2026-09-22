@@ -547,6 +547,50 @@ const mutations = [
     old: "std::chrono::milliseconds(timeout_ms),",
     new: "std::chrono::milliseconds(timeout_ms + 100),",
   },
+  // The wait's predicate: a poll with nothing to deliver stays for its timeout
+  // however often the host's other threads call in. Every call leaves through a
+  // CallScope that wakes every waiter, so it is the predicate, and nothing else,
+  // that sends a woken poll back to waiting. Every scenario before `pollbusy` had
+  // a single-threaded host, nothing called during a wait, and dropping the
+  // predicate survived the whole matrix on both targets.
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    rule: "an idle poll stays for its timeout while other host threads call (revert: the wait has no predicate)",
+    old: "        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),\n" +
+      "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
+    new: "        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms)) ==\n" +
+      "            std::cv_status::no_timeout;\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The careful-looking spelling: it works out for itself what woke it, so the
+    // hold is never asked about a wake that found nothing, and it still leaves on
+    // any wake at all. Only a second host thread can see it.
+    rule: "an idle poll stays for its timeout while other host threads call (loosening: it reads what woke it and does not wait again)",
+    old: "        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),\n" +
+      "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
+    new: "        runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms));\n" +
+      "        const bool woken = !runtime->events.empty() || runtime->closing;\n",
+  },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // The hand-written loop, which is the ordinary way to spell a predicate
+    // wait and gets the other half wrong: it does wait again, for the whole
+    // timeout each time. A host whose other thread calls more often than its poll
+    // timeout never sees the poll come back while that thread is busy. A function
+    // of the input, so no single probe value makes it the identity.
+    rule: "an idle poll stays for its timeout while other host threads call (loosening: each wake restarts the whole timeout)",
+    old: "        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),\n" +
+      "            [runtime] { return !runtime->events.empty() || runtime->closing; });\n",
+    new: "        while (runtime->events.empty() && !runtime->closing &&\n" +
+      "               runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms)) ==\n" +
+      "                   std::cv_status::no_timeout) {\n" +
+      "        }\n" +
+      "        const bool woken = !runtime->events.empty() || runtime->closing;\n",
+  },
   // The seam's own rule, and the only non-comment source change of the last pass
   // that nothing pinned. It is development-only and folds away in release, so
   // nothing shipped was at risk; it is still the shape this campaign keeps
@@ -781,15 +825,16 @@ function testsPass(workspace) {
 // deliberately keeps the shipped shape — no assertions, no seam — because what
 // it is there for is the race in a library built like the one that ships.
 //
-// `polltimeout` and `holdtimeout` both measure a wait against the timeout it
-// asked for, so they are run only where nothing distorts the clock: a
-// sanitizer's slowdown would make their bands meaningless, which is the honest
+// `polltimeout`, `pollbusy` and `holdtimeout` measure a wait against the
+// timeout it asked for, so they are run only where nothing distorts the clock:
+// a sanitizer's slowdown would make their bands meaningless, which is the honest
 // limit of those entries.
 const assertScenarios = [
   ["holdclose", "3", "64"],
   ["latecall", "5"],
   ["holdtimeout", "3"],
   ["polltimeout", "3"],
+  ["pollbusy", "3"],
   ["payloadfit", "3"],
   ["closerace", "20", "256"],
 ];

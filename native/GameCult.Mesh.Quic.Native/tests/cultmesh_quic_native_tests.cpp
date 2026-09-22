@@ -20,6 +20,7 @@
 //   cultmesh_quic_native_tests closerace [iterations] [pollers]
 //   cultmesh_quic_native_tests holdclose [iterations] [pollers]
 //   cultmesh_quic_native_tests polltimeout [iterations]
+//   cultmesh_quic_native_tests pollbusy [iterations]
 //   cultmesh_quic_native_tests latecall [iterations]
 //   cultmesh_quic_native_tests holdtimeout [iterations]
 //
@@ -33,8 +34,10 @@
 // In both of those the wait is ended by the close, so the host's timeout governs
 // nothing either of them can see, and a bridge waiting on a constant of its own
 // passes both. `polltimeout` is the one that lets the timeout govern the return
-// and measures it. `latecall` covers the other half of section 4: a call that
-// races the start of a close is refused rather than counted behind its wait.
+// and measures it, and `pollbusy` measures it again with the host's other thread
+// calling in throughout, which wakes the wait. `latecall` covers the other half
+// of section 4: a call that races the start of a close is refused rather than
+// counted behind its wait.
 // `holdtimeout` covers the seam's own rule, which nothing else is in a position
 // to see: the hold parks a call the wait woke and not one whose own timeout
 // expired, so the quiesce the hold scenarios assert is the bridge's doing and
@@ -333,6 +336,80 @@ int PollTimeout(int iterations) {
     std::printf("polltimeout %dx: ok (worst overshoot %lld ms at %d best of %d, %lld ms at %d, %lld ms at %d)\n",
         iterations, overshoot[0].worst_ms, kTimedProbesMs[0], kShortestAttempts, overshoot[1].worst_ms, kTimedProbesMs[1],
         overshoot[2].worst_ms, kTimedProbesMs[2]);
+    return 0;
+}
+
+// How long `pollbusy`'s poll asks for, and how often the host's other thread
+// calls into the library while it waits.
+constexpr int32_t kBusyPollMs = 1000;
+constexpr int kBusyCallEveryMs = 20;
+
+// The same rule as `polltimeout` — a poll with nothing to deliver stays for its
+// timeout — for a host with more than one thread, which is every real host: one
+// thread polls, another sends, shuts streams down, reads the last error.
+//
+// Every host call leaves through a scope that wakes every waiter on the
+// runtime's condition variable, because that is how the close learns a call has
+// left. So a poll is woken each time any other thread makes any call, and what
+// keeps it inside is the wait's predicate: nothing queued and no close means
+// wait again, for the rest of the time the host asked for. With one host thread
+// nothing else ever calls during the wait, and the predicate could be deleted
+// with every other scenario still green.
+//
+// The other thread keeps calling for twice the poll's timeout and then stops,
+// so a wait that restarts its whole timeout on every wake is seen as late
+// rather than hanging the scenario.
+std::string PollBusyOnce(Overshoot& overshoot) {
+    void* runtime = nullptr;
+    const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
+    if (opened != 0 || runtime == nullptr)
+        return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
+
+    std::atomic<int> calls{0};
+    std::atomic<int> refused{0};
+    std::thread other([runtime, &calls, &refused] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2 * kBusyPollMs);
+        std::array<char, 256> message{};
+        while (std::chrono::steady_clock::now() < until) {
+            if (cultmesh_quic_last_error(runtime, message.data(), static_cast<int32_t>(message.size())) < 0)
+                refused.fetch_add(1);
+            calls.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(kBusyCallEveryMs));
+        }
+    });
+
+    const TimedPoll poll = PollFor(runtime, kBusyPollMs);
+    const int calls_during = calls.load();
+    other.join();
+    cultmesh_quic_runtime_close(runtime);
+
+    overshoot.Record(poll, kBusyPollMs);
+    if (refused.load() != 0)
+        return std::to_string(refused.load()) + " call(s) from the host's other thread were refused "
+            "by a runtime that was not closing";
+    // The timing first: a poll that left on the first wake returns before the
+    // other thread has had time to make many calls, and that is the bridge
+    // failing, not the fixture.
+    const std::string failure = CheckTimedPoll(poll, kBusyPollMs, LateToleranceMs(kBusyPollMs));
+    if (!failure.empty()) return failure + ", while the host's other thread was calling in";
+    // A poll that passed with fewer calls than this was never woken, and passed
+    // because the fixture did nothing rather than because the bridge held.
+    if (calls_during < 3)
+        return "the host's other thread made " + std::to_string(calls_during) +
+            " call(s) during the poll, so nothing woke it";
+    return {};
+}
+
+int PollBusy(int iterations) {
+    MeasureAboveTheLoad();
+    Overshoot overshoot{};
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        const std::string failure = PollBusyOnce(overshoot);
+        if (!failure.empty())
+            return Fail("pollbusy iteration " + std::to_string(iteration) + ": " + failure);
+    }
+    std::printf("pollbusy %dx: ok (worst overshoot %lld ms at %d)\n", iterations, overshoot.worst_ms,
+        kBusyPollMs);
     return 0;
 }
 
@@ -755,7 +832,7 @@ int CloseRace(int iterations, int pollers) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: %s closerace|holdclose|holdtimeout|polltimeout|payloadfit|latecall "
+            "usage: %s closerace|holdclose|holdtimeout|polltimeout|pollbusy|payloadfit|latecall "
             "[iterations] [pollers]\n",
             argv[0]);
         return 2;
@@ -769,6 +846,7 @@ int main(int argc, char** argv) {
     }
     if (scenario == "closerace") return CloseRace(iterations, pollers);
     if (scenario == "polltimeout") return PollTimeout(iterations);
+    if (scenario == "pollbusy") return PollBusy(iterations);
     if (scenario == "payloadfit") return PayloadFit(iterations);
     if (scenario == "holdclose" || scenario == "latecall" || scenario == "holdtimeout") {
 #if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
