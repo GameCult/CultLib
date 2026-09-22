@@ -32,6 +32,18 @@ Two things were found that this map did not name:
   Leaving it would make the claim of one evaluator false. It is a deletion and
   takes a mutation entry like the others.
 
+**Q-J was not implemented, and the map is the reason.** Commits 0 and 1
+shipped `number` as `double?` (`CultNetSelection.cs:71`), `CompareNumber` as
+IEEE comparison (`CultNetSelectionEvaluator.cs:103-113`), a JSON schema that
+says `"type": "number"`, and a cache `NumberOf` that returns `double`. The
+operator had already ruled decimal strings, and §16 recorded it, but §2 and
+D8 still specified float64, and nothing specified the canonical form or the
+comparison that the ruling explicitly required. Hands built what §2 said. The
+Rust Hands caught the conflict before writing a line and stopped, correctly.
+**Self swept §2, D8 and the §7 table on 2026-09-22**, and §2 "Numbers" now
+specifies the form. The Q-J fix lands on the branch before the Rust runtime,
+as its own commits. Commit 1 is not wire-final until it does.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
@@ -314,7 +326,7 @@ FieldPredicate {                                           // one operator per p
   index:   string                                          // a declared index alias, reachable on some schema the selection can reach, else refused
   op:      "any_of" | "lt" | "le" | "ge" | "gt"
   values:  string[]?                                       // present iff op = any_of; non-empty
-  number:  float64?                                        // present iff op is a comparison; the alias must be declared numeric on every reachable schema that declares it
+  number:  string?                                         // present iff op is a comparison; a canonical decimal (Q-J, below); the alias must be declared numeric on every reachable schema that declares it
 }
 Citation       { target: RecordRef, role: string? }        // target validated as a reference the row owner recognises
 Incoming       { role: string, exists: bool }
@@ -367,11 +379,49 @@ Messages: `cultnet.snapshot_request.v1 { messageId, selection, shardId?, shardEp
   empty `keys` or `schemas` list, and a `role` no schema declares are
   refused typed at the door (`selection_invalid { field, value }`), never
   answered as an empty page. `any_of` values are strings because the
-  cache's indexes are strings (`CultCache.cs:1084`); comparison numbers are
-  IEEE float64 on the wire, and a member of an integer type wider than 53
-  bits compares at float precision — a stated limit, not a hidden one. No
-  range operator (two predicates on one alias make a range), no `ne`, no
-  nesting.
+  cache's indexes are strings (`CultCache.cs:1084`). Comparison numbers are
+  **canonical decimal strings** under the operator's Q-J ruling. The rule is
+  specified in full in the **Numbers** item below. No range operator (two
+  predicates on one alias make a range), no `ne`, and no nesting.
+- **Numbers (Q-J; Self's specification, 2026-09-22, which the ruling asked
+  for and this map had not yet written).**
+  - *Canonical form.* A number on the wire matches
+    `^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, and `-0` is excluded. That fixes
+    one spelling per value. It forbids leading zeros, trailing fractional
+    zeros, a bare trailing point, an explicit `+`, exponent notation,
+    negative zero, whitespace, and culture separators.
+  - *Non-canonical spellings are refused.* Any other spelling is refused at
+    the door with `selection_invalid { field: "number", value }`. It is never
+    normalised. The reasons: the cursor digest and the parity vectors need
+    one byte form per value, and a lenient parser differs between runtimes
+    at exactly these edges. The ruling says "a non-canonical spelling of an
+    equal value must not change an answer". That holds because such a
+    spelling never reaches the evaluator. It gets a typed refusal, not a
+    different page.
+  - *Row side.* The cache renders a numeric member as its exact canonical
+    decimal:
+    - An integer type renders as its exact decimal. There is no 2^53 limit.
+    - `decimal` renders with its trailing zeros stripped.
+    - `float` and `double` render in the runtime's established shortest
+      round-trip form (`"R"` in .NET, the standard shortest form in Rust),
+      rewritten from exponent notation to positional digits. Parity pins
+      this.
+    - A NaN or infinite member matches no comparison.
+  - *Comparison.* Both operands are canonical, so they are compared
+    numerically by sign, then by the integer part's length, then by the
+    integer digits, then by the fraction digits padded on the right. It is
+    one small pure function per runtime, with no numeric parse and no
+    precision limit.
+  - *Mutants that must die:*
+    - a lexicographic comparison ("10" < "9");
+    - a comparison that ignores sign;
+    - a comparison that ignores the integer part's length;
+    - a door that accepts `+1`, `1.0`, `01`, `1e3` or `-0`;
+    - a row rendering through float64 (a `long` member of 2^53+1 must
+      compare greater than `"9007199254740992"`).
+  - *For the operator's review on return:* refusing a non-canonical number
+    at the door, rather than normalising it, is Self's reading of the
+    ruling.
 - **Inheritance.** A schema is a leaf: only a type with `[CultDocument]`
   has a schema name, and `schemas` names leaves. A predicate on an alias
   applies to every reachable leaf whose descriptor carries a member with
@@ -494,7 +544,7 @@ the cache gains accessors, not attributes.** A comparison needs a numeric
 value the string getter cannot give. `CultCache.cs:1053` holds the CLR
 `MemberType` and the catalog already persists `TypeName` in the canonical
 shape, so numeric-ness is declared; what is added is runtime: on each
-member, `ValueOf(document) -> object?` and `NumberOf(document) -> double?`
+member, `ValueOf(document) -> object?` and `NumberOf(document) -> string?` (the exact canonical decimal, Q-J; was `double?` before 2026-09-22)
 (non-null exactly for the closed set of CLR numeric types), and the public
 member entry exposes `IsNumeric` derived from `TypeName`. No new attribute,
 no catalog-shape change, no schema hash moves, no migration. Rust mirrors
@@ -527,8 +577,10 @@ value — string or number — without the reflection the map is deleting. The
 cache add is therefore a **public read surface over declared members**, of
 which the numeric accessor is one method:
 `TryGetIndexValue(object document, string alias, out string? value)`,
-`TryGetIndexNumber(object document, string alias, out double value)`,
-`ReferencesOf` (D11), and a public member view carrying `IndexAlias`,
+`TryGetIndexNumber(object document, string alias, out string canonicalDecimal)`
+(**revised 2026-09-22 under Q-J**: `NumberOf` returns the member's exact
+canonical decimal string, never `double`; see §2 "Numbers"; commit 0 shipped
+`double` and is corrected in the Q-J fix), `ReferencesOf` (D11), and a public member view carrying `IndexAlias`,
 `IsReference`, `IsMany`, `IsNumeric` and the target **`Type`** (D9 needs
 the type, not the name). Section 14 carries the revised cost.
 
@@ -660,7 +712,7 @@ They die with the last runtime follow-up.
 
 | Add | Owner | Live consumer | Protected invariant | What it replaces |
 |---|---|---|---|---|
-| `src/GameCult.Caching/CultCache.cs`: a **public read surface over declared members** — `CultDocumentDescriptor.DeclaredMembers` (a public view: `MemberName`, `Slot`, `IndexAlias`, `IsName`, `IsReference`, `IsMany`, `IsNumeric`, `TargetType`), `TryGetIndexValue(document, alias, out string?)`, `TryGetIndexNumber(document, alias, out double)`, `ReferencesOf(document, member)` (D11), `ResolveTargetLeaves(targetType)` over `AllDescriptors` (D9) | `GameCult.Caching` | the evaluator; `CultNetDocumentRegistry`; later any runtime-side reader | **the cache owns addressing and its values**; a reader outside the assembly reads declarations and values through one surface instead of reflecting over documents | the reflection loop at `CultNetDocumentRegistry.cs:325-342`, and the absence that forced it |
+| `src/GameCult.Caching/CultCache.cs`: a **public read surface over declared members** — `CultDocumentDescriptor.DeclaredMembers` (a public view: `MemberName`, `Slot`, `IndexAlias`, `IsName`, `IsReference`, `IsMany`, `IsNumeric`, `TargetType`), `TryGetIndexValue(document, alias, out string?)`, `TryGetIndexNumber(document, alias, out string canonicalDecimal)` (Q-J, revised 2026-09-22), `ReferencesOf(document, member)` (D11), `ResolveTargetLeaves(targetType)` over `AllDescriptors` (D9) | `GameCult.Caching` | the evaluator; `CultNetDocumentRegistry`; later any runtime-side reader | **the cache owns addressing and its values**; a reader outside the assembly reads declarations and values through one surface instead of reflecting over documents | the reflection loop at `CultNetDocumentRegistry.cs:325-342`, and the absence that forced it |
 | `CultCache.cs` registration refusals: one alias-collision rejection beside `:931-943` (D10), one `unsupported_reference_shape` rejection for a `many`/reference member the cache cannot walk (D11) | `GameCult.Caching` | every registering catalog | a declaration the cache cannot read is refused when it is declared, not answered as nothing when it is read | an `ArgumentException` from `ToDictionary` `:462-468` that names nothing; a silent unwalkable reference |
 | `contracts/cultnet/cultnet.selection.schema.json` (`$id`, referenced by `$ref`), `cultnet.snapshot-request.v1.schema.json`, `cultnet.database-subscribe.v1.schema.json`, `cultnet.snapshot-response-raw.v1.schema.json`; registry entries in `CultNetSchemaRegistry.cs` | CultLib contracts | C#, Rust; TS/Py/Kotlin follow-ups | one published shape of a selection, hand-written like its siblings, pinned by vectors in both runtimes | `schemaIds`/`recordKeys`/`includeSnapshot` as the wire's only selection |
 | `src/GameCult.Networking/CultNetSelection.cs`: `CultNetSelection`, `CultNetFieldPredicate`, `CultNetCitation`, `CultNetIncoming`, `CultNetSelectionProjection`, `CultNetRecordRef`, `CultNetRawDocumentHeader`, `CultNetSelectionPage`, **`CultNetEdge`** (`From`, `Role`, `To`, `PayloadEncoding?`, `Payload?`), **`CultNetSelectionOperator`** (`AnyOf`, `Lt`, `Le`, `Ge`, `Gt`, serialised as the `op` string, never as a union); `Validate(IReadOnlyList<CultDocumentDescriptor>)` — declared aliases and roles, non-empty lists, exactly one of `values`/`number` per `op`, and every reachable leaf declaring a compared alias declares it numeric | `GameCult.Networking` | the three message classes, the evaluator, Mesh | a selection is typed data with one validation | `_projectRecord`, the allowlist pair |
