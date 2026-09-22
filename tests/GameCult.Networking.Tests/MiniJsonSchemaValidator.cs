@@ -12,7 +12,7 @@ namespace GameCult.Networking.Tests
     /// A deliberately small JSON Schema (draft 2020-12) validator covering only the constructs
     /// contracts/cultnet/*.schema.json actually use: object/array/string/integer/boolean/null types
     /// (plain or as a ["type","null"] union), required, additionalProperties: false, properties,
-    /// items, const, enum, pattern, minLength, minItems, oneOf, and $ref - same-document
+    /// items, const, enum, pattern, minLength, minItems, oneOf, not, and $ref - same-document
     /// ("#/$defs/name"), cross-document ("other.schema.json"), and both ("other.schema.json#/$defs/name").
     /// Not a general validator: it exists for R-S (docs/cultnet-selection-cut.md, fix batch 3) to
     /// decode real C# wire bytes and check them against the committed schema files, which no
@@ -112,6 +112,14 @@ namespace GameCult.Networking.Tests
                 {
                     errors.Add($"{path}: oneOf matched {matches} branches (want exactly 1); branch errors: {string.Join(" | ", branchErrors)}");
                 }
+            }
+
+            if (schema.TryGetProperty("not", out var not))
+            {
+                var local = new List<string>();
+                ValidateAgainst(instance, not, file, path, local);
+                if (local.Count == 0)
+                    errors.Add($"{path}: matched the \"not\" subschema, which it must not");
             }
 
             if (schema.TryGetProperty("const", out var constEl))
