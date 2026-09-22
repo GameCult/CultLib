@@ -521,6 +521,61 @@ public static partial class math
             a._m20 * b._m01 + a._m21 * b._m11 + a._m22 * b._m21,
             a._m20 * b._m02 + a._m21 * b._m12 + a._m22 * b._m22);
 
+    // Abramowitz & Stegun 7.1.26, a single-precision rational/exponential fit with a stated
+    // max absolute error of 1.5e-7. erf is odd, so only x >= 0 is fit and the sign is restored.
+    public static float erf(float value)
+    {
+        const float p = 0.3275911f;
+        const float a1 = 0.254829592f;
+        const float a2 = -0.284496736f;
+        const float a3 = 1.421413741f;
+        const float a4 = -1.453152027f;
+        const float a5 = 1.061405429f;
+
+        var s = sign(value);
+        var x = abs(value);
+        var t = 1.0f / (1.0f + p * x);
+        var poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t;
+        var result = 1.0f - poly * exp(-x * x);
+        return s * result;
+    }
+
+    // Giles, "Approximating the erfinv function" (GPU Computing Gems, 2010): a single-precision
+    // minimax polynomial in two ranges of w = -ln((1-x)(1+x)), central and tail.
+    public static float erfinv(float value)
+    {
+        var w = -log((1.0f - value) * (1.0f + value));
+        float p;
+        if (w < 5.0f)
+        {
+            w -= 2.5f;
+            p = 2.81022636e-08f;
+            p = 3.43273939e-07f + p * w;
+            p = -3.5233877e-06f + p * w;
+            p = -4.39150654e-06f + p * w;
+            p = 0.00021858087f + p * w;
+            p = -0.00125372503f + p * w;
+            p = -0.00417768164f + p * w;
+            p = 0.246640727f + p * w;
+            p = 1.50140941f + p * w;
+        }
+        else
+        {
+            w = sqrt(w) - 3.0f;
+            p = -0.000200214257f;
+            p = 0.000100950558f + p * w;
+            p = 0.00134934322f + p * w;
+            p = -0.00367342844f + p * w;
+            p = 0.00573950773f + p * w;
+            p = -0.0076224613f + p * w;
+            p = 0.00943887047f + p * w;
+            p = 1.00167406f + p * w;
+            p = 2.83297682f + p * w;
+        }
+
+        return p * value;
+    }
+
     // Ashima Arts / Ian McEwan 3D simplex noise (MIT), mirrored by cultmath_snoise(float3)
     // in shaders/CultMath.hlsl with the same float32 evaluation order.
     public static float snoise(float3 value)
