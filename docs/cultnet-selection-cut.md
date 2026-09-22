@@ -747,6 +747,46 @@ merge.**
   `dotnet-stryker --project GameCult.Networking.csproj --mutate "**/CultNetSelection*.cs" --reporter json --reporter progress --concurrency 4`.
   **Read the HTML report Stryker writes beside the JSON**, rather than parsing
   JSON in the container.
+- **The triage landed on the fifth attempt, 2026-09-22, and it sharpens S-5
+  rather than softening it.** Most of the 85 are message-string mutations and
+  are not worth chasing; roughly a dozen are real, and they sit on the rules
+  this cut exists to enforce:
+  - `CultNetSelection.cs:439`, `Any()` → `All()` survived. §2's "a comparison
+    on an alias any reachable schema declares non-numeric is refused" degrades
+    to "refused only if every reachable schema declares it non-numeric". No
+    fixture has an alias numeric on one reachable leaf and a string on
+    another — the exact case the rule exists for.
+  - `CultNetSelection.cs:387`, `||` → `&&` survived. A `cites.target` with a
+    schemaId and a blank recordKey, or the reverse, stops being refused.
+  - `member.IndexAlias ?? member.MemberName` → `member.MemberName` survived at
+    all four sites (`CultNetSelectionEvaluator.cs:352,384,404` and
+    `CultNetSelection.cs:445`). §2's role-naming rule for the hop is untested
+    everywhere it is implemented.
+  - `CultNetSelectionEvaluator.cs:203,204`, `ThenBy` ↔ `ThenByDescending`
+    survived on both paths: the `(ordinal, schemaId, recordKey)` tiebreak is
+    pinned by nothing.
+  - `CultNetSelectionEvaluator.cs:290-297`, five order flips in `EdgesFor`, all
+    survived. **R-B's "page-row order, then `(from, role, to)` in code-point
+    order" has no test pinning a single component**, though R-B exists because
+    that ordering was wrong once already.
+  - `CultNetSelectionEvaluator.cs:590-605` has no coverage at all:
+    `ComputeDigest`'s `cites` and `cited` branches, plus the number-presence
+    flag at `:584-585`. R-H's collision-freedom rests on a reading, not a test.
+  - `:673,678` survived: `Cursor.Parse`'s length-prefix bounds checks, on
+    attacker-supplied base64. `:307,322` survived: cursor positioning under
+    `descending`, and `ComparePosition`'s schema-vs-key tiebreak. `:710,715,729`
+    survived: the code-point comparator's surrogate path, despite R-C having a
+    vector for it.
+  - **Equivalent, not to be chased:** `Selection.cs:103` `<=`, `:118` `>=`,
+    `:121` `dot <= 0` are guarded upstream and unreachable for canonical input;
+    `:103,107` turn `sign * x` into `sign / x` with `x` in {-1,1}; `:109`
+    Max→Min is a no-op because `PadRight` to a shorter length does nothing;
+    `:80` is a `RegexOptions` flag; `Evaluator:272` is equivalent because
+    `full.Edges` is empty without a hop.
+- **Soul withdrew a finding of its own in the same pass.** It had reported that
+  C#'s cursor digest does not sort its lists while Rust's does, offered as a
+  low-severity intra-runtime difference. `CultNetSelectionEvaluator.cs:637`
+  sorts by code point, same as Rust. The remark belongs in no fix list.
 - **cargo-mutants cannot run on `cultnet-rs` at all.** `schema_discovery.rs`
   uses `include_str!("../../../contracts/…")`, which escapes the package, so
   the tool's copied tree fails its baseline build. **There is no mutation
@@ -781,6 +821,13 @@ merge.**
 - **R-AA (S-5).** Triage all 85 survivors by name. The 75 uncovered mutants
   mean whole regions have no test; write behavioural tests for them. A
   survivor that is genuinely equivalent gets a one-line reason in the report.
+  **The triage half is done** (see the list under S-5, 2026-09-22). What is
+  owed is a behavioural test for each named live survivor: the alias
+  disagreement across reachable schemas, the half-blank `cites.target`, the
+  four index-alias role sites, the row tiebreak, `EdgesFor`'s ordering,
+  `ComputeDigest`'s hop branches, `Cursor.Parse`'s bounds, descending cursor
+  positioning, and the surrogate comparator. The equivalent mutants are
+  recorded and are not to be chased.
 - **R-AB. Make `cultnet-rs` self-contained enough to mutate.** Replace the
   escaping `include_str!` with a build script that stages the contracts into
   `OUT_DIR`, or another route that keeps every source path inside the package.
