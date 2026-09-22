@@ -419,16 +419,106 @@ public sealed class MathTests
         }
     }
 
-    [Fact]
-    public void ErfinvIsMonotonicallyIncreasing()
+    // Reference values from bisecting the platform's double-precision erf (Python's math.erf,
+    // glibc-backed), not this package's own erf, to 200 iterations over [-6, 6] -- effectively
+    // exact at float precision. This is what ErfinvInvertsErf cannot be: a check against this
+    // package's own erf only proves the two functions agree with each other, not that either is
+    // numerically correct. Soul measured the round-trip test alone to be blind to a coefficient
+    // change that degraded erfinv's worst error 300-400x (5.0e-7 to 2.0e-4).
+    [Theory]
+    // Expected values are computed for the actual float32-rounded input (e.g. the literal
+    // 0.999f is really 0.9990000128746033 as a double), not the decimal literal, because
+    // erfinv's derivative diverges near +-1: at y = 0.999f that rounding alone moves the
+    // true answer by ~2.6e-6, larger than the test's own error bar, if ignored.
+    [InlineData(0.0f, 0.0)]
+    [InlineData(0.1f, 0.08885599182530649)]
+    [InlineData(-0.1f, -0.08885599182530649)]
+    [InlineData(0.3f, 0.2724627261055238)]
+    [InlineData(-0.3f, -0.2724627261055238)]
+    [InlineData(0.5f, 0.4769362762044699)]
+    [InlineData(-0.5f, -0.4769362762044699)]
+    [InlineData(0.7f, 0.7328690598827587)]
+    [InlineData(-0.7f, -0.732869059882759)]
+    [InlineData(0.9f, 1.1630870719457724)]
+    [InlineData(-0.9f, -1.1630870719457729)]
+    [InlineData(0.95f, 1.3859037522360764)]
+    [InlineData(-0.95f, -1.3859037522360773)]
+    [InlineData(0.99f, 1.8213866009002766)]
+    [InlineData(-0.99f, -1.8213866009002793)]
+    [InlineData(0.999f, 2.3267563267961435)]
+    [InlineData(-0.999f, -2.3267563267961657)]
+    [InlineData(0.9999f, 2.751035437903192)]
+    [InlineData(-0.9999f, -2.751035437903383)]
+    public void ErfinvMatchesReferenceValues(float y, double expected)
     {
+        Assert.True(
+            Math.Abs(math.erfinv(y) - expected) <= 2e-6,
+            $"erfinv({y}) = {math.erfinv(y)}, expected {expected}");
+    }
+
+    [Fact]
+    public void ErfinvAtDomainEdgesAndBeyond()
+    {
+        // Domain is [-1, 1]. The edges are the correctly-signed infinite limits; anything
+        // outside, including +-infinity itself, has no real inverse and is NaN.
+        Assert.Equal(float.PositiveInfinity, math.erfinv(1.0f));
+        Assert.Equal(float.NegativeInfinity, math.erfinv(-1.0f));
+        Assert.True(float.IsNaN(math.erfinv(1.0001f)));
+        Assert.True(float.IsNaN(math.erfinv(-1.0001f)));
+        Assert.True(float.IsNaN(math.erfinv(2.0f)));
+        Assert.True(float.IsNaN(math.erfinv(-2.0f)));
+        Assert.True(float.IsNaN(math.erfinv(float.PositiveInfinity)));
+        Assert.True(float.IsNaN(math.erfinv(float.NegativeInfinity)));
+        Assert.True(float.IsNaN(math.erfinv(float.NaN)));
+    }
+
+    // The deleted ErfinvIsMonotonicallyIncreasing asserted a property erfinv does not have:
+    // Soul measured 9662 backward steps scanning every representable float32 in [0, 0.999999],
+    // first at y = 0.00022214651, worst drop 5.960464e-8 (one ULP at that scale) -- invisible
+    // only because that fixture stepped by 0.001. erf has the same shape: 100 backward steps
+    // over [0, 4.5], worst drop 1.192093e-7. Pin what is actually true: monotone to within a
+    // tolerance comfortably above that measured noise floor.
+    [Fact]
+    public void ErfinvIsMonotonicWithinFloatingPointTolerance()
+    {
+        const float tolerance = 1e-6f;
         var previous = float.NegativeInfinity;
         for (var i = -999; i <= 999; i++)
         {
             var y = i / 1000.0f;
             var x = math.erfinv(y);
-            Assert.True(x > previous, $"erfinv({y}) = {x} did not exceed previous value {previous}");
+            Assert.True(
+                x >= previous - tolerance,
+                $"erfinv({y}) = {x} dropped more than {tolerance} below previous value {previous}");
             previous = x;
+        }
+    }
+
+    // The consumer-level property that actually matters: fire control turns adjacent erf
+    // values into a cell's probability mass, so a backward step in erf would show up as a
+    // negative mass. Soul checked these geometries clean: 16/64/256/1024/4096 cells over
+    // +-4 sigma, plus a tight 1 sigma spread and a very tight 0.25 sigma spread.
+    [Theory]
+    [InlineData(16, 4f)]
+    [InlineData(64, 4f)]
+    [InlineData(256, 4f)]
+    [InlineData(1024, 4f)]
+    [InlineData(4096, 4f)]
+    [InlineData(256, 1f)]
+    [InlineData(64, 0.25f)]
+    public void ErfCellMassesStayNonNegativeAcrossRealisticGeometries(int cells, float sigmaRange)
+    {
+        var lo = -sigmaRange;
+        var hi = sigmaRange;
+        var step = (hi - lo) / cells;
+        var previous = math.erf(lo / MathF.Sqrt(2f));
+        for (var i = 1; i <= cells; i++)
+        {
+            var edge = lo + step * i;
+            var current = math.erf(edge / MathF.Sqrt(2f));
+            var mass = current - previous;
+            Assert.True(mass >= 0f, $"cell {i} of {cells} over +-{sigmaRange} sigma has negative mass {mass}");
+            previous = current;
         }
     }
 }
