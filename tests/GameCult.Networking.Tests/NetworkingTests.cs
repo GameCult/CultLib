@@ -1886,6 +1886,129 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // R-A (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch): CultNetDatabaseServer
+        // answers a v1 snapshot request against the selection's own Fields predicate, not a selection
+        // quietly lowered to v0's two allowlists. CultNetDatabaseServer pairs with Server (the
+        // LiteNetLib/TCP-secured production construction site, per section 1), not RudpCultNetSchemaServer
+        // - matching CultNetDatabaseServer_Creates_Filtered_SnapshotResponse above, this drives
+        // CreateSelectionResponse directly rather than a real client/server round trip.
+        [Test]
+        public async Task CultNetDatabaseServer_AnswersV1SnapshotRequestRespectingItsFields()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey("v1:weapon"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "sword",
+                Kind = "weapon",
+                Mass = 3
+            });
+            await database.PutAsync(new CultRecordKey("v1:armor"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "shield",
+                Kind = "armor",
+                Mass = 3
+            });
+
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var response = databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                MessageId = "v1-snapshot",
+                Selection = new CultNetSelection
+                {
+                    Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "weapon" } } },
+                    Projection = CultNetSelectionProjections.Document
+                }
+            });
+
+            Assert.That(response.Matched, Is.EqualTo(1u));
+            Assert.That(response.Documents!.Select(document => document.RecordKey), Is.EqualTo(new[] { "v1:weapon" }));
+        }
+
+        // S9 (docs/cultnet-selection-cut.md section 10) / D6: a hop-bearing subscription reconciles the
+        // whole matched set on every change, not only the changed row. "target" does not itself change
+        // here - a new citer is put that cites it - so only the reconcile path (not the single-row fast
+        // path, which would evaluate the citer's own row against a Selection carrying no hop and answer
+        // null, since the citer's schema is excluded by this selection's Schemas filter) can produce the
+        // add this test waits for.
+        [Test]
+        public async Task DatabaseSubscriptionServer_SubscribesV1AndReconcilesAHopBearingSelectionWhenTheCiterChanges()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey("target"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "target",
+                Kind = "k",
+                Mass = 1
+            });
+            var targetSchemaId = cache.Registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-v1-hop-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-v1-hop-subscription-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawV1Message>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "subscribe-v1-hop",
+                    SubscriptionId = "hop",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Schemas = new[] { targetSchemaId },
+                        Cited = new CultNetIncoming { Role = "Design", Exists = true }
+                    }
+                });
+
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                // "target" is not yet cited by anything - the hop-bearing selection matches nothing yet.
+                Assert.That(snapshot.Matched, Is.EqualTo(0u));
+
+                // The citer is a different schema entirely, excluded by this selection's own Schemas
+                // filter - the change that must cause "target" to be reported is not to "target" itself.
+                await database.PutAsync(new CultRecordKey("citer"), new CultNetSelectionEvaluatorTests.SelCiter
+                {
+                    Name = "citer",
+                    Design = new CultRecordRef<CultNetSelectionEvaluatorTests.SelFixtureMiddle>(new CultRecordKey("target"))
+                });
+
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == "target"),
+                    TimeSpan.FromSeconds(2));
+                Assert.That(changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == "target"), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
         [Test]
         public async Task DatabaseSubscriptionServer_ProjectsBodyDemandAndWithdrawalFromExactSubscription()
         {

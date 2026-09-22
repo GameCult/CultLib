@@ -377,6 +377,12 @@ namespace GameCult.Networking
             {
                 if (string.IsNullOrEmpty(selection.Cites.Target?.SchemaId) || string.IsNullOrEmpty(selection.Cites.Target?.RecordKey))
                     throw new CultNetSelectionInvalidException("cites.target", null, "selection.cites.target requires schemaId and recordKey.");
+                // R-E (docs/cultnet-selection-cut.md): a cites target names a schema through the same
+                // alias matcher `schemas` uses. One that matches no declared schema is refused here,
+                // never answered with an empty page by MatchesCitation silently treating an unresolved
+                // target as "not found".
+                if (!allDescriptors.Any(descriptor => CultNetSchemaAliasMatching.Matches(selection.Cites.Target!.SchemaId, descriptor)))
+                    throw new CultNetSelectionInvalidException("cites.target.schemaId", selection.Cites.Target!.SchemaId, $"selection.cites.target.schemaId \"{selection.Cites.Target!.SchemaId}\" does not match any declared schema.");
                 if (selection.Cites.Role != null && !AnySchemaDeclaresRole(allDescriptors, selection.Cites.Role))
                     throw new CultNetSelectionInvalidException("cites.role", selection.Cites.Role, $"selection.cites.role \"{selection.Cites.Role}\" is not declared by any schema.");
             }
