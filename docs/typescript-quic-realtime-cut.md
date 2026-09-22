@@ -551,6 +551,54 @@ against `checkout-index`. Sidecar repair after a mid-mutation `taskkill`.
 8 CPUs. **Not run:** a forced red control, and Windows under a CPU burner.
 **All four go to Hands as the sixth fix batch.**
 
+**The sixth fix batch landed** (Opus), `b3d9cf7..ff72f16`. Details:
+
+- **N3 (`b3d9cf7`):** the README gives an existing clone a one-line repair beside
+  the container path. It is `git rm --cached -q scripts/build-quic-native.sh;
+  git checkout HEAD -- scripts/build-quic-native.sh`. A plain checkout keeps the
+  CR. The line was verified on clones made at `367c9bc` from Git Bash and from
+  PowerShell 5.1.
+- **N2 (`37967e8`):** the timeout probes are 15, 200 and 7300 ms. The 15 ms
+  probe takes the fastest of ten tries, and every try is still checked for an
+  early return. There are new entries for a round clamp, a floor and an
+  offset. The limits measured on both targets are now written in source:
+  - `t+25` survives and `t+40` dies;
+  - `max(t,40)` survives and `max(t,50)` dies;
+  - `t*106/100` survives and `t*108/100` dies;
+  - `min(t,7285)` survives and `min(t,7275)` dies;
+  - any shortening up to 20 ms survives.
+
+  The "above any plausible ceiling" claim is deleted.
+- **N1 (`4ffa4c9`):** `pollbusy` runs a second host thread that calls into the
+  bridge while a poll is idle. Three entries sit on it: the revert, "reads
+  what woke it", and "each wake restarts the whole timeout". All three die on
+  `pollbusy` on both targets.
+- **N4 (`ff72f16`):** `holdtimeout` makes a second held poll at 1300 ms. The
+  input-derived hold mutant dies there and nowhere else.
+- **Recorded as not yet reached:** the loosening that checks only `closing`.
+  It breaks "an arriving event ends the wait early", a promise no scenario
+  measures.
+
+Hands' numbers:
+
+| Target | Killed | Survived | Skipped | Control |
+|---|---|---|---|---|
+| win32-x64 | 26 | 0 | 2 | green |
+| linux-x64 | 28 | 0 | 0 | green |
+
+Under 16 burners on 8 CPUs, 15 of 15 rounds passed on each target. The worst
+single poll was 15 ms late on Windows and 41 ms on Linux.
+
+**The batch added one mechanism nobody specified. Self accepted it, 2026-09-22.**
+On Windows the timed scenarios raise their own process priority. Without that,
+Windows under load put polls up to 127 ms late. The unmodified bridge then
+failed even the pre-batch tolerance: the 150 ms hold probe came back 100–115 ms
+late against 78 ms allowed. The only alternative was a flat allowance of about
+150 ms, which would readmit the offsets and floors this batch exists to kill.
+The priority change is test-fixture only, needs no admin rights, and changes
+nothing in the bridge. Accepted, and handed to Soul to attack.
+**Soul's seventh pass dispatched** (Opus).
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
