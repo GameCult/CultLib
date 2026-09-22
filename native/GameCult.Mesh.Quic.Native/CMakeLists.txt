@@ -90,5 +90,15 @@ if(CULTMESH_QUIC_BUILD_TESTS)
     set_target_properties(cultmesh_quic_native_tests PROPERTIES
       BUILD_WITH_INSTALL_RPATH TRUE
       INSTALL_RPATH "$ORIGIN")
+    # Both binaries carry INSTALL_RPATH "$ORIGIN" and expect libmsquic.so.2
+    # beside them at load time. build-quic-native.sh's packaged output gets
+    # that copy from its own recipe; a test build has no packaging step, so
+    # the runner would otherwise die at once with "cannot open shared object
+    # file". CMake already knows where MSQUIC_LIB_DIR is, so it places the
+    # file itself instead of leaving the reader to run an extra cp by hand.
+    add_custom_command(TARGET cultmesh_quic_native_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${MSQUIC_LIB_DIR}/libmsquic.so.2"
+        "$<TARGET_FILE_DIR:cultmesh_quic_native_tests>/libmsquic.so.2")
   endif()
 endif()
