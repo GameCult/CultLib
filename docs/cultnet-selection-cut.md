@@ -278,6 +278,138 @@ join the next selection fix batch, whatever the final Soul pass adds.
 The organ answers a cursor's page at the cursor's own `asOf`. If a finding
 makes `parse` private, expose `cursor_as_of` instead.
 
+**Soul's whole-cut pass, 2026-09-22** (Opus, at `00f4c02`). **Cut 1 does not
+merge.** The notes are in the session scratchpad at `soul-ss4-notes.md`.
+
+- **High, confirmed:**
+  - **The C# reference never answers v1.** No v1 listener is registered
+    (`CultNetDatabaseServer.cs:49-55`, `Server.cs:562-571`).
+    `CreateSelectionResponse` and `LastWriteSequence` have no callers. §7's
+    server handling, D6's subscription v1 and S9 were never built. Hands
+    reported none of it missing.
+  - **`cited` returns the wrong edges in both runtimes.** Edges are filtered by
+    whether the *citer* is on the page, but under `cited` the page rows are the
+    *cited* rows. `exists:true` gives no edges. `exists:false` gives edges into
+    rows that are not on the page. The committed vector pins the wrong answer.
+  - **The C# door accepts `"5\n"`.** .NET's `$` matches before a final
+    newline. Rust and the schema refuse it.
+- **Parity broken on caller inputs:**
+  - **Float rendering at ties.** 394 `f32` and 48 `f64` values out of 200k
+    render differently, because .NET rounds half to even and Rust does not.
+    A shortest form is a stand-in for the value in any case: an `f32` of 3e20
+    is stored as 300000002010536247296.
+  - **`schemas`.** C# matches through the alias matcher and Rust matches exact
+    ids. `["leaf_a"]` gives 8 rows against 0.
+  - **Tiebreak.** C# compares UTF-16 code units and Rust compares UTF-8
+    bytes, so astral keys sort in opposite orders.
+  - **`cited` edge order.** It comes from a Rust `HashMap` and is
+    nondeterministic.
+  - **`any_of` on a numeric alias.** C# goes through a culture-dependent
+    `ToString()`.
+- **The door is advisory.** Both `select` implementations are public and never
+  validate. Rust's `matches` only `debug_assert`s the hop, so a release build
+  ignores `cites` and `cited`. Mesh `EnsureV0Compatible` lets `Keys=[]` and
+  `[""]` through, and v0 lowering turns them into "every key".
+- **Not what the map specifies:**
+  - `Matched` counts the page, which breaks C5.
+  - v0 and shard snapshots re-evaluate the whole cache on every page, which is
+    O(N²/200), and cannot detect a write between pages.
+  - Cursor digests collide: `["a|b"]` digests the same as `["a","b"]`.
+  - S20 has no C# test. Two S20 mutants survive 196/196. Rust `select`
+    ignores `projection`, so the rule has no owner there. Nothing tests
+    `SelectPage` or `CreateSelectionResponse`.
+- **The Networking host still crashes**, 2 in 11 runs. The flaky `HasConsumers`
+  assertion (`NetworkingTests.cs:1720`) predates this cut. Joins sit outside
+  `finally` in about 18 tests, so a failed assertion becomes a host crash. The
+  "10 runs, no crash" claim did not reproduce.
+- **Low:**
+  - The JSON schema disagrees with the runtimes on `limit` bounds and on
+    `minItems`.
+  - Python R-2 refuses only v1, so v2 and later are still dropped.
+  - `TryReadSchemaVersion` is a public sniff heuristic, and two Mesh sites
+    repeat the same line around it.
+  - Rust v0 dedups before `reject_duplicates`, so that function is dead.
+  - `mutate-dotnet.ps1` throws on `\` against `/` in paths.
+- **Deletions Soul named:**
+  - `contracts.rs:1206-1541`, about 335 lines of hand codecs that the serde
+    derives already round-trip, verified both ways;
+  - `expand_scientific_notation`, about 46 lines, dead: 400k renders produced
+    no exponent;
+  - `reject_duplicates`;
+  - `RawDocumentHeader::from_document`, which has no callers;
+  - C#'s `WithBindingSchemaAlias`/`ExpandSchemaBindingAliases` duplicate,
+    about 60 lines, and a shared lower-and-page loop, about 20 lines.
+- **Settled:** `cites` is a fixture limit, not a parity gap. With real SHA-256
+  ids, 40 selections agree byte for byte. The seven `cultmesh-py` failures
+  are environmental: with `PYTHONPATH` set, 78/78 pass. The flaky Rust test
+  waits 30×5 ms for a flusher, which is too short under contention, and it is
+  not this cut's.
+- **Held:**
+  - Every mutation suite killed everything.
+  - Door refusals are byte-identical apart from `"5\n"`.
+  - The Q-J comparator agrees with Python `Decimal`.
+  - No float sits on either comparison path.
+  - Negation, limit clamping and v0 dedup are at parity.
+  - Mesh reads in the order exact, then alias, then payload.
+  - Mesh is actually 253/254.
+
+**Self's rulings for the Cut 1 fix batch, 2026-09-22:**
+
+- **R-A. Serving v1 is part of this cut.** Both C# servers register v1
+  listeners. The snapshot answers through `CreateSelectionResponse` in
+  last-write order, and the subscription server answers v1 as D6 and §7 say,
+  with S9 tested. A v1 request that is not served is a defect, not a
+  follow-up.
+- **R-B. Hop edges follow the hop's direction.** Under `cites`, the edges are
+  the ones *from* page rows. Under `cited`, they are the ones *into* page
+  rows. Every edge touches a page row. The order is deterministic: the
+  page-row order, then `(from, role, to)` in code-point order. Regenerate the
+  vectors.
+- **R-C. Every string comparison in the vocabulary uses Unicode code-point
+  order.** In Rust that is UTF-8 byte order. C# compares by code point, not
+  by UTF-16 unit. This covers the tiebreak, edge order and anything else
+  ordered.
+- **R-D. A floating-point member renders as its exact decimal expansion,
+  in canonical form, and not as a shortest form.** Every finite `f32` and
+  `f64` is an exact dyadic rational and has a finite decimal expansion. That
+  expansion is the stored value, it is the same in both runtimes by
+  construction, and it matches the reason for Q-J. Implement it from
+  mantissa and exponent, with `BigInteger` in C# and a small bignum in Rust.
+  Add no new dependency unless the expansion cannot be written in about 60
+  lines. `decimal` and the integers are unchanged. **Flagged for the
+  operator's review:** this is Self's reading of Q-J, and it changes what
+  `ge "3e20"` means for an `f32` of 3e20.
+- **R-E. There is one schema-identity rule in both runtimes.** Rust gets the
+  alias matcher (the owner is `cultnet-rs`, ported from
+  `CultNetSchemaAliasMatching`). `schemas`, `cites.target.schemaId` and the
+  binding id emitted on records all go through it. A `cites` target that
+  matches no schema is refused at the door, never answered with an empty page.
+  `ToRawRecord` and `ToEdge` emit the same id.
+- **R-F. The door is inside `select`.** `select` validates first, in both
+  runtimes, and returns the typed refusal. A public entry point that skips
+  validation does not exist. Rust's hop handling is not a `debug_assert`.
+  Mesh's `EnsureV0Compatible` runs the door first.
+- **R-G. `matched` is the total number of matches, not the page count** (C5).
+  Rust's `Evaluation` carries it (P-1). A single evaluation answers v0 and
+  shard paging, taken as one snapshot.
+- **R-H. Cursor digests use length-prefixed encoding** for every string and
+  list, in both runtimes.
+- **R-I. The projection has an owner in both runtimes.** `cultnet-rs` gets
+  `select_page`, which produces `SelectionPage` under `projection`, with
+  `matched` and edges. C# `SelectPage` and `CreateSelectionResponse` get
+  tests, and so does S20. Page bytes are compared across the runtimes in the
+  parity vectors.
+- **R-J. `any_of` on a numeric alias** compares the canonical rendering.
+- **R-K. Test hygiene is finished, not claimed.** Every poll-thread join
+  moves into `finally`, and the `HasConsumers` race gets a deterministic
+  wait. The fix is proven by 20 consecutive full runs.
+- **R-L. The contract follows the runtimes.** The schema gains
+  `minItems: 1` on `schemas` and `keys`, and `limit` is documented as
+  clamped. Python refuses every `cultnet.*.vN` with N > 0.
+  `TryReadSchemaVersion` goes back to internal, behind a registry method that
+  takes the descriptor. `mutate-dotnet.ps1` normalises path separators.
+- **R-M. Soul's named deletions all land.** P-2 (`Eq`) lands too.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
