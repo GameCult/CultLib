@@ -773,7 +773,110 @@ and P3. **Cut 3 still does not close.** The method moved the gaps outward.
    checks. Prove it with 5 rounds under 16 burners on Windows.
 6. **F6.** Fix the prose.
 
-To Hands (Sonnet) as the eighth fix batch.
+**Superseded the same day, 2026-09-22, by the operator's retirement of the
+mutation harness.** The operator's words: *"The manual mutation testing turned
+out to be a terrible idea, lots of guarding the shape of the code instead of
+the behavior. Better to have nothing than a harness that punishes
+refactoring."* `scripts/mutate-cultmesh.mjs` and every committed suite are
+deleted, with no fallback. Four of the six rulings above named harness entries
+(R1, W1–W3, P1, Z1, Z2); those clauses are dead text. What each ruling
+protected is not:
+
+1. **F1 stands as behaviour.** The scenarios gain a **release** configuration
+   on both targets, run against the release library. The release build is the
+   thing that ships, so a rule the release build never runs is not pinned.
+   Without the harness there is no R1 entry; the release path is proven by the
+   scenarios themselves going red when the seam's `#else` shortens the wait,
+   which Soul checks by hand on a scratch copy.
+2. **F2 stands.** The seam wraps the whole argument to `wait_for` — the
+   duration expression — and `waitseam` asserts it equals
+   `milliseconds(host argument)`. The assertion is the pin; W1–W3 are Soul's
+   hand probes, not committed entries.
+3. **F3 stands.** `pollhammer` also runs against a runtime holding live
+   objects: an open connection to an unroutable address, plus a listener and a
+   stream where the fixture can make them.
+4. **F4 stands.** Any `timeout_ms <= 0` returns within a small bound, timed
+   with a generous margin. A negative timeout is probed. The seam's sentinel
+   moves to a value that cannot collide, or becomes a separate recorded flag.
+5. **F5 stands**, and its 5 rounds under 16 burners run **on Yggdrasil**. The
+   burners that motivated this ruling are what froze the operator's
+   workstation on 2026-09-22; no CPU burner runs on Starfire again.
+6. **F6 widens.** The prose fix now includes removing every reference to the
+   deleted harness, not only the stale 1300 ms history and the scenario list.
+
+**There is no mutation evidence for the bridge and there will not be one
+committed.** It is C++, and no ecosystem mutation tool is wired here. The
+bridge's rules are pinned by behavioural scenarios at the layer that decides
+them; a mutant is a thing Soul tries by hand on a scratch copy and throws away.
+
+**The eighth fix batch landed** (Sonnet) at `5646ff7`, before the retirement,
+and the harness deletion followed at `796433f`. Both are on
+`hands/cultmath-erf`, not yet on `main`. What landed:
+
+- the seam wraps the whole duration handed to `wait_for`, and its "unset"
+  sentinel became a separate `debug_wait_recorded` flag, so a recorded `-1`
+  cannot read as nothing recorded;
+- `pollhammer` runs against a runtime holding a live connection to an
+  unroutable address (RFC 5737 TEST-NET-1), a stream on it, and a real
+  never-connected listener;
+- a `zerotimeout` scenario pins that `timeout_ms <= 0` returns within 50 ms,
+  probing 0, -1 and `INT32_MIN`;
+- `closerace`'s settle waits for `debug_peak_calls` to reach the poller count
+  instead of sleeping a guessed duration;
+- `kGenerousLateToleranceMs` narrows from 800 ms to 400 ms, so the wall-clock
+  layer catches arithmetic applied outside the seam's own argument —
+  `waitseam`'s equality check structurally cannot see that.
+
+The release configuration and the seven mutation entries (R1, W1–W3, P1,
+Z1–Z2) landed **inside the harness**, and went out with it two commits later.
+The scenario runner and every seam survived untouched: the README and the dev
+Dockerfile now document building with `-DCULTMESH_QUIC_BUILD_TESTS=ON
+-DCULTMESH_QUIC_DEBUG_ASSERTS=ON` and running each scenario as a direct
+argument to the binary. **The release configuration is therefore owed again as
+a plain build, not as a harness target**, and R1's substance — that the
+release macro is unexercised — is a Soul hand probe now.
+
+**The Linux leg ran on Yggdrasil, 2026-09-22** (Sonnet), against
+`hands/cultmath-erf` HEAD, in an image built from the committed
+`scripts/quic-native-linux-dev.Dockerfile` (pinned `debian:13`, tagged by
+content hash `cultlib-quic-native-dev:13d7fbd109fc`). No repo change was
+needed and none was made.
+
+- **Asserts build, all ten scenarios pass**, 20 rounds each: `closerace`,
+  `holdclose`, `holdtimeout`, `polltimeout`, `pollbusy`, `pollhammer`,
+  `zerotimeout`, `payloadfit`, `latecall`, `waitseam` (11 probes, 40 repeated
+  polls on one runtime).
+- **Release build, asserts off, all four required scenarios pass**:
+  `polltimeout`, `pollbusy`, `pollhammer`, `zerotimeout`.
+- Worst overshoot anywhere was 4 ms, against `kGenerousLateToleranceMs` of
+  400 ms. **F1 is closed on Linux**: the build that ships now runs the timeout
+  rule.
+
+**A defect in the README's own worked example, found by running it.** The
+example builds the test binary and runs it directly, and every scenario dies
+with `libmsquic.so.2: cannot open shared object file`. Both the bridge and the
+test executable carry `INSTALL_RPATH "$ORIGIN"` and expect the MsQuic runtime
+beside them in `bin/`, but nothing puts it there for a test build — only
+`build-quic-native.sh`'s packaged output directory gets that copy. Hands
+worked around it with a `cp` after each build and correctly did not treat it
+as a bridge defect. **This is the documented path, written in `796433f` when
+the harness was deleted, and it has never worked.** A documented path that
+fails on first use is worse than no documentation: it was published in the
+same commit that removed the working one.
+
+**Still outstanding for Cut 3:**
+
+- The **Windows release configuration**. It lived inside the harness and left
+  with it, exactly as Linux's did; Linux has now been re-run without the
+  harness and Windows has not.
+- **F5's stress under load cannot be run on Windows at all.** It wants five
+  rounds with sixteen CPU burners, and those burners are what froze the
+  operator's workstation on 2026-09-22. `closerace` is Windows-sensitive (it
+  went red under load there in four of five rounds), so the check matters most
+  on the platform where it is now forbidden. **This is an operator fork, not
+  something to route around:** either Windows stress finds a host that is not
+  Starfire, or the check is accepted as unproven on Windows and recorded that
+  way.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
