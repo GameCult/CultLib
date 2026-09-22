@@ -773,7 +773,43 @@ and P3. **Cut 3 still does not close.** The method moved the gaps outward.
    checks. Prove it with 5 rounds under 16 burners on Windows.
 6. **F6.** Fix the prose.
 
-To Hands (Sonnet) as the eighth fix batch.
+**Superseded the same day, 2026-09-22, by the operator's retirement of the
+mutation harness.** The operator's words: *"The manual mutation testing turned
+out to be a terrible idea, lots of guarding the shape of the code instead of
+the behavior. Better to have nothing than a harness that punishes
+refactoring."* `scripts/mutate-cultmesh.mjs` and every committed suite are
+deleted, with no fallback. Four of the six rulings above named harness entries
+(R1, W1–W3, P1, Z1, Z2); those clauses are dead text. What each ruling
+protected is not:
+
+1. **F1 stands as behaviour.** The scenarios gain a **release** configuration
+   on both targets, run against the release library. The release build is the
+   thing that ships, so a rule the release build never runs is not pinned.
+   Without the harness there is no R1 entry; the release path is proven by the
+   scenarios themselves going red when the seam's `#else` shortens the wait,
+   which Soul checks by hand on a scratch copy.
+2. **F2 stands.** The seam wraps the whole argument to `wait_for` — the
+   duration expression — and `waitseam` asserts it equals
+   `milliseconds(host argument)`. The assertion is the pin; W1–W3 are Soul's
+   hand probes, not committed entries.
+3. **F3 stands.** `pollhammer` also runs against a runtime holding live
+   objects: an open connection to an unroutable address, plus a listener and a
+   stream where the fixture can make them.
+4. **F4 stands.** Any `timeout_ms <= 0` returns within a small bound, timed
+   with a generous margin. A negative timeout is probed. The seam's sentinel
+   moves to a value that cannot collide, or becomes a separate recorded flag.
+5. **F5 stands**, and its 5 rounds under 16 burners run **on Yggdrasil**. The
+   burners that motivated this ruling are what froze the operator's
+   workstation on 2026-09-22; no CPU burner runs on Starfire again.
+6. **F6 widens.** The prose fix now includes removing every reference to the
+   deleted harness, not only the stale 1300 ms history and the scenario list.
+
+**There is no mutation evidence for the bridge and there will not be one
+committed.** It is C++, and no ecosystem mutation tool is wired here. The
+bridge's rules are pinned by behavioural scenarios at the layer that decides
+them; a mutant is a thing Soul tries by hand on a scratch copy and throws away.
+
+To Hands (Sonnet) as the eighth fix batch, under the rewrite above.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
