@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord};
+use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord, RecordRef, Row, Selection};
 
 /// Read-only backing surface for a CultNet snapshot server.
 ///
@@ -76,15 +76,25 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         return Err(anyhow!("expected cultnet.snapshot_request.v0"));
     };
     require_non_empty(message_id, "message_id")?;
+    // Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): the door
+    // refuses an empty or blank entry in a *present* Selection list, but v0's own lowering keeps
+    // v0's old cleaning - an empty v0 list, or one made only of blanks, lowers to `null` (no
+    // filter) rather than reaching the door as something to refuse. That is a v0 compatibility
+    // rule the lowering owns, not a meaning the evaluator or the door carries for v1 lists.
+    let schema_ids = lower_v0_list(schema_ids);
+    let record_keys = lower_v0_list(record_keys);
     reject_duplicates(schema_ids.as_deref(), "requested schema id")?;
     reject_duplicates(record_keys.as_deref(), "requested record key")?;
 
-    let requested_schemas = schema_ids
-        .as_ref()
-        .map(|values| values.iter().map(String::as_str).collect::<BTreeSet<_>>());
-    let requested_keys = record_keys
-        .as_ref()
-        .map(|values| values.iter().map(String::as_str).collect::<BTreeSet<_>>());
+    // D3/D4's v0 lowering (docs/cultnet-selection-cut.md section 4): the two allowlists are not a
+    // selector of their own, they are cultnet.snapshot_request.v0 lowered into a Selection with no
+    // fields/cites/cited, matched through the one evaluator (selection::matches) instead of a fifth
+    // hand-rolled copy of "is this schema/key requested".
+    let selection = Selection {
+        schemas: schema_ids.clone(),
+        keys: record_keys.clone(),
+        ..Selection::default()
+    };
     let mut selected = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -110,16 +120,7 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         if !policy.allows(&document.schema_id, &document.record_key) {
             continue;
         }
-        if requested_schemas
-            .as_ref()
-            .is_some_and(|schemas| !schemas.contains(document.schema_id.as_str()))
-        {
-            continue;
-        }
-        if requested_keys
-            .as_ref()
-            .is_some_and(|keys| !keys.contains(document.record_key.as_str()))
-        {
+        if !crate::matches(&RawSnapshotRow(&document), &selection) {
             continue;
         }
         selected.push(document);
@@ -129,6 +130,34 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         message_id: message_id.clone(),
         documents: selected,
     })
+}
+
+/// A `CultNetRawDocumentRecord` carries only identity (schema id, record key) at this layer - no
+/// declared index values, no ordinal, no reference edges, because it is already-serialized bytes
+/// from a read-only source, not a live document. The v0 lowering above never sets `fields`, `cites`
+/// or `cited`, so `matches_schema_keys_fields` never calls `ordinal`/`values`/`number`/`references`
+/// on this row; the unreachable stubs exist only to satisfy the `Row` trait's shape.
+struct RawSnapshotRow<'a>(&'a CultNetRawDocumentRecord);
+
+impl Row for RawSnapshotRow<'_> {
+    fn schema_id(&self) -> &str {
+        &self.0.schema_id
+    }
+    fn record_key(&self) -> &str {
+        &self.0.record_key
+    }
+    fn ordinal(&self) -> i64 {
+        unreachable!("v0's lowered selection carries no fields/cites/cited; ordinal is not read")
+    }
+    fn values(&self, _index: &str) -> Vec<String> {
+        unreachable!("v0's lowered selection carries no fields; values is not read")
+    }
+    fn number(&self, _index: &str) -> Option<String> {
+        unreachable!("v0's lowered selection carries no fields; number is not read")
+    }
+    fn references(&self) -> Vec<(String, RecordRef, Option<Vec<u8>>)> {
+        unreachable!("v0's lowered selection carries no cites/cited; references is not read")
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -336,4 +365,17 @@ fn require_non_empty(value: &str, field: &str) -> Result<()> {
         return Err(anyhow!("{field} must be non-empty"));
     }
     Ok(())
+}
+
+/// v0's own cleaning (Self's ruling, 2026-09-22): an absent list, an empty list, or a list made
+/// only of blank entries all lower to `None` (no filter) - a v0 compatibility rule the lowering
+/// owns, not a meaning the door or the evaluator carries for v1's own lists (those refuse `[]`
+/// and any blank entry outright, in `selection::validate`).
+fn lower_v0_list(list: &Option<Vec<String>>) -> Option<Vec<String>> {
+    match list {
+        Some(values) if !values.is_empty() && values.iter().any(|value| !value.trim().is_empty()) => {
+            Some(values.clone())
+        }
+        _ => None,
+    }
 }

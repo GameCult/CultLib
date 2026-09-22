@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::{Edge, RawDocumentHeader, RecordRef, Selection, SelectionDocumentRecord};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CultNetWireContract {
     #[serde(rename = "cultnet.schema.v0")]
@@ -329,6 +331,56 @@ pub enum CultNetMessage {
         message_id: String,
         documents: Vec<CultNetRawDocumentRecord>,
     },
+    /// CultNet typed selection, Cut 1 (docs/cultnet-selection-cut.md section 2/7). Mirrors
+    /// `CultNetSnapshotRequestV1Message`.
+    #[serde(rename = "cultnet.snapshot_request.v1", rename_all = "camelCase")]
+    SnapshotRequestV1 {
+        message_id: String,
+        selection: Selection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_epoch: Option<i64>,
+    },
+    /// Mirrors `CultNetDatabaseSubscribeV1Message`.
+    #[serde(rename = "cultnet.database_subscribe.v1", rename_all = "camelCase")]
+    DatabaseSubscribeV1 {
+        message_id: String,
+        subscription_id: String,
+        selection: Selection,
+        #[serde(default = "true_default")]
+        include_snapshot: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consumer_runtime_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_ids: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supported_body_transports: Option<Vec<String>>,
+    },
+    /// `cultnet.snapshot_response_raw.v1` (section 2: `SelectionPage`). Binary payload, so this is
+    /// carried through `encode_raw_cultnet_schema_message`/`parse_raw_cultnet_schema_message` like
+    /// `SnapshotResponseRaw` above - a JSON intermediate cannot losslessly carry `documents[].payload`
+    /// or `edges[].payload`. Mirrors `CultNetSnapshotResponseRawV1Message`.
+    #[serde(rename = "cultnet.snapshot_response_raw.v1", rename_all = "camelCase")]
+    SnapshotResponseRawV1 {
+        message_id: String,
+        matched: u32,
+        as_of: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<Vec<RawDocumentHeader>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        documents: Option<Vec<SelectionDocumentRecord>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edges: Option<Vec<Edge>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_epoch: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_log_sequence: Option<i64>,
+    },
     #[serde(rename = "cultnet.schema_catalog_request.v0", rename_all = "camelCase")]
     SchemaCatalogRequest {
         message_id: String,
@@ -395,6 +447,10 @@ fn messagepack_base64_encoding() -> String {
     "messagepack-base64".to_string()
 }
 
+fn true_default() -> bool {
+    true
+}
+
 pub fn parse_cultnet_message(
     wire_value: &rmpv::Value,
     contract: CultNetWireContract,
@@ -402,9 +458,11 @@ pub fn parse_cultnet_message(
     match contract {
         CultNetWireContract::CultNetSchemaV0 => {
             let message = match schema_version_from_wire_value(wire_value)? {
-                Some("cultnet.document_put_raw.v0" | "cultnet.snapshot_response_raw.v0") => {
-                    parse_raw_cultnet_schema_message(wire_value)?
-                }
+                Some(
+                    "cultnet.document_put_raw.v0"
+                    | "cultnet.snapshot_response_raw.v0"
+                    | "cultnet.snapshot_response_raw.v1",
+                ) => parse_raw_cultnet_schema_message(wire_value)?,
                 _ => {
                     let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
                     serde_json::from_value(json_value)?
@@ -424,7 +482,9 @@ pub fn encode_cultnet_message_for_wire(
     validate_message(message)?;
     match contract {
         CultNetWireContract::CultNetSchemaV0 => match message {
-            CultNetMessage::DocumentPutRaw { .. } | CultNetMessage::SnapshotResponseRaw { .. } => {
+            CultNetMessage::DocumentPutRaw { .. }
+            | CultNetMessage::SnapshotResponseRaw { .. }
+            | CultNetMessage::SnapshotResponseRawV1 { .. } => {
                 encode_raw_cultnet_schema_message(message)
             }
             _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
@@ -565,6 +625,57 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             for document in documents {
                 validate_raw_document_record(document)?;
             }
+        }
+        CultNetMessage::SnapshotRequestV1 {
+            message_id,
+            // The selection's own declared-alias semantics need a schema registry this wire-level
+            // deserialization does not have; the C# reference does not validate CultNetSelection at
+            // this layer either (CultNetSchemaMessageSerialization.cs just deserializes it). A
+            // server-side caller runs `selection::validate` against its RowSet before evaluating.
+            selection: _,
+            shard_id,
+            shard_epoch: _,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_optional_non_empty(shard_id.as_deref(), "shardId")?;
+        }
+        CultNetMessage::DatabaseSubscribeV1 {
+            message_id,
+            subscription_id,
+            selection: _,
+            include_snapshot: _,
+            consumer_runtime_id,
+            body_ids,
+            supported_body_transports,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_non_empty(subscription_id, "subscriptionId")?;
+            require_optional_non_empty(consumer_runtime_id.as_deref(), "consumerRuntimeId")?;
+            require_optional_string_vec(body_ids.as_deref(), "bodyIds")?;
+            require_optional_string_vec(
+                supported_body_transports.as_deref(),
+                "supportedBodyTransports",
+            )?;
+        }
+        CultNetMessage::SnapshotResponseRawV1 {
+            message_id,
+            matched: _,
+            as_of: _,
+            next: _,
+            headers,
+            documents,
+            edges: _,
+            shard_id,
+            shard_epoch: _,
+            shard_log_sequence: _,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            if headers.is_some() == documents.is_some() {
+                return Err(anyhow!(
+                    "CultNet field exactly one of headers/documents must be present"
+                ));
+            }
+            require_optional_non_empty(shard_id.as_deref(), "shardId")?;
         }
         CultNetMessage::SchemaCatalogRequest {
             message_id,
@@ -803,6 +914,67 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                 documents,
             })
         }
+        "cultnet.snapshot_response_raw.v1" => {
+            let headers = get("headers")
+                .filter(|value| !value.is_nil())
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("headers must be an array"))?
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            require_raw_document_header(Some(value), &format!("headers[{index}]"))
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+            let documents = get("documents")
+                .filter(|value| !value.is_nil())
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("documents must be an array"))?
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            require_selection_document_record(
+                                Some(value),
+                                &format!("documents[{index}]"),
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+            let edges = get("edges")
+                .filter(|value| !value.is_nil())
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("edges must be an array"))?
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| require_edge(Some(value), &format!("edges[{index}]")))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+
+            Ok(CultNetMessage::SnapshotResponseRawV1 {
+                message_id: require_legacy_string(get("messageId"), "messageId")?,
+                matched: require_legacy_u32(get("matched"), "matched")?,
+                as_of: require_legacy_u64(get("asOf"), "asOf")?,
+                next: require_legacy_optional_string(get("next"), "next")?,
+                headers,
+                documents,
+                edges,
+                shard_id: require_legacy_optional_string(get("shardId"), "shardId")?,
+                shard_epoch: require_legacy_optional_i64(get("shardEpoch"), "shardEpoch")?,
+                shard_log_sequence: require_legacy_optional_i64(
+                    get("shardLogSequence"),
+                    "shardLogSequence",
+                )?,
+            })
+        }
         _ => Err(anyhow!(
             "Unsupported raw cultnet.schema.v0 schemaVersion {schema_version}"
         )),
@@ -843,6 +1015,74 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
             (
                 rmpv::Value::from("documents"),
                 rmpv::Value::Array(documents.iter().map(encode_raw_document_record).collect()),
+            ),
+        ],
+        CultNetMessage::SnapshotResponseRawV1 {
+            message_id,
+            matched,
+            as_of,
+            next,
+            headers,
+            documents,
+            edges,
+            shard_id,
+            shard_epoch,
+            shard_log_sequence,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultnet.snapshot_response_raw.v1"),
+            ),
+            (
+                rmpv::Value::from("messageId"),
+                rmpv::Value::from(message_id.as_str()),
+            ),
+            (rmpv::Value::from("matched"), rmpv::Value::from(*matched)),
+            (rmpv::Value::from("asOf"), rmpv::Value::from(*as_of)),
+            (
+                rmpv::Value::from("next"),
+                next.as_deref().map(rmpv::Value::from).unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("headers"),
+                headers
+                    .as_deref()
+                    .map(|headers| {
+                        rmpv::Value::Array(headers.iter().map(encode_raw_document_header).collect())
+                    })
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("documents"),
+                documents
+                    .as_deref()
+                    .map(|documents| {
+                        rmpv::Value::Array(
+                            documents.iter().map(encode_selection_document_record).collect(),
+                        )
+                    })
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("edges"),
+                edges
+                    .as_deref()
+                    .map(|edges| rmpv::Value::Array(edges.iter().map(encode_edge).collect()))
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("shardId"),
+                shard_id.as_deref().map(rmpv::Value::from).unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("shardEpoch"),
+                shard_epoch.map(rmpv::Value::from).unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("shardLogSequence"),
+                shard_log_sequence
+                    .map(rmpv::Value::from)
+                    .unwrap_or(rmpv::Value::Nil),
             ),
         ],
         _ => {
@@ -959,6 +1199,374 @@ fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Valu
             legacy_optional_string_array(document.tags.as_deref()),
         ),
     ])
+}
+
+// --- cultnet.snapshot_response_raw.v1 (docs/cultnet-selection-cut.md section 2) -------------
+
+fn require_selection_document_record(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<SelectionDocumentRecord> {
+    let object = value
+        .and_then(rmpv::Value::as_map)
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    Ok(SelectionDocumentRecord {
+        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
+        schema_name: require_legacy_optional_string(
+            get("schemaName"),
+            &format!("{field_name}.schemaName"),
+        )?,
+        schema_version: require_legacy_optional_string(
+            get("schemaVersion"),
+            &format!("{field_name}.schemaVersion"),
+        )?,
+        schema_content_hash: require_legacy_optional_string(
+            get("schemaContentHash"),
+            &format!("{field_name}.schemaContentHash"),
+        )?,
+        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
+        stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
+        payload_encoding: require_legacy_string(
+            get("payloadEncoding"),
+            &format!("{field_name}.payloadEncoding"),
+        )?,
+        payload: get("payload")
+            .and_then(rmpv::Value::as_slice)
+            .map(|bytes| bytes.to_vec())
+            .ok_or_else(|| anyhow!("{field_name}.payload must be binary MessagePack bytes"))?,
+        source_runtime_id: require_legacy_optional_string(
+            get("sourceRuntimeId"),
+            &format!("{field_name}.sourceRuntimeId"),
+        )?,
+        source_agent_id: require_legacy_optional_string(
+            get("sourceAgentId"),
+            &format!("{field_name}.sourceAgentId"),
+        )?,
+        source_role: require_legacy_optional_string(
+            get("sourceRole"),
+            &format!("{field_name}.sourceRole"),
+        )?,
+        tags: require_legacy_optional_string_array(get("tags"), &format!("{field_name}.tags"))?,
+    })
+}
+
+fn encode_selection_document_record(document: &SelectionDocumentRecord) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("schemaId"),
+            rmpv::Value::from(document.schema_id.as_str()),
+        ),
+        (
+            rmpv::Value::from("schemaName"),
+            document
+                .schema_name
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("schemaVersion"),
+            document
+                .schema_version
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("schemaContentHash"),
+            document
+                .schema_content_hash
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("recordKey"),
+            rmpv::Value::from(document.record_key.as_str()),
+        ),
+        (
+            rmpv::Value::from("storedAt"),
+            rmpv::Value::from(document.stored_at.as_str()),
+        ),
+        (
+            rmpv::Value::from("payloadEncoding"),
+            rmpv::Value::from(document.payload_encoding.as_str()),
+        ),
+        (
+            rmpv::Value::from("payload"),
+            rmpv::Value::Binary(document.payload.clone()),
+        ),
+        (
+            rmpv::Value::from("sourceRuntimeId"),
+            document
+                .source_runtime_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceAgentId"),
+            document
+                .source_agent_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceRole"),
+            document
+                .source_role
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("tags"),
+            legacy_optional_string_array(document.tags.as_deref()),
+        ),
+    ])
+}
+
+fn require_raw_document_header(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<RawDocumentHeader> {
+    let object = value
+        .and_then(rmpv::Value::as_map)
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    Ok(RawDocumentHeader {
+        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
+        schema_name: require_legacy_optional_string(
+            get("schemaName"),
+            &format!("{field_name}.schemaName"),
+        )?,
+        schema_version: require_legacy_optional_string(
+            get("schemaVersion"),
+            &format!("{field_name}.schemaVersion"),
+        )?,
+        schema_content_hash: require_legacy_optional_string(
+            get("schemaContentHash"),
+            &format!("{field_name}.schemaContentHash"),
+        )?,
+        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
+        stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
+        source_runtime_id: require_legacy_optional_string(
+            get("sourceRuntimeId"),
+            &format!("{field_name}.sourceRuntimeId"),
+        )?,
+        source_agent_id: require_legacy_optional_string(
+            get("sourceAgentId"),
+            &format!("{field_name}.sourceAgentId"),
+        )?,
+        source_role: require_legacy_optional_string(
+            get("sourceRole"),
+            &format!("{field_name}.sourceRole"),
+        )?,
+        tags: require_legacy_optional_string_array(get("tags"), &format!("{field_name}.tags"))?,
+    })
+}
+
+fn encode_raw_document_header(header: &RawDocumentHeader) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("schemaId"),
+            rmpv::Value::from(header.schema_id.as_str()),
+        ),
+        (
+            rmpv::Value::from("schemaName"),
+            header
+                .schema_name
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("schemaVersion"),
+            header
+                .schema_version
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("schemaContentHash"),
+            header
+                .schema_content_hash
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("recordKey"),
+            rmpv::Value::from(header.record_key.as_str()),
+        ),
+        (
+            rmpv::Value::from("storedAt"),
+            rmpv::Value::from(header.stored_at.as_str()),
+        ),
+        (
+            rmpv::Value::from("sourceRuntimeId"),
+            header
+                .source_runtime_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceAgentId"),
+            header
+                .source_agent_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceRole"),
+            header
+                .source_role
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("tags"),
+            legacy_optional_string_array(header.tags.as_deref()),
+        ),
+    ])
+}
+
+fn require_edge(value: Option<&rmpv::Value>, field_name: &str) -> Result<Edge> {
+    let object = value
+        .and_then(rmpv::Value::as_map)
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    Ok(Edge {
+        from: require_record_ref(get("from"), &format!("{field_name}.from"))?,
+        role: require_legacy_string(get("role"), &format!("{field_name}.role"))?,
+        to: require_record_ref(get("to"), &format!("{field_name}.to"))?,
+        payload_encoding: require_legacy_optional_string(
+            get("payloadEncoding"),
+            &format!("{field_name}.payloadEncoding"),
+        )?,
+        payload: get("payload")
+            .filter(|value| !value.is_nil())
+            .map(|value| {
+                value
+                    .as_slice()
+                    .map(|bytes| bytes.to_vec())
+                    .ok_or_else(|| anyhow!("{field_name}.payload must be binary MessagePack bytes"))
+            })
+            .transpose()?,
+    })
+}
+
+fn encode_edge(edge: &Edge) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (rmpv::Value::from("from"), encode_record_ref(&edge.from)),
+        (rmpv::Value::from("role"), rmpv::Value::from(edge.role.as_str())),
+        (rmpv::Value::from("to"), encode_record_ref(&edge.to)),
+        (
+            rmpv::Value::from("payloadEncoding"),
+            edge.payload_encoding
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("payload"),
+            edge.payload
+                .as_deref()
+                .map(|bytes| rmpv::Value::Binary(bytes.to_vec()))
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+    ])
+}
+
+fn require_record_ref(value: Option<&rmpv::Value>, field_name: &str) -> Result<RecordRef> {
+    let object = value
+        .and_then(rmpv::Value::as_map)
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    Ok(RecordRef {
+        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
+        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
+    })
+}
+
+fn encode_record_ref(record_ref: &RecordRef) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("schemaId"),
+            rmpv::Value::from(record_ref.schema_id.as_str()),
+        ),
+        (
+            rmpv::Value::from("recordKey"),
+            rmpv::Value::from(record_ref.record_key.as_str()),
+        ),
+    ])
+}
+
+fn require_legacy_u32(value: Option<&rmpv::Value>, field_name: &str) -> Result<u32> {
+    let number = value
+        .and_then(rmpv::Value::as_u64)
+        .ok_or_else(|| anyhow!("{field_name} must be a non-negative integer"))?;
+    u32::try_from(number).map_err(|_| anyhow!("{field_name} does not fit in u32"))
+}
+
+fn require_legacy_u64(value: Option<&rmpv::Value>, field_name: &str) -> Result<u64> {
+    value
+        .and_then(rmpv::Value::as_u64)
+        .ok_or_else(|| anyhow!("{field_name} must be a non-negative integer"))
+}
+
+fn require_legacy_optional_i64(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<i64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(None);
+    }
+    value
+        .as_i64()
+        .map(Some)
+        .ok_or_else(|| anyhow!("{field_name} must be an integer"))
 }
 
 fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessage> {

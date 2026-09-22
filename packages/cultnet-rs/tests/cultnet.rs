@@ -18,6 +18,9 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetRawDocumentRecord;
+use cultnet_rs::CultNetRawPayloadEncoding;
+use cultnet_rs::CultNetReadOnlySnapshotPolicy;
 use cultnet_rs::CultNetReactiveDocumentOptions;
 use cultnet_rs::CultNetReconnectController;
 use cultnet_rs::CultNetReconnectPolicyOptions;
@@ -43,6 +46,7 @@ use cultnet_rs::CultNetTransportDescriptor;
 use cultnet_rs::CultNetTransportFrame;
 use cultnet_rs::CultNetTransportOrdering;
 use cultnet_rs::CultNetTransportProfile;
+use cultnet_rs::serve_read_only_raw_snapshot;
 use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::LengthPrefixedMessageFramer;
@@ -2031,6 +2035,69 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
         target.get_required::<GhostlightAgentStateFixture>("epiphany.persona")?,
         payload
     );
+    Ok(())
+}
+
+// Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): v0's own
+// cleaning - an empty schema_ids/record_keys list, or one made only of blanks, lowers to `null`
+// (no filter) rather than reaching the door as something to refuse or the evaluator as "match
+// nothing". A v1 Selection with the same shape is refused outright (validation_refuses_a_blank_entry_in_schemas_or_keys,
+// validation_refuses_undeclared_index_role_and_empty_lists in tests/selection.rs) - this is v0's
+// own compatibility rule, owned by the lowering in snapshot_query.rs, not a meaning v1 carries.
+#[test]
+fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_filter() -> Result<()>
+{
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        GhostlightAgentStateFixture,
+    >("ghostlight.agent-state".to_string(), None));
+
+    let mut policy = CultNetReadOnlySnapshotPolicy::new();
+    policy.allow("ghostlight.agent-state", "row-1")?;
+    policy.allow("ghostlight.agent-state", "row-2")?;
+
+    let source = vec![
+        CultNetRawDocumentRecord {
+            schema_id: "ghostlight.agent-state".to_string(),
+            record_key: "row-1".to_string(),
+            stored_at: "now".to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![1, 2, 3],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        },
+        CultNetRawDocumentRecord {
+            schema_id: "ghostlight.agent-state".to_string(),
+            record_key: "row-2".to_string(),
+            stored_at: "now".to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![4, 5, 6],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        },
+    ];
+
+    for schema_ids in [None, Some(Vec::new()), Some(vec!["   ".to_string()])] {
+        let request = CultNetMessage::SnapshotRequest {
+            message_id: "req-1".to_string(),
+            schema_ids: schema_ids.clone(),
+            record_keys: None,
+        };
+        let response = serve_read_only_raw_snapshot(&registry, &policy, &source, &request)?;
+        let CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
+            panic!("expected a raw snapshot response");
+        };
+        assert_eq!(
+            documents.len(),
+            2,
+            "schema_ids = {schema_ids:?} must lower to no filter, not zero rows"
+        );
+    }
+
     Ok(())
 }
 
