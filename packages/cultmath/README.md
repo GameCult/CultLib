@@ -26,7 +26,8 @@ shader semantics.
   acceleration and semi-implicit Euler integration
 - `math` intrinsics: `radians`, `degrees`, `abs`, `floor`, `ceil`, `frac`,
   `min`, `max`, `clamp`, `saturate`, `lerp`, `step`, `smoothstep`, `dot`,
-  `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, exponential
+  `cross`, `length`, `distance`, `normalize`, `reflect`, `csum`, `erf`,
+  `erfinv` (scalar only), exponential
   `decay`/`damp`, intercept/segment helpers, Catmull-Rom, Bezier curves, and
   deterministic value-noise primitives
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
