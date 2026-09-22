@@ -944,9 +944,12 @@ nobody ran one.
 
 **Still outstanding for Cut 3:**
 
-- The **Windows release configuration**. It lived inside the harness and left
-  with it, exactly as Linux's did; Linux has now been re-run without the
-  harness and Windows has not.
+- **Nothing on the release configuration.** Both platforms have now run it
+  without the harness; F1 is closed. This line previously said Windows was
+  owed and was left stale for a few hours after the Windows leg landed above,
+  which is the exact failure the same map records elsewhere.
+- **Whether earlier Windows numbers were measured against the pinned MsQuic**
+  (see the Windows leg above). Until that is settled, they are unconfirmed.
 - **F5's stress under load cannot be run on Windows at all.** It wants five
   rounds with sixteen CPU burners, and those burners are what froze the
   operator's workstation on 2026-09-22. `closerace` is Windows-sensitive (it
