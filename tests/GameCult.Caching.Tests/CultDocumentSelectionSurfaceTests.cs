@@ -118,7 +118,7 @@ namespace GameCult.Caching.Tests
             Assert.That(leafA.TryGetIndexValue(documentA, "mass", out var text), Is.True);
             Assert.That(text, Is.EqualTo("3.5"));
             Assert.That(leafA.TryGetIndexNumber(documentA, "mass", out var number), Is.True);
-            Assert.That(number, Is.EqualTo(3.5d));
+            Assert.That(number, Is.EqualTo("3.5"));
         }
 
         [Test]
@@ -142,7 +142,7 @@ namespace GameCult.Caching.Tests
             Assert.That(weight.IsNumeric, Is.True);
             var document = new FixtureLeafB { Weight = 4.25m };
             Assert.That(leafB.TryGetIndexNumber(document, "weight", out var number), Is.True);
-            Assert.That(number, Is.EqualTo(4.25d));
+            Assert.That(number, Is.EqualTo("4.25"));
         }
 
         [Test]
@@ -153,6 +153,63 @@ namespace GameCult.Caching.Tests
             var name = leafA.DeclaredMembers.Single(member => member.MemberName == nameof(FixtureLeafA.Name));
 
             Assert.That(name.IsNumeric, Is.False);
+        }
+
+        // Q-J (docs/cultnet-selection-cut.md, section 2 "Numbers", 2026-09-22): the row side renders a
+        // member's exact canonical decimal - never a double. A long past 2^53 (where double loses
+        // integer precision) is the named boundary: rendering it through float64 would silently produce
+        // "9007199254740992" for 9007199254740993, and the two would then compare equal on the wire.
+        [Test]
+        public void TryGetIndexNumberRendersALongPast2Pow53ExactlyNotThroughFloat64()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FixtureLeafNumbers) });
+            var leaf = registry.GetRequired<FixtureLeafNumbers>();
+            var document = new FixtureLeafNumbers { BigInteger = 9007199254740993L };
+
+            Assert.That(leaf.TryGetIndexNumber(document, "big_integer", out var number), Is.True);
+            Assert.That(number, Is.EqualTo("9007199254740993"));
+        }
+
+        [Test]
+        public void TryGetIndexNumberStripsTrailingZerosFromADecimal()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FixtureLeafNumbers) });
+            var leaf = registry.GetRequired<FixtureLeafNumbers>();
+            var document = new FixtureLeafNumbers { TrimmedDecimal = 13.500m };
+
+            Assert.That(leaf.TryGetIndexNumber(document, "trimmed_decimal", out var number), Is.True);
+            Assert.That(number, Is.EqualTo("13.5"));
+        }
+
+        // The shortest round-trip form .NET renders for a double/float outside a middle magnitude range
+        // uses exponent notation ("1E+21", "1E-07"); the canonical wire form never does (Q-J).
+        [Test]
+        public void TryGetIndexNumberRewritesADoublesExponentNotationToPositionalDigits()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FixtureLeafNumbers) });
+            var leaf = registry.GetRequired<FixtureLeafNumbers>();
+            var wide = new FixtureLeafNumbers { WideDouble = 1e21 };
+            var tiny = new FixtureLeafNumbers { TinyDouble = 1e-7 };
+
+            Assert.That(leaf.TryGetIndexNumber(wide, "wide_double", out var wideNumber), Is.True);
+            Assert.That(wideNumber, Does.Not.Contain("E"));
+            Assert.That(wideNumber, Is.EqualTo("1000000000000000000000"));
+
+            Assert.That(leaf.TryGetIndexNumber(tiny, "tiny_double", out var tinyNumber), Is.True);
+            Assert.That(tinyNumber, Does.Not.Contain("E"));
+            Assert.That(tinyNumber, Is.EqualTo("0.0000001"));
+        }
+
+        [Test]
+        public void TryGetIndexNumberReturnsFalseForNaNAndInfinity()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FixtureLeafNumbers) });
+            var leaf = registry.GetRequired<FixtureLeafNumbers>();
+            var nan = new FixtureLeafNumbers { WideDouble = double.NaN };
+            var infinite = new FixtureLeafNumbers { WideDouble = double.PositiveInfinity };
+
+            Assert.That(leaf.TryGetIndexNumber(nan, "wide_double", out _), Is.False);
+            Assert.That(leaf.TryGetIndexNumber(infinite, "wide_double", out _), Is.False);
         }
 
         // D10 and D11 registration refusals: emitted into a dynamic assembly, invisible to registry
@@ -248,6 +305,34 @@ namespace GameCult.Caching.Tests
             [Key(2)]
             [CultIndex("weight")]
             public decimal? Weight;
+        }
+
+        // Q-J: a fixture dedicated to the row-side canonical rendering rules, independent of the
+        // abstract-middle/inheritance fixtures above so it can carry a long, a decimal and two doubles
+        // without disturbing the schemas other tests in this file pin.
+        [CultDocument("selection.fixture.leaf_numbers", "selection.fixture.leaf_numbers.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class FixtureLeafNumbers
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            [CultIndex("big_integer")]
+            public long BigInteger;
+
+            [Key(2)]
+            [CultIndex("trimmed_decimal")]
+            public decimal TrimmedDecimal;
+
+            [Key(3)]
+            [CultIndex("wide_double")]
+            public double WideDouble;
+
+            [Key(4)]
+            [CultIndex("tiny_double")]
+            public double TinyDouble;
         }
 
         [CultDocument("selection.fixture.citer", "selection.fixture.citer.v1")]

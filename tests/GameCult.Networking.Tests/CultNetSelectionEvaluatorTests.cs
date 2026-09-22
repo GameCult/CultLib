@@ -51,6 +51,23 @@ namespace GameCult.Networking.Tests
             Assert.That(ex!.Field, Is.EqualTo(expectedField));
         }
 
+        // Q-J (docs/cultnet-selection-cut.md, section 2 "Numbers", 2026-09-22): the door refuses every
+        // non-canonical spelling of a comparison number, rather than normalising it - a leading '+', a
+        // trailing fractional zero, a leading integer zero, exponent notation, and negative zero.
+        [TestCase("+1")]
+        [TestCase("1.0")]
+        [TestCase("01")]
+        [TestCase("1e3")]
+        [TestCase("-0")]
+        public void ValidationRefusesNonCanonicalNumberSpellings(string spelling)
+        {
+            var descriptors = Registry().AllDescriptors.ToArray();
+            AssertInvalid(
+                new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "gt", Number = spelling } } },
+                descriptors,
+                "fields[0].number");
+        }
+
         // S2: fields conjoin; any_of matches on membership.
         [Test]
         public void EvaluatorConjoinsAnyOfPredicatesOverDeclaredIndexes()
@@ -64,7 +81,7 @@ namespace GameCult.Networking.Tests
                 Fields = new[]
                 {
                     new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "weapon" } },
-                    new CultNetFieldPredicate { Index = "mass", Op = "ge", Number = 3 }
+                    new CultNetFieldPredicate { Index = "mass", Op = "ge", Number = "3" }
                 }
             };
 
@@ -217,7 +234,7 @@ namespace GameCult.Networking.Tests
 
             string[] Matches(string op) => CultNetSelectionEvaluator.Select(
                 registry, rows,
-                new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = op, Number = 5 } } },
+                new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = op, Number = "5" } } },
                 asOf: 1).Rows.Select(r => r.Key.Value).OrderBy(k => k, StringComparer.Ordinal).ToArray();
 
             Assert.That(Matches("lt"), Is.EqualTo(new[] { "lo" }));
@@ -240,7 +257,7 @@ namespace GameCult.Networking.Tests
                 new CultNetSelection
                 {
                     Schemas = new[] { registry.GetRequired<SelLeafA>().SchemaId, registry.GetRequired<SelLeafB>().SchemaId },
-                    Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "gt", Number = 10 } }
+                    Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "gt", Number = "10" } }
                 },
                 asOf: 1);
 

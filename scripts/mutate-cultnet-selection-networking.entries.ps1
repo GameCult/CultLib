@@ -71,8 +71,8 @@
         Mutant = 'revert'
         File   = 'src/GameCult.Networking/CultNetSelectionEvaluator.cs'
         Killer = 'FullyQualifiedName=GameCult.Networking.Tests.CultNetSelectionEvaluatorTests.EvaluatorComparesNumbersAtTheBoundaryForEachOfTheFourOperators'
-        Old    = 'CultNetSelectionOperator.Le => left <= right,'
-        New    = 'CultNetSelectionOperator.Le => left < right,'
+        Old    = 'CultNetSelectionOperator.Le => cmp <= 0,'
+        New    = 'CultNetSelectionOperator.Le => cmp < 0,'
     },
     @{
         Id     = 'NET-S16-Ge-Revert'
@@ -80,8 +80,8 @@
         Mutant = 'revert'
         File   = 'src/GameCult.Networking/CultNetSelectionEvaluator.cs'
         Killer = 'FullyQualifiedName=GameCult.Networking.Tests.CultNetSelectionEvaluatorTests.EvaluatorComparesNumbersAtTheBoundaryForEachOfTheFourOperators'
-        Old    = 'CultNetSelectionOperator.Ge => left >= right,'
-        New    = 'CultNetSelectionOperator.Ge => left > right,'
+        Old    = 'CultNetSelectionOperator.Ge => cmp >= 0,'
+        New    = 'CultNetSelectionOperator.Ge => cmp > 0,'
     },
     @{
         Id     = 'NET-S18-Revert'
@@ -108,4 +108,54 @@
     # filter still returns the same single row. This is a finding about the fixture, not a defended
     # rule - a second document of a different schema in the same shard is needed to make the
     # loosening fail, and is not added here (no easier mutant substituted per the Hands brief).
+    #
+    # Q-J (docs/cultnet-selection-cut.md section 2 "Numbers", 2026-09-22): the door's canonical-decimal
+    # grammar (CultNetSelection.cs) and the comparator that reads it (CultNetSelectionEvaluator.cs's
+    # CompareNumber, via CultNetCanonicalNumber.Compare). CultNetCanonicalNumberTests pins Compare
+    # directly with more cases than the entries below exercise; every entry here is one the map named.
+    @{
+        Id     = 'NET-QJ-Door-Regex-Revert'
+        Rule   = 'Q-J: the door refuses a non-canonical number spelling (+1, 1.0, 01, 1e3) rather than accepting it.'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Networking/CultNetSelection.cs'
+        Killer = 'FullyQualifiedName~CultNetSelectionEvaluatorTests.ValidationRefusesNonCanonicalNumberSpellings'
+        Old    = 'if (!CultNetCanonicalNumber.IsCanonical(field.Number))'
+        New    = 'if (false)'
+    },
+    @{
+        Id     = 'NET-QJ-Door-NegativeZero-Revert'
+        Rule   = 'Q-J: "-0" is excluded even though the regex alone matches it - IsCanonical checks it explicitly.'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Networking/CultNetSelection.cs'
+        Killer = 'FullyQualifiedName~CultNetSelectionEvaluatorTests.ValidationRefusesNonCanonicalNumberSpellings'
+        Old    = 'value != null && value != "-0" && CanonicalRegex.IsMatch(value);'
+        New    = 'value != null && CanonicalRegex.IsMatch(value);'
+    },
+    @{
+        Id     = 'NET-QJ-Compare-IntegerLength-Revert'
+        Rule   = 'Q-J: the comparator checks the integer part''s length before its digits - "100" > "99" even though ''1'' < ''9'' as a bare character.'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Networking/CultNetSelection.cs'
+        Killer = 'FullyQualifiedName=GameCult.Networking.Tests.CultNetCanonicalNumberTests.CompareOrdersByIntegerPartLengthBeforeDigits'
+        Old    = "            if (integerLeft.Length != integerRight.Length)`n                return sign * (integerLeft.Length < integerRight.Length ? -1 : 1);`n`n"
+        New    = ''
+    },
+    @{
+        Id     = 'NET-QJ-Compare-Lexicographic-Revert'
+        Rule   = 'Q-J: the comparator is not a lexicographic compare of the whole string ("10" must not be less than "9").'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Networking/CultNetSelection.cs'
+        Killer = 'FullyQualifiedName=GameCult.Networking.Tests.CultNetCanonicalNumberTests.CompareOrdersByMagnitudeNotLexicographically'
+        Old    = 'var (negativeLeft, integerLeft, fractionLeft) = Decompose(left);'
+        New    = 'return string.CompareOrdinal(left, right); var (negativeLeft, integerLeft, fractionLeft) = Decompose(left);'
+    },
+    @{
+        Id     = 'NET-QJ-Compare-Sign-Revert'
+        Rule   = 'Q-J: the comparator orders a negative value below a positive one of the same magnitude.'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Networking/CultNetSelection.cs'
+        Killer = 'FullyQualifiedName=GameCult.Networking.Tests.CultNetCanonicalNumberTests.CompareOrdersNegativeBelowPositive'
+        Old    = 'if (negativeLeft != negativeRight)'
+        New    = 'if (false)'
+    }
 )

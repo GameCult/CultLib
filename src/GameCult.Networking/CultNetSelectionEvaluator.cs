@@ -100,9 +100,9 @@ namespace GameCult.Networking
                 }
                 else
                 {
-                    if (!descriptor.TryGetIndexNumber(document, field.Index, out var number) || !field.Number.HasValue)
+                    if (!descriptor.TryGetIndexNumber(document, field.Index, out var number) || field.Number == null)
                         return false;
-                    if (!CompareNumber(number, op, field.Number.Value))
+                    if (!CompareNumber(number, op, field.Number))
                         return false;
                 }
             }
@@ -110,14 +110,22 @@ namespace GameCult.Networking
             return true;
         }
 
-        private static bool CompareNumber(double left, CultNetSelectionOperator op, double right) => op switch
+        // Q-J: both operands are canonical decimal strings by the time they reach here (the row side
+        // renders through RenderCanonicalNumber, the wire side is validated at the door), so the
+        // comparison is CultNetCanonicalNumber.Compare's pure string function - no double anywhere on
+        // this path (docs/cultnet-selection-cut.md section 2 "Numbers").
+        private static bool CompareNumber(string left, CultNetSelectionOperator op, string right)
         {
-            CultNetSelectionOperator.Lt => left < right,
-            CultNetSelectionOperator.Le => left <= right,
-            CultNetSelectionOperator.Ge => left >= right,
-            CultNetSelectionOperator.Gt => left > right,
-            _ => throw new ArgumentOutOfRangeException(nameof(op))
-        };
+            var cmp = CultNetCanonicalNumber.Compare(left, right);
+            return op switch
+            {
+                CultNetSelectionOperator.Lt => cmp < 0,
+                CultNetSelectionOperator.Le => cmp <= 0,
+                CultNetSelectionOperator.Ge => cmp >= 0,
+                CultNetSelectionOperator.Gt => cmp > 0,
+                _ => throw new ArgumentOutOfRangeException(nameof(op))
+            };
+        }
 
         /// <summary>
         /// Evaluates a selection over the full row set: schemas/keys/fields, the hop (cites/cited,

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using GameCult.Caching;
 using MessagePack;
 
@@ -57,6 +58,68 @@ namespace GameCult.Networking
         public static bool IsComparison(this CultNetSelectionOperator op) => op != CultNetSelectionOperator.AnyOf;
     }
 
+    /// <summary>
+    /// The wire's canonical decimal form (Q-J, docs/cultnet-selection-cut.md section 2 "Numbers"): one
+    /// spelling per value, so the cursor digest and the cross-runtime parity vectors need no numeric
+    /// parser and no precision limit. A comparison number that does not match <see cref="Pattern"/>, or
+    /// that spells zero with a leading minus, is refused at the door rather than normalised - a
+    /// non-canonical spelling of an equal value never reaches the evaluator.
+    /// </summary>
+    public static class CultNetCanonicalNumber
+    {
+        /// <summary>
+        /// Forbids leading zeros, a trailing fractional zero or bare point, an explicit '+', exponent
+        /// notation, and whitespace. Does not by itself forbid "-0"; <see cref="IsCanonical"/> does.
+        /// </summary>
+        public const string Pattern = @"^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$";
+
+        private static readonly Regex CanonicalRegex = new(Pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        /// <summary>True for a canonical decimal string; false for null, "-0", or any other spelling.</summary>
+        public static bool IsCanonical(string? value) =>
+            value != null && value != "-0" && CanonicalRegex.IsMatch(value);
+
+        /// <summary>
+        /// Compares two canonical decimal strings by sign, then the integer part's length, then its
+        /// digits, then the fraction digits padded on the right to equal length - a pure string
+        /// comparison, never a numeric parse, so no CLR type's range limits what a comparison can hold.
+        /// Callers must validate both operands with <see cref="IsCanonical"/> first; this does not
+        /// re-validate.
+        /// </summary>
+        public static int Compare(string left, string right)
+        {
+            var (negativeLeft, integerLeft, fractionLeft) = Decompose(left);
+            var (negativeRight, integerRight, fractionRight) = Decompose(right);
+
+            if (negativeLeft != negativeRight)
+                return negativeLeft ? -1 : 1;
+            var sign = negativeLeft ? -1 : 1;
+
+            if (integerLeft.Length != integerRight.Length)
+                return sign * (integerLeft.Length < integerRight.Length ? -1 : 1);
+
+            var integerCompare = string.CompareOrdinal(integerLeft, integerRight);
+            if (integerCompare != 0)
+                return sign * Math.Sign(integerCompare);
+
+            var fractionLength = Math.Max(fractionLeft.Length, fractionRight.Length);
+            var fractionCompare = string.CompareOrdinal(
+                fractionLeft.PadRight(fractionLength, '0'),
+                fractionRight.PadRight(fractionLength, '0'));
+            return sign * Math.Sign(fractionCompare);
+        }
+
+        private static (bool Negative, string Integer, string Fraction) Decompose(string canonical)
+        {
+            var negative = canonical.Length > 0 && canonical[0] == '-';
+            var unsigned = negative ? canonical.Substring(1) : canonical;
+            var dot = unsigned.IndexOf('.');
+            return dot < 0
+                ? (negative, unsigned, string.Empty)
+                : (negative, unsigned.Substring(0, dot), unsigned.Substring(dot + 1));
+        }
+    }
+
     /// <summary>One predicate over a single declared index alias (docs/cultnet-selection-cut.md, section 2).</summary>
     [MessagePackObject]
     public sealed class CultNetFieldPredicate
@@ -67,8 +130,8 @@ namespace GameCult.Networking
         [Key("op")] public string Op { get; set; } = string.Empty;
         /// <summary>Present iff op = any_of; non-empty.</summary>
         [Key("values")] public string[]? Values { get; set; }
-        /// <summary>Present iff op is a comparison.</summary>
-        [Key("number")] public double? Number { get; set; }
+        /// <summary>Present iff op is a comparison; a canonical decimal string (Q-J, <see cref="CultNetCanonicalNumber"/>).</summary>
+        [Key("number")] public string? Number { get; set; }
     }
 
     /// <summary>Identifies one row on the wire by schema and record key.</summary>
@@ -280,13 +343,15 @@ namespace GameCult.Networking
             {
                 if (field.Values == null || field.Values.Length == 0)
                     throw new CultNetSelectionInvalidException($"{prefix}.values", null, $"{prefix}.values must be non-empty for op any_of.");
-                if (field.Number.HasValue)
+                if (field.Number != null)
                     throw new CultNetSelectionInvalidException($"{prefix}.number", null, $"{prefix} carries both values and number; any_of takes only values.");
             }
             else
             {
-                if (!field.Number.HasValue)
+                if (field.Number == null)
                     throw new CultNetSelectionInvalidException($"{prefix}.number", null, $"{prefix}.number is required for op {field.Op}.");
+                if (!CultNetCanonicalNumber.IsCanonical(field.Number))
+                    throw new CultNetSelectionInvalidException($"{prefix}.number", field.Number, $"{prefix}.number \"{field.Number}\" is not a canonical decimal string (Q-J): it must match {CultNetCanonicalNumber.Pattern} and not be \"-0\".");
                 if (field.Values != null)
                     throw new CultNetSelectionInvalidException($"{prefix}.values", null, $"{prefix} carries both values and number; a comparison takes only number.");
             }

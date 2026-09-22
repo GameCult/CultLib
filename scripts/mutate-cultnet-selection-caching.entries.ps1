@@ -50,5 +50,40 @@
         Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.ReferencesOfEnumeratesADictionaryReferenceAsEdgesCarryingItsValues'
         Old    = 'results.Add((reference.Key, valueProperty.GetValue(entry)));'
         New    = 'results.Add((reference.Key, (object?)null));'
+    },
+    # Q-J (docs/cultnet-selection-cut.md section 2 "Numbers", 2026-09-22): the row side's canonical
+    # decimal rendering. The map named these five mutants explicitly; the fifth ("a row rendered
+    # through float64") is this campaign's, the other four are the door's (networking entries file).
+    @{
+        Id     = 'CACHE-QJ-IntegerFloat64-Revert'
+        Rule   = 'Q-J: an integer renders its exact decimal, never through double - a long past 2^53 must not round.'
+        Mutant = 'revert'
+        Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberRendersALongPast2Pow53ExactlyNotThroughFloat64'
+        Old    = '_ => CanonicalizeDecimalDigits(Convert.ToString(raw, CultureInfo.InvariantCulture)!)'
+        New    = '_ => CanonicalizeDecimalDigits(Convert.ToDouble(raw, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture))'
+    },
+    @{
+        Id     = 'CACHE-QJ-DecimalTrailingZeros-Revert'
+        Rule   = 'Q-J: a decimal renders with its trailing fractional zeros stripped.'
+        Mutant = 'revert'
+        Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberStripsTrailingZerosFromADecimal'
+        Old    = "fractionPart = fractionPart.TrimEnd('0');"
+        New    = ''
+    },
+    @{
+        Id     = 'CACHE-QJ-ExponentExpansion-Revert'
+        Rule   = 'Q-J: a double/float that .NET would render in exponent notation is rewritten to positional digits before canonicalizing.'
+        Mutant = 'revert'
+        Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberRewritesADoublesExponentNotationToPositionalDigits'
+        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
+        New    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(d.ToString(CultureInfo.InvariantCulture)),'
+    },
+    @{
+        Id     = 'CACHE-QJ-NaNInfinity-Revert'
+        Rule   = 'Q-J: a NaN or infinite member matches no comparison - TryGetIndexNumber must answer false, not a garbage rendering of the value.'
+        Mutant = 'revert'
+        Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberReturnsFalseForNaNAndInfinity'
+        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
+        New    = 'double d => CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
     }
 )

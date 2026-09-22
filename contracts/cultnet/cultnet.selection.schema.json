@@ -50,7 +50,11 @@
           "items": { "type": "string" },
           "minItems": 1
         },
-        "number": { "type": "number" }
+        "number": {
+          "type": "string",
+          "description": "Q-J: a canonical decimal string, never a JSON number. Matches ^-?(0|[1-9][0-9]*)(\\.[0-9]*[1-9])?$ and is not \"-0\"; any other spelling is refused typed at the door (selection_invalid), never normalised.",
+          "pattern": "^(?!-0$)-?(0|[1-9][0-9]*)(\\.[0-9]*[1-9])?$"
+        }
       },
       "oneOf": [
         { "required": ["values"], "properties": { "op": { "const": "any_of" } } },
