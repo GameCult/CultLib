@@ -864,6 +864,31 @@ the harness was deleted, and it has never worked.** A documented path that
 fails on first use is worse than no documentation: it was published in the
 same commit that removed the working one.
 
+**The README's worked example was broken twice, and fixed at `5533c34`**
+(Sonnet, on `hands/cultmath-erf`).
+
+- The loader failure above, fixed in its owner: a `POST_BUILD` step on the
+  test target copies `libmsquic.so.2` beside the built binaries. CMake already
+  receives `MSQUIC_LIB_DIR` as a required argument on Linux, so no new input,
+  option or script was invented — the knowledge it already had now acts
+  instead of sitting in prose. The `$ORIGIN` rpath is untouched.
+- **A second, independent break that fires first.** The example passed
+  `-DMSQUIC_INCLUDE_DIR` and `-DMSQUIC_LIB_DIR` as relative paths. CMake
+  resolves a relative cache path against the `CMakeLists.txt` that consumes
+  it, not the directory `cmake` ran in, so the build failed on a missing
+  `msquic.h` **before the loader problem was ever reachable**. Fixed to
+  absolute paths with a paragraph saying why.
+
+So the documented path failed at its first command, not its last. It was
+published in `796433f` — the commit that deleted the working path — and
+nobody ran it. **The check that would have caught this is running the
+documentation, which is what found it now.** Verified on Yggdrasil by
+executing the README's command block literally, with no extra step:
+`polltimeout` and `pollbusy` both pass, 20 rounds each.
+
+Structural delta: one `add_custom_command`, four lines, in the test target's
+build graph. No new files, scripts, options or targets.
+
 **Still outstanding for Cut 3:**
 
 - The **Windows release configuration**. It lived inside the harness and left
