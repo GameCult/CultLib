@@ -2495,3 +2495,63 @@ Cut 2 spends it.
 - **Q-P. Ordering on a feed, later.** Out of this cut by the rules above.
   If "the latest N, live" is wanted, it is a third cut with an eviction
   rule, not a field added here.
+
+**R-AA landed, 2026-09-22** (Sonnet), `b7d77b7..99e366a` on
+`cultnet/selection-cut1`. One new test file, 27 tests, 707 lines. **No
+production code touched.** Score **66% → 77.62%**: killed 345→371, survived
+85→57, no-coverage 75→50, over the same 428-mutant set both passes. Suite
+green on Yggdrasil, 271 passed / 2 skipped.
+
+Every one of the nine named survivor groups is killed, with two corrections to
+the triage that matter more than the score.
+
+- **`EdgesFor`: three of five killed, and two are genuinely equivalent.**
+  Within one hop direction, `(From, Role)` already determines a unique
+  declared edge value, so no legal selection can make two edges share anchor,
+  From and Role while `To` differs. Hands could not construct one, and
+  Stryker agreed across two independent runs. **Soul's triage misclassified
+  `To.SchemaId` and `To.Key` as live.** They are recorded here as equivalent
+  so nobody pays for them a third time.
+- **A sixth mutant in the same method that nobody had named**:
+  `OrderBy(pageRowIndex)`, which is R-B's *primary* key, ahead of
+  `(from, role, to)`. It survived the first pass and is now killed by a test
+  that forces page order and `(from, role, to)` order to disagree. The rule
+  R-B exists to protect had its first component unguarded, and the triage had
+  not caught that either.
+- **The digest needed a golden value, not a comparison.** Beyond the named
+  branch mutants, about nineteen finer-grained ones survived — deleting
+  individual `AppendString` calls. A same-versus-different digest test
+  structurally cannot catch these: a mutant that swaps which case gets which
+  flag still produces two *different* digests, merely mislabelled. Hands
+  reconstructed a golden HMAC independently from the method's doc comments
+  rather than from its private helpers, which is the right way to build one,
+  and it killed all but three residual coincidences.
+
+**Line drift: every rule had moved 30–90 lines** from Soul's `52082ec`
+numbers, none to a different method. Locate by name, not by number, and do not
+trust the numbers in this section either.
+
+**Four things found along the way, flagged rather than silently fixed.** Two
+are test gaps; two look like real defects:
+
+- `ReadLengthPrefixedFields`, `length <= 0`: a legitimately zero-length field
+  would be wrongly refused.
+- `ReferenceMembers`'s `!member.IsReference` guard: a data member could be
+  treated as citeable.
+- `FindCursorPosition`'s loop bound: an out-of-bounds read when paging past
+  the last row with a cursor exactly at the end.
+- `ComputeDigest`'s `else`-branch appends survive only because the golden
+  test has both `Cites` and `Cited` non-null; a second golden with both absent
+  closes them.
+
+**Self's rulings, 2026-09-22:**
+
+- **R-AC. The two `EdgesFor` `To` mutants are equivalent.** Recorded, not to
+  be chased. A survivor correctly identified beats a test written to move a
+  number.
+- **R-AD. The three suspected defects above get behaviour tests first**, since
+  a test that fails today is the only thing that proves they are defects
+  rather than readings. The out-of-bounds read in `FindCursorPosition` is the
+  one to check first: it is reachable from an attacker-supplied cursor.
+- **R-AE. A second golden digest with both hops absent**, closing the three
+  residual mutants rather than leaving them as folklore.
