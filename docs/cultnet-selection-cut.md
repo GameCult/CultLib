@@ -410,6 +410,38 @@ merge.** The notes are in the session scratchpad at `soul-ss4-notes.md`.
   takes the descriptor. `mutate-dotnet.ps1` normalises path separators.
 - **R-M. Soul's named deletions all land.** P-2 (`Eq`) lands too.
 
+**The C# half of the fix batch landed** (Sonnet), `7903853`..`3d32c67`.
+
+What changed:
+- **R-A:** v1 is served by both servers, and D6 reconcile routing is in place.
+- **R-C:** `CultNetCodePointComparer` gives code-point order.
+- **R-D:** floats render as their exact decimal expansion, computed with
+  `BigInteger`.
+- **R-E:** cites go through the alias matcher, and the wire id is one
+  `WireSchemaId`.
+- **R-F:** the door is unconditional inside `Select`.
+- **R-G:** `Matched` is the total, computed once through `EvaluateAll` and
+  `SelectAll`.
+- **R-H:** the cursor digest is length-prefixed.
+- **R-J:** numeric `any_of` compares the canonical form.
+- **R-M:** `WithBindingSchemaAlias` and the duplicated paging loop are deleted.
+- **R-I:** tests kill both S20 mutants. One real bug was fixed in the
+  process: `ToEdge` serialised a plain-typed payload as a document.
+- **R-K:** every join is in `finally`. `HasConsumers` now waits for the
+  condition.
+- **R-L:** the schema carries `minItems`. Python refuses every vN>0 (only
+  one site exists). The harness normalises path separators.
+- **Vectors:** `cs-written.json` is regenerated and gains the float-tie,
+  cites-by-alias, astral-order and projection cases.
+
+Tests: Networking 201/202, where the one failure is the stale Rust vector
+until the Rust half lands. Caching 192. Mesh 253/254. Python 54, 78 and 34. In
+20 full runs there was no crash, but one run had an unexplained failure.
+
+**Not done, sent to a second Hands:** mutation entries for the fix-batch
+rules (there are only regression tests), S9, and a diagnosis of the 1-in-20
+failure over 30 runs.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
