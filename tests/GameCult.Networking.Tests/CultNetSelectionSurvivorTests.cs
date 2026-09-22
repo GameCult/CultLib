@@ -307,6 +307,50 @@ namespace GameCult.Networking.Tests
             Assert.That(evaluation.Edges.Select(e => e.Role), Is.EqualTo(new[] { "aFirstRole", "zLastRole" }));
         }
 
+        // A sixth EdgesFor mutant Stryker reported alongside the five R-B names: OrderBy(pageRowIndex)
+        // itself (the primary key, page-row position) mutated to OrderByDescending. Two page rows, each
+        // the anchor for exactly one edge from a differently-keyed citer, where the citers' own
+        // (from, role, to) order is the *opposite* of the pages' row order - so only the primary
+        // page-position key, not the secondary from/role/to tiebreak, can produce the right answer.
+        [Test]
+        public void EdgesFor_OrdersByPageRowPositionBeforeFromRoleTo()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SurvivorAliasTarget), typeof(SurvivorPageOrderCiter) });
+            var targetZ = new SurvivorAliasTarget { Name = "z" };
+            var targetA = new SurvivorAliasTarget { Name = "a" };
+            var citerForZ = new SurvivorPageOrderCiter { Name = "cz", Link = new CultRecordRef<SurvivorAliasTarget>(new CultRecordKey("z-target")) };
+            // "citer-a" sorts before "citer-z" in code-point order - the opposite of the page order below
+            // (targetZ's ordinal puts it first), so a from/role/to-only sort would put this edge first.
+            var citerForA = new SurvivorPageOrderCiter { Name = "ca", Link = new CultRecordRef<SurvivorAliasTarget>(new CultRecordKey("a-target")) };
+            var rows = new[]
+            {
+                Row(registry, targetZ, "z-target", 1),
+                Row(registry, targetA, "a-target", 2),
+                Row(registry, citerForZ, "citer-z", 3),
+                Row(registry, citerForA, "citer-a", 4)
+            };
+
+            var selection = new CultNetSelection { Cited = new CultNetIncoming { Role = "hopRole", Exists = true } };
+            var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+
+            // Page order is by ordinal: z-target (1) then a-target (2).
+            Assert.That(evaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "z-target", "a-target" }));
+            // Edges must follow that same page order, not "citer-a" < "citer-z".
+            Assert.That(evaluation.Edges.Select(e => e.From.Key.Value), Is.EqualTo(new[] { "citer-z", "citer-a" }));
+        }
+
+        [CultDocument("cultnet.selection-tests.survivor_page_order_citer", "cultnet.selection-tests.survivor_page_order_citer.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class SurvivorPageOrderCiter
+        {
+            [Key(0)] [CultName] public string Name = string.Empty;
+
+            [Key(1)]
+            [CultIndex("hopRole")]
+            [CultReference(typeof(SurvivorAliasTarget))]
+            public CultRecordRef<SurvivorAliasTarget> Link;
+        }
+
         [CultDocument("cultnet.selection-tests.survivor_alt_citer", "cultnet.selection-tests.survivor_alt_citer.v1")]
         [MessagePackObject(AllowPrivate = true)]
         public sealed class SurvivorAltCiter
@@ -397,6 +441,109 @@ namespace GameCult.Networking.Tests
             Assert.That(
                 CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", absentNumber),
                 Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", emptyNumber)));
+        }
+
+        // Every "differs" assertion above is symmetric to a mutant that swaps which of two cases gets
+        // which flag value (e.g. field.Number == null ? '0' : '1' mutated to != null) - both cases still
+        // produce two different digests, just with the labels swapped, so inequality alone cannot catch
+        // it. Nor can it catch deleting one AppendString/sb.Append call whose content happens not to be
+        // the only thing distinguishing a particular pair. An independently reconstructed golden value -
+        // built from ComputeDigest's own doc comments, not by calling its private helpers - pins the
+        // exact byte-for-byte wire shape: every append call and every flag's polarity must be exactly
+        // right for this to still match, so deleting or mislabelling any of them fails it.
+        [Test]
+        public void ComputeDigest_MatchesAnIndependentlyReconstructedGoldenValue()
+        {
+            var keyBytes = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+            var key = new CultNetSelectionCursorKey(keyBytes);
+            var selection = new CultNetSelection
+            {
+                Schemas = new[] { "schema-b", "schema-a" },
+                Keys = new[] { "key-a" },
+                Fields = new[]
+                {
+                    new CultNetFieldPredicate { Index = "idx-a", Op = "any_of", Values = new[] { "v2", "v1" } },
+                    new CultNetFieldPredicate { Index = "idx-b", Op = "gt", Number = "5" }
+                },
+                Cites = new CultNetCitation
+                {
+                    Target = new CultNetRecordRef { SchemaId = "cite-schema", RecordKey = "cite-key" },
+                    Role = "cite-role"
+                },
+                Cited = new CultNetIncoming { Role = "cited-role", Exists = true },
+                Projection = CultNetSelectionProjections.Document,
+                Descending = true
+            };
+
+            var expected = IndependentDigest(asOf: 42, ordinal: 7, schemaId: "row-schema", recordKey: "row-key", selection, keyBytes);
+            var actual = CultNetSelectionCursor.ComputeDigest(42, 7, "row-schema", "row-key", selection, key);
+
+            Assert.That(actual, Is.EqualTo(expected));
+        }
+
+        // Independent re-implementation of ComputeDigest's wire shape (R-H/R-Y), written from the
+        // method's doc comments rather than by delegating to it or its private helpers.
+        private static string IndependentDigest(ulong asOf, long ordinal, string schemaId, string recordKey, CultNetSelection selection, byte[] keyBytes)
+        {
+            var sb = new System.Text.StringBuilder();
+            void AppendString(string value) => sb.Append(System.Text.Encoding.UTF8.GetByteCount(value)).Append(':').Append(value);
+            void AppendList(System.Collections.Generic.IReadOnlyList<string>? values)
+            {
+                var ordered = (values ?? Array.Empty<string>()).OrderBy(v => v, CultNetCodePointComparer.Instance).ToArray();
+                sb.Append(ordered.Length).Append(':');
+                foreach (var v in ordered) AppendString(v);
+            }
+
+            AppendString(asOf.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendString(ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendString(schemaId);
+            AppendString(recordKey);
+            AppendList(selection.Schemas);
+            AppendList(selection.Keys);
+
+            var fields = selection.Fields ?? Array.Empty<CultNetFieldPredicate>();
+            sb.Append(fields.Length).Append(':');
+            foreach (var field in fields)
+            {
+                AppendString(field.Index);
+                AppendString(field.Op);
+                AppendList(field.Values);
+                AppendString(field.Number ?? string.Empty);
+                sb.Append(field.Number == null ? '0' : '1');
+            }
+
+            if (selection.Cites != null)
+            {
+                sb.Append('1');
+                AppendString(selection.Cites.Target.SchemaId);
+                AppendString(selection.Cites.Target.RecordKey);
+                AppendString(selection.Cites.Role ?? string.Empty);
+                sb.Append(selection.Cites.Role == null ? '0' : '1');
+            }
+            else
+            {
+                sb.Append('0');
+            }
+
+            if (selection.Cited != null)
+            {
+                sb.Append('1');
+                AppendString(selection.Cited.Role);
+                sb.Append(selection.Cited.Exists ? '1' : '0');
+            }
+            else
+            {
+                sb.Append('0');
+            }
+
+            AppendString(selection.Projection);
+            sb.Append(selection.Descending ? '1' : '0');
+
+            using var hmac = new System.Security.Cryptography.HMACSHA256(keyBytes);
+            var bytes = hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
+            var hex = new System.Text.StringBuilder(bytes.Length * 2);
+            foreach (var b in bytes) hex.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+            return hex.ToString();
         }
 
         // ---------------------------------------------------------------------------------------------
