@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.snapshot-response-raw.v1.schema.json",
+  "title": "CultNet Snapshot Response Raw Message v1",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "matched", "asOf"],
+  "additionalProperties": false,
+  "oneOf": [
+    { "required": ["headers"] },
+    { "required": ["documents"] }
+  ],
+  "properties": {
+    "schemaVersion": { "const": "cultnet.snapshot_response_raw.v1" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "matched": { "type": "integer", "minimum": 0 },
+    "asOf": { "type": "integer", "minimum": 0 },
+    "next": { "type": "string" },
+    "headers": {
+      "type": "array",
+      "items": { "$ref": "cultnet.raw-document-record.schema.json" }
+    },
+    "documents": {
+      "type": "array",
+      "items": { "$ref": "cultnet.raw-document-record.schema.json" }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "role", "to"],
+        "additionalProperties": false,
+        "properties": {
+          "from": { "$ref": "cultnet.selection.schema.json#/$defs/recordRef" },
+          "role": { "type": "string", "minLength": 1 },
+          "to": { "$ref": "cultnet.selection.schema.json#/$defs/recordRef" },
+          "payloadEncoding": { "type": "string" },
+          "payload": { "type": "string" }
+        }
+      }
+    },
+    "shardId": { "type": "string", "minLength": 1 },
+    "shardEpoch": { "type": "integer" },
+    "shardLogSequence": { "type": "integer" }
+  }
+}

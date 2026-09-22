@@ -44,7 +44,10 @@ namespace GameCult.Networking
         Reconciled
     }
 
-    internal static class CultNetSchemaAliasMatching
+    /// <summary>
+    /// The one schema-alias matcher for every runtime-side schema match (docs/cultnet-selection-cut.md, D4).
+    /// </summary>
+    public static class CultNetSchemaAliasMatching
     {
         public static bool MatchesAny(IReadOnlyList<string> candidates, string schemaId)
         {
@@ -93,6 +96,37 @@ namespace GameCult.Networking
             return version.All(char.IsDigit)
                 ? schemaId.Substring(0, marker)
                 : null;
+        }
+
+        /// <summary>
+        /// A selection whose schema filter also matches a document's wire binding id, when it carries
+        /// one different from its descriptor's own. <see cref="CultDocumentDescriptor"/> knows nothing
+        /// of <c>CultNetDocumentBinding</c>'s optional schema-id override, so a caller that has both in
+        /// hand (the two subscription servers) reconciles them here rather than in the evaluator, which
+        /// stays decoupled from CultNetDocumentRegistry by design.
+        /// </summary>
+        public static CultNetSelection WithBindingSchemaAlias(CultNetSelection selection, CultDocumentDescriptor descriptor, string? bindingSchemaId)
+        {
+            if (selection.Schemas is not { Length: > 0 } ||
+                string.IsNullOrEmpty(bindingSchemaId) ||
+                !selection.Schemas.Contains(bindingSchemaId, StringComparer.Ordinal) ||
+                MatchesAny(selection.Schemas, descriptor))
+            {
+                return selection;
+            }
+
+            return new CultNetSelection
+            {
+                Schemas = null,
+                Keys = selection.Keys,
+                Fields = selection.Fields,
+                Cites = selection.Cites,
+                Cited = selection.Cited,
+                Projection = selection.Projection,
+                Descending = selection.Descending,
+                Limit = selection.Limit,
+                Cursor = selection.Cursor
+            };
         }
     }
 
@@ -464,6 +498,11 @@ namespace GameCult.Networking
             new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _appliedShardSequences = new(StringComparer.Ordinal);
+        // CultNet typed selection, section 2: "ordinal is the sequence of the commit that last wrote
+        // the row". Kept on every append (AppendMutationLogEntry is the one site), keyed by (schemaId,
+        // recordKey) so the evaluator's order and cursor never read a clock.
+        private readonly Dictionary<(string SchemaId, string RecordKey), long> _lastWriteSequence =
+            new();
         private readonly Subject<object> _changes = new();
         private bool _disposed;
 
@@ -1254,7 +1293,16 @@ namespace GameCult.Networking
                 ? null
                 : wireEntry ?? ToLogEntryMessage(entry);
             RecordMutationLogEntry(entry, storedWireEntry);
+            _lastWriteSequence[(schemaId, key.Value)] = sequence;
         }
+
+        /// <summary>
+        /// The shard-log sequence of the commit that last wrote this row, or null when the row has
+        /// never been committed through this database. The order the CultNet selection evaluator
+        /// pages by (docs/cultnet-selection-cut.md, section 2).
+        /// </summary>
+        public long? LastWriteSequence(string schemaId, CultRecordKey key) =>
+            _lastWriteSequence.TryGetValue((schemaId, key.Value), out var sequence) ? sequence : null;
 
         private void RecordMutationLogEntry(
             CultNetShardMutationLogEntry entry,

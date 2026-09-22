@@ -2331,10 +2331,10 @@ namespace GameCult.Networking.Tests
                 new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "alias-live" },
                 previousDocument: null);
             var method = typeof(CultNetDatabaseSubscriptionServer).GetMethod(
-                "CreateChange",
+                "CreateMatchedRecord",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-            var message = (CultNetDatabaseChangeRawMessage?)method.Invoke(subscriptions, new object[]
+            var record = (CultNetRawDocumentRecord?)method.Invoke(subscriptions, new object?[]
             {
                 change,
                 new CultNetDatabaseSubscribeMessage
@@ -2343,14 +2343,14 @@ namespace GameCult.Networking.Tests
                     SchemaIds = ["tests.networking_note.v1"],
                     RecordKeys = ["tests:subscription-client:alias-note"]
                 },
-                "alias-notes"
+                null
             });
 
-            Assert.That(message, Is.Not.Null);
-            Assert.That(message!.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
-            Assert.That(message.Document.SchemaName, Is.EqualTo(descriptor.SchemaName));
-            Assert.That(message.Document.SchemaVersion, Is.EqualTo(descriptor.SchemaVersion));
-            Assert.That(message.Document.SchemaContentHash, Is.EqualTo(descriptor.ContentHash));
+            Assert.That(record, Is.Not.Null);
+            Assert.That(record!.SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(record.SchemaName, Is.EqualTo(descriptor.SchemaName));
+            Assert.That(record.SchemaVersion, Is.EqualTo(descriptor.SchemaVersion));
+            Assert.That(record.SchemaContentHash, Is.EqualTo(descriptor.ContentHash));
         }
 
         [Test]
@@ -5582,11 +5582,11 @@ namespace GameCult.Networking.Tests
             {
                 change,
                 "sub-1",
-                new CultNetDatabaseSubscribeMessage
+                new CultNetSelection
                 {
-                    SubscriptionId = "sub-1",
-                    SchemaIds = [schemaId],
-                    RecordKeys = [key.Value]
+                    Schemas = [schemaId],
+                    Keys = [key.Value],
+                    Projection = CultNetSelectionProjections.Document
                 }
             });
 
@@ -5632,11 +5632,11 @@ namespace GameCult.Networking.Tests
             {
                 change,
                 "sub-alias",
-                new CultNetDatabaseSubscribeMessage
+                new CultNetSelection
                 {
-                    SubscriptionId = "sub-alias",
-                    SchemaIds = ["tests.networking_note.v1"],
-                    RecordKeys = [key.Value]
+                    Schemas = ["tests.networking_note.v1"],
+                    Keys = [key.Value],
+                    Projection = CultNetSelectionProjections.Document
                 }
             });
 

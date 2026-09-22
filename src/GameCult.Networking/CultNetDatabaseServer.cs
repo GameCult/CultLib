@@ -334,9 +334,17 @@ namespace GameCult.Networking
             string subscriptionId,
             CultNetServerPeer peer)
         {
+            // v0 has no engine of its own (docs/cultnet-selection-cut.md, D3/D4): it lowers into a
+            // Selection and is matched by the one evaluator, same as a v1 subscribe would be.
+            var selection = new CultNetSelection
+            {
+                Schemas = request.SchemaIds,
+                Keys = request.RecordKeys,
+                Projection = CultNetSelectionProjections.Document
+            };
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                var outbound = CreateChangeMessage(change, subscriptionId, request);
+                var outbound = CreateChangeMessage(change, subscriptionId, selection);
                 if (outbound != null)
                 {
                     peer.SendCultNet(outbound);
@@ -347,21 +355,28 @@ namespace GameCult.Networking
         internal CultNetDatabaseChangeRawMessage? CreateChangeMessage(
             object change,
             string subscriptionId,
-            CultNetDatabaseSubscribeMessage request)
+            CultNetSelection selection)
         {
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(string.Empty));
             var schemaId = (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? string.Empty;
             var documentType = changeType.IsGenericType ? changeType.GetGenericArguments()[0] : null;
             var descriptor = documentType == null ? null : _database.Cache.Registry.GetRequired(documentType);
-            var binding = documentType == null ? null : _database.Documents.GetByDocumentType(documentType);
-            if (!Matches(request, schemaId, key, descriptor, binding))
+            var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
+            var document = changeType.GetProperty("Document")?.GetValue(change);
+
+            if (descriptor == null)
             {
                 return null;
             }
 
-            var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
-            var document = changeType.GetProperty("Document")?.GetValue(change);
+            var binding = _database.Documents.GetByDocumentType(descriptor.DocumentType);
+            var effectiveSelection = CultNetSchemaAliasMatching.WithBindingSchemaAlias(selection, descriptor, binding?.SchemaId);
+            if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
+            {
+                return null;
+            }
+
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
             {
                 return new CultNetDatabaseChangeRawMessage
@@ -379,92 +394,8 @@ namespace GameCult.Networking
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
                 ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
-                Document = CreateRawDocumentRecord(key, document)
+                Document = _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"))
             };
-        }
-
-        private CultNetRawDocumentRecord CreateRawDocumentRecord(CultRecordKey key, object document)
-        {
-            var method = typeof(CultNetDocumentRegistry)
-                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .Single(candidate => candidate.Name == nameof(CultNetDocumentRegistry.CreateRawDocumentPutMessage) &&
-                                     candidate.IsGenericMethodDefinition);
-            var documentType = document.GetType();
-            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
-            var handle = Activator.CreateInstance(handleType, new object[] { key });
-            var message = method
-                .MakeGenericMethod(documentType)
-                .Invoke(_database.Documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
-            return ((CultNetDocumentPutRawMessage)message!).Document;
-        }
-
-        private static bool Matches(
-            CultNetDatabaseSubscribeMessage request,
-            string schemaId,
-            CultRecordKey key,
-            CultDocumentDescriptor? descriptor,
-            CultNetDocumentBinding? binding)
-        {
-            var schemaMatches = MatchesSchema(request.SchemaIds, schemaId, descriptor, binding);
-            var keyMatches = request.RecordKeys == null ||
-                             request.RecordKeys.Length == 0 ||
-                             request.RecordKeys.Contains(key.Value, StringComparer.Ordinal);
-            return schemaMatches && keyMatches;
-        }
-
-        private static bool MatchesSchema(
-            string[]? requestedSchemaIds,
-            string schemaId,
-            CultDocumentDescriptor? descriptor,
-            CultNetDocumentBinding? binding)
-        {
-            if (requestedSchemaIds == null || requestedSchemaIds.Length == 0)
-            {
-                return true;
-            }
-
-            var requested = requestedSchemaIds.ToHashSet(StringComparer.Ordinal);
-            if (requested.Contains(schemaId))
-            {
-                return true;
-            }
-
-            if (descriptor == null)
-            {
-                return false;
-            }
-
-            if (requested.Contains(descriptor.SchemaId) ||
-                requested.Contains(descriptor.SchemaName) ||
-                requested.Contains(descriptor.SchemaVersion) ||
-                (binding != null && requested.Contains(binding.SchemaId)))
-            {
-                return true;
-            }
-
-            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requested.Contains))
-            {
-                return true;
-            }
-
-            return requested
-                .Select(InferSchemaName)
-                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
-                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-            {
-                return null;
-            }
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
 
         private static string SubscriptionKey(NetPeer peer, string subscriptionId)

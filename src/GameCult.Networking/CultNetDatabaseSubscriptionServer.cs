@@ -234,8 +234,8 @@ namespace GameCult.Networking
                     }
 
                     var sourceRecordKey = ResolveChangeRecordKey(change);
-                    var message = CreateAuthorizedChange(change, request, subscriptionId, peer);
-                    var projected = message?.Document;
+                    var matched = CreateMatchedRecord(change, request, peer);
+                    var projected = matched;
                     if (projected != null && _projectRecord != null)
                         projected = _projectRecord(request, peer, projected);
                     ApplyProjectedChange(
@@ -421,97 +421,40 @@ namespace GameCult.Networking
                 _requests.TryRemove(key, out _);
         }
 
-        private CultNetDatabaseChangeRawMessage? CreateAuthorizedChange(
+        // One evaluator (docs/cultnet-selection-cut.md, D3/D4): a v0 subscribe request lowers into a
+        // Selection with no engine of its own, matched and projected exactly as a v1 request would be.
+        // Record-level authorization (_authorizeRecord) is not selection and stays layered on top.
+        private CultNetRawDocumentRecord? CreateMatchedRecord(
             object change,
             CultNetDatabaseSubscribeMessage request,
-            string subscriptionId,
             ICultNetSchemaServerPeer peer)
-        {
-            return CreateChangeCore(change, request, subscriptionId, (recordKey, schemaId) =>
-                _authorizeRecord?.Invoke(request, peer, recordKey, schemaId) != false);
-        }
-
-        private CultNetDatabaseChangeRawMessage? CreateChange(
-            object change,
-            CultNetDatabaseSubscribeMessage request,
-            string subscriptionId)
-        {
-            return CreateChangeCore(change, request, subscriptionId, (_, _) => true);
-        }
-
-        private CultNetDatabaseChangeRawMessage? CreateChangeCore(
-            object change,
-            CultNetDatabaseSubscribeMessage request,
-            string subscriptionId,
-            Func<string, string, bool> authorizeRecord)
         {
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(""));
-            if (request.RecordKeys is { Length: > 0 } && !request.RecordKeys.Contains(key.Value, StringComparer.Ordinal))
-                return null;
-
             var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
             var document = changeType.GetProperty("Document")?.GetValue(change);
-            if (kind == CultNetDatabaseChangeKind.Removed || document == null)
-            {
-                var previous = changeType.GetProperty("PreviousDocument")?.GetValue(change);
-                var schemaId = ResolveWireSchemaId(previous, (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? "");
-                if (!MatchesRequestedSchema(request.SchemaIds, previous, schemaId))
-                    return null;
-                if (!authorizeRecord(key.Value, schemaId))
-                    return null;
-                return new CultNetDatabaseChangeRawMessage
-                {
-                    MessageId = Guid.NewGuid().ToString("N"),
-                    SubscriptionId = subscriptionId,
-                    ChangeKind = "removed",
-                    RecordKey = key.Value,
-                    SchemaId = schemaId
-                };
-            }
+            var forDescriptor = document ?? changeType.GetProperty("PreviousDocument")?.GetValue(change);
+            if (forDescriptor == null)
+                return null;
 
-            var raw = CreateRawRecord(key, document);
-            if (!MatchesRequestedSchema(request.SchemaIds, document, raw.SchemaId))
-                return null;
-            if (!authorizeRecord(key.Value, raw.SchemaId))
-                return null;
-            return new CultNetDatabaseChangeRawMessage
+            var descriptor = _database.Cache.Registry.GetRequired(forDescriptor.GetType());
+            var selection = new CultNetSelection
             {
-                MessageId = Guid.NewGuid().ToString("N"),
-                SubscriptionId = subscriptionId,
-                ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
-                Document = raw
+                Schemas = request.SchemaIds,
+                Keys = request.RecordKeys,
+                Projection = CultNetSelectionProjections.Document
             };
-        }
+            var binding = _database.Documents.GetByDocumentType(descriptor.DocumentType);
+            var effectiveSelection = CultNetSchemaAliasMatching.WithBindingSchemaAlias(selection, descriptor, binding?.SchemaId);
+            if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
+                return null;
+            if (_authorizeRecord?.Invoke(request, peer, key.Value, descriptor.SchemaId) == false)
+                return null;
 
-        private string ResolveWireSchemaId(object? document, string fallback)
-        {
-            if (document == null) return fallback;
-            return _database.Documents.GetByDocumentType(document.GetType())?.SchemaId ?? fallback;
-        }
+            if (kind == CultNetDatabaseChangeKind.Removed || document == null)
+                return null;
 
-        private bool MatchesRequestedSchema(string[]? requestedSchemaIds, object? document, string wireSchemaId)
-        {
-            if (requestedSchemaIds is not { Length: > 0 }) return true;
-            if (requestedSchemaIds.Contains(wireSchemaId, StringComparer.Ordinal)) return true;
-            return document != null && CultNetSchemaAliasMatching.MatchesAny(
-                requestedSchemaIds,
-                _database.Cache.Registry.GetRequired(document.GetType()));
-        }
-
-        private CultNetRawDocumentRecord CreateRawRecord(CultRecordKey key, object document)
-        {
-            var method = typeof(CultNetDocumentRegistry)
-                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .Single(candidate => candidate.Name == nameof(CultNetDocumentRegistry.CreateRawDocumentPutMessage) &&
-                                     candidate.IsGenericMethodDefinition);
-            var documentType = document.GetType();
-            var handle = Activator.CreateInstance(
-                typeof(CultRecordHandle<>).MakeGenericType(documentType),
-                new object[] { key });
-            var put = method.MakeGenericMethod(documentType)
-                .Invoke(_database.Documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
-            return ((CultNetDocumentPutRawMessage)put!).Document;
+            return _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"));
         }
 
         private sealed class SubscriptionProjectionState

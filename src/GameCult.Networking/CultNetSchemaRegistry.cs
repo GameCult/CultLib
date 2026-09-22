@@ -378,6 +378,33 @@ namespace GameCult.Networking
             },
             new SchemaResourceSpec
             {
+                FileName = "cultnet.selection.schema.json",
+                Kind = "shared_contract",
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.snapshot-request.v1.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.SnapshotRequestV1,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.database-subscribe.v1.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.DatabaseSubscribeV1,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
+                FileName = "cultnet.snapshot-response-raw.v1.schema.json",
+                Kind = "wire_message",
+                SchemaVersion = CultNetSchemaVersions.SnapshotResponseRawV1,
+                WireContracts = new[] { CultNetWireContracts.SchemaV0 }
+            },
+            new SchemaResourceSpec
+            {
                 FileName = "cultnet.database-unsubscribe.schema.json",
                 Kind = "wire_message",
                 SchemaVersion = CultNetSchemaVersions.DatabaseUnsubscribe,

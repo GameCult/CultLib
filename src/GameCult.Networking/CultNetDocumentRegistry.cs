@@ -258,7 +258,23 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Creates a raw snapshot response from the cache.
+        /// Creates a typed-selection snapshot request message (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public CultNetSnapshotRequestV1Message CreateSnapshotRequestV1(string messageId, CultNetSelection selection)
+        {
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+            return new CultNetSnapshotRequestV1Message
+            {
+                MessageId = RequireNonEmpty(messageId, nameof(messageId)),
+                Selection = selection
+            };
+        }
+
+        /// <summary>
+        /// Creates a raw snapshot response from the cache. v0 has no selector engine of its own
+        /// (docs/cultnet-selection-cut.md, D3/D4): the filter lowers into a <see cref="CultNetSelection"/>
+        /// and is answered by <see cref="CultNetSelectionEvaluator"/>, walking every page it returns so a
+        /// v0 caller still sees its whole matching set in one message.
         /// </summary>
         public CultNetSnapshotResponseRawMessage CreateRawSnapshotResponse(
             CultCache cache,
@@ -266,86 +282,192 @@ namespace GameCult.Networking
             CultNetSnapshotRequestMessage? filter = null,
             CultNetDocumentMessageOptions? options = null)
         {
-            var requestedSchemaIds = filter?.SchemaIds != null
-                ? new HashSet<string>(filter.SchemaIds, StringComparer.Ordinal)
-                : null;
-            var requestedRecordKeys = filter?.RecordKeys != null
-                ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
-                : null;
-            var storedAt = ResolveStoredAt(options);
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+            var selection = new CultNetSelection
+            {
+                Schemas = filter?.SchemaIds,
+                Keys = filter?.RecordKeys,
+                Projection = CultNetSelectionProjections.Document,
+                Limit = CultNetSelectionEvaluator.LimitMax
+            };
 
             var documents = new List<CultNetRawDocumentRecord>();
-            void AddDocument(object document, string key)
+            string? cursor = null;
+            do
             {
-                var descriptor = _documents.GetRequired(document.GetType());
-                var binding = GetByDocumentType(document.GetType()) ??
-                              new CultNetDocumentBinding(
-                                  document.GetType(),
-                                  descriptor.SchemaId,
-                                  value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType()),
-                                  payload => CultDocumentMessagePackSerialization.DeserializeUntyped(document.GetType(), payload));
-
-                if (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, binding, requestedSchemaIds))
-                {
-                    return;
-                }
-                if (requestedRecordKeys != null && !requestedRecordKeys.Contains(key))
-                {
-                    return;
-                }
-
-                documents.Add(new CultNetRawDocumentRecord
-                {
-                    SchemaId = binding.SchemaId,
-                    SchemaName = descriptor.SchemaName,
-                    SchemaVersion = descriptor.SchemaVersion,
-                    SchemaContentHash = descriptor.ContentHash,
-                    RecordKey = key,
-                    StoredAt = storedAt,
-                    PayloadEncoding = "messagepack",
-                    Payload = binding.PayloadSerializer(document),
-                    SourceRuntimeId = options?.SourceRuntimeId,
-                    SourceAgentId = options?.SourceAgentId,
-                    SourceRole = options?.SourceRole,
-                    Tags = options?.Tags
-                });
-            }
-
-            if (requestedRecordKeys != null)
-            {
-                foreach (var key in requestedRecordKeys)
-                {
-                    var document = cache.Get(new CultRecordKey(key));
-                    if (document != null)
-                        AddDocument(document, key);
-                }
-            }
-            else
-            {
-                foreach (var document in cache.AllEntries)
-                {
-                    var handleMethod = typeof(CultCache)
-                        .GetMethod(nameof(CultCache.TryGetHandle))!
-                        .MakeGenericMethod(document.GetType());
-                    var handleObject = handleMethod.Invoke(cache, new[] { document });
-                    if (handleObject == null)
-                        continue;
-
-                    var keyProperty = handleObject.GetType().GetProperty("Value");
-                    var handleValue = keyProperty?.GetValue(handleObject) ?? handleObject;
-                    var recordKeyProperty = handleValue.GetType().GetProperty("Key");
-                    var recordKey = recordKeyProperty?.GetValue(handleValue);
-                    var valueProperty = recordKey?.GetType().GetProperty("Value");
-                    var key = (string?)(valueProperty?.GetValue(recordKey)) ?? string.Empty;
-                    AddDocument(document, key);
-                }
-            }
+                selection.Cursor = cursor;
+                var page = SelectPage(cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, validate: false, options);
+                documents.AddRange(page.Documents ?? Array.Empty<CultNetRawDocumentRecord>());
+                cursor = page.Next;
+            } while (cursor != null);
 
             return new CultNetSnapshotResponseRawMessage
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
                 Documents = documents.ToArray()
             };
+        }
+
+        /// <summary>
+        /// Evaluates a typed selection against the cache and returns its page
+        /// (docs/cultnet-selection-cut.md, section 2/6). <paramref name="ordinalOf"/> supplies each
+        /// row's ordinal (the reference: <see cref="CultNetDatabase.LastWriteSequence"/>); <paramref name="asOf"/>
+        /// is the snapshot the page is exact for.
+        /// </summary>
+        public CultNetSnapshotResponseRawV1Message CreateSelectionResponse(
+            CultCache cache,
+            string messageId,
+            CultNetSelection selection,
+            Func<string, CultRecordKey, long> ordinalOf,
+            ulong asOf,
+            CultNetDocumentMessageOptions? options = null)
+        {
+            if (cache == null) throw new ArgumentNullException(nameof(cache));
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+            if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
+
+            var page = SelectPage(cache, selection, ordinalOf, asOf, validate: true, options);
+            return new CultNetSnapshotResponseRawV1Message
+            {
+                MessageId = RequireNonEmpty(messageId, nameof(messageId)),
+                Matched = page.Matched,
+                AsOf = page.AsOf,
+                Next = page.Next,
+                Headers = page.Headers,
+                Documents = page.Documents,
+                Edges = page.Edges
+            };
+        }
+
+        /// <summary>
+        /// Evaluates a selection over every row the cache holds and projects the matched page to wire
+        /// records. The one evaluator (<see cref="CultNetSelectionEvaluator"/>) owns matching, order,
+        /// the hop and the cursor; this owns turning its result into <see cref="CultNetRawDocumentRecord"/>s.
+        /// </summary>
+        internal CultNetSelectionPage SelectPage(
+            CultCache cache,
+            CultNetSelection selection,
+            Func<string, CultRecordKey, long> ordinalOf,
+            ulong asOf,
+            bool validate,
+            CultNetDocumentMessageOptions? options)
+        {
+            selection = ExpandSchemaBindingAliases(selection);
+            if (validate)
+                selection.Validate(_documents.AllDescriptors.ToArray());
+
+            var rows = cache.AllStoredDocuments
+                .Select(stored => new CultNetSelectionEvaluator.Row(
+                    stored.Descriptor, stored.Key, stored.Document, ordinalOf(stored.Descriptor.SchemaId, stored.Key), stored.StoredAt))
+                .ToArray();
+            var evaluation = CultNetSelectionEvaluator.Select(_documents, rows, selection, asOf);
+            var records = evaluation.Rows.Select(row => ToRawRecord(row, options)).ToArray();
+            var wantDocument = selection.Projection == CultNetSelectionProjections.Document;
+
+            return new CultNetSelectionPage
+            {
+                Matched = (uint)records.Length,
+                AsOf = asOf,
+                Next = evaluation.NextCursor,
+                Documents = wantDocument ? records : null,
+                Headers = wantDocument ? null : records.Select(CultNetRawDocumentHeader.FromRecord).ToArray(),
+                Edges = selection.HasHop ? evaluation.Edges.Select(edge => ToEdge(edge, wantDocument)).ToArray() : null
+            };
+        }
+
+        // A CultDocumentDescriptor knows nothing of CultNetDocumentBinding's optional schema-id
+        // override; a caller filtering by that wire id (rather than the descriptor's own) needs the
+        // descriptor's own id present in the selection too, since CultNetSelectionEvaluator only ever
+        // reads descriptors. Mirrors CultNetSchemaAliasMatching.WithBindingSchemaAlias, at the layer
+        // that owns every binding rather than one row's.
+        private CultNetSelection ExpandSchemaBindingAliases(CultNetSelection selection)
+        {
+            if (selection.Schemas is not { Length: > 0 } || _bindingsByType.Count == 0)
+                return selection;
+
+            List<string>? expanded = null;
+            foreach (var binding in _bindingsByType.Values)
+            {
+                if (!selection.Schemas.Contains(binding.SchemaId, StringComparer.Ordinal))
+                    continue;
+                var descriptor = _documents.GetRequired(binding.DocumentType);
+                if (selection.Schemas.Contains(descriptor.SchemaId, StringComparer.Ordinal))
+                    continue;
+                expanded ??= new List<string>(selection.Schemas);
+                if (!expanded.Contains(descriptor.SchemaId, StringComparer.Ordinal))
+                    expanded.Add(descriptor.SchemaId);
+            }
+
+            if (expanded == null)
+                return selection;
+
+            return new CultNetSelection
+            {
+                Schemas = expanded.ToArray(),
+                Keys = selection.Keys,
+                Fields = selection.Fields,
+                Cites = selection.Cites,
+                Cited = selection.Cited,
+                Projection = selection.Projection,
+                Descending = selection.Descending,
+                Limit = selection.Limit,
+                Cursor = selection.Cursor
+            };
+        }
+
+        /// <summary>
+        /// Builds the wire record for one evaluated row. The shared path under snapshot and change
+        /// (docs/cultnet-selection-cut.md, section 8's "shared paths").
+        /// </summary>
+        internal CultNetRawDocumentRecord ToRawRecord(CultNetSelectionEvaluator.Row row, CultNetDocumentMessageOptions? options = null) =>
+            ToRawRecord(row.Descriptor, row.Key, row.Document, string.IsNullOrEmpty(row.StoredAt) ? ResolveStoredAt(options) : row.StoredAt, options);
+
+        internal CultNetRawDocumentRecord ToRawRecord(
+            CultDocumentDescriptor descriptor,
+            CultRecordKey key,
+            object document,
+            string storedAt,
+            CultNetDocumentMessageOptions? options = null)
+        {
+            var binding = GetByDocumentType(descriptor.DocumentType) ??
+                          new CultNetDocumentBinding(
+                              descriptor.DocumentType,
+                              descriptor.SchemaId,
+                              value => CultDocumentMessagePackSerialization.SerializeUntyped(value, value.GetType(), _documents),
+                              payload => CultDocumentMessagePackSerialization.DeserializeUntyped(descriptor.DocumentType, payload, _documents));
+
+            return new CultNetRawDocumentRecord
+            {
+                SchemaId = binding.SchemaId,
+                SchemaName = descriptor.SchemaName,
+                SchemaVersion = descriptor.SchemaVersion,
+                SchemaContentHash = descriptor.ContentHash,
+                RecordKey = key.Value,
+                StoredAt = storedAt,
+                PayloadEncoding = "messagepack",
+                Payload = binding.PayloadSerializer(document),
+                SourceRuntimeId = options?.SourceRuntimeId,
+                SourceAgentId = options?.SourceAgentId,
+                SourceRole = options?.SourceRole,
+                Tags = options?.Tags
+            };
+        }
+
+        private CultNetEdge ToEdge(CultNetSelectionEvaluator.EdgeMatch edge, bool wantDocument)
+        {
+            var wire = new CultNetEdge
+            {
+                From = new CultNetRecordRef { SchemaId = edge.From.Descriptor.SchemaId, RecordKey = edge.From.Key.Value },
+                Role = edge.Role,
+                To = new CultNetRecordRef { SchemaId = edge.To.Descriptor.SchemaId, RecordKey = edge.To.Key.Value }
+            };
+            if (wantDocument && edge.Payload != null)
+            {
+                wire.PayloadEncoding = "messagepack";
+                wire.Payload = CultDocumentMessagePackSerialization.SerializeUntyped(edge.Payload, edge.Payload.GetType(), _documents);
+            }
+
+            return wire;
         }
 
         /// <summary>
@@ -500,27 +622,6 @@ namespace GameCult.Networking
                 .Select(binding => _documents.GetRequired(binding.DocumentType))
                 .GroupBy(descriptor => descriptor.DocumentType)
                 .Select(group => group.First());
-        }
-
-        private static bool MatchesRequestedSchema(
-            CultDocumentDescriptor descriptor,
-            CultNetDocumentBinding binding,
-            ISet<string> requestedSchemaIds)
-        {
-            if (requestedSchemaIds.Count == 0)
-                return true;
-
-            if (requestedSchemaIds.Contains(descriptor.SchemaId) ||
-                requestedSchemaIds.Contains(binding.SchemaId))
-                return true;
-
-            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requestedSchemaIds.Contains))
-                return true;
-
-            return requestedSchemaIds
-                .Select(InferSchemaName)
-                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
-                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
         }
 
         private static string? TryReadSchemaVersion(byte[] payload)

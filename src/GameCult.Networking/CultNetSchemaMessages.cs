@@ -80,6 +80,18 @@ namespace GameCult.Networking
         /// </summary>
         public const string SnapshotResponseRaw = "cultnet.snapshot_response_raw.v0";
         /// <summary>
+        /// typed-selection snapshot request contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string SnapshotRequestV1 = "cultnet.snapshot_request.v1";
+        /// <summary>
+        /// typed-selection database subscription request contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string DatabaseSubscribeV1 = "cultnet.database_subscribe.v1";
+        /// <summary>
+        /// typed-selection snapshot response contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string SnapshotResponseRawV1 = "cultnet.snapshot_response_raw.v1";
+        /// <summary>
         /// schema catalog request contract identifier.
         /// </summary>
         public const string SchemaCatalogRequest = "cultnet.schema_catalog_request.v0";
@@ -823,6 +835,78 @@ namespace GameCult.Networking
         /// Gets or sets body transports the consumer can open, ordered by consumer preference.
         /// </summary>
         [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
+    }
+
+    /// <summary>
+    /// CultNet message requesting a document snapshot through a typed selection (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSnapshotRequestV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SnapshotRequestV1;
+        /// <summary>Gets or sets the message id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the selection.</summary>
+        [Key("selection")] public CultNetSelection Selection { get; set; } = new CultNetSelection();
+        /// <summary>Gets or sets the shard id requested for a shard-bounded snapshot.</summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>Gets or sets the expected shard epoch.</summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+    }
+
+    /// <summary>
+    /// Requests a live database subscription through a typed selection (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDatabaseSubscribeV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DatabaseSubscribeV1;
+        /// <summary>Gets or sets the request id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the live subscription id.</summary>
+        [Key("subscriptionId")] public string SubscriptionId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the selection.</summary>
+        [Key("selection")] public CultNetSelection Selection { get; set; } = new CultNetSelection();
+        /// <summary>Gets or sets whether the server should send a matching snapshot before live changes.</summary>
+        [Key("includeSnapshot")] public bool IncludeSnapshot { get; set; } = true;
+        /// <summary>Gets or sets the stable consumer runtime identity used for subscription diagnostics and body-plane demand.</summary>
+        [Key("consumerRuntimeId")] public string? ConsumerRuntimeId { get; set; }
+        /// <summary>Gets or sets logical hot-body identities needed by this exact state subscription.</summary>
+        [Key("bodyIds")] public string[]? BodyIds { get; set; }
+        /// <summary>Gets or sets body transports the consumer can open, ordered by consumer preference.</summary>
+        [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
+    }
+
+    /// <summary>
+    /// CultNet message returning a typed selection's page (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSnapshotResponseRawV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SnapshotResponseRawV1;
+        /// <summary>Gets or sets the message id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the number of rows on this page.</summary>
+        [Key("matched")] public uint Matched { get; set; }
+        /// <summary>Gets or sets the snapshot this page is exact as of.</summary>
+        [Key("asOf")] public ulong AsOf { get; set; }
+        /// <summary>Gets or sets the cursor for the next page, absent on the last page.</summary>
+        [Key("next")] public string? Next { get; set; }
+        /// <summary>Gets or sets the headers, present under header projection.</summary>
+        [Key("headers")] public CultNetRawDocumentHeader[]? Headers { get; set; }
+        /// <summary>Gets or sets the documents, present under document projection.</summary>
+        [Key("documents")] public CultNetRawDocumentRecord[]? Documents { get; set; }
+        /// <summary>Gets or sets the edges a hop-bearing selection traversed.</summary>
+        [Key("edges")] public CultNetEdge[]? Edges { get; set; }
+        /// <summary>Gets or sets the shard id represented by this snapshot.</summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>Gets or sets the shard epoch represented by this snapshot.</summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+        /// <summary>Gets or sets the shard-log sequence represented by this snapshot.</summary>
+        [Key("shardLogSequence")] public long? ShardLogSequence { get; set; }
     }
 
     /// <summary>
