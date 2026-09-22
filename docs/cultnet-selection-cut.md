@@ -475,6 +475,24 @@ its `RowSet` must expose each schema's name, and it deletes the hash-stripping
 matcher. C# refuses an unresolved `cites.target` at the door. Each vector that
 fails today becomes a vector both runtimes must pass.
 
+**The Rust alias port landed** (Sonnet). Rust's `schema_alias::matches` is
+now `(candidate, schema_id, schema_name)`, and it matches the C# reference row
+for row: exact id, bare name, `.vN` on the name, case-sensitive, the last
+`.v` marker wins, and `.v` with no digits is taken literally. The C# table was
+produced by running the reference source. The hash-stripping overload is
+deleted. `SchemaVersion` and `CompatibleSchemaIds` are not ported, because no
+Rust call site needs them; that is a stated reduction. Rust entries are 40/40
+killed. The whole suite had never run under `-Repo` before, and its commands
+now carry `--manifest-path`.
+
+| Reader | Vectors from | Pass |
+|---|---|---|
+| Rust | `cs-written` | 15/15 |
+| C# | `rs-written` | 14/16 |
+
+The two C# failures both come from the pending C# door refusal of an
+unmatched `cites.target`, which sits with the matrix Hands.
+
 **The early Soul pass (commits 0–1, pinned at `17d10e0`) reported late, on
 2026-09-22.** It was interrupted three times by API errors. Much of what it
 found is already covered by R-A to R-M. These findings are **new, and still
