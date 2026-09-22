@@ -609,8 +609,38 @@ edit `src/` at the same time.
     was backed out; Rust matches C#'s field names byte for byte once they land.
 - **C# pass A is in Hands:** R-N, R-P, R-T. **Pass B follows:** R-O, R-Q, R-S,
   R-U.
-- **To check:** three `StoreRoutingTests` failures in Caching were called
-  pre-existing. That claim is unverified, and pass A reports on it.
+- **C# pass A landed** (`66b5e60`, `e8a3dec`): R-N, R-P and R-T.
+  - **R-N's wire shape:** `CultNetErrorMessage` gains `code` and `details`.
+    `CultNetErrorDetails` carries `field`, `value`, `asOf` and `current`. The
+    codes are `selection_invalid`, `cursor_stale`, `cursor_invalid` and
+    `reference_outside_target`. The schema gains both fields additively.
+  - Two catch sites that previously let the exception escape now answer the
+    peer.
+  - **R-P:** the live fast path authorized on the descriptor id and now uses
+    the wire id, so all three paths agree.
+  - **R-T:** a removal skips field predicates instead of dereferencing a null
+    document. `cites` no longer early-returns on a null target, and **the root
+    cause was in CultCache**: a many-reference declared without an explicit
+    attribute left its target type null, even though the element type was
+    statically known, so the out-of-target check silently skipped.
+  - Networking 223 pass and 2 skip; Mesh 255.
+  - **The Caching claim was wrong.** There is one failure, not three, and it
+    is identical at the branch head, at `b3d9cf7` and on `main`. It expects a
+    write to a read-only directory to fail, which cannot happen in a container
+    running as root. **Environmental.**
+- **Rust R-N landed** (`eff62e5`): 213 tests pass. Parity is pinned by
+  **captured C# bytes** for all four codes, taken from a probe run on the
+  dotnet image.
+  - **An encoding trap the vectors would not have caught:** MessagePack C#
+    always writes all five declared keys in declaration order, nil included,
+    while Rust's generic path sorts keys alphabetically. Rust now builds that
+    map by hand. **A key added or reordered in either error type must be
+    mirrored there.**
+  - **A defect in C#, sent to pass B:** `ForReferenceOutsideTarget` prefixes a
+    message that already carries its own prefix, so a peer reads
+    `reference_outside_target: reference_outside_target: …`.
+  - The parity-vector machinery carries no concept of an error message, so
+    R-N's parity lives in its own byte-level test. That is the right home.
 
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
