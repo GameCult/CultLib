@@ -1,0 +1,13 @@
+{
+  "stryker-config": {
+    "project": "CultMath.csproj",
+    "mutate": [
+      "**/packages/cultmath/src/CultMath/**/*.cs",
+      "!**/packages/cultmath/src/CultMath/Swizzles.g.cs",
+      "!**/packages/cultmath/src/CultMath/*.meta"
+    ],
+    "mutation-level": "Standard",
+    "reporters": [ "progress", "html", "json" ],
+    "thresholds": { "high": 80, "low": 60, "break": 0 }
+  }
+}

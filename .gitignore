@@ -6,6 +6,9 @@
 # dotenv files
 .env
 
+# Stryker.NET mutation-testing output
+StrykerOutput/
+
 # User-specific files
 *.rsuser
 *.suo
