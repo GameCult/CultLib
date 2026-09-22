@@ -809,7 +809,36 @@ committed.** It is C++, and no ecosystem mutation tool is wired here. The
 bridge's rules are pinned by behavioural scenarios at the layer that decides
 them; a mutant is a thing Soul tries by hand on a scratch copy and throws away.
 
-To Hands (Sonnet) as the eighth fix batch, under the rewrite above.
+**The eighth fix batch landed** (Sonnet) at `5646ff7`, before the retirement,
+and the harness deletion followed at `796433f`. Both are on
+`hands/cultmath-erf`, not yet on `main`. What landed:
+
+- the seam wraps the whole duration handed to `wait_for`, and its "unset"
+  sentinel became a separate `debug_wait_recorded` flag, so a recorded `-1`
+  cannot read as nothing recorded;
+- `pollhammer` runs against a runtime holding a live connection to an
+  unroutable address (RFC 5737 TEST-NET-1), a stream on it, and a real
+  never-connected listener;
+- a `zerotimeout` scenario pins that `timeout_ms <= 0` returns within 50 ms,
+  probing 0, -1 and `INT32_MIN`;
+- `closerace`'s settle waits for `debug_peak_calls` to reach the poller count
+  instead of sleeping a guessed duration;
+- `kGenerousLateToleranceMs` narrows from 800 ms to 400 ms, so the wall-clock
+  layer catches arithmetic applied outside the seam's own argument —
+  `waitseam`'s equality check structurally cannot see that.
+
+The release configuration and the seven mutation entries (R1, W1–W3, P1,
+Z1–Z2) landed **inside the harness**, and went out with it two commits later.
+The scenario runner and every seam survived untouched: the README and the dev
+Dockerfile now document building with `-DCULTMESH_QUIC_BUILD_TESTS=ON
+-DCULTMESH_QUIC_DEBUG_ASSERTS=ON` and running each scenario as a direct
+argument to the binary. **The release configuration is therefore owed again as
+a plain build, not as a harness target**, and R1's substance — that the
+release macro is unexercised — is a Soul hand probe now.
+
+**Outstanding for Cut 3: the Linux leg.** Every scenario, asserts and release,
+in the committed `debian:13` dev image, run on Yggdrasil. Windows is the
+workstation's only remaining QUIC work.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
