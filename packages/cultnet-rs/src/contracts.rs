@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Edge, RawDocumentHeader, RecordRef, Selection, SelectionDocumentRecord};
+use crate::{Edge, RawDocumentHeader, Selection, SelectionDocumentRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CultNetWireContract {
@@ -924,7 +924,7 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                         .iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            require_raw_document_header(Some(value), &format!("headers[{index}]"))
+                            require_typed::<RawDocumentHeader>(Some(value), &format!("headers[{index}]"))
                         })
                         .collect::<Result<Vec<_>>>()
                 })
@@ -938,7 +938,7 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                         .iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            require_selection_document_record(
+                            require_typed::<SelectionDocumentRecord>(
                                 Some(value),
                                 &format!("documents[{index}]"),
                             )
@@ -954,7 +954,9 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                         .ok_or_else(|| anyhow!("edges must be an array"))?
                         .iter()
                         .enumerate()
-                        .map(|(index, value)| require_edge(Some(value), &format!("edges[{index}]")))
+                        .map(|(index, value)| {
+                            require_typed::<Edge>(Some(value), &format!("edges[{index}]"))
+                        })
                         .collect::<Result<Vec<_>>>()
                 })
                 .transpose()?;
@@ -1047,27 +1049,21 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
                 rmpv::Value::from("headers"),
                 headers
                     .as_deref()
-                    .map(|headers| {
-                        rmpv::Value::Array(headers.iter().map(encode_raw_document_header).collect())
-                    })
+                    .map(|headers| rmpv::Value::Array(headers.iter().map(encode_typed).collect()))
                     .unwrap_or(rmpv::Value::Nil),
             ),
             (
                 rmpv::Value::from("documents"),
                 documents
                     .as_deref()
-                    .map(|documents| {
-                        rmpv::Value::Array(
-                            documents.iter().map(encode_selection_document_record).collect(),
-                        )
-                    })
+                    .map(|documents| rmpv::Value::Array(documents.iter().map(encode_typed).collect()))
                     .unwrap_or(rmpv::Value::Nil),
             ),
             (
                 rmpv::Value::from("edges"),
                 edges
                     .as_deref()
-                    .map(|edges| rmpv::Value::Array(edges.iter().map(encode_edge).collect()))
+                    .map(|edges| rmpv::Value::Array(edges.iter().map(encode_typed).collect()))
                     .unwrap_or(rmpv::Value::Nil),
             ),
             (
@@ -1201,343 +1197,34 @@ fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Valu
     ])
 }
 
-// --- cultnet.snapshot_response_raw.v1 (docs/cultnet-selection-cut.md section 2) -------------
+// R-M: `SelectionDocumentRecord`, `RawDocumentHeader`, `Edge` and `RecordRef` already derive
+// `Serialize`/`Deserialize` (selection.rs) with the same camelCase field names this hand-written
+// codec used to spell out by hand - about 335 lines duplicating what those derives already do.
+//
+// `rmpv::ext::to_value`/`from_value` looked like the natural generic bridge, but they serialize a
+// struct positionally (`serialize_struct` as a MessagePack array, one slot per field in
+// declaration order, breaking as soon as a `skip_serializing_if` field is actually skipped) -
+// wrong for these types twice over: it is not the named-map encoding this wire always uses
+// (section 10's rule; `rmp_serde::to_vec_named` elsewhere in this crate), and it does not
+// round-trip at all once a field is omitted. These two helpers instead go through
+// `rmp_serde::to_vec_named`/`from_slice` (named-map bytes, proven both ways by
+// `tests/selection.rs`'s `snapshot_response_raw_v1_round_trips_*` tests) and hand the bytes to
+// `rmpv::Value`'s own `Serialize`/`Deserialize` (already used throughout this file, e.g. to decode
+// the outer message envelope) to shuttle to/from the `rmpv::Value` tree the rest of this codec
+// builds by hand.
 
-fn require_selection_document_record(
+fn require_typed<T: serde::de::DeserializeOwned>(
     value: Option<&rmpv::Value>,
     field_name: &str,
-) -> Result<SelectionDocumentRecord> {
-    let object = value
-        .and_then(rmpv::Value::as_map)
-        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
-
-    let get = |name: &str| -> Option<&rmpv::Value> {
-        object.iter().find_map(|(key, value)| {
-            key.as_str()
-                .filter(|candidate| *candidate == name)
-                .map(|_| value)
-        })
-    };
-
-    Ok(SelectionDocumentRecord {
-        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
-        schema_name: require_legacy_optional_string(
-            get("schemaName"),
-            &format!("{field_name}.schemaName"),
-        )?,
-        schema_version: require_legacy_optional_string(
-            get("schemaVersion"),
-            &format!("{field_name}.schemaVersion"),
-        )?,
-        schema_content_hash: require_legacy_optional_string(
-            get("schemaContentHash"),
-            &format!("{field_name}.schemaContentHash"),
-        )?,
-        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
-        stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
-        payload_encoding: require_legacy_string(
-            get("payloadEncoding"),
-            &format!("{field_name}.payloadEncoding"),
-        )?,
-        payload: get("payload")
-            .and_then(rmpv::Value::as_slice)
-            .map(|bytes| bytes.to_vec())
-            .ok_or_else(|| anyhow!("{field_name}.payload must be binary MessagePack bytes"))?,
-        source_runtime_id: require_legacy_optional_string(
-            get("sourceRuntimeId"),
-            &format!("{field_name}.sourceRuntimeId"),
-        )?,
-        source_agent_id: require_legacy_optional_string(
-            get("sourceAgentId"),
-            &format!("{field_name}.sourceAgentId"),
-        )?,
-        source_role: require_legacy_optional_string(
-            get("sourceRole"),
-            &format!("{field_name}.sourceRole"),
-        )?,
-        tags: require_legacy_optional_string_array(get("tags"), &format!("{field_name}.tags"))?,
-    })
+) -> Result<T> {
+    let value = value.ok_or_else(|| anyhow!("{field_name} is required"))?;
+    let bytes = rmp_serde::to_vec(value).map_err(|err| anyhow!("{field_name}: {err}"))?;
+    rmp_serde::from_slice(&bytes).map_err(|err| anyhow!("{field_name}: {err}"))
 }
 
-fn encode_selection_document_record(document: &SelectionDocumentRecord) -> rmpv::Value {
-    rmpv::Value::Map(vec![
-        (
-            rmpv::Value::from("schemaId"),
-            rmpv::Value::from(document.schema_id.as_str()),
-        ),
-        (
-            rmpv::Value::from("schemaName"),
-            document
-                .schema_name
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("schemaVersion"),
-            document
-                .schema_version
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("schemaContentHash"),
-            document
-                .schema_content_hash
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("recordKey"),
-            rmpv::Value::from(document.record_key.as_str()),
-        ),
-        (
-            rmpv::Value::from("storedAt"),
-            rmpv::Value::from(document.stored_at.as_str()),
-        ),
-        (
-            rmpv::Value::from("payloadEncoding"),
-            rmpv::Value::from(document.payload_encoding.as_str()),
-        ),
-        (
-            rmpv::Value::from("payload"),
-            rmpv::Value::Binary(document.payload.clone()),
-        ),
-        (
-            rmpv::Value::from("sourceRuntimeId"),
-            document
-                .source_runtime_id
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("sourceAgentId"),
-            document
-                .source_agent_id
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("sourceRole"),
-            document
-                .source_role
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("tags"),
-            legacy_optional_string_array(document.tags.as_deref()),
-        ),
-    ])
-}
-
-fn require_raw_document_header(
-    value: Option<&rmpv::Value>,
-    field_name: &str,
-) -> Result<RawDocumentHeader> {
-    let object = value
-        .and_then(rmpv::Value::as_map)
-        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
-
-    let get = |name: &str| -> Option<&rmpv::Value> {
-        object.iter().find_map(|(key, value)| {
-            key.as_str()
-                .filter(|candidate| *candidate == name)
-                .map(|_| value)
-        })
-    };
-
-    Ok(RawDocumentHeader {
-        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
-        schema_name: require_legacy_optional_string(
-            get("schemaName"),
-            &format!("{field_name}.schemaName"),
-        )?,
-        schema_version: require_legacy_optional_string(
-            get("schemaVersion"),
-            &format!("{field_name}.schemaVersion"),
-        )?,
-        schema_content_hash: require_legacy_optional_string(
-            get("schemaContentHash"),
-            &format!("{field_name}.schemaContentHash"),
-        )?,
-        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
-        stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
-        source_runtime_id: require_legacy_optional_string(
-            get("sourceRuntimeId"),
-            &format!("{field_name}.sourceRuntimeId"),
-        )?,
-        source_agent_id: require_legacy_optional_string(
-            get("sourceAgentId"),
-            &format!("{field_name}.sourceAgentId"),
-        )?,
-        source_role: require_legacy_optional_string(
-            get("sourceRole"),
-            &format!("{field_name}.sourceRole"),
-        )?,
-        tags: require_legacy_optional_string_array(get("tags"), &format!("{field_name}.tags"))?,
-    })
-}
-
-fn encode_raw_document_header(header: &RawDocumentHeader) -> rmpv::Value {
-    rmpv::Value::Map(vec![
-        (
-            rmpv::Value::from("schemaId"),
-            rmpv::Value::from(header.schema_id.as_str()),
-        ),
-        (
-            rmpv::Value::from("schemaName"),
-            header
-                .schema_name
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("schemaVersion"),
-            header
-                .schema_version
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("schemaContentHash"),
-            header
-                .schema_content_hash
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("recordKey"),
-            rmpv::Value::from(header.record_key.as_str()),
-        ),
-        (
-            rmpv::Value::from("storedAt"),
-            rmpv::Value::from(header.stored_at.as_str()),
-        ),
-        (
-            rmpv::Value::from("sourceRuntimeId"),
-            header
-                .source_runtime_id
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("sourceAgentId"),
-            header
-                .source_agent_id
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("sourceRole"),
-            header
-                .source_role
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("tags"),
-            legacy_optional_string_array(header.tags.as_deref()),
-        ),
-    ])
-}
-
-fn require_edge(value: Option<&rmpv::Value>, field_name: &str) -> Result<Edge> {
-    let object = value
-        .and_then(rmpv::Value::as_map)
-        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
-
-    let get = |name: &str| -> Option<&rmpv::Value> {
-        object.iter().find_map(|(key, value)| {
-            key.as_str()
-                .filter(|candidate| *candidate == name)
-                .map(|_| value)
-        })
-    };
-
-    Ok(Edge {
-        from: require_record_ref(get("from"), &format!("{field_name}.from"))?,
-        role: require_legacy_string(get("role"), &format!("{field_name}.role"))?,
-        to: require_record_ref(get("to"), &format!("{field_name}.to"))?,
-        payload_encoding: require_legacy_optional_string(
-            get("payloadEncoding"),
-            &format!("{field_name}.payloadEncoding"),
-        )?,
-        payload: get("payload")
-            .filter(|value| !value.is_nil())
-            .map(|value| {
-                value
-                    .as_slice()
-                    .map(|bytes| bytes.to_vec())
-                    .ok_or_else(|| anyhow!("{field_name}.payload must be binary MessagePack bytes"))
-            })
-            .transpose()?,
-    })
-}
-
-fn encode_edge(edge: &Edge) -> rmpv::Value {
-    rmpv::Value::Map(vec![
-        (rmpv::Value::from("from"), encode_record_ref(&edge.from)),
-        (rmpv::Value::from("role"), rmpv::Value::from(edge.role.as_str())),
-        (rmpv::Value::from("to"), encode_record_ref(&edge.to)),
-        (
-            rmpv::Value::from("payloadEncoding"),
-            edge.payload_encoding
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-        (
-            rmpv::Value::from("payload"),
-            edge.payload
-                .as_deref()
-                .map(|bytes| rmpv::Value::Binary(bytes.to_vec()))
-                .unwrap_or(rmpv::Value::Nil),
-        ),
-    ])
-}
-
-fn require_record_ref(value: Option<&rmpv::Value>, field_name: &str) -> Result<RecordRef> {
-    let object = value
-        .and_then(rmpv::Value::as_map)
-        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
-
-    let get = |name: &str| -> Option<&rmpv::Value> {
-        object.iter().find_map(|(key, value)| {
-            key.as_str()
-                .filter(|candidate| *candidate == name)
-                .map(|_| value)
-        })
-    };
-
-    Ok(RecordRef {
-        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
-        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
-    })
-}
-
-fn encode_record_ref(record_ref: &RecordRef) -> rmpv::Value {
-    rmpv::Value::Map(vec![
-        (
-            rmpv::Value::from("schemaId"),
-            rmpv::Value::from(record_ref.schema_id.as_str()),
-        ),
-        (
-            rmpv::Value::from("recordKey"),
-            rmpv::Value::from(record_ref.record_key.as_str()),
-        ),
-    ])
+fn encode_typed<T: Serialize>(value: &T) -> rmpv::Value {
+    let bytes = rmp_serde::to_vec_named(value).expect("selection wire types always encode to MessagePack");
+    rmp_serde::from_slice(&bytes).expect("named-map MessagePack bytes always decode into rmpv::Value")
 }
 
 fn require_legacy_u32(value: Option<&rmpv::Value>, field_name: &str) -> Result<u32> {

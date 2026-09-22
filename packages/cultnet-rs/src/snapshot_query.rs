@@ -81,10 +81,10 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
     // v0's old cleaning - an empty v0 list, or one made only of blanks, lowers to `null` (no
     // filter) rather than reaching the door as something to refuse. That is a v0 compatibility
     // rule the lowering owns, not a meaning the evaluator or the door carries for v1 lists.
+    // R-M: `lower_v0_list` already dedups (Soul: it dedups before `reject_duplicates` ever ran,
+    // making that function's own duplicate check dead code - deleted below along with its calls).
     let schema_ids = lower_v0_list(schema_ids);
     let record_keys = lower_v0_list(record_keys);
-    reject_duplicates(schema_ids.as_deref(), "requested schema id")?;
-    reject_duplicates(record_keys.as_deref(), "requested record key")?;
 
     // D3/D4's v0 lowering (docs/cultnet-selection-cut.md section 4): the two allowlists are not a
     // selector of their own, they are cultnet.snapshot_request.v0 lowered into a Selection with no
@@ -342,20 +342,6 @@ fn require_expected_metadata(
             expected,
             actual
         ));
-    }
-    Ok(())
-}
-
-fn reject_duplicates(values: Option<&[String]>, label: &str) -> Result<()> {
-    let Some(values) = values else {
-        return Ok(());
-    };
-    let mut seen = BTreeSet::new();
-    for value in values {
-        require_non_empty(value, label)?;
-        if !seen.insert(value) {
-            return Err(anyhow!("duplicate {label} {value:?}"));
-        }
     }
     Ok(())
 }
