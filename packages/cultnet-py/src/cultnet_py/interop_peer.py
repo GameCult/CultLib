@@ -384,7 +384,23 @@ def handle_server_message(state: PeerState, message: dict[str, Any], subscriptio
         return [state.verse_catalog.create_response(message)]
     if schema_version == PEER_EXCHANGE_REQUEST:
         return [state.peer_catalog.create_response(message)]
+    if isinstance(schema_version, str) and schema_version.startswith("cultnet.") and schema_version.endswith(".v1"):
+        # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): this peer speaks
+        # cultnet.selection.v1's carrier messages (snapshot_request.v1, database_subscribe.v1) not at
+        # all - it is v0-only. A v1 message is refused loudly, not answered with a silent empty list.
+        return [unsupported_schema_version_error(message)]
     return []
+
+
+def unsupported_schema_version_error(message: dict[str, Any]) -> dict[str, Any]:
+    schema_version = message.get("schemaVersion")
+    return {
+        "schemaVersion": "cultnet.error.v0",
+        "messageId": str(message.get("messageId") or ""),
+        "error": f"Unsupported CultNet message schema: {schema_version!r}.",
+        "code": "unsupported_schema_version",
+        "details": {"schemaVersion": schema_version},
+    }
 
 
 def handle_database_subscribe(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:
