@@ -514,12 +514,6 @@ namespace GameCult.Networking
         public CultNetSelectionCursorKey CursorKey { get; }
 
         /// <summary>
-        /// Resolves the shard that owns a record key (R-Q: whether a matched selection's rows span more
-        /// than one shard's log, and so whether the page's <c>asOf</c> is well defined).
-        /// </summary>
-        public CultNetShardDescriptor ResolveShard(string schemaId, CultRecordKey key) => ResolveShardInternal(schemaId, key);
-
-        /// <summary>
         /// Gets the local cache backing this database surface.
         /// </summary>
         public CultCache Cache => _cache;
