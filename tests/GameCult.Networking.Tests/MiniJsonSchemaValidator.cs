@@ -12,14 +12,39 @@ namespace GameCult.Networking.Tests
     /// A deliberately small JSON Schema (draft 2020-12) validator covering only the constructs
     /// contracts/cultnet/*.schema.json actually use: object/array/string/integer/boolean/null types
     /// (plain or as a ["type","null"] union), required, additionalProperties: false, properties,
-    /// items, const, enum, pattern, minLength, minItems, oneOf, not, and $ref - same-document
-    /// ("#/$defs/name"), cross-document ("other.schema.json"), and both ("other.schema.json#/$defs/name").
-    /// Not a general validator: it exists for R-S (docs/cultnet-selection-cut.md, fix batch 3) to
-    /// decode real C# wire bytes and check them against the committed schema files, which no
-    /// dependency in this repo already does - see CultNetSchemaContractTests.
+    /// items, const, enum, pattern, minLength, maxLength, minItems, maxItems, minimum, maximum, oneOf,
+    /// not, and $ref - same-document ("#/$defs/name"), cross-document ("other.schema.json"), and both
+    /// ("other.schema.json#/$defs/name"). Not a general validator: it exists for R-S
+    /// (docs/cultnet-selection-cut.md, fix batch 3) to decode real C# wire bytes and check them against
+    /// the committed schema files, which no dependency in this repo already does - see
+    /// CultNetSchemaContractTests.
+    /// R-X (fix batch 4): a schema keyword this validator does not implement is refused, not silently
+    /// ignored - see <see cref="ImplementedKeywords"/>/<see cref="MetadataKeywords"/> and
+    /// <see cref="CheckSupportedKeywords"/>. Before this, a schema using e.g. allOf/anyOf/if-then-else/
+    /// uniqueItems validated an instance as if that keyword were not there at all, which is silent
+    /// under-validation, not the "no such constraint" the schema author intended.
     /// </summary>
     internal sealed class MiniJsonSchemaValidator
     {
+        // Keywords this validator gives real constraint semantics to.
+        private static readonly HashSet<string> ImplementedKeywords = new(StringComparer.Ordinal)
+        {
+            "$ref", "oneOf", "not", "const", "enum", "type",
+            "minLength", "maxLength", "pattern", "minItems", "maxItems", "minimum", "maximum",
+            "items", "required", "properties", "additionalProperties"
+        };
+
+        // Keywords that are pure annotation/metadata - present on many schema nodes, never checked
+        // against an instance by any JSON Schema vocabulary this validator implements, so there is
+        // nothing for CheckSupportedKeywords to refuse. contentEncoding/contentMediaType/contentSchema
+        // are "media" annotations that draft 2020-12 itself does not assign validation behavior to
+        // without an explicit vocabulary; x-cult-runtime-type is this repo's own vendor extension.
+        private static readonly HashSet<string> MetadataKeywords = new(StringComparer.Ordinal)
+        {
+            "$schema", "$id", "$defs", "title", "description", "default",
+            "contentEncoding", "x-cult-runtime-type"
+        };
+
         private readonly string _schemaDir;
         private readonly Dictionary<string, JsonElement> _docCache = new(StringComparer.Ordinal);
 
@@ -89,6 +114,8 @@ namespace GameCult.Networking.Tests
 
         private void ValidateAgainst(JsonElement instance, JsonElement schema, string file, string path, List<string> errors)
         {
+            CheckSupportedKeywords(schema, path, errors);
+
             if (schema.TryGetProperty("$ref", out var refProp))
             {
                 var (resolved, resolvedFile) = Resolve(refProp.GetString()!, file);
@@ -155,8 +182,26 @@ namespace GameCult.Networking.Tests
                 var value = instance.GetString()!;
                 if (schema.TryGetProperty("minLength", out var minLength) && value.Length < minLength.GetInt32())
                     errors.Add($"{path}: string shorter than minLength {minLength.GetInt32()}");
-                if (schema.TryGetProperty("pattern", out var pattern) && !Regex.IsMatch(value, pattern.GetString()!))
-                    errors.Add($"{path}: \"{value}\" does not match pattern {pattern.GetString()}");
+                if (schema.TryGetProperty("maxLength", out var maxLength) && value.Length > maxLength.GetInt32())
+                    errors.Add($"{path}: string longer than maxLength {maxLength.GetInt32()}");
+                if (schema.TryGetProperty("pattern", out var pattern))
+                {
+                    // R-X: a full match, not Regex.IsMatch's "search anywhere" - and not .NET's own `$`,
+                    // which (unlike ECMA-262's) matches immediately before a single trailing newline even
+                    // without RegexOptions.Multiline, so an author-anchored "^...$" pattern here would
+                    // wrongly accept e.g. "5\n" for a pattern that means "exactly one digit".
+                    var match = Regex.Match(value, pattern.GetString()!);
+                    if (!match.Success || match.Index != 0 || match.Length != value.Length)
+                        errors.Add($"{path}: \"{value}\" does not match pattern {pattern.GetString()}");
+                }
+            }
+
+            if (instance.ValueKind == JsonValueKind.Number)
+            {
+                if (schema.TryGetProperty("minimum", out var minimum) && instance.GetDouble() < minimum.GetDouble())
+                    errors.Add($"{path}: {instance} is less than minimum {minimum}");
+                if (schema.TryGetProperty("maximum", out var maximum) && instance.GetDouble() > maximum.GetDouble())
+                    errors.Add($"{path}: {instance} is greater than maximum {maximum}");
             }
 
             if (instance.ValueKind == JsonValueKind.Array)
@@ -164,6 +209,8 @@ namespace GameCult.Networking.Tests
                 var items = instance.EnumerateArray().ToArray();
                 if (schema.TryGetProperty("minItems", out var minItems) && items.Length < minItems.GetInt32())
                     errors.Add($"{path}: array shorter than minItems {minItems.GetInt32()}");
+                if (schema.TryGetProperty("maxItems", out var maxItems) && items.Length > maxItems.GetInt32())
+                    errors.Add($"{path}: array longer than maxItems {maxItems.GetInt32()}");
                 if (schema.TryGetProperty("items", out var itemSchema))
                 {
                     for (var i = 0; i < items.Length; i++)
@@ -204,6 +251,24 @@ namespace GameCult.Networking.Tests
                             ValidateAgainst(propertyValue, propertySchema.Value, file, $"{path}.{propertySchema.Name}", errors);
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// R-X: refuses a schema node that uses a keyword this validator gives no behaviour to - allOf,
+        /// anyOf, if/then/else and uniqueItems are the ones found in the committed contracts at the time
+        /// this check was added. Before this, such a keyword was silently invisible: an instance that
+        /// violated it still validated clean, because nothing ever looked at the keyword to begin with.
+        /// Only checks the schema node actually reached during this validation (the same nodes
+        /// ValidateAgainst recurses into) - it is not a whole-document schema linter.
+        /// </summary>
+        private static void CheckSupportedKeywords(JsonElement schema, string path, List<string> errors)
+        {
+            if (schema.ValueKind != JsonValueKind.Object) return;
+            foreach (var property in schema.EnumerateObject())
+            {
+                if (!ImplementedKeywords.Contains(property.Name) && !MetadataKeywords.Contains(property.Name))
+                    errors.Add($"{path}: schema uses keyword \"{property.Name}\", which this validator does not implement");
             }
         }
 

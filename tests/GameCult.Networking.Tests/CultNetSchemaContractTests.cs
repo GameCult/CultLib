@@ -161,5 +161,44 @@ namespace GameCult.Networking.Tests
 
             Assert.That(errors, Is.Empty, string.Join("; ", errors));
         }
+
+        // R-X (docs/cultnet-selection-cut.md, fix batch 4): CultNetErrorMessage is a MessagePack-CSharp
+        // map-mode object - routingHint/code/details are always written, nil included, the same as any
+        // other declared key. Soul's P7 found the schema disagreed with the real bytes on exactly this:
+        // routingHint undeclared, additionalProperties:false, and details.asOf/current typed as a plain
+        // integer instead of ["integer","null"]. This decodes real bytes for all four refusal codes.
+        [Test]
+        public void ErrorMessage_SelectionInvalidRealBytes_MatchesItsSchema()
+        {
+            var ex = new CultNetSelectionInvalidException("schemas", null, "selection.schemas must be non-empty.");
+            AssertErrorMatchesSchema(CultNetErrorMessage.ForSelectionInvalid(ex));
+        }
+
+        [Test]
+        public void ErrorMessage_CursorStaleRealBytes_MatchesItsSchema()
+        {
+            var ex = new CultNetSelectionCursorException("cursor_stale", "stale", asOf: 3, current: 7);
+            AssertErrorMatchesSchema(CultNetErrorMessage.ForCursor(ex));
+        }
+
+        [Test]
+        public void ErrorMessage_CursorInvalidRealBytes_MatchesItsSchema()
+        {
+            var ex = new CultNetSelectionCursorException("cursor_invalid", "The cursor does not decode.");
+            AssertErrorMatchesSchema(CultNetErrorMessage.ForCursor(ex));
+        }
+
+        [Test]
+        public void ErrorMessage_ReferenceOutsideTargetRealBytes_MatchesItsSchema()
+        {
+            var ex = new CultNetSelectionReferenceOutsideTargetException("citer-schema", "citer-key", "Design", "outside-schema", "outside-key");
+            AssertErrorMatchesSchema(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+        }
+
+        private static void AssertErrorMatchesSchema(CultNetErrorMessage message)
+        {
+            var validator = new MiniJsonSchemaValidator(SchemaDir());
+            validator.AssertValid(ToJson(message), "cultnet.error.schema.json");
+        }
     }
 }
