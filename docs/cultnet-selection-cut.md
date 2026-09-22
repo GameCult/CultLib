@@ -381,7 +381,8 @@ merge.** The notes are in the session scratchpad at `soul-ss4-notes.md`.
   Add no new dependency unless the expansion cannot be written in about 60
   lines. `decimal` and the integers are unchanged. **Flagged for the
   operator's review:** this is Self's reading of Q-J, and it changes what
-  `ge "3e20"` means for an `f32` of 3e20.
+  `ge "3e20"` means for an `f32` of 3e20. **Accepted by the operator,
+  2026-09-22** ("I accept your recommendations").
 - **R-E. There is one schema-identity rule in both runtimes.** Rust gets the
   alias matcher (the owner is `cultnet-rs`, ported from
   `CultNetSchemaAliasMatching`). `schemas`, `cites.target.schemaId` and the
@@ -961,9 +962,9 @@ Messages: `cultnet.snapshot_request.v1 { messageId, selection, shardId?, shardEp
     - a door that accepts `+1`, `1.0`, `01`, `1e3` or `-0`;
     - a row rendering through float64 (a `long` member of 2^53+1 must
       compare greater than `"9007199254740992"`).
-  - *For the operator's review on return:* refusing a non-canonical number
-    at the door, rather than normalising it, is Self's reading of the
-    ruling.
+  - Refusing a non-canonical number at the door, rather than normalising it,
+    was Self's reading of the ruling. **The operator accepted it on
+    2026-09-22.**
 - **Inheritance.** A schema is a leaf: only a type with `[CultDocument]`
   has a schema name, and `schemas` names leaves. A predicate on an alias
   applies to every reachable leaf whose descriptor carries a member with
