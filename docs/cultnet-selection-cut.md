@@ -587,6 +587,31 @@ edit `src/` at the same time.
   must die.** That covers S1-Loose, S2-AllOf, S17-FirstLeaf,
   S5-DigestNoFields, Auth-LiveSchemaId, QL-OutOfTargetCites and an S4 entry.
 
+**Fix batch 3 is landing in pieces, 2026-09-22.**
+
+- **The harness is retired** (operator ruling). The branch's `mutate-dotnet.ps1`,
+  the four `*.entries.ps1` and the Rust entries file are deleted. Tests pin
+  behaviour, and Soul runs Stryker.NET and cargo-mutants on the diff.
+- **C#, first pass** (`8d7bee9..f366791`): R-R (v0 lowering answers exactly
+  what pre-cut v0 answered, key order included) and the cites-refusal vectors.
+  C# now reads 16 of 16 Rust vectors. It stopped there, so R-N, R-O, R-P, R-Q,
+  R-S, R-T and R-U were left.
+  - **R-R meets R-F:** the raw v0 wire answers an explicit empty list with an
+    empty page, while Mesh's `EnsureV0Compatible` refuses that list before
+    sending. Both layers keep their own ruling, which is right.
+- **Rust** (`5cf31d1..c606eb3`): R-O (keyed cursor), R-T, R-R, and the entries
+  file deleted.
+  - **The cursor API for Huginn:** `Cursor::parse` stays public and key-free
+    and still exposes `as_of`. Only digest verification needs the process key,
+    so no second helper was needed.
+  - Rust reads 17 of 17 C# vectors.
+  - **R-N is pending in Rust by design.** An earlier guess at the wire shape
+    was backed out; Rust matches C#'s field names byte for byte once they land.
+- **C# pass A is in Hands:** R-N, R-P, R-T. **Pass B follows:** R-O, R-Q, R-S,
+  R-U.
+- **To check:** three `StoreRoutingTests` failures in Caching were called
+  pre-existing. That claim is unverified, and pass A reports on it.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
