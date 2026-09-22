@@ -367,4 +367,68 @@ public sealed class MathTests
         Assert.Equal(0.0f, px[1], precision: 5);
         Assert.Equal(0.0f, py[1], precision: 5);
     }
+
+    // Tabulated to 16 significant figures (Abramowitz & Stegun table 7.1 lineage / standard erf tables).
+    [Theory]
+    [InlineData(0.0f, 0.0)]
+    [InlineData(0.5f, 0.5204998778130465)]
+    [InlineData(-0.5f, -0.5204998778130465)]
+    [InlineData(1.0f, 0.8427007929497149)]
+    [InlineData(-1.0f, -0.8427007929497149)]
+    [InlineData(2.0f, 0.9953222650189527)]
+    [InlineData(-2.0f, -0.9953222650189527)]
+    [InlineData(3.0f, 0.9999779095030014)]
+    [InlineData(-3.0f, -0.9999779095030014)]
+    public void ErfMatchesReferenceValues(float x, double expected)
+    {
+        Assert.True(
+            Math.Abs(math.erf(x) - expected) <= 2e-6,
+            $"erf({x}) = {math.erf(x)}, expected {expected}");
+    }
+
+    [Fact]
+    public void ErfIsOdd()
+    {
+        for (var i = -30; i <= 30; i++)
+        {
+            var x = i / 10.0f;
+            Assert.Equal(-math.erf(x), math.erf(-x));
+        }
+    }
+
+    [Fact]
+    public void ErfApproachesItsLimitsOfPlusMinusOne()
+    {
+        Assert.Equal(1.0f, math.erf(6.0f));
+        Assert.Equal(1.0f, math.erf(20.0f));
+        Assert.Equal(-1.0f, math.erf(-6.0f));
+        Assert.Equal(-1.0f, math.erf(-20.0f));
+    }
+
+    [Fact]
+    public void ErfinvInvertsErf()
+    {
+        for (var i = -999; i <= 999; i++)
+        {
+            var y = i / 1000.0f;
+            var x = math.erfinv(y);
+            var roundTrip = math.erf(x);
+            Assert.True(
+                MathF.Abs(roundTrip - y) < 1e-5f,
+                $"erf(erfinv({y})) = {roundTrip}");
+        }
+    }
+
+    [Fact]
+    public void ErfinvIsMonotonicallyIncreasing()
+    {
+        var previous = float.NegativeInfinity;
+        for (var i = -999; i <= 999; i++)
+        {
+            var y = i / 1000.0f;
+            var x = math.erfinv(y);
+            Assert.True(x > previous, $"erfinv({y}) = {x} did not exceed previous value {previous}");
+            previous = x;
+        }
+    }
 }
