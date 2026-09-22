@@ -88,14 +88,24 @@
 //    decrements the count and notifies. That is the ordinary exit every export
 //    makes, and it is the bridge's wait — not the hold — that keeps the runtime
 //    alive underneath it.
+//  - RECORD_WAIT wraps the exact `timeout_ms` handed to the condition wait in
+//    `cultmesh_quic_next_event`, in place, as a pass-through: it stores the
+//    value and returns it unchanged, so a mutation to what is actually waited
+//    on changes what this reports rather than the two ever being able to
+//    diverge. A scenario reads it and asserts equality against the timeout it
+//    asked for, deterministically and with no timing tolerance — the method
+//    Self's ruling of 2026-09-22 asks for in place of inferring the same fact
+//    from how long a call took to return.
 #if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
 #define CULTMESH_QUIC_DEBUG_PEAK(count) DebugRaisePeak(count)
 #define CULTMESH_QUIC_DEBUG_AT_CLOSE(count) DebugRecordCallsAtClose(count)
 #define CULTMESH_QUIC_DEBUG_HELD(lock) DebugHoldCall(lock)
+#define CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms) DebugRecordWait(timeout_ms)
 #else
 #define CULTMESH_QUIC_DEBUG_PEAK(count) ((void)0)
 #define CULTMESH_QUIC_DEBUG_AT_CLOSE(count) ((void)0)
 #define CULTMESH_QUIC_DEBUG_HELD(lock) (false)
+#define CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms) (timeout_ms)
 #endif
 
 namespace {
@@ -238,6 +248,7 @@ std::atomic<int> debug_calls_at_close{-1};
 std::mutex debug_hold_gate;
 std::condition_variable debug_hold_signal;
 bool debug_hold_armed = false;
+std::atomic<int32_t> debug_last_wait_ms{-1};
 
 void DebugRaisePeak(int count) {
     int peak = debug_peak_calls.load(std::memory_order_relaxed);
@@ -257,6 +268,16 @@ bool DebugHoldCall(std::unique_lock<std::mutex>& lock) {
     lock.unlock();
     debug_hold_signal.wait(hold, [] { return !debug_hold_armed; });
     return true;
+}
+
+// A pass-through: it stores `timeout_ms` and returns it unmodified, so wrapping
+// it around the exact expression handed to the condition wait makes the two
+// impossible to desync by construction. Whatever that expression evaluates to
+// — the plain argument today, or a derivation a future change or a mutation
+// introduces — is what gets recorded, because it is the same evaluation.
+int32_t DebugRecordWait(int32_t timeout_ms) {
+    debug_last_wait_ms.store(timeout_ms);
+    return timeout_ms;
 }
 #endif
 
@@ -1175,8 +1196,10 @@ CULTMESH_API int32_t cultmesh_quic_next_event(
     std::unique_lock<std::mutex> lock(runtime->gate);
     if (runtime->events.empty() && timeout_ms > 0) {
         // The host's timeout bounds the wait; an event or the close ends it
-        // sooner, and `woken` is which of the two happened.
-        const bool woken = runtime->signal.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+        // sooner, and `woken` is which of the two happened. RECORD_WAIT wraps
+        // this exact argument; see the development seam note near its macros.
+        const bool woken = runtime->signal.wait_for(
+            lock, std::chrono::milliseconds(CULTMESH_QUIC_DEBUG_RECORD_WAIT(timeout_ms)),
             [runtime] { return !runtime->events.empty() || runtime->closing; });
         // Development builds only; a no-op unless a scenario has armed the hold.
         // A held call returns the same 0 an empty queue would have, and makes no
@@ -1461,5 +1484,13 @@ CULTMESH_API int32_t cultmesh_quic_debug_peak_calls(void) {
 
 CULTMESH_API int32_t cultmesh_quic_debug_calls_at_close(void) {
     return debug_calls_at_close.load();
+}
+
+CULTMESH_API int32_t cultmesh_quic_debug_last_wait_ms(void) {
+    return debug_last_wait_ms.load();
+}
+
+CULTMESH_API void cultmesh_quic_debug_reset_last_wait_ms(void) {
+    debug_last_wait_ms.store(-1);
 }
 #endif

@@ -23,6 +23,8 @@
 //   cultmesh_quic_native_tests pollbusy [iterations]
 //   cultmesh_quic_native_tests latecall [iterations]
 //   cultmesh_quic_native_tests holdtimeout [iterations]
+//   cultmesh_quic_native_tests waitseam [iterations]
+//   cultmesh_quic_native_tests pollhammer [iterations]
 //
 // `closerace` hunts the race: many pollers, many iterations, and whatever the
 // schedule gives. `holdclose` takes the guessing out of it — the bridge's
@@ -43,18 +45,27 @@
 // expired, so the quiesce the hold scenarios assert is the bridge's doing and
 // not the fixture's.
 //
+// Self's ruling of 2026-09-22, after seven Soul passes against `polltimeout`,
+// `pollbusy` and `holdtimeout` alone: a wall-clock probe cannot tell the host's
+// timeout from any function of it that is the identity at the probe's own
+// value, because there is always another function that matches. `waitseam`
+// puts the observation where the rule is decided instead of where its effect
+// eventually shows: it reads `cultmesh_quic_debug_last_wait_ms`, the bridge's
+// own account of what it handed its condition wait, and asserts equality
+// against the host's argument, deterministically, with no timing tolerance.
+// `polltimeout`, `pollbusy` and `holdtimeout` stay only as generous-margin
+// proof that the recorded wait is really waited and not merely recorded.
+// `pollhammer` covers the wait's predicate the same way `pollbusy` used to try
+// to: one thread hammers every gate-touching entry point that cannot itself
+// queue an event, in a yield loop, while another holds a single idle poll, and
+// the poll must still stay for its timeout.
+//
 // Exit code 0 means every assertion held. Anything else, including a sanitizer
 // abort or the bridge's own assertion, is a failure. Under ThreadSanitizer run
 // it with `TSAN_OPTIONS=halt_on_error=1`, or a reported race leaves the exit
 // code to the last thing that set it.
 
 #include <cultmesh_quic_native.h>
-
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 #include <algorithm>
 #include <array>
@@ -164,26 +175,11 @@ std::string CloseRaceOnce(int pollers) {
     return {};
 }
 
-// The three timeouts `polltimeout` asks for. More than one, because a single
-// value cannot tell a bridge that honours the host's timeout from one that waits
-// on that same number of its own: a constant has to satisfy every band, and no
-// constant is in two of them.
-//
-// A constant was never the hard case, though, and the numbers are chosen for the
-// waits that are computed from the argument instead. Any mapping that is the
-// identity at every probe passes for free, so each probe is placed to leave one
-// family of ordinary mappings nowhere to be identity:
-//
-//  - 15 ms is as small as the OS timer lets a measurement be honest about. A
-//    floor — `max(timeout, 100)`, so a polling host cannot spin — and an added
-//    constant — `timeout + 100` of grace — are both the whole of the wait here,
-//    and nothing larger can see either one under the scheduler's noise.
-//  - 200 is the ordinary host poll, and sits between the other two so that a
-//    constant cannot satisfy both of its neighbours.
-//  - 7300 is long and deliberately not round. A clamp — `min(timeout, 1000)` to
-//    notice a shutdown, `min(timeout, 5000)` because five seconds is surely
-//    enough — is identity at any probe at or under its ceiling, and a round
-//    probe is exactly where somebody's round ceiling sits.
+// The three timeouts `polltimeout` asks for: a spread, not a hunt for any
+// particular derivation. `waitseam` is what proves the bridge hands its
+// condition wait the host's own argument, exactly, at every value that matters
+// — these three exist only to prove that value is then really waited on, so
+// the spread just needs to be a short one, an ordinary one and a long one.
 constexpr int32_t kShortestPollMs = 15;
 constexpr int32_t kShortPollMs = 200;
 constexpr int32_t kLongPollMs = 7300;
@@ -193,61 +189,14 @@ constexpr int32_t kLongPollMs = 7300;
 // duration looks like. This is scheduler granularity, not slack.
 constexpr int kEarlyToleranceMs = 20;
 
-// How much later than the timeout a single poll may return: an allowance for
-// the scheduler, plus a sixteenth of what was asked for.
-//
-// This is what the probes that look for gross failures use: a constant of the
-// bridge's own, a clamp, a hold that parks a call until it is released, a wait
-// that restarts on every wake. Each of those is wrong by far more than this.
-constexpr int kSchedulerSlackMs = 60;
-constexpr int LateToleranceMs(int32_t timeout_ms) { return kSchedulerSlackMs + timeout_ms / 16; }
-
-// The 15 ms probe is held to something much tighter, because it is the only
-// place a floor or an added constant shows and a scheduler allowance would hide
-// both. Scheduler delay only ever adds, so the probe is asked
-// `kShortestAttempts` times and the fastest is what is checked: noise has to
-// delay every attempt to fail the bridge, and a floor or offset delays every
-// attempt by construction. Every attempt is still checked for being early.
-constexpr int kShortestAttempts = 10;
-constexpr int kTimerSlackMs = 30;
-
-// Both allowances were checked against a loaded machine, two busy threads per
-// logical CPU for five rounds of all three timed scenarios, and not a quiet one.
-// Worst overshoot seen, win32-x64 and linux-x64 on 8 logical CPUs:
-//  - a single poll: 15 and 41 ms;
-//  - the fastest of the 15 ms attempts: 0 and 0 ms.
-// On win32-x64 that needs `MeasureAboveTheLoad` below. At normal priority under
-// the same load a single poll landed up to 127 ms late and the fastest of ten
-// 15 ms attempts up to 87 ms late — Windows makes a woken thread wait out busy
-// threads' time slices — and a tolerance of 45 ms plus a sixteenth failed the
-// unmutated bridge in four rounds of five.
-//
-// The honest limit. Each of these was compiled into the bridge and run through
-// all three timed scenarios on both targets; what survives is not claimed:
-//  - an added constant: `timeout + 25` survived and `timeout + 40` died, on the
-//    15 ms probe alone;
-//  - a floor: `max(timeout, 40)` survived and `max(timeout, 50)` died, on the
-//    15 ms probe alone and on linux-x64 by 5 ms, so a floor near 50 is a kill
-//    that rests on timing;
-//  - a scaling: `timeout * 106 / 100` survived and `timeout * 108 / 100` died,
-//    on the 7300 ms probe alone;
-//  - a clamp: `min(timeout, 7285)` survived and `min(timeout, 7275)` died; a
-//    clamp at or above 7300 is the identity at every probe;
-//  - a shortening of up to `kEarlyToleranceMs` at any probe.
-// Each run prints its worst overshoot per probe, so the allowances can be
-// rechecked on another machine rather than trusted.
-
-// The timed scenarios measure the bridge's wait, and on a loaded Windows machine
-// what they would otherwise measure is the scheduler's: a thread woken at the
-// end of its wait queues behind busy threads of equal priority for whole time
-// slices. Raising this process above them takes that out of the measurement,
-// and it needs no privilege on Windows. Linux schedules a woken thread promptly
-// at normal priority under the same load, so nothing is asked of it there.
-void MeasureAboveTheLoad() {
-#if defined(_WIN32)
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-#endif
-}
+// How much later than the timeout a poll may return. Generous on purpose: these
+// scenarios are no longer where a clamp, a floor, a round or a scale is caught
+// — `waitseam` catches those by equality, with no clock involved — so this only
+// has to catch a wait that is wrong by a lot: a constant of the bridge's own, a
+// wait that never happens, a hold that parks a call its own timeout already
+// ended. Each of those misses by seconds, not milliseconds, so one flat, wide
+// margin serves every probe this file times, on a machine under real load.
+constexpr int kGenerousLateToleranceMs = 800;
 
 struct TimedPoll {
     int32_t result;
@@ -304,21 +253,10 @@ std::string PollTimeoutOnce(std::array<Overshoot, 3>& overshoot) {
         return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
 
     std::string failure;
-    // The fastest of several, each checked for being early; see kShortestAttempts.
-    TimedPoll fastest{0, LLONG_MAX};
-    for (int attempt = 0; attempt < kShortestAttempts && failure.empty(); ++attempt) {
-        const TimedPoll poll = PollFor(runtime, kShortestPollMs);
-        failure = CheckTimedPoll(poll, kShortestPollMs, INT_MAX);
-        if (poll.elapsed_ms < fastest.elapsed_ms) fastest = poll;
-    }
-    if (failure.empty()) {
-        overshoot[0].Record(fastest, kShortestPollMs);
-        failure = CheckTimedPoll(fastest, kShortestPollMs, kTimerSlackMs);
-    }
-    for (size_t probe = 1; probe < kTimedProbesMs.size() && failure.empty(); ++probe) {
+    for (size_t probe = 0; probe < kTimedProbesMs.size() && failure.empty(); ++probe) {
         const TimedPoll poll = PollFor(runtime, kTimedProbesMs[probe]);
         overshoot[probe].Record(poll, kTimedProbesMs[probe]);
-        failure = CheckTimedPoll(poll, kTimedProbesMs[probe], LateToleranceMs(kTimedProbesMs[probe]));
+        failure = CheckTimedPoll(poll, kTimedProbesMs[probe], kGenerousLateToleranceMs);
     }
 
     cultmesh_quic_runtime_close(runtime);
@@ -326,15 +264,14 @@ std::string PollTimeoutOnce(std::array<Overshoot, 3>& overshoot) {
 }
 
 int PollTimeout(int iterations) {
-    MeasureAboveTheLoad();
     std::array<Overshoot, 3> overshoot{};
     for (int iteration = 0; iteration < iterations; ++iteration) {
         const std::string failure = PollTimeoutOnce(overshoot);
         if (!failure.empty())
             return Fail("polltimeout iteration " + std::to_string(iteration) + ": " + failure);
     }
-    std::printf("polltimeout %dx: ok (worst overshoot %lld ms at %d best of %d, %lld ms at %d, %lld ms at %d)\n",
-        iterations, overshoot[0].worst_ms, kTimedProbesMs[0], kShortestAttempts, overshoot[1].worst_ms, kTimedProbesMs[1],
+    std::printf("polltimeout %dx: ok (worst overshoot %lld ms at %d, %lld ms at %d, %lld ms at %d)\n",
+        iterations, overshoot[0].worst_ms, kTimedProbesMs[0], overshoot[1].worst_ms, kTimedProbesMs[1],
         overshoot[2].worst_ms, kTimedProbesMs[2]);
     return 0;
 }
@@ -390,7 +327,7 @@ std::string PollBusyOnce(Overshoot& overshoot) {
     // The timing first: a poll that left on the first wake returns before the
     // other thread has had time to make many calls, and that is the bridge
     // failing, not the fixture.
-    const std::string failure = CheckTimedPoll(poll, kBusyPollMs, LateToleranceMs(kBusyPollMs));
+    const std::string failure = CheckTimedPoll(poll, kBusyPollMs, kGenerousLateToleranceMs);
     if (!failure.empty()) return failure + ", while the host's other thread was calling in";
     // A poll that passed with fewer calls than this was never woken, and passed
     // because the fixture did nothing rather than because the bridge held.
@@ -401,7 +338,6 @@ std::string PollBusyOnce(Overshoot& overshoot) {
 }
 
 int PollBusy(int iterations) {
-    MeasureAboveTheLoad();
     Overshoot overshoot{};
     for (int iteration = 0; iteration < iterations; ++iteration) {
         const std::string failure = PollBusyOnce(overshoot);
@@ -737,12 +673,15 @@ std::string LateCallOnce() {
 // lands at the last number instead of its own.
 //
 // Two polls, a short one and a long one, because a guard that tests the timeout
-// instead of the wake — park it unless it was short — is identity on any single
-// value on one side of its threshold. The long one sits above the thresholds
-// such a guard would plausibly carry.
+// instead of the wake — park it unless it was long — is identity on any single
+// value on one side of its threshold. The long one sits above 1500, the stated
+// ceiling on how long the hold guard may treat a long wait as surely worth
+// parking; the hold stays armed well past it so a guard that parks anyway is
+// held for the rest of the arming instead of leaving on its own timeout, which
+// is the overshoot this scenario's late tolerance is wide enough to see.
 constexpr int32_t kHeldTimeoutPollMs = 150;
-constexpr int32_t kHeldLongTimeoutPollMs = 1300;
-constexpr int kHoldArmedMs = 2200;
+constexpr int32_t kHeldLongTimeoutPollMs = 1600;
+constexpr int kHoldArmedMs = 3000;
 
 // The seam's own rule, and the only scenario that can see it: the hold parks a
 // call the wait woke, and not one whose own timeout expired.
@@ -792,7 +731,7 @@ std::string HoldTimeoutOnce(std::array<Overshoot, 2>& overshoot) {
         if (poll.elapsed_ms < timeout_ms - kEarlyToleranceMs)
             return "a poll asking for " + std::to_string(timeout_ms) + " ms returned after " +
                 std::to_string(poll.elapsed_ms) + " ms, so the fixture never let its timeout run out";
-        if (poll.elapsed_ms > timeout_ms + LateToleranceMs(timeout_ms))
+        if (poll.elapsed_ms > timeout_ms + kGenerousLateToleranceMs)
             return "a poll asking for " + std::to_string(timeout_ms) + " ms returned after " +
                 std::to_string(poll.elapsed_ms) + " ms: the hold parked a call its own timeout had "
                 "already ended, and it left when the hold did";
@@ -801,7 +740,6 @@ std::string HoldTimeoutOnce(std::array<Overshoot, 2>& overshoot) {
 }
 
 int HoldTimeout(int iterations) {
-    MeasureAboveTheLoad();
     std::array<Overshoot, 2> overshoot{};
     for (int iteration = 0; iteration < iterations; ++iteration) {
         const std::string failure = HoldTimeoutOnce(overshoot);
@@ -833,7 +771,220 @@ int HoldClose(int iterations, int pollers) {
     return 0;
 }
 
+// The values `waitseam` asks for: the smallest, the seam's own sentinel-versus-
+// zero boundary, one on either side of a 16 ms quantum and of a 40 ms one, the
+// ordinary `pollbusy` timeout and its neighbours, `polltimeout`'s long probe,
+// and INT32_MAX. Nothing in section 6 of the header states a maximum on
+// `timeout_ms` narrower than what `int32_t` itself holds, so INT32_MAX is the
+// ceiling this checks and nothing wider is claimed.
+constexpr std::array<int32_t, 11> kWaitSeamProbesMs{
+    0, 1, 15, 16, 39, 40, 999, 1000, 1001, 7300, INT32_MAX};
+
+// How long a probe's own poller thread is given to reach the wait before this
+// gives up on it and fails with the probe named, rather than hanging.
+constexpr int kWaitSeamDeadlineMs = 2000;
+
+// One probe: ask a fresh, otherwise-idle runtime for `timeout_ms` and read
+// `cultmesh_quic_debug_last_wait_ms` — the bridge's own account of what it
+// handed its condition wait — instead of measuring how long the call took.
+// Every clamp, floor, round, scale, offset and later-poll mapping Soul's seven
+// passes found is the identity at some wall-clock probe; none of them is the
+// identity here unless it is also the identity at every value below, because
+// this reads the argument itself rather than inferring it from elapsed time.
+//
+// `timeout_ms <= 0` never reaches the wait at all — `cultmesh_quic_next_event`
+// returns at once when the queue is empty — so there is nothing for the seam to
+// record, and the honest check is the converse: it must still say nothing,
+// which is exactly what a seam that recorded the raw argument on every call,
+// instead of only the value it actually handed its wait, would get wrong.
+std::string WaitSeamProbeOnce(int32_t timeout_ms) {
+    void* runtime = nullptr;
+    const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
+    if (opened != 0 || runtime == nullptr)
+        return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
+    cultmesh_quic_debug_reset_last_wait_ms();
+
+    std::string failure;
+    if (timeout_ms <= 0) {
+        std::vector<uint8_t> payload(static_cast<size_t>(kPayloadCapacity));
+        cultmesh_quic_event event{};
+        int32_t required = 0;
+        const int32_t result = cultmesh_quic_next_event(
+            runtime, timeout_ms, &event, payload.data(), kPayloadCapacity, &required);
+        const int32_t recorded = cultmesh_quic_debug_last_wait_ms();
+        if (result != 0)
+            failure = "a poll asking for " + std::to_string(timeout_ms) + " ms returned " +
+                std::to_string(result) + ", not the 0 an idle runtime owes it";
+        else if (recorded != -1)
+            failure = "a poll asking for " + std::to_string(timeout_ms) + " ms recorded " +
+                std::to_string(recorded) + " ms on the wait seam, though the bridge's own guard "
+                "never enters a wait for a timeout that is not greater than zero";
+        cultmesh_quic_runtime_close(runtime);
+        return failure;
+    }
+
+    // A real wait, on a thread of its own: a probe at INT32_MAX has to be
+    // released by the close, not waited out.
+    std::thread poller([runtime, timeout_ms] {
+        std::vector<uint8_t> payload(static_cast<size_t>(kPayloadCapacity));
+        cultmesh_quic_event event{};
+        int32_t required = 0;
+        cultmesh_quic_next_event(runtime, timeout_ms, &event, payload.data(), kPayloadCapacity, &required);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitSeamDeadlineMs);
+    int32_t recorded = cultmesh_quic_debug_last_wait_ms();
+    while (recorded == -1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        recorded = cultmesh_quic_debug_last_wait_ms();
+    }
+
+    cultmesh_quic_runtime_close(runtime);
+    poller.join();
+
+    if (recorded != timeout_ms)
+        failure = "a poll asking for " + std::to_string(timeout_ms) + " ms recorded " +
+            std::to_string(recorded) + " ms on the wait seam: the bridge handed its condition "
+            "wait something other than the host's own argument";
+    return failure;
+}
+
+// Past the twelfth poll on one runtime: no scenario before this one ever asked
+// a runtime for a thirteenth, so a wait that only changes shape after twelve
+// had nowhere to be seen. Forty short waits on a runtime that stays open for
+// all of them, each checked by equality.
+constexpr int32_t kWaitSeamRepeatedMs = 5;
+constexpr int kWaitSeamRepeatedPolls = 40;
+
+std::string WaitSeamRepeatedOnce() {
+    void* runtime = nullptr;
+    const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
+    if (opened != 0 || runtime == nullptr)
+        return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
+
+    std::string failure;
+    for (int poll = 0; poll < kWaitSeamRepeatedPolls && failure.empty(); ++poll) {
+        cultmesh_quic_debug_reset_last_wait_ms();
+        std::vector<uint8_t> payload(static_cast<size_t>(kPayloadCapacity));
+        cultmesh_quic_event event{};
+        int32_t required = 0;
+        cultmesh_quic_next_event(
+            runtime, kWaitSeamRepeatedMs, &event, payload.data(), kPayloadCapacity, &required);
+        const int32_t recorded = cultmesh_quic_debug_last_wait_ms();
+        if (recorded != kWaitSeamRepeatedMs)
+            failure = "poll " + std::to_string(poll + 1) + " of " +
+                std::to_string(kWaitSeamRepeatedPolls) + " on one runtime recorded " +
+                std::to_string(recorded) + " ms, not " + std::to_string(kWaitSeamRepeatedMs);
+    }
+    cultmesh_quic_runtime_close(runtime);
+    return failure;
+}
+
+int WaitSeam(int iterations) {
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (int32_t probe : kWaitSeamProbesMs) {
+            const std::string failure = WaitSeamProbeOnce(probe);
+            if (!failure.empty())
+                return Fail("waitseam iteration " + std::to_string(iteration) + " probe " +
+                    std::to_string(probe) + ": " + failure);
+        }
+        const std::string repeated = WaitSeamRepeatedOnce();
+        if (!repeated.empty())
+            return Fail("waitseam iteration " + std::to_string(iteration) + ": " + repeated);
+    }
+    std::printf("waitseam %dx: ok (%zu probes, %d repeated polls on one runtime)\n",
+        iterations, kWaitSeamProbesMs.size(), kWaitSeamRepeatedPolls);
+    return 0;
+}
+
 #endif  // CULTMESH_QUIC_DEBUG_ASSERTS
+
+// How long `pollhammer`'s idle poll asks for. One host thread hammers every
+// gate-touching entry point that cannot itself queue an event, in a yield
+// loop, while another holds this one poll idle; each hammered call's
+// `CallScope` destructor notifies every waiter on the runtime's condition
+// variable (cultmesh_quic_native.cpp:286), so the idle poll is woken many times
+// over for every timeout it is given here. That is exactly the shape a wake
+// count or an error-state predicate exploits, and exactly what a revert that
+// returns on any wake at all fails immediately.
+//
+// `cultmesh_quic_connection_open`, `cultmesh_quic_listener_open` and
+// `cultmesh_quic_stream_open` touch the same gate but can each queue a real
+// event on this runtime, and a genuine event is allowed to end the idle poll
+// early — hammering with those would make an early return ambiguous between
+// the fault this scenario hunts and a real delivery, so they are left out. The
+// refused `listener_open` below is a setup step run once, not part of the
+// loop, and it leaves no listener behind.
+constexpr int32_t kHammerPollMs = 1000;
+
+std::string PollHammerOnce(bool with_recorded_error) {
+    void* runtime = nullptr;
+    const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
+    if (opened != 0 || runtime == nullptr)
+        return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
+
+    if (with_recorded_error) {
+        // Not a certificate at all: PKCS12 parsing fails before any network
+        // I/O, so this is refused synchronously and leaves no listener behind,
+        // and `runtime->error` is non-empty for the rest of this runtime's life.
+        const uint8_t junk[] = {0x00, 0x01, 0x02, 0x03};
+        uint64_t listener_id = 0;
+        uint16_t bound_port = 0;
+        const int32_t result = cultmesh_quic_listener_open(
+            runtime, nullptr, 0, junk, static_cast<int32_t>(sizeof(junk)), "", &listener_id, &bound_port);
+        if (result >= 0) {
+            cultmesh_quic_runtime_close(runtime);
+            return "cultmesh_quic_listener_open accepted a junk PKCS12 credential";
+        }
+    }
+
+    std::atomic<bool> hammering{true};
+    std::thread hammer([runtime, &hammering] {
+        constexpr uint64_t kBogusId = 0xffffffffffffffffull;
+        const uint8_t frame[] = {0x00};
+        std::array<char, 256> message{};
+        while (hammering.load(std::memory_order_relaxed)) {
+            cultmesh_quic_last_error(runtime, message.data(), static_cast<int32_t>(message.size()));
+            cultmesh_quic_last_status(runtime);
+            cultmesh_quic_connection_shutdown(runtime, kBogusId, 0);
+            cultmesh_quic_stream_shutdown(runtime, kBogusId, 0);
+            cultmesh_quic_stream_send_frame(runtime, kBogusId, frame, 1, 0);
+            cultmesh_quic_connection_certificate_complete(runtime, kBogusId, 0);
+            cultmesh_quic_listener_close(runtime, kBogusId);
+            std::this_thread::yield();
+        }
+    });
+
+    const TimedPoll poll = PollFor(runtime, kHammerPollMs);
+    hammering.store(false, std::memory_order_relaxed);
+    hammer.join();
+    cultmesh_quic_runtime_close(runtime);
+
+    if (poll.result != 0)
+        return "the idle poll returned " + std::to_string(poll.result) +
+            ", not the 0 an idle runtime owes it";
+    if (poll.elapsed_ms < kHammerPollMs - kEarlyToleranceMs)
+        return "the idle poll returned after " + std::to_string(poll.elapsed_ms) +
+            " ms while another thread hammered the gate, ending its wait early";
+    if (poll.elapsed_ms > static_cast<long long>(kHammerPollMs) + kGenerousLateToleranceMs)
+        return "the idle poll returned after " + std::to_string(poll.elapsed_ms) +
+            " ms: well past its own timeout";
+    return {};
+}
+
+int PollHammer(int iterations) {
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        std::string failure = PollHammerOnce(false);
+        if (!failure.empty())
+            return Fail("pollhammer iteration " + std::to_string(iteration) + " (clean runtime): " + failure);
+        failure = PollHammerOnce(true);
+        if (!failure.empty())
+            return Fail("pollhammer iteration " + std::to_string(iteration) +
+                " (after a refused call recorded an error): " + failure);
+    }
+    std::printf("pollhammer %dx: ok\n", iterations);
+    return 0;
+}
 
 int CloseRace(int iterations, int pollers) {
     for (int iteration = 0; iteration < iterations; ++iteration) {
@@ -850,8 +1001,8 @@ int CloseRace(int iterations, int pollers) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: %s closerace|holdclose|holdtimeout|polltimeout|pollbusy|payloadfit|latecall "
-            "[iterations] [pollers]\n",
+            "usage: %s closerace|holdclose|holdtimeout|polltimeout|pollbusy|pollhammer|payloadfit|"
+            "latecall|waitseam [iterations] [pollers]\n",
             argv[0]);
         return 2;
     }
@@ -865,11 +1016,14 @@ int main(int argc, char** argv) {
     if (scenario == "closerace") return CloseRace(iterations, pollers);
     if (scenario == "polltimeout") return PollTimeout(iterations);
     if (scenario == "pollbusy") return PollBusy(iterations);
+    if (scenario == "pollhammer") return PollHammer(iterations);
     if (scenario == "payloadfit") return PayloadFit(iterations);
-    if (scenario == "holdclose" || scenario == "latecall" || scenario == "holdtimeout") {
+    if (scenario == "holdclose" || scenario == "latecall" || scenario == "holdtimeout" ||
+        scenario == "waitseam") {
 #if defined(CULTMESH_QUIC_DEBUG_ASSERTS)
         if (scenario == "latecall") return LateCall(iterations);
         if (scenario == "holdtimeout") return HoldTimeout(iterations);
+        if (scenario == "waitseam") return WaitSeam(iterations);
         return HoldClose(iterations, pollers);
 #else
         std::fprintf(stderr,

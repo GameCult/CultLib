@@ -341,6 +341,24 @@ CULTMESH_QUIC_API int32_t cultmesh_quic_debug_peak_calls(void);
  * since the hold was armed. This is the number the wait exists for. */
 CULTMESH_QUIC_API int32_t cultmesh_quic_debug_calls_at_close(void);
 
+/* The `timeout_ms` most recently handed to the condition wait inside
+ * `cultmesh_quic_next_event`, recorded at the point the wait is entered rather
+ * than observed from outside. A poll whose queue is not empty, or whose
+ * `timeout_ms` is not greater than zero, never enters that wait and leaves this
+ * unchanged. -1 until the first such wait, or after
+ * `cultmesh_quic_debug_reset_last_wait_ms`.
+ *
+ * This exists because a wall-clock probe cannot tell the host's timeout from
+ * any function of it that is the identity at the probe's own value — a floor,
+ * a round, a clamp, a later-poll fault, there is always another one that
+ * matches. This reads what the bridge actually handed its wait instead of
+ * inferring it from how long a call took. */
+CULTMESH_QUIC_API int32_t cultmesh_quic_debug_last_wait_ms(void);
+
+/* Resets the value `cultmesh_quic_debug_last_wait_ms` reports to -1, without
+ * touching the hold or the two call counters above. */
+CULTMESH_QUIC_API void cultmesh_quic_debug_reset_last_wait_ms(void);
+
 #endif /* CULTMESH_QUIC_DEBUG_ASSERTS */
 
 #if defined(__cplusplus)
