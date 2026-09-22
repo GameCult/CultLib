@@ -620,9 +620,15 @@ namespace GameCult.Networking
         }
 
         /// <summary>Appends one length-prefixed string: unambiguous regardless of what the string itself contains.</summary>
+        // The length prefix is a UTF-8 BYTE count, not string.Length's UTF-16 code-unit count - the
+        // cursor body's prefix is read back out of UTF-8 bytes (ReadLengthPrefixedFields), and an
+        // astral character (a surrogate pair: 2 UTF-16 code units, 4 UTF-8 bytes) would otherwise
+        // slice the wrong number of bytes on the way back. The digest's canonical string never
+        // round-trips through this byte-sliced reader - it is hashed whole - but keeping one counting
+        // rule for both uses is what makes AppendString unambiguous rather than merely usually right.
         private static void AppendString(StringBuilder sb, string value)
         {
-            sb.Append(value.Length).Append(':').Append(value);
+            sb.Append(Encoding.UTF8.GetByteCount(value)).Append(':').Append(value);
         }
 
         /// <summary>Appends a count-prefixed list of length-prefixed strings, sorted by code point so the digest does not depend on wire order.</summary>
