@@ -599,6 +599,75 @@ The priority change is test-fixture only, needs no admin rights, and changes
 nothing in the bridge. Accepted, and handed to Soul to attack.
 **Soul's seventh pass dispatched** (Opus).
 
+**Soul's seventh pass, 2026-09-22** (Opus). Reproduced from a fresh clone:
+
+| Target | Killed | Survived | Skipped | Control |
+|---|---|---|---|---|
+| win32-x64 | 26 | 0 | 2 | green |
+| linux-x64 | 28 | 0 | 0 | green |
+
+Exit 2 on win32 is by design: it means entries were skipped
+(`mutate-cultmesh.mjs:1192`). A forced red control was reported red, and the
+harness ran nothing after it. Restores matched `checkout-index` by hash. N3
+holds from both shells. **The priority raise is sound.** It is scoped to the
+process, which exits after each scenario, and it cannot hide a lock held
+across a sleep, because every thread in the process is raised equally.
+**Cut 3 still does not close.**
+
+- **S1, medium: N1 is not closed.** Two predicate mutants survive the full
+  matrix on both targets:
+  - **K1**, `|| ++wakes > 64`. Under a thread calling in a yield loop, an idle
+    `poll(1000)` returns after 0–5 ms.
+  - **K2**, `|| !runtime->error.empty()`. After one refused call, every later
+    idle poll returns at 0 ms.
+
+  `pollbusy` covers one call kind, at one pace, on a runtime with no error
+  recorded.
+- **S2, medium: the 15 ms probe has no early check.** The check is
+  `elapsed < 15 - 20`, which cannot fail. Both `t<50 ? 0 : t` and `t/16*16`
+  survive.
+- **S3, low-medium: more derived waits survive.** Rounding up to a 40 ms
+  quantum survives. So does any fault that only shows after a runtime's 12th
+  poll, because no scenario polls a runtime more than 12 times.
+- **S4, low: two stated boundaries depend on timing on Windows.** `t+25` died
+  in one of two repetitions. `min(t,7275)` survived in one of two.
+- **S5, low:** the hold guard `timeout_ms > 1500` survives. The stated limit
+  should put the ceiling at 1300.
+
+**Self's ruling, 2026-09-22: change the method, not the probes.** This rule has
+now taken seven passes. Each fix batch pinned the functions the previous Soul
+named, and the next Soul found another function that equals the identity at
+every probe point. A rule about the arithmetic of a derived wait cannot
+converge under wall-clock observation from outside, because there is always
+another function that matches at the probes. The skill already says it: put
+the observation where the rule is decided.
+
+- **The wait.** A dev-only seam, of the same kind as the existing hold seam
+  and folded away in release, records the timeout the bridge actually hands to
+  its condition wait on every poll. A scenario asserts that it equals the
+  host's argument **exactly**:
+  - over a spread of values: 0, 1, 15, 16, 39, 40, 999, 1000, 1001, 7300,
+    `INT32_MAX`, and the bridge's documented maximum if it has one;
+  - on polls well past the 12th on a single runtime.
+
+  Every clamp, floor, round, scale, offset and later-poll mutant then dies by
+  equality, deterministically, on every host, with no timing tolerance. The
+  wall-clock scenarios stay as proof that the recorded wait is actually waited,
+  with **generous** margins. The wide boundary table goes: those limits existed
+  only because the observation was indirect. Stated limits that are no longer
+  true are deleted, not kept as history in source.
+- **The predicate.** A `pollhammer` scenario runs one host thread that calls
+  every entry point which touches the gate, in a yield loop, while another
+  thread holds an idle poll. It runs once on a clean runtime and once after a
+  refused call has recorded an error. The poll must stay for its timeout,
+  within a generous margin. K1, K2 and a "returns on any wake" revert must die
+  there.
+- **The seam itself** gets a revert entry and a loosening entry: a seam that
+  records the argument instead of the computed wait must die. The release shape
+  must still fold it away.
+
+To Hands (Sonnet) as the seventh fix batch.
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
